@@ -499,9 +499,11 @@ dependencies = [
 name = "relay-xtask"
 version = "0.1.0"
 dependencies = [
+ "crc",
  "fatfs",
  "gpt",
  "ovmf-prebuilt",
+ "relay-abi",
 ]
 
 [[package]]

@@ -1,2 +1,2 @@
 [alias]
-xtask = "run -p relay-xtask --"
+xtask = "run -p relay-xtask --locked --"
