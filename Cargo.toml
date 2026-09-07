@@ -1,0 +1,32 @@
+[workspace]
+members = [
+    "crates/relay-abi",
+    "crates/relay-core",
+    "crates/relay-loader",
+    "crates/relay-kernel",
+    "xtask",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.98"
+
+[workspace.dependencies]
+crc = { version = "=3.4.0", default-features = false }
+elf = { version = "=0.8.0", default-features = false }
+fatfs = "=0.3.6"
+gpt = "=4.1.0"
+noto-sans-mono-bitmap = { version = "=0.3.2", default-features = false, features = ["regular", "size_16", "unicode-basic-latin"] }
+ovmf-prebuilt = "=0.2.9"
+pci_types = { version = "=0.10.1", default-features = false }
+uart_16550 = { version = "=0.8.0", default-features = false }
+uefi = { version = "=0.40.0", default-features = false }
+x86_64 = { version = "=0.15.5", default-features = false }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

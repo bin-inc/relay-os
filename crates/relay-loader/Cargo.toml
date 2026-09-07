@@ -1,0 +1,12 @@
+[package]
+name = "relay-loader"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+relay-abi = { path = "../relay-abi", version = "0.1.0" }
+elf.workspace = true
+uefi.workspace = true
+x86_64.workspace = true
