@@ -13,6 +13,8 @@ name = "xtask"
 path = "src/main.rs"
 
 [dependencies]
+crc.workspace = true
 fatfs.workspace = true
 gpt.workspace = true
 ovmf-prebuilt.workspace = true
+relay-abi = { path = "../crates/relay-abi", version = "0.1.0" }
