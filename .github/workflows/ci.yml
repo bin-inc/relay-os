@@ -21,7 +21,7 @@ jobs:
         with:
           toolchain: 1.98.1
           components: rustfmt, clippy
-      - run: sudo apt-get update && sudo apt-get install --yes e2fsprogs gdisk mtools
+      - run: sudo apt-get update && sudo apt-get install --yes e2fsprogs gdisk mtools qemu-system-x86
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
