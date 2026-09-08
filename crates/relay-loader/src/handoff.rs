@@ -1,19 +1,20 @@
-use core::{arch::naked_asm, mem};
+use core::mem;
 
 use relay_abi::{BootInfo, FramebufferInfo};
 use uefi::{
     boot,
     mem::memory_map::{MemoryMap as UefiMemoryMap, MemoryType},
     proto::console::gop::{GraphicsOutput, PixelFormat},
-    proto::loaded_image::LoadedImage,
     system,
     table::cfg::ConfigTableEntry,
 };
 
 use crate::{
+    cpu::firmware_paging_depth,
     files,
     memory::{
-        self, BootData, PHYSICAL_MEMORY_OFFSET, allocate_boot_data, allocate_zeroed, load_kernel,
+        self, BootData, PHYSICAL_MEMORY_OFFSET, allocate_boot_data, allocate_transition_page,
+        allocate_zeroed, load_kernel,
     },
     paging::PageTables,
     parse_config, parse_load_plan,
@@ -49,13 +50,13 @@ pub fn boot() -> Result<(), HandoffError> {
     let acpi_rsdp_phys = capture_rsdp()?;
     let stack = allocate_zeroed(STACK_PAGES).map_err(|_| HandoffError::Memory)?;
     let boot_data = allocate_boot_data().map_err(|_| HandoffError::Memory)?;
-    let mut tables = PageTables::new().map_err(|_| HandoffError::Paging)?;
+    let transition_page = allocate_transition_page().map_err(|_| HandoffError::Memory)?;
+    let mut tables = PageTables::new(firmware_paging_depth()).map_err(|_| HandoffError::Paging)?;
+    tables
+        .map_transition_page(transition_page)
+        .map_err(|_| HandoffError::Paging)?;
     tables
         .map_identity_first_4g()
-        .map_err(|_| HandoffError::Paging)?;
-    let (loader_image_start, loader_image_len) = loaded_image_range()?;
-    tables
-        .map_identity_execution_range(loader_image_start, loader_image_len)
         .map_err(|_| HandoffError::Paging)?;
     tables
         .map_identity_allocation(stack)
@@ -99,14 +100,7 @@ pub fn boot() -> Result<(), HandoffError> {
     let stack_top = stack.end().map_err(|_| HandoffError::Memory)?;
     let cr3 = tables.root_physical_address();
     let boot_info = boot_data.physical_start as *mut BootData;
-
-    // All UEFI protocol handles and heap-backed values are released before this call.
-    // The final map is the only firmware data retained past this point.
-    let final_map = unsafe { boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) };
     unsafe {
-        if memory::normalize_memory_map(boot_info, &final_map).is_err() {
-            halt();
-        }
         (*boot_info).info.magic = relay_abi::BOOT_INFO_MAGIC;
         (*boot_info).info.abi_version = relay_abi::BOOT_ABI_VERSION;
         (*boot_info).info.struct_size = core::mem::size_of::<BootInfo>() as u32;
@@ -115,12 +109,25 @@ pub fn boot() -> Result<(), HandoffError> {
         (*boot_info).info.physical_memory_offset = PHYSICAL_MEMORY_OFFSET;
         (*boot_info).info.acpi_rsdp_phys = acpi_rsdp_phys;
     }
+    // SAFETY: the transition page is currently UEFI-mapped at its physical address and remains
+    // executable at the same identity address after it loads the new CR3.
+    let transition: unsafe extern "sysv64" fn(*const BootInfo, u64, u64, u64) -> ! =
+        unsafe { mem::transmute(transition_page.physical_start as usize) };
 
-    // No allocation or UEFI access is possible after exit. Page tables remain loader-owned
-    // memory and are intentionally leaked together with the final handoff data.
-    mem::forget(tables);
-    mem::forget(final_map);
-    unsafe { jump_to_kernel(boot_info.cast::<BootInfo>(), cr3, stack_top, kernel.entry) }
+    // All UEFI protocol handles and heap-backed values are released before this call.
+    // The final map is the only firmware data retained past this point.
+    let mut final_map = unsafe { boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) };
+    // No allocation or UEFI access is possible after exit. The non-returning transition leaves
+    // its loader-owned tables and final map allocated for the kernel handoff.
+    let normalization = unsafe { memory::normalize_final_map(boot_info, &mut final_map) };
+    match normalization {
+        Ok(()) => {}
+        Err(memory::MemoryError::TooManyRegions) => halt(),
+        Err(memory::MemoryError::UnsortedOrOverlapping) => halt(),
+        Err(memory::MemoryError::DescriptorArithmetic) => halt(),
+        Err(_) => halt(),
+    }
+    unsafe { transition(boot_info.cast::<BootInfo>(), cr3, stack_top, kernel.entry) }
 }
 
 fn halt() -> ! {
@@ -137,10 +144,13 @@ fn capture_framebuffer() -> Result<FramebufferInfo, HandoffError> {
     let info = gop.current_mode_info();
     let (width, height) = info.resolution();
     let stride = info.stride();
-    let pixel_format = match info.pixel_format() {
-        PixelFormat::Rgb => 0,
-        PixelFormat::Bgr => 1,
-        PixelFormat::Bitmask => 2,
+    let (pixel_format, red_mask, green_mask, blue_mask, reserved_mask) = match info.pixel_format() {
+        PixelFormat::Rgb => (0, 0, 0, 0, 0),
+        PixelFormat::Bgr => (1, 0, 0, 0, 0),
+        PixelFormat::Bitmask => {
+            let mask = info.pixel_bitmask().ok_or(HandoffError::Graphics)?;
+            (2, mask.red, mask.green, mask.blue, mask.reserved)
+        }
         PixelFormat::BltOnly => return Err(HandoffError::Graphics),
     };
     let mut buffer = gop.frame_buffer();
@@ -153,10 +163,10 @@ fn capture_framebuffer() -> Result<FramebufferInfo, HandoffError> {
         stride_pixels: u32::try_from(stride).map_err(|_| HandoffError::Graphics)?,
         bytes_per_pixel: 4,
         pixel_format,
-        red_mask: 0,
-        green_mask: 0,
-        blue_mask: 0,
-        reserved_mask: 0,
+        red_mask,
+        green_mask,
+        blue_mask,
+        reserved_mask,
     })
 }
 
@@ -174,36 +184,4 @@ fn capture_rsdp() -> Result<u64, HandoffError> {
             .ok_or(HandoffError::Acpi)?;
         (address != 0).then_some(address).ok_or(HandoffError::Acpi)
     })
-}
-
-fn loaded_image_range() -> Result<(u64, u64), HandoffError> {
-    let image = boot::open_protocol_exclusive::<LoadedImage>(boot::image_handle())
-        .map_err(|_| HandoffError::Paging)?;
-    let (base, len) = image.info();
-    let start = base as u64;
-    if start == 0 || len == 0 || start.checked_add(len).is_none() {
-        return Err(HandoffError::Paging);
-    }
-    Ok((start, len))
-}
-
-/// # Safety
-/// `boot_info` is identity-mapped and valid, `cr3` names a complete page-table root,
-/// `stack_top` is a writable identity-mapped stack, and `entry` is an executable mapping.
-#[unsafe(naked)]
-unsafe extern "sysv64" fn jump_to_kernel(
-    _boot_info: *const BootInfo,
-    _cr3: u64,
-    _stack_top: u64,
-    _entry: u64,
-) -> ! {
-    naked_asm!(
-        "cli",
-        "mov cr3, rsi",
-        "mov rsp, rdx",
-        "and rsp, -16",
-        "sub rsp, 8",
-        "cld",
-        "jmp rcx",
-    )
 }

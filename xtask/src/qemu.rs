@@ -12,7 +12,6 @@ use ovmf_prebuilt::{Arch, FileType, Prebuilt, Source};
 use crate::qmp;
 
 pub const KERNEL_ENTRY_MARKER: &str = "[relay] phase=kernel-entry status=ok";
-const UEFI_FALLBACK_MARKER: &str = "phase=uefi-fallback";
 
 pub struct QemuRun {
     child: Child,
@@ -112,16 +111,9 @@ impl QemuRun {
     pub fn wait_for_marker(&mut self, marker: &str) -> Result<(), String> {
         while Instant::now() < self.deadline {
             let serial = self.serial_log();
-            match serial_marker_status(&serial, marker) {
-                Err(error) => {
-                    self.capture_diagnostics();
-                    return Err(error);
-                }
-                Ok(true) => {
-                    self.capture_diagnostics();
-                    return Ok(());
-                }
-                Ok(false) => {}
+            if serial.contains(marker) {
+                self.capture_diagnostics();
+                return Ok(());
             }
             let status = match self.child.try_wait() {
                 Ok(status) => status,
@@ -155,17 +147,107 @@ impl QemuRun {
 }
 
 pub fn validate_serial_log(serial: &str) -> Result<(), String> {
-    serial_marker_status(serial, KERNEL_ENTRY_MARKER)?
+    serial
+        .contains(KERNEL_ENTRY_MARKER)
         .then_some(())
         .ok_or_else(|| format!("serial log lacks marker `{KERNEL_ENTRY_MARKER}`"))
 }
 
-fn serial_marker_status(serial: &str, marker: &str) -> Result<bool, String> {
-    if serial.contains(UEFI_FALLBACK_MARKER) {
-        Err("serial log contains phase=uefi-fallback".into())
-    } else {
-        Ok(serial.contains(marker))
+/// Checks that a requested screen region contains at least one pixel different from the stable
+/// lower-right background sample. It proves QEMU captured visible content near the boot banner,
+/// while host `Mirror` tests remain responsible for exact byte-for-byte output semantics.
+pub fn ppm_region_has_foreground(
+    ppm: &[u8],
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) -> Result<bool, String> {
+    let mut offset = 0;
+    if ppm_token(ppm, &mut offset)? != b"P6" {
+        return Err("framebuffer screenshot is not a binary PPM".into());
     }
+    let image_width = ppm_number(ppm_token(ppm, &mut offset)?)?;
+    let image_height = ppm_number(ppm_token(ppm, &mut offset)?)?;
+    if ppm_number(ppm_token(ppm, &mut offset)?)? != 255 {
+        return Err("framebuffer screenshot does not use 8-bit PPM channels".into());
+    }
+    if offset >= ppm.len() || !ppm[offset].is_ascii_whitespace() {
+        return Err("framebuffer screenshot has an invalid PPM header".into());
+    }
+    offset += 1;
+    let pixel_len = image_width
+        .checked_mul(image_height)
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or("framebuffer screenshot dimensions overflow")?;
+    let pixels = ppm
+        .get(
+            offset
+                ..offset
+                    .checked_add(pixel_len)
+                    .ok_or("framebuffer screenshot overflows")?,
+        )
+        .ok_or("framebuffer screenshot is truncated")?;
+    if x >= image_width || y >= image_height || width == 0 || height == 0 {
+        return Err("banner region is outside the framebuffer screenshot".into());
+    }
+    let end_x = x
+        .checked_add(width)
+        .ok_or("banner region overflows")?
+        .min(image_width);
+    let end_y = y
+        .checked_add(height)
+        .ok_or("banner region overflows")?
+        .min(image_height);
+    let background_start = (image_height - 1)
+        .checked_mul(image_width)
+        .and_then(|row| row.checked_add(image_width - 1))
+        .and_then(|pixel| pixel.checked_mul(3))
+        .ok_or("framebuffer screenshot dimensions overflow")?;
+    let background = &pixels[background_start..background_start + 3];
+    for row in y..end_y {
+        for column in x..end_x {
+            let start = (row * image_width + column) * 3;
+            if &pixels[start..start + 3] != background {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn ppm_token<'a>(ppm: &'a [u8], offset: &mut usize) -> Result<&'a [u8], String> {
+    loop {
+        while ppm.get(*offset).is_some_and(u8::is_ascii_whitespace) {
+            *offset += 1;
+        }
+        if ppm.get(*offset) != Some(&b'#') {
+            break;
+        }
+        while ppm
+            .get(*offset)
+            .is_some_and(|byte| *byte != b'\n' && *byte != b'\r')
+        {
+            *offset += 1;
+        }
+    }
+    let start = *offset;
+    while ppm
+        .get(*offset)
+        .is_some_and(|byte| !byte.is_ascii_whitespace())
+    {
+        *offset += 1;
+    }
+    ppm.get(start..*offset)
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| "framebuffer screenshot has an incomplete PPM header".into())
+}
+
+fn ppm_number(token: &[u8]) -> Result<usize, String> {
+    core::str::from_utf8(token)
+        .map_err(|_| "framebuffer screenshot has a non-UTF-8 PPM header".to_owned())?
+        .parse()
+        .map_err(|_| "framebuffer screenshot has an invalid PPM dimension".to_owned())
 }
 
 impl Drop for QemuRun {

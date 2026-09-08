@@ -481,6 +481,7 @@ name = "relay-kernel"
 version = "0.1.0"
 dependencies = [
  "relay-abi",
+ "relay-core",
  "uart_16550",
 ]
 

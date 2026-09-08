@@ -1,30 +1,20 @@
 #![no_std]
 #![no_main]
 
+mod allocator;
+mod arch;
+mod console;
 mod entry;
 mod serial;
 
-struct NoAllocator;
-
-unsafe impl core::alloc::GlobalAlloc for NoAllocator {
-    unsafe fn alloc(&self, _: core::alloc::Layout) -> *mut u8 {
-        core::ptr::null_mut()
-    }
-
-    unsafe fn dealloc(&self, _: *mut u8, _: core::alloc::Layout) {}
-}
-
-// Task 4 kernel entry is allocation-free; this satisfies transitive `alloc` linkage
-// without making post-ExitBootServices allocation appear to work.
 #[global_allocator]
-static ALLOCATOR: NoAllocator = NoAllocator;
+static ALLOCATOR: allocator::BumpAllocator = allocator::BumpAllocator::new();
 
 #[cfg(target_os = "none")]
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
+    console::panic_write(info);
+    arch::x86_64::halt();
 }
 
 #[unsafe(no_mangle)]

@@ -11,14 +11,27 @@ const MAX_DIRECT_MAPPED_PHYSICAL: u64 = 0x7fff_ffff_ffff;
 /// remains identity-mapped for the lifetime of kernel entry. No untrusted pointer is
 /// dereferenced until this contract has been established by the handoff ABI.
 pub unsafe fn enter(info: *const BootInfo) -> ! {
-    if unsafe { valid_boot_info(info) } {
-        crate::serial::write(b"[relay] phase=kernel-entry status=ok\n");
-    } else {
+    if !unsafe { valid_boot_info(info) } {
         crate::serial::write(b"[relay] phase=kernel-entry status=invalid\n");
+        crate::arch::x86_64::halt();
     }
-    loop {
-        core::hint::spin_loop();
+    // SAFETY: `valid_boot_info` checked this framebuffer's direct-map range and geometry.
+    if unsafe { crate::console::initialize(&(*info).framebuffer) }.is_err() {
+        crate::serial::write(b"[relay] phase=kernel-runtime status=invalid-framebuffer\n");
+        crate::arch::x86_64::halt();
     }
+    // SAFETY: diagnostics are available before descriptor-table setup can fault.
+    unsafe { crate::arch::x86_64::initialize() };
+    // SAFETY: validated handoff data remains resident and its normalized map is retained by the loader.
+    if unsafe { crate::arch::x86_64::memory::initialize_frame_allocator(&*info) }.is_err() {
+        crate::console::write(b"[relay] phase=kernel-runtime status=invalid-memory-map\n");
+        crate::arch::x86_64::halt();
+    }
+    // SAFETY: the static bounded heap is initialized once before any allocation is attempted.
+    unsafe { crate::ALLOCATOR.initialize() };
+    crate::console::write(b"[relay] phase=kernel-entry status=ok\n");
+    crate::console::write(b"[relay] phase=kernel-runtime status=ok\n");
+    crate::arch::x86_64::halt();
 }
 
 unsafe fn valid_boot_info(info: *const BootInfo) -> bool {
