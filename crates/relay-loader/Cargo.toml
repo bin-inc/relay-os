@@ -10,3 +10,12 @@ relay-abi = { path = "../relay-abi", version = "0.1.0" }
 elf.workspace = true
 uefi.workspace = true
 x86_64.workspace = true
+
+[target.'cfg(target_os = "uefi")'.dependencies]
+uefi = { workspace = true, features = ["alloc", "global_allocator"] }
+
+[[bin]]
+name = "relay-loader"
+path = "src/main.rs"
+test = false
+bench = false

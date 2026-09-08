@@ -1,0 +1,96 @@
+use core::{mem::size_of, ptr};
+
+use relay_abi::{BOOT_ABI_VERSION, BOOT_INFO_MAGIC, BootInfo, MemoryRegion};
+
+const PHYSICAL_MEMORY_OFFSET: u64 = 0xffff_8000_0000_0000;
+const MAX_MEMORY_REGIONS: u64 = 512;
+const MAX_DIRECT_MAPPED_PHYSICAL: u64 = 0x7fff_ffff_ffff;
+
+/// # Safety
+/// The loader must pass a non-null, aligned pointer to an initialized `BootInfo` that
+/// remains identity-mapped for the lifetime of kernel entry. No untrusted pointer is
+/// dereferenced until this contract has been established by the handoff ABI.
+pub unsafe fn enter(info: *const BootInfo) -> ! {
+    if unsafe { valid_boot_info(info) } {
+        crate::serial::write(b"[relay] phase=kernel-entry status=ok\n");
+    } else {
+        crate::serial::write(b"[relay] phase=kernel-entry status=invalid\n");
+    }
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+unsafe fn valid_boot_info(info: *const BootInfo) -> bool {
+    if info.is_null() || !(info as usize).is_multiple_of(core::mem::align_of::<BootInfo>()) {
+        return false;
+    }
+    // SAFETY: `enter` requires this pointer to name an initialized, identity-mapped BootInfo.
+    let info = unsafe { &*info };
+    if info.magic != BOOT_INFO_MAGIC
+        || info.abi_version != BOOT_ABI_VERSION
+        || info.struct_size != size_of::<BootInfo>() as u32
+        || info.physical_memory_offset != PHYSICAL_MEMORY_OFFSET
+        || info.acpi_rsdp_phys == 0
+        || !info.acpi_rsdp_phys.is_multiple_of(4)
+        || info.root_partition_guid.0 == [0; 16]
+    {
+        return false;
+    }
+    valid_framebuffer(&info.framebuffer) && valid_memory_map(info)
+}
+
+fn valid_framebuffer(framebuffer: &relay_abi::FramebufferInfo) -> bool {
+    if framebuffer.physical_base == 0
+        || framebuffer.byte_len == 0
+        || framebuffer.width == 0
+        || framebuffer.height == 0
+        || framebuffer.stride_pixels < framebuffer.width
+        || framebuffer.bytes_per_pixel != 4
+    {
+        return false;
+    }
+    u64::from(framebuffer.stride_pixels)
+        .checked_mul(u64::from(framebuffer.height))
+        .and_then(|pixels| pixels.checked_mul(u64::from(framebuffer.bytes_per_pixel)))
+        .is_some_and(|required| required <= framebuffer.byte_len)
+        && framebuffer
+            .physical_base
+            .checked_add(framebuffer.byte_len)
+            .is_some_and(|end| {
+                end > framebuffer.physical_base && end - 1 <= MAX_DIRECT_MAPPED_PHYSICAL
+            })
+}
+
+fn valid_memory_map(info: &BootInfo) -> bool {
+    let map = &info.memory_map;
+    if map.entry_count == 0
+        || map.entry_count > MAX_MEMORY_REGIONS
+        || map.entries_address == 0
+        || !map
+            .entries_address
+            .is_multiple_of(core::mem::align_of::<MemoryRegion>() as u64)
+        || map
+            .entry_count
+            .checked_mul(size_of::<MemoryRegion>() as u64)
+            .and_then(|bytes| map.entries_address.checked_add(bytes))
+            .is_none()
+    {
+        return false;
+    }
+
+    let entries = ptr::slice_from_raw_parts(
+        map.entries_address as *const MemoryRegion,
+        map.entry_count as usize,
+    );
+    // SAFETY: the checked count and address range are supplied by the loader's boot-data page.
+    let entries = unsafe { &*entries };
+    let mut previous_end = 0_u64;
+    for entry in entries {
+        if entry.start >= entry.end || entry.start < previous_end || entry.reserved != 0 {
+            return false;
+        }
+        previous_end = entry.end;
+    }
+    true
+}
