@@ -5,6 +5,14 @@ extern crate alloc;
 mod config;
 mod elf;
 mod error;
+#[cfg(target_os = "uefi")]
+pub mod files;
+#[cfg(target_os = "uefi")]
+pub mod handoff;
+#[cfg(any(target_os = "uefi", test))]
+pub mod memory;
+#[cfg(any(target_os = "uefi", test))]
+pub mod paging;
 
 pub use config::{LoaderConfig, parse_config};
 pub use elf::{ELF_PF_R, ELF_PF_W, ELF_PF_X, LoadPlan, LoadSegment, SegmentFlags, parse_load_plan};

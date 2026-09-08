@@ -88,6 +88,7 @@ fn build_artifacts(root: &Path) -> Result<()> {
             "build",
             "-p",
             "relay-loader",
+            "--release",
             "--target",
             "x86_64-unknown-uefi",
             "--locked",
@@ -99,6 +100,7 @@ fn build_artifacts(root: &Path) -> Result<()> {
             "build",
             "-p",
             "relay-kernel",
+            "--release",
             "--target",
             "x86_64-unknown-none",
             "--locked",
@@ -117,12 +119,12 @@ struct Artifacts {
 fn stage_artifacts(root: &Path, work: &Path, epoch: u64) -> Result<Artifacts> {
     let target = root.join("target");
     let loader = stage_file(
-        &target.join("x86_64-unknown-uefi/debug/relay-loader.efi"),
+        &target.join("x86_64-unknown-uefi/release/relay-loader.efi"),
         &work.join("BOOTX64.EFI"),
         epoch,
     )?;
     let kernel = stage_file(
-        &target.join("x86_64-unknown-none/debug/relay-kernel"),
+        &target.join("x86_64-unknown-none/release/relay-kernel"),
         &work.join("kernel.elf"),
         epoch,
     )?;

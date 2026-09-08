@@ -4,7 +4,7 @@ fn main() {
         None | Some("doctor") if args.next().is_none() => doctor(),
         Some("image") => image(args),
         Some("verify-image") => verify_image(args),
-        Some("qemu") => unavailable("qemu is unavailable until Task 4"),
+        Some("qemu") => qemu(args),
         Some(command) => unavailable(&format!(
             "unknown command `{command}`; available commands are `doctor`, `image`, and `verify-image`"
         )),
@@ -44,6 +44,52 @@ fn verify_image(mut args: impl Iterator<Item = String>) {
             std::process::exit(1);
         }
     }
+}
+
+fn qemu(mut args: impl Iterator<Item = String>) {
+    let Some(action) = args.next() else {
+        unavailable("qemu requires `boot IMAGE --display none --accel tcg`");
+    };
+    let Some(image) = args.next() else {
+        unavailable("qemu boot requires IMAGE");
+    };
+    let Some(display_flag) = args.next() else {
+        unavailable("qemu boot requires `--display none --accel tcg`");
+    };
+    let Some(display) = args.next() else {
+        unavailable("qemu boot requires `--display none --accel tcg`");
+    };
+    let Some(accel_flag) = args.next() else {
+        unavailable("qemu boot requires `--display none --accel tcg`");
+    };
+    let Some(accel) = args.next() else {
+        unavailable("qemu boot requires `--display none --accel tcg`");
+    };
+    if action != "boot"
+        || display_flag != "--display"
+        || accel_flag != "--accel"
+        || args.next().is_some()
+    {
+        unavailable("qemu requires exactly `boot IMAGE --display none --accel tcg`");
+    }
+    let mut run = match relay_xtask::qemu::QemuRun::boot(
+        std::path::Path::new(&image),
+        &display,
+        &accel,
+        std::time::Duration::from_secs(20),
+    ) {
+        Ok(run) => run,
+        Err(error) => {
+            eprintln!("cargo xtask qemu boot: {error}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(error) = run.wait_for_marker(relay_xtask::qemu::KERNEL_ENTRY_MARKER) {
+        eprintln!("cargo xtask qemu boot: {error}");
+        eprintln!("{}", run.serial_log());
+        std::process::exit(1);
+    }
+    print!("{}", run.serial_log());
 }
 
 fn doctor() {
