@@ -1,0 +1,40 @@
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConfigError {
+    TooLarge,
+    NonAscii,
+    NulByte,
+    MissingTrailingNewline,
+    MissingRootGuid,
+    DuplicateRootGuid,
+    UnknownKey,
+    Whitespace,
+    InvalidFormat,
+    InvalidRootGuid,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ElfLoadError {
+    Truncated,
+    InvalidMagic,
+    UnsupportedClass,
+    UnsupportedEndianness,
+    UnsupportedVersion,
+    UnsupportedAbi,
+    UnsupportedType,
+    UnsupportedMachine,
+    InvalidHeaderSize,
+    InvalidProgramHeaderSize,
+    ProgramHeaderTableOutOfBounds,
+    IntegerOverflow,
+    InvalidSegmentFlags,
+    InvalidSegmentAlignment,
+    FileSizeExceedsMemorySize,
+    SegmentOutOfBounds,
+    OffsetNotPageCongruent,
+    NotHighHalf,
+    WritableExecutable,
+    OverlappingSegments,
+    InvalidDynamicTable,
+    DynamicRelocations,
+    EntryOutsideExecutableSegment,
+}
