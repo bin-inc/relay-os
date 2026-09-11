@@ -473,6 +473,7 @@ dependencies = [
  "crc",
  "noto-sans-mono-bitmap",
  "pci_types",
+ "relay-abi",
  "x86_64",
 ]
 
