@@ -71,8 +71,16 @@ GUID in boot configuration.
 
 At startup, the UEFI boot layer loads the kernel and builds a read-only boot
 information structure containing the firmware memory map, graphics framebuffer,
-and configured root-partition GUID. It exits UEFI boot services before
-transferring control permanently to the kernel. The kernel then:
+and configured root-partition GUID. Before constructing replacement page tables,
+it reads `CR4.LA57` and builds a four- or five-level hierarchy matching the
+active firmware paging depth without changing that bit in long mode. It changes
+`CR3` only from a loader-owned, position-independent transition page whose
+physical address is known and identity-mapped in the replacement hierarchy; it
+does not assume the UEFI loaded-image base is physical or identity-mapped. The
+loader obtains the final UEFI memory map in preallocated storage, performs the
+real `ExitBootServices` transition, sorts and normalizes the returned map
+without allocation, and publishes it in `BootInfo` before permanently
+transferring control to the kernel. The kernel then:
 
 1. Establishes exception handling, memory mapping, physical-page allocation,
    heap allocation, and the framebuffer console.
@@ -259,6 +267,13 @@ create, mutate, flush, reopen, and verify images, then run standard `e2fsck`
 against the result. Fault-injecting block devices exercise short I/O, timeouts,
 capacity exhaustion, and write failures.
 
+Loader host tests cover `CR4.LA57` paging-depth selection, four- and five-level
+index traversal, canonical transition-page addresses, executable
+identity-mapping of the transition page, final-map sorting and overlap
+rejection, and conditional NX enablement. The production QEMU boot gate requires
+the kernel banner after real `ExitBootServices`; it does not accept a UEFI
+fallback path.
+
 Automated QEMU tests use a `q35` machine with UEFI, an emulated xHCI
 controller, a USB keyboard, and the boot image attached as USB mass storage.
 The harness boots the production image, injects keyboard commands, observes
@@ -276,14 +291,17 @@ With Secure Boot disabled, one supported keyboard and one supported flash drive
 are connected directly to the Intel NUC 12 Pro. The flashed milestone image
 must:
 
-1. Boot from USB to a visible prompt without a serial terminal.
-2. Successfully exercise every documented shell command.
-3. Create, list, navigate, read, append, and remove representative files and
+1. Complete the real `ExitBootServices` handoff and display the post-UEFI kernel
+   banner without a serial terminal; record the NUC firmware version, tested
+   image SHA-256, and a banner photo.
+2. Boot from USB to a visible prompt without a serial terminal.
+3. Successfully exercise every documented shell command.
+4. Create, list, navigate, read, append, and remove representative files and
    directories.
-4. Run `sync` and `shutdown` without an I/O or filesystem error.
-5. Boot again from the same USB drive and read content retained from the prior
+5. Run `sync` and `shutdown` without an I/O or filesystem error.
+6. Boot again from the same USB drive and read content retained from the prior
    session.
-6. Leave an ext2 partition that passes host `e2fsck` after clean shutdown.
+7. Leave an ext2 partition that passes host `e2fsck` after clean shutdown.
 
 Milestone one is complete only when automated QEMU verification and this NUC
 acceptance test both pass.
