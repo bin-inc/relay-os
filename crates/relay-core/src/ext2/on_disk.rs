@@ -35,6 +35,8 @@ pub const INODE_FLAGS: usize = 32;
 #[allow(dead_code)]
 pub const INODE_BLOCK: usize = 40;
 #[allow(dead_code)]
+pub const INODE_SIZE_HIGH: usize = 108;
+#[allow(dead_code)]
 pub const DIRECTORY_INODE: usize = 0;
 #[allow(dead_code)]
 pub const DIRECTORY_RECORD_LENGTH: usize = 4;

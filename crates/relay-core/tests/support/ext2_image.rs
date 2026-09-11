@@ -1,3 +1,5 @@
+#![allow(dead_code)] // Individual integration-test crates use distinct fixture mutations.
+
 use std::{
     env,
     fs::{self, File},
@@ -26,6 +28,17 @@ const FEATURE_RO_COMPAT_OFFSET: usize = 100;
 const BLOCK_BITMAP_OFFSET: usize = 0;
 const INODE_BITMAP_OFFSET: usize = 4;
 const INODE_TABLE_OFFSET: usize = 8;
+const INODE_BYTES: usize = 256;
+const INODE_MODE_OFFSET: usize = 0;
+const INODE_FILE_SIZE_OFFSET: usize = 4;
+const INODE_FLAGS_OFFSET: usize = 32;
+const INODE_BLOCK_OFFSET: usize = 40;
+const INODE_FILE_SIZE_HIGH_OFFSET: usize = 108;
+const DIRECTORY_RECORD_LENGTH_OFFSET: usize = 4;
+const DIRECTORY_INODE_OFFSET: usize = 0;
+const DIRECTORY_FILE_TYPE_OFFSET: usize = 7;
+const DIRECTORY_NAME_LENGTH_OFFSET: usize = 6;
+const DIRECTORY_NAME_OFFSET: usize = 8;
 
 static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 
@@ -247,6 +260,82 @@ impl Ext2Fixture {
         self.set_group_descriptor_u32(INODE_TABLE_OFFSET, value);
     }
 
+    pub fn clear_first_data_pointer(&mut self, name: &str) {
+        self.with_named_inode_mut(name, |bytes, inode| {
+            set_u32(bytes, inode + INODE_BLOCK_OFFSET, 0);
+        });
+    }
+
+    pub fn set_first_indirect_data_pointer(&mut self, name: &str, value: u32) {
+        self.with_named_inode_mut(name, |bytes, inode| {
+            let indirect = u32_at(bytes, inode + INODE_BLOCK_OFFSET + 12 * 4);
+            let indirect = usize::try_from(indirect).unwrap();
+            set_u32(bytes, indirect * 4096, value);
+        });
+    }
+
+    pub fn set_inode_file_size(&mut self, name: &str, value: u32) {
+        self.with_named_inode_mut(name, |bytes, inode| {
+            set_u32(bytes, inode + INODE_FILE_SIZE_OFFSET, value);
+        });
+    }
+
+    pub fn set_inode_file_size_high(&mut self, name: &str, value: u32) {
+        self.with_named_inode_mut(name, |bytes, inode| {
+            set_u32(bytes, inode + INODE_FILE_SIZE_HIGH_OFFSET, value);
+        });
+    }
+
+    pub fn set_inode_mode(&mut self, name: &str, value: u16) {
+        self.with_named_inode_mut(name, |bytes, inode| {
+            set_u16(bytes, inode + INODE_MODE_OFFSET, value);
+        });
+    }
+
+    pub fn set_inode_flags(&mut self, name: &str, value: u32) {
+        self.with_named_inode_mut(name, |bytes, inode| {
+            set_u32(bytes, inode + INODE_FLAGS_OFFSET, value);
+        });
+    }
+
+    pub fn set_double_indirect_pointer(&mut self, name: &str, value: u32) {
+        self.with_named_inode_mut(name, |bytes, inode| {
+            set_u32(bytes, inode + INODE_BLOCK_OFFSET + 13 * 4, value);
+        });
+    }
+
+    pub fn set_triple_indirect_pointer(&mut self, name: &str, value: u32) {
+        self.with_named_inode_mut(name, |bytes, inode| {
+            set_u32(bytes, inode + INODE_BLOCK_OFFSET + 14 * 4, value);
+        });
+    }
+
+    pub fn set_root_entry_inode(&mut self, name: &str, value: u32) {
+        self.with_root_entry_mut(name, |bytes, entry| {
+            set_u32(bytes, entry + DIRECTORY_INODE_OFFSET, value);
+        });
+    }
+
+    pub fn set_root_entry_record_length(&mut self, name: &str, value: u16) {
+        self.with_root_entry_mut(name, |bytes, entry| {
+            set_u16(bytes, entry + DIRECTORY_RECORD_LENGTH_OFFSET, value);
+        });
+    }
+
+    pub fn set_root_entry_file_type(&mut self, name: &str, value: u8) {
+        self.with_root_entry_mut(name, |bytes, entry| {
+            bytes[entry + DIRECTORY_FILE_TYPE_OFFSET] = value;
+        });
+    }
+
+    pub fn rename_root_entry(&mut self, name: &str, replacement: &str) {
+        assert_eq!(name.len(), replacement.len());
+        self.with_root_entry_mut(name, |bytes, entry| {
+            let start = entry + DIRECTORY_NAME_OFFSET;
+            bytes[start..start + replacement.len()].copy_from_slice(replacement.as_bytes());
+        });
+    }
+
     fn set_superblock_u16(&mut self, offset: usize, value: u16) {
         self.with_bytes_mut(|bytes| {
             bytes[SUPERBLOCK_OFFSET + offset..SUPERBLOCK_OFFSET + offset + 2]
@@ -282,6 +371,58 @@ impl Ext2Fixture {
         file.write_all(&bytes).unwrap();
         file.sync_all().unwrap();
     }
+
+    fn with_named_inode_mut(&mut self, name: &str, mutate: impl FnOnce(&mut [u8], usize)) {
+        self.with_bytes_mut(|bytes| {
+            let entry = root_entry(bytes, name);
+            let inode = inode_offset(bytes, u32_at(bytes, entry + DIRECTORY_INODE_OFFSET));
+            mutate(bytes, inode);
+        });
+    }
+
+    fn with_root_entry_mut(&mut self, name: &str, mutate: impl FnOnce(&mut [u8], usize)) {
+        self.with_bytes_mut(|bytes| mutate(bytes, root_entry(bytes, name)));
+    }
+}
+
+fn root_entry(bytes: &[u8], wanted: &str) -> usize {
+    let root = inode_offset(bytes, 2);
+    let data_block = usize::try_from(u32_at(bytes, root + INODE_BLOCK_OFFSET)).unwrap();
+    let mut offset = data_block * 4096;
+    let end = offset + 4096;
+    while offset < end {
+        let length = usize::from(u16_at(bytes, offset + DIRECTORY_RECORD_LENGTH_OFFSET));
+        let name_length = usize::from(bytes[offset + DIRECTORY_NAME_LENGTH_OFFSET]);
+        if &bytes[offset + DIRECTORY_NAME_OFFSET..offset + DIRECTORY_NAME_OFFSET + name_length]
+            == wanted.as_bytes()
+        {
+            return offset;
+        }
+        offset += length;
+    }
+    panic!("fixture root entry does not exist: {wanted}");
+}
+
+fn inode_offset(bytes: &[u8], inode: u32) -> usize {
+    let table =
+        usize::try_from(u32_at(bytes, GROUP_DESCRIPTOR_OFFSET + INODE_TABLE_OFFSET)).unwrap();
+    table * 4096 + usize::try_from(inode - 1).unwrap() * INODE_BYTES
+}
+
+fn u16_at(bytes: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap())
+}
+
+fn u32_at(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
+
+fn set_u16(bytes: &mut [u8], offset: usize, value: u16) {
+    bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn set_u32(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
 fn valid_component(name: &str) -> bool {
