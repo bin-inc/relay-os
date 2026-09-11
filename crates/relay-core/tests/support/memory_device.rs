@@ -1,4 +1,27 @@
+use std::{cell::Cell, rc::Rc};
+
 use relay_core::block::{BlockDevice, BlockError, BlockGeometry};
+
+#[derive(Clone, Default)]
+pub struct OperationLog {
+    reads: Rc<Cell<usize>>,
+    writes: Rc<Cell<usize>>,
+    flushes: Rc<Cell<usize>>,
+}
+
+impl OperationLog {
+    pub fn read_count(&self) -> usize {
+        self.reads.get()
+    }
+
+    pub fn write_count(&self) -> usize {
+        self.writes.get()
+    }
+
+    pub fn flush_count(&self) -> usize {
+        self.flushes.get()
+    }
+}
 
 pub struct MemoryDevice {
     sector_size: u32,
@@ -8,6 +31,7 @@ pub struct MemoryDevice {
     write_count: usize,
     read_only: bool,
     flush_error: bool,
+    operations: OperationLog,
 }
 
 impl MemoryDevice {
@@ -45,6 +69,7 @@ impl MemoryDevice {
             write_count: 0,
             read_only: false,
             flush_error: false,
+            operations: OperationLog::default(),
         })
     }
 
@@ -67,6 +92,18 @@ impl MemoryDevice {
 
     pub fn read_lbas(&self) -> &[u64] {
         &self.read_lbas
+    }
+
+    pub fn operations(&self) -> OperationLog {
+        self.operations.clone()
+    }
+
+    pub fn bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.bytes
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
     }
 
     pub fn with_read_only(mut self) -> Self {
@@ -93,6 +130,7 @@ impl BlockDevice for MemoryDevice {
         let range = self.byte_range(first_lba, dst.len())?;
         dst.copy_from_slice(self.bytes.get(range).ok_or(BlockError::OutOfRange)?);
         self.read_lbas.push(first_lba);
+        self.operations.reads.set(self.operations.reads.get() + 1);
         Ok(())
     }
 
@@ -108,10 +146,14 @@ impl BlockDevice for MemoryDevice {
             .ok_or(BlockError::OutOfRange)?
             .copy_from_slice(src);
         self.write_count += 1;
+        self.operations.writes.set(self.operations.writes.get() + 1);
         Ok(())
     }
 
     fn flush(&mut self) -> Result<(), BlockError> {
+        self.operations
+            .flushes
+            .set(self.operations.flushes.get() + 1);
         if self.flush_error {
             return Err(BlockError::Flush);
         }
