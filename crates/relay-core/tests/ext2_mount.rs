@@ -3,7 +3,7 @@ mod support;
 use relay_core::{
     block::{BlockDevice, BlockError, BlockGeometry},
     ext2::{Ext2, Ext2Error, MountMode},
-    fs::{Name, NodeKind},
+    fs::Name,
 };
 use support::ext2_image::{self, FeatureField, FixtureError, fixture_with_files};
 
@@ -17,7 +17,6 @@ fn name_accepts_only_nonempty_printable_ascii_path_components() {
     assert!(Name::new(&[b'a'; 256]).is_err());
     assert!(Name::new(b".").is_err());
     assert!(Name::new(b"..").is_err());
-    assert_eq!(NodeKind::Regular, NodeKind::Regular);
 }
 
 #[test]
@@ -120,10 +119,13 @@ fn mount_rejects_invalid_profile_fields() {
         |image| image.set_magic(0),
         |image| image.set_revision(0),
         |image| image.set_log_block_size(1),
+        |image| image.set_log_fragment_size(1),
         |image| image.set_inode_size(128),
         |image| image.set_block_count(32_767),
         |image| image.set_inode_count(4_095),
         |image| image.set_blocks_per_group(32_767),
+        |image| image.set_fragments_per_group(32_767),
+        |image| image.set_inodes_per_group(4_095),
         |image| image.set_first_data_block(1),
     ];
     for mutation in mutations {

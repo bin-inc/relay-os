@@ -25,6 +25,18 @@ pub(crate) struct Geometry {
     pub(crate) inode_table_blocks: u32,
 }
 
+impl Geometry {
+    pub(crate) fn is_structural_metadata_block(self, block: u32) -> bool {
+        block < 2
+            || block == self.block_bitmap
+            || block == self.inode_bitmap
+            || self
+                .inode_table
+                .checked_add(self.inode_table_blocks)
+                .is_some_and(|end| range_contains(self.inode_table, end, block))
+    }
+}
+
 pub fn mount<D: BlockDevice>(device: &mut D, mode: MountMode) -> Result<Geometry, Ext2Error> {
     let device_geometry = device.geometry();
     if device_geometry.logical_sector_size != SECTOR_BYTES {

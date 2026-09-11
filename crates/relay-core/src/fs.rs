@@ -11,6 +11,7 @@ pub enum NameError {
     Empty,
     TooLong,
     InvalidByte,
+    Allocation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,7 +50,11 @@ impl Name {
         {
             return Err(NameError::InvalidByte);
         }
-        Ok(Self(bytes.into()))
+        let mut name = Vec::new();
+        name.try_reserve_exact(bytes.len())
+            .map_err(|_| NameError::Allocation)?;
+        name.extend_from_slice(bytes);
+        Ok(Self(name))
     }
 
     pub fn as_bytes(&self) -> &[u8] {

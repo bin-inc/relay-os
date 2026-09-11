@@ -18,9 +18,12 @@ const STATE_OFFSET: usize = 58;
 const REVISION_OFFSET: usize = 76;
 const FIRST_DATA_BLOCK_OFFSET: usize = 20;
 const LOG_BLOCK_SIZE_OFFSET: usize = 24;
+const LOG_FRAGMENT_SIZE_OFFSET: usize = 28;
 const BLOCKS_COUNT_OFFSET: usize = 4;
 const BLOCKS_PER_GROUP_OFFSET: usize = 32;
+const FRAGMENTS_PER_GROUP_OFFSET: usize = 36;
 const INODES_COUNT_OFFSET: usize = 0;
+const INODES_PER_GROUP_OFFSET: usize = 40;
 const INODE_SIZE_OFFSET: usize = 88;
 const FEATURE_COMPAT_OFFSET: usize = 92;
 const FEATURE_INCOMPAT_OFFSET: usize = 96;
@@ -154,6 +157,17 @@ pub fn fixture_with_files(files: &[(&str, &[u8])]) -> Result<Ext2Fixture, Fixtur
         ));
     }
 
+    let output = Command::new("debugfs")
+        .args(["-w", "-R", "rmdir /lost+found"])
+        .arg(&image)
+        .env("E2FSPROGS_FAKE_TIME", "1788739200")
+        .output()?;
+    if !output.status.success() {
+        return Err(FixtureError::CommandFailed(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ));
+    }
+
     for (name, contents) in files {
         let source = directory.join(format!("source-{name}"));
         fs::write(&source, contents)?;
@@ -224,6 +238,10 @@ impl Ext2Fixture {
         self.set_superblock_u32(LOG_BLOCK_SIZE_OFFSET, value);
     }
 
+    pub fn set_log_fragment_size(&mut self, value: u32) {
+        self.set_superblock_u32(LOG_FRAGMENT_SIZE_OFFSET, value);
+    }
+
     pub fn set_inode_size(&mut self, value: u16) {
         self.set_superblock_u16(INODE_SIZE_OFFSET, value);
     }
@@ -238,6 +256,14 @@ impl Ext2Fixture {
 
     pub fn set_blocks_per_group(&mut self, value: u32) {
         self.set_superblock_u32(BLOCKS_PER_GROUP_OFFSET, value);
+    }
+
+    pub fn set_fragments_per_group(&mut self, value: u32) {
+        self.set_superblock_u32(FRAGMENTS_PER_GROUP_OFFSET, value);
+    }
+
+    pub fn set_inodes_per_group(&mut self, value: u32) {
+        self.set_superblock_u32(INODES_PER_GROUP_OFFSET, value);
     }
 
     pub fn set_first_data_block(&mut self, value: u32) {
@@ -266,12 +292,40 @@ impl Ext2Fixture {
         });
     }
 
+    pub fn set_first_data_pointer(&mut self, name: &str, value: u32) {
+        self.with_named_inode_mut(name, |bytes, inode| {
+            set_u32(bytes, inode + INODE_BLOCK_OFFSET, value);
+        });
+    }
+
+    pub fn set_indirect_pointer(&mut self, name: &str, value: u32) {
+        self.with_named_inode_mut(name, |bytes, inode| {
+            set_u32(bytes, inode + INODE_BLOCK_OFFSET + 12 * 4, value);
+        });
+    }
+
     pub fn set_first_indirect_data_pointer(&mut self, name: &str, value: u32) {
         self.with_named_inode_mut(name, |bytes, inode| {
             let indirect = u32_at(bytes, inode + INODE_BLOCK_OFFSET + 12 * 4);
             let indirect = usize::try_from(indirect).unwrap();
             set_u32(bytes, indirect * 4096, value);
         });
+    }
+
+    pub fn structural_metadata_blocks(&self) -> Vec<u32> {
+        self.with_bytes(|bytes| {
+            let block_bitmap = u32_at(bytes, GROUP_DESCRIPTOR_OFFSET + BLOCK_BITMAP_OFFSET);
+            let inode_bitmap = u32_at(bytes, GROUP_DESCRIPTOR_OFFSET + INODE_BITMAP_OFFSET);
+            let inode_table = u32_at(bytes, GROUP_DESCRIPTOR_OFFSET + INODE_TABLE_OFFSET);
+            vec![
+                0,
+                1,
+                block_bitmap,
+                inode_bitmap,
+                inode_table,
+                inode_table + 255,
+            ]
+        })
     }
 
     pub fn set_inode_file_size(&mut self, name: &str, value: u32) {
@@ -328,6 +382,18 @@ impl Ext2Fixture {
         });
     }
 
+    pub fn set_root_entry_name_length(&mut self, name: &str, value: u8) {
+        self.with_root_entry_mut(name, |bytes, entry| {
+            bytes[entry + DIRECTORY_NAME_LENGTH_OFFSET] = value;
+        });
+    }
+
+    pub fn set_root_entry_name_byte(&mut self, name: &str, offset: usize, value: u8) {
+        self.with_root_entry_mut(name, |bytes, entry| {
+            bytes[entry + DIRECTORY_NAME_OFFSET + offset] = value;
+        });
+    }
+
     pub fn rename_root_entry(&mut self, name: &str, replacement: &str) {
         assert_eq!(name.len(), replacement.len());
         self.with_root_entry_mut(name, |bytes, entry| {
@@ -370,6 +436,14 @@ impl Ext2Fixture {
         file.seek(SeekFrom::Start(0)).unwrap();
         file.write_all(&bytes).unwrap();
         file.sync_all().unwrap();
+    }
+
+    fn with_bytes<T>(&self, inspect: impl FnOnce(&[u8]) -> T) -> T {
+        let mut file = File::open(&self.image).unwrap();
+        let len = usize::try_from(file.metadata().unwrap().len()).unwrap();
+        let mut bytes = vec![0; len];
+        file.read_exact(&mut bytes).unwrap();
+        inspect(&bytes)
     }
 
     fn with_named_inode_mut(&mut self, name: &str, mutate: impl FnOnce(&mut [u8], usize)) {

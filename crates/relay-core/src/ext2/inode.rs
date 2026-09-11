@@ -194,7 +194,7 @@ pub(super) fn resolve_block<D: BlockDevice>(
         })?)?
     } else if logical_block < DIRECT_BLOCKS + INDIRECT_BLOCKS {
         let indirect = inode.pointer(12)?;
-        require_data_block(indirect)?;
+        require_data_block(fs, indirect)?;
         let mut pointers = [0; BLOCK_BYTES];
         fs.read_block(indirect, &mut pointers)?;
         let index = usize::try_from(logical_block - DIRECT_BLOCKS).map_err(|_| {
@@ -212,7 +212,7 @@ pub(super) fn resolve_block<D: BlockDevice>(
     } else {
         return Err(Ext2Error::UnsupportedFile);
     };
-    require_data_block(pointer)?;
+    require_data_block(fs, pointer)?;
     Ok(pointer)
 }
 
@@ -243,9 +243,14 @@ fn validate(inode: &Inode) -> Result<(), Ext2Error> {
     Ok(())
 }
 
-fn require_data_block(block: u32) -> Result<(), Ext2Error> {
+fn require_data_block<D: BlockDevice>(fs: &Ext2<D>, block: u32) -> Result<(), Ext2Error> {
     if block == 0 {
         return Err(Ext2Error::SparseFile);
+    }
+    if fs.geometry.is_structural_metadata_block(block) {
+        return Err(Ext2Error::CorruptMetadata {
+            field: "block_pointer",
+        });
     }
     Ok(())
 }

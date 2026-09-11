@@ -1,7 +1,8 @@
 use crate::{
     block::BlockDevice,
-    fs::{Name, NodeId, NodeKind},
+    fs::{DirEntry, Name, NameError, NodeId, NodeKind},
 };
+use alloc::vec::Vec;
 
 use super::{
     Ext2, Ext2Error, inode,
@@ -16,6 +17,37 @@ pub(super) fn lookup<D: BlockDevice>(
     dir: NodeId,
     wanted: &Name,
 ) -> Result<NodeId, Ext2Error> {
+    let mut found = None;
+    visit(fs, dir, |node, name, _| {
+        if found.is_none() && name.is_some_and(|name| name.as_bytes() == wanted.as_bytes()) {
+            found = Some(node);
+        }
+        Ok(())
+    })?;
+    found.ok_or(Ext2Error::NotFound)
+}
+
+pub(super) fn read_dir<D: BlockDevice>(
+    fs: &mut Ext2<D>,
+    dir: NodeId,
+) -> Result<Vec<DirEntry>, Ext2Error> {
+    let mut entries = Vec::new();
+    visit(fs, dir, |node, name, kind| {
+        let Some(name) = name else {
+            return Ok(());
+        };
+        entries.try_reserve(1).map_err(|_| Ext2Error::Allocation)?;
+        entries.push(DirEntry { name, node, kind });
+        Ok(())
+    })?;
+    Ok(entries)
+}
+
+fn visit<D: BlockDevice>(
+    fs: &mut Ext2<D>,
+    dir: NodeId,
+    mut visitor: impl FnMut(NodeId, Option<Name>, NodeKind) -> Result<(), Ext2Error>,
+) -> Result<(), Ext2Error> {
     let inode = inode::load(fs, dir)?;
     let metadata = inode.metadata();
     if metadata.kind != NodeKind::Directory {
@@ -27,7 +59,6 @@ pub(super) fn lookup<D: BlockDevice>(
         }
     })?;
     let mut bytes = [0; BLOCK_BYTES];
-    let mut found = None;
     for logical_block in 0..blocks {
         let block = inode::resolve_block(fs, &inode, logical_block)?;
         fs.read_block(block, &mut bytes)?;
@@ -58,12 +89,10 @@ pub(super) fn lookup<D: BlockDevice>(
                     field: "directory_file_type",
                 });
             }
-            if found.is_none() && name.is_some_and(|name| name.as_bytes() == wanted.as_bytes()) {
-                found = Some(node);
-            }
+            visitor(node, name, kind)?;
         }
     }
-    found.ok_or(Ext2Error::NotFound)
+    Ok(())
 }
 
 struct Record<'a> {
@@ -76,6 +105,9 @@ struct Record<'a> {
 
 impl Record<'_> {
     fn live(&self) -> Result<Option<(NodeId, Option<Name>, NodeKind)>, Ext2Error> {
+        if self.inode == 0 {
+            return Ok(None);
+        }
         let kind = match self.file_type {
             DIRECTORY_FILETYPE_REGULAR => NodeKind::Regular,
             DIRECTORY_FILETYPE_DIRECTORY => NodeKind::Directory,
@@ -85,9 +117,6 @@ impl Record<'_> {
                 });
             }
         };
-        if self.inode == 0 {
-            return Ok(None);
-        }
         let name = self
             .bytes
             .get(on_disk::DIRECTORY_NAME..on_disk::DIRECTORY_NAME + self.name_length)
@@ -97,9 +126,15 @@ impl Record<'_> {
         let name = if name == b"." || name == b".." {
             None
         } else {
-            Some(Name::new(name).map_err(|_| Ext2Error::CorruptMetadata {
-                field: "directory_name",
-            })?)
+            Some(match Name::new(name) {
+                Ok(name) => name,
+                Err(NameError::Allocation) => return Err(Ext2Error::Allocation),
+                Err(_) => {
+                    return Err(Ext2Error::CorruptMetadata {
+                        field: "directory_name",
+                    });
+                }
+            })
         };
         if !(2..=4_096).contains(&self.inode) {
             return Err(Ext2Error::CorruptMetadata {

@@ -4,7 +4,8 @@ mod on_disk;
 mod validate;
 
 use crate::block::{BlockDevice, BlockError};
-use crate::fs::{Metadata, Name, NodeId};
+use crate::fs::{DirEntry, Metadata, Name, NodeId};
+use alloc::vec::Vec;
 use on_disk::BLOCK_BYTES;
 use validate::Geometry;
 
@@ -30,7 +31,7 @@ pub enum Ext2Error {
     NotFound,
     UnsupportedFile,
     SparseFile,
-    AllocationFailure,
+    Allocation,
 }
 
 #[allow(dead_code)] // Tasks 2 and 3 consume the mounted device and validated geometry.
@@ -60,6 +61,10 @@ impl<D: BlockDevice> Ext2<D> {
 
     pub fn lookup(&mut self, dir: NodeId, name: &Name) -> Result<NodeId, Ext2Error> {
         directory::lookup(self, dir, name)
+    }
+
+    pub fn read_dir(&mut self, dir: NodeId) -> Result<Vec<DirEntry>, Ext2Error> {
+        directory::read_dir(self, dir)
     }
 
     pub fn read_at(
