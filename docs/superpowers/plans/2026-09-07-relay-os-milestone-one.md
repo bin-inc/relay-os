@@ -14,6 +14,9 @@
 
 - The physical acceptance target is Intel NUC 12 Pro `RNUC12WSHI70000`, Core i7-1260P, with Secure Boot disabled.
 - UEFI must exit boot services before kernel entry and must not provide keyboard or storage I/O afterward.
+- The handoff reads `CR4.LA57` and preserves the firmware's active four- or five-level paging depth; it must not change `CR4.LA57` in long mode.
+- The loader changes `CR3` only from a loader-owned, position-independent transition page at a known physical address that is identity-mapped executable in the replacement hierarchy; it must not rely on the UEFI loaded-image base being physical or identity-mapped.
+- The final map returned by real `ExitBootServices` is sorted and normalized without allocation before it is published in `BootInfo`; no UEFI call or allocation occurs after exit.
 - Project-owned code is Rust except for documented, architecture-required assembly in entry/exception transitions.
 - The kernel is single-core, single-address-space, polling-based, and `no_std`; processes, scheduling, and user mode are excluded.
 - Supported USB is one directly connected HID boot-protocol keyboard and one directly connected BOT/SCSI flash drive through xHCI; hubs, UAS, and hot-plug recovery are excluded.
@@ -276,6 +279,9 @@ pub struct FramebufferInfo {
 
 Assert `size_of::<MemoryRegion>() == 24`, `size_of::<FramebufferInfo>() == 56`, and `size_of::<BootInfo>() == 120`. Implement canonical ASCII GUID parsing/display and explicit GPT mixed-endian conversion with a known-vector test in `relay-abi`, so loader, GPT, and image tooling all use one representation.
 
+`BootInfo.memory_map` references a retained, final post-`ExitBootServices` map,
+sorted by physical start and normalized before kernel entry.
+
 - [ ] **Step 4: Build and verify the fixed image**
 
 Use fixed identifiers:
@@ -390,6 +396,8 @@ git commit -m "feat: validate loader config and kernel ELF"
 - Create: `crates/relay-loader/src/files.rs`
 - Create: `crates/relay-loader/src/memory.rs`
 - Create: `crates/relay-loader/src/paging.rs`
+- Create: `crates/relay-loader/src/cpu.rs`
+- Create: `crates/relay-loader/src/transition.rs`
 - Create: `crates/relay-loader/src/handoff.rs`
 - Modify: `crates/relay-loader/src/lib.rs`
 - Modify: `crates/relay-loader/src/main.rs`
@@ -407,7 +415,7 @@ git commit -m "feat: validate loader config and kernel ELF"
 
 **Interfaces:**
 - Consumes: `BootInfo`, validated loader config/ELF plan, deterministic image.
-- Produces: `unsafe extern "C" fn _start(*const BootInfo) -> !` and `cargo xtask qemu boot`.
+- Produces: `unsafe extern "C" fn _start(*const BootInfo) -> !` reached through a loader-owned transition page after real `ExitBootServices`, and `cargo xtask qemu boot`.
 
 - [ ] **Step 1: Write the failing post-exit boot test**
 
@@ -416,6 +424,7 @@ git commit -m "feat: validate loader config and kernel ELF"
 fn production_image_reaches_kernel_after_exit_boot_services() {
     let run = QemuRun::boot_production_image(Duration::from_secs(20)).unwrap();
     run.wait_for_marker("[relay] phase=kernel-entry status=ok").unwrap();
+    run.wait_for_marker("[relay] phase=kernel-runtime status=ok").unwrap();
     assert!(!run.serial_log().contains("phase=uefi-fallback"));
 }
 ```
@@ -428,15 +437,42 @@ Expected: FAIL with a bounded missing-marker or missing-QEMU diagnostic.
 
 - [ ] **Step 3: Load files and construct mappings**
 
-Read config and kernel from the loader's own filesystem. Allocate and zero pages for each ELF segment, copy file bytes, map segment permissions, reserve loader/kernel/stack/page-table/boot-data pages, map usable RAM at `0xffff_8000_0000_0000`, and map the framebuffer with an appropriate non-normal cache attribute. Expose a checked kernel mapping API for PCI BARs discovered later rather than pre-mapping unknown MMIO. Reject address overflow and overlapping mappings.
+Read `CR4` before table construction and build a matching four- or five-level
+hierarchy. Read config and kernel from the loader's own filesystem. Allocate and
+zero pages for each ELF segment, copy file bytes, map segment permissions, and
+allocate one `LOADER_DATA` transition page containing a fixed
+position-independent trampoline. Map that page identity-mapped executable at
+its allocated physical address; reserve it together with loader, kernel, stack,
+page-table, and boot-data pages. Map usable RAM at `0xffff_8000_0000_0000`, and
+map the framebuffer with an appropriate non-normal cache attribute. Expose a
+checked kernel mapping API for PCI BARs discovered later rather than pre-mapping
+unknown MMIO. Before exiting boot services, reject invalid paging depth,
+non-canonical virtual addresses, invalid transition placement, address
+overflow, and overlapping mappings. Validate the kernel entry, replacement
+stack, retained boot-data/`BootInfo`, and every mapping's virtual and physical
+range before the final map is acquired.
 
 - [ ] **Step 4: Capture platform data and exit UEFI**
 
-Capture GOP metadata and ACPI 2.0 RSDP, falling back to ACPI 1.0. Obtain the final UEFI memory map in preallocated storage, call `exit_boot_services`, normalize entries without allocation, and build `BootInfo`. Keep runtime, ACPI NVS, MMIO, unknown, and all loader-owned pages reserved.
+Capture GOP metadata and ACPI 2.0 RSDP, falling back to ACPI 1.0. Obtain the
+final UEFI memory map in preallocated storage and perform real
+`ExitBootServices`. Sort the returned map in place once, normalize it without
+allocation, and build `BootInfo`; make no UEFI call or allocation after exit.
+Keep runtime, ACPI NVS, MMIO, unknown, and all loader-owned pages reserved.
 
 - [ ] **Step 5: Transfer to the kernel through the documented ABI**
 
-Use the smallest required `naked_asm!` trampoline to load CR3/RSP, clear the direction flag, preserve the SysV argument register, and jump to the ELF entry with interrupts disabled. At `_start`, validate magic, ABI version, structure size, pointer alignment, memory ordering/ranges, framebuffer bounds, root GUID, physical offset, and RSDP before printing the serial marker.
+Invoke the transition page at its current UEFI-mapped address. Before loading
+`CR3`, it conditionally enables `EFER.NXE` when CPUID advertises NX support.
+After loading `CR3`, it installs the replacement stack, clears DF, preserves
+`rdi = *const BootInfo`, and jumps to the ELF entry with interrupts disabled.
+It performs no allocation, UEFI call, relocation, or stack access before
+installing that stack. The transition ABI is `rdi = *const BootInfo`, `rsi =`
+the new CR3 physical address, `rdx =` replacement stack top, and `rcx =` kernel
+entry virtual address; it saves the stack and entry values before loading CR3.
+At `_start`, validate magic, ABI version, structure size, pointer alignment,
+sorted normalized memory-map ordering/ranges, framebuffer bounds, root GUID,
+physical offset, and RSDP before printing the serial marker.
 
 - [ ] **Step 6: Run the production boot gate**
 
@@ -449,11 +485,20 @@ cargo xtask image --output target/relay-os.img
 cargo xtask qemu boot target/relay-os.img --display none --accel tcg
 ```
 
-Expected: QEMU reports `[relay] phase=kernel-entry status=ok` after the loader reports exit from boot services.
+Expected: QEMU reports both `[relay] phase=kernel-entry status=ok` and
+`[relay] phase=kernel-runtime status=ok` after the real boot-services exit.
+
+Also add host tests for LA57 depth/index selection, canonical transition-page
+addresses, executable identity mapping, final-map sort/overlap behavior, and
+conditional NX enablement.
 
 - [ ] **Step 7: Add the headless QEMU CI gate**
 
-Extend `.github/workflows/ci.yml` with `qemu-boot`. Install `qemu-system-x86`, run `cargo xtask qemu boot target/relay-os.img --display none --accel tcg`, enforce the same 20-second marker deadline as the host test, and upload serial, QMP, QEMU stderr, and framebuffer artifacts on failure. Keep GUI output disabled in CI.
+Extend `.github/workflows/ci.yml` with `qemu-boot`. Install `qemu-system-x86`,
+run `cargo xtask qemu boot target/relay-os.img --display none --accel tcg`,
+enforce the same 20-second deadline for both kernel phase markers as the host
+test, and upload serial, QMP, QEMU stderr, and framebuffer artifacts on failure.
+Keep GUI output disabled in CI.
 
 - [ ] **Step 8: Commit**
 
@@ -534,7 +579,10 @@ Expected: host tests pass; QEMU serial contains the same stable boot banner rend
 
 - [ ] **Step 6: Perform the first NUC boot gate**
 
-Flash the image, disable Secure Boot, and record firmware version plus a photo/hash showing the post-UEFI kernel banner in `docs/acceptance/nuc-m1.md`. Do not start xHCI work if this gate fails.
+Flash the production image, disable Secure Boot, and require the visible
+post-UEFI kernel banner after the real `ExitBootServices` handoff. Record the
+firmware version, image SHA-256, and a photo/hash in
+`docs/acceptance/nuc-m1.md`. Do not start xHCI work if this gate fails.
 
 - [ ] **Step 7: Commit**
 
@@ -1429,7 +1477,15 @@ cargo xtask qemu all target/relay-os.img --display none --accel tcg
 
 - [ ] **Step 5: Perform and record the physical NUC acceptance test**
 
-Record commit, image SHA-256, NUC BIOS version, Secure Boot and VT-d state, keyboard/drive models and VID:PIDs, physical ports, and each numbered spec acceptance result. Boot to framebuffer prompt without serial; exercise every command; create and append retained content; sync; shut down; boot again; read retained content; shut down; extract root on the host; require clean ext2 state and `e2fsck -fn` exit 0. Attach photos/logs by repository-relative evidence paths recorded in the document.
+Record commit, image SHA-256, NUC BIOS version, Secure Boot and VT-d state,
+keyboard/drive models and VID:PIDs, physical ports, the initial real-
+`ExitBootServices` kernel-banner result, and each numbered spec acceptance
+result. The NUC-tested image SHA-256 must match the release-gate image. Boot to
+framebuffer prompt without serial; exercise every command; create and append
+retained content; sync; shut down; boot again; read retained content; shut down;
+extract root on the host; require clean ext2 state and `e2fsck -fn` exit 0.
+Attach photos/logs by repository-relative evidence paths recorded in the
+document.
 
 - [ ] **Step 6: Update user documentation**
 
