@@ -91,18 +91,12 @@ impl<F: FileSystem> Vfs<F> {
         Cwd::root()
     }
 
+    pub fn metadata(&mut self, node: NodeId) -> Result<Metadata, VfsError> {
+        self.filesystem.metadata(node).map_err(VfsError::Fs)
+    }
+
     pub fn cwd_path(&self, cwd: &Cwd) -> Result<Vec<u8>, VfsError> {
-        let mut path = Vec::new();
-        path.try_reserve_exact(canonical_path_len(&cwd.components))
-            .map_err(|_| VfsError::Allocation)?;
-        path.push(b'/');
-        for (index, component) in cwd.components.iter().enumerate() {
-            if index != 0 {
-                path.push(b'/');
-            }
-            path.extend_from_slice(component.as_bytes());
-        }
-        Ok(path)
+        render_cwd_path(cwd, |path, capacity| path.try_reserve_exact(capacity))
     }
 
     pub fn resolve(&mut self, cwd: &Cwd, path: &str) -> Result<ResolvedPath, VfsError> {
@@ -266,6 +260,22 @@ impl<F: FileSystem> Vfs<F> {
     }
 }
 
+fn render_cwd_path<E>(
+    cwd: &Cwd,
+    reserve: impl FnOnce(&mut Vec<u8>, usize) -> Result<(), E>,
+) -> Result<Vec<u8>, VfsError> {
+    let mut path = Vec::new();
+    reserve(&mut path, canonical_path_len(&cwd.components)).map_err(|_| VfsError::Allocation)?;
+    path.push(b'/');
+    for (index, component) in cwd.components.iter().enumerate() {
+        if index != 0 {
+            path.push(b'/');
+        }
+        path.extend_from_slice(component.as_bytes());
+    }
+    Ok(path)
+}
+
 fn clone_components(components: &[Name]) -> Result<Vec<Name>, VfsError> {
     let mut cloned = Vec::new();
     cloned
@@ -293,5 +303,22 @@ fn map_name_error(error: crate::fs::NameError) -> VfsError {
         crate::fs::NameError::Empty
         | crate::fs::NameError::TooLong
         | crate::fs::NameError::InvalidByte => VfsError::InvalidPath,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cwd_rendering_maps_capacity_reservation_failure_to_allocation() {
+        let cwd = Cwd {
+            components: alloc::vec![Name::new(b"docs").unwrap()],
+        };
+
+        assert_eq!(
+            render_cwd_path(&cwd, |_, _| Err(())),
+            Err(VfsError::Allocation)
+        );
     }
 }

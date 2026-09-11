@@ -2,42 +2,12 @@
 
 mod support;
 
-use std::{
-    alloc::{GlobalAlloc, Layout, System},
-    cell::Cell,
-};
-
 use relay_core::{
     ext2::{Ext2, MountMode},
     fs::{DirEntry, Metadata, Name, NodeId, NodeKind},
     vfs::{FsError, Vfs, VfsError},
 };
 use support::ext2_image::{fixture_with_directory, fixture_with_files};
-
-thread_local! {
-    static FAIL_CWD_PATH_ALLOCATION: Cell<bool> = const { Cell::new(false) };
-}
-
-struct FailCwdPathAllocator;
-
-#[global_allocator]
-static ALLOCATOR: FailCwdPathAllocator = FailCwdPathAllocator;
-
-unsafe impl GlobalAlloc for FailCwdPathAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if layout.size() == 5 && FAIL_CWD_PATH_ALLOCATION.get() {
-            core::ptr::null_mut()
-        } else {
-            // SAFETY: This allocator delegates all non-test allocations to System unchanged.
-            unsafe { System.alloc(layout) }
-        }
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        // SAFETY: Pointers passed to dealloc were allocated by System.
-        unsafe { System.dealloc(pointer, layout) };
-    }
-}
 
 fn fixture_vfs<'a>(files: &[(&'a str, &'a [u8])]) -> Vfs<Ext2<support::file_device::FileDevice>> {
     let image = fixture_with_files(files).unwrap();
@@ -288,19 +258,6 @@ fn read_file_rejects_an_overreported_read_without_panicking() {
         vfs.read_file(&cwd, "file", |_| Ok(())),
         Err(VfsError::Fs(FsError::Corrupt))
     );
-}
-
-#[test]
-fn cwd_path_reports_output_allocation_failure() {
-    let mut vfs = fixture_vfs_with_directory("docs", "guide", b"read me");
-    let root = vfs.initial_cwd();
-    let docs = vfs.change_dir(&root, "docs").unwrap();
-
-    FAIL_CWD_PATH_ALLOCATION.set(true);
-    let result = vfs.cwd_path(&docs);
-    FAIL_CWD_PATH_ALLOCATION.set(false);
-
-    assert_eq!(result, Err(VfsError::Allocation));
 }
 
 #[test]
