@@ -191,6 +191,48 @@ pub fn fixture_with_files(files: &[(&str, &[u8])]) -> Result<Ext2Fixture, Fixtur
     Ok(Ext2Fixture { directory, image })
 }
 
+pub fn fixture_with_directory(
+    directory: &str,
+    file: &str,
+    contents: &[u8],
+) -> Result<Ext2Fixture, FixtureError> {
+    if !valid_component(directory) || !valid_component(file) {
+        return Err(FixtureError::InvalidName);
+    }
+    let fixture = fixture_with_files(&[])?;
+    let output = Command::new("debugfs")
+        .args(["-w", "-R"])
+        .arg(format!("mkdir /{}", debugfs_string(directory)))
+        .arg(&fixture.image)
+        .env("E2FSPROGS_FAKE_TIME", "1788739200")
+        .output()?;
+    if !output.status.success() {
+        return Err(FixtureError::CommandFailed(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ));
+    }
+
+    let source = fixture.directory.join(format!("source-{file}"));
+    fs::write(&source, contents)?;
+    let output = Command::new("debugfs")
+        .args(["-w", "-R"])
+        .arg(format!(
+            "write \"{}\" \"/{}/{}\"",
+            debugfs_string(&source.display().to_string()),
+            debugfs_string(directory),
+            debugfs_string(file)
+        ))
+        .arg(&fixture.image)
+        .env("E2FSPROGS_FAKE_TIME", "1788739200")
+        .output()?;
+    if !output.status.success() {
+        return Err(FixtureError::CommandFailed(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ));
+    }
+    Ok(fixture)
+}
+
 pub fn fixture_with_feature(field: FeatureField, bit: u32) -> Result<Ext2Fixture, FixtureError> {
     let mut fixture = fixture_with_files(&[])?;
     fixture.set_feature(field, field.approved_mask() | bit);
