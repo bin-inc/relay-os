@@ -7,5 +7,7 @@ extern crate std;
 
 pub mod block;
 pub mod console;
+pub mod ext2;
+pub mod fs;
 pub mod gpt;
 pub mod memory;
