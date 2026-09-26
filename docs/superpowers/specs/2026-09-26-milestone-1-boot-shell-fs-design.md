@@ -912,3 +912,59 @@ Each step ends with something that can be tested.
    - **New cmdline words:** `panic=early` (test), `tsc=hpet` (measure the
      TSC against the HPET even when CPUID knows it) and `check=timer` (count
      timer ticks over three RTC seconds at boot).
+9. **Decisions made while planning plan 3** (filesystem and shell):
+   - **One filesystem trait keyed by inode number.** §8.1's `FileSystem`
+     and `Inode` traits are one `vfs::FileSystem` trait whose operations
+     name inodes by number; an inode object would have to borrow the
+     filesystem, its block cache and its device at once. Its documentation
+     is a contract (which error wins when several apply, modes and times of
+     new inodes, a full disk as a short write, the rename rules), and it
+     adds `read_link`, `touch` and `shutdown`. `vfs::MemFs` keeps the same
+     contract: it is the shell's test filesystem, the model the ext2 driver
+     is checked against, and the empty read-only `/` of §10. The shell works
+     through a path-level `Vfs` trait that the mount table implements; the
+     mount table can already mount further filesystems.
+   - **Path details follow Linux.** A symbolic link used as a directory is
+     `ENOTDIR`; an inode number no longer in use is `ENOENT`; `rmdir .` is
+     `EINVAL`, `rmdir ..` `ENOTEMPTY`, `rmdir /` `EBUSY`; a removed current
+     directory makes relative paths `ENOENT` until the next `cd`.
+   - **Errors.** `Errno` gains `EFBIG` ("File too large") for writes past
+     the largest file ext2 can map (Linux's `ext2_max_size`). There is no
+     `EMLINK`, so a directory already holding 32,000 links is `ENOSPC`.
+   - **Shell.** An unquoted `~` alone or before `/` at the start of a word
+     means `/root`. Besides §7.3's list, an unquoted `<`, `` ` ``, `(`, `)`
+     and `2>` are unsupported syntax, and a command has at most one
+     redirection. The line editor takes printable ASCII. `head` and `tail`
+     take one file and plain-digit counts (also as `-N`). `cat f >> f` is
+     refused, and commands that read to the end of a file stop at the size
+     it had when they started. There is no `--help`, so GNU's "Try" line is
+     left out. Exit statuses follow bash and GNU (127, 2, 130; `ls` 2).
+   - **`reboot` and `poweroff` keep the machine up if the clean shutdown
+     fails** (§7.4); `-f` goes ahead anyway. `System::reboot`/`poweroff`
+     return only where they cannot act (on the host, in tests), and the
+     shell then stops.
+   - **ext2 treats every inconsistency as corruption, never as a panic.**
+     Beyond §8.2's checks, mount refuses group metadata that leaves its
+     group or overlaps other metadata, a first data block that does not
+     match the block size, fewer than 8 blocks per group and more than
+     65,536 groups. Later, a block pointer into metadata, an impossible file
+     size or entry name, and a directory whose size does not match its
+     blocks are `EIO` with an `ext2:` log line.
+   - **The clean flag follows Linux** (refines §8.2): `shutdown` writes back
+     the state the filesystem had when it was mounted, so one that was not
+     clean then stays marked not clean until `e2fsck` has checked it. If the
+     final writes fail, a later `sync` or `shutdown` keeps trying.
+   - **ext2 writes what Linux and e2fsprogs write.** Root may use the
+     reserved blocks (`df` leaves them out of "available"). Writing past
+     2 GiB sets `large_file`; releasing an inode drops its extended
+     attribute block's reference count; a change to an htree directory
+     clears its index flag (htree directories are read linearly); new
+     256-byte inodes get `i_extra_isize` 32 and a creation time; times are
+     32-bit seconds; `sparse_super2` backup locations are honoured.
+   - **e2fsprogs is already on the CI runner** (ubuntu-24.04 ships 1.47.0
+     and fdisk), so the `unit` job runs the real-tool tests without an
+     install step. Those tests fail, never skip, when the tools are missing.
+   - **`xtask host-shell`** accepts only image files, puts the terminal in
+     raw mode with `stty` (restored at the end and after a panic), shows
+     ext2's mount warnings, and ends on `reboot`, `poweroff` or the end of
+     input, always with a clean shutdown. `free` has no figures on the host.
