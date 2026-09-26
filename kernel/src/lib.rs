@@ -12,6 +12,7 @@ pub mod console;
 pub mod klog;
 pub mod mm;
 pub mod panic_screen;
+pub mod pci;
 pub mod rtc;
 pub mod serial;
 pub mod timer;
