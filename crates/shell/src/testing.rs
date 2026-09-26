@@ -289,4 +289,8 @@ impl Harness {
     pub fn dir(&mut self, path: &str) {
         self.vfs.mkdir(path.as_bytes()).unwrap();
     }
+
+    pub fn exists(&mut self, path: &str) -> bool {
+        self.vfs.lookup(path.as_bytes()).is_ok()
+    }
 }

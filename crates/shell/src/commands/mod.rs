@@ -5,6 +5,7 @@ use crate::ctx::Ctx;
 use alloc::string::String;
 
 mod basic;
+mod change;
 mod ls;
 mod stat;
 mod text;
@@ -37,6 +38,11 @@ pub const COMMANDS: &[Builtin] = &[
         run: basic::clear,
     },
     Builtin {
+        name: "cp",
+        help: "copy files",
+        run: change::cp,
+    },
+    Builtin {
         name: "echo",
         help: "print the arguments",
         run: basic::echo,
@@ -57,9 +63,29 @@ pub const COMMANDS: &[Builtin] = &[
         run: ls::ls,
     },
     Builtin {
+        name: "mkdir",
+        help: "make directories",
+        run: change::mkdir,
+    },
+    Builtin {
+        name: "mv",
+        help: "move or rename files",
+        run: change::mv,
+    },
+    Builtin {
         name: "pwd",
         help: "print the current directory",
         run: basic::pwd,
+    },
+    Builtin {
+        name: "rm",
+        help: "remove files or directories",
+        run: change::rm,
+    },
+    Builtin {
+        name: "rmdir",
+        help: "remove empty directories",
+        run: change::rmdir,
     },
     Builtin {
         name: "stat",
@@ -70,6 +96,11 @@ pub const COMMANDS: &[Builtin] = &[
         name: "tail",
         help: "print the last lines of a file",
         run: text::tail,
+    },
+    Builtin {
+        name: "touch",
+        help: "create files or update their times",
+        run: change::touch,
     },
     Builtin {
         name: "uname",
