@@ -10,6 +10,7 @@ extern crate alloc;
 
 mod block;
 mod errno;
+pub mod path;
 
 pub use block::{BlockDevice, IoError, check_request};
 pub use errno::Errno;
