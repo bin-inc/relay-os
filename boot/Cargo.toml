@@ -4,11 +4,20 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# Pure, host-testable logic lives in the library. The UEFI application (the
-# binary) is added in a later task and only builds for x86_64-unknown-uefi.
+# Pure, host-testable logic lives in the library; the UEFI application is the
+# binary and only builds for x86_64-unknown-uefi.
 [lib]
 name = "relay_boot"
 path = "src/lib.rs"
 
+[[bin]]
+name = "relay-boot"
+path = "src/main.rs"
+test = false
+
 [dependencies]
 boot-info.workspace = true
+
+[target.'cfg(target_os = "uefi")'.dependencies]
+uefi = { workspace = true, features = ["alloc", "global_allocator", "panic_handler", "logger"] }
+x86_64.workspace = true

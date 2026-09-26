@@ -1,0 +1,4 @@
+Relay OS - milestone 1
+
+Files live on the USB stick and survive reboots. Useful commands:
+  ls, cd, pwd, cat, echo text > file, mkdir, rm, cp, mv, help
