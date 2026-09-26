@@ -7,6 +7,7 @@ use alloc::string::String;
 const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
+const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 /// Half of 365.2425 days, GNU `ls`'s limit for showing the time of day.
 const SIX_MONTHS: u64 = 31_556_952 / 2;
 
@@ -20,6 +21,8 @@ pub struct DateTime {
     pub hour: u32,
     pub minute: u32,
     pub second: u32,
+    /// 0 = Sunday
+    pub weekday: u32,
 }
 
 impl DateTime {
@@ -43,12 +46,29 @@ impl DateTime {
             hour: (rem / 3600) as u32,
             minute: (rem / 60 % 60) as u32,
             second: (rem % 60) as u32,
+            // 1970-01-01 was a Thursday.
+            weekday: ((days + 4).rem_euclid(7)) as u32,
         }
     }
 
     fn month_name(&self) -> &'static str {
         MONTHS[(self.month - 1) as usize]
     }
+}
+
+/// `date`: `Sat Sep 26 12:00:00 UTC 2026`.
+pub fn date(secs: u64) -> String {
+    let t = DateTime::from_unix(secs);
+    format!(
+        "{} {} {:>2} {:02}:{:02}:{:02} UTC {}",
+        WEEKDAYS[t.weekday as usize],
+        t.month_name(),
+        t.day,
+        t.hour,
+        t.minute,
+        t.second,
+        t.year
+    )
 }
 
 /// `stat`: `2026-09-26 12:00:00.000000000 +0000`.
@@ -84,9 +104,12 @@ mod tests {
     #[test]
     fn known_dates() {
         let t = DateTime::from_unix(0);
-        assert_eq!((t.year, t.month, t.day), (1970, 1, 1));
+        assert_eq!((t.year, t.month, t.day, t.weekday), (1970, 1, 1, 4));
         let t = DateTime::from_unix(1_790_424_000);
-        assert_eq!((t.year, t.month, t.day, t.hour), (2026, 9, 26, 12));
+        assert_eq!(
+            (t.year, t.month, t.day, t.hour, t.weekday),
+            (2026, 9, 26, 12, 6)
+        );
         // A leap day and the last second of a year.
         let t = DateTime::from_unix(951_782_400);
         assert_eq!((t.year, t.month, t.day), (2000, 2, 29));
@@ -102,6 +125,8 @@ mod tests {
 
     #[test]
     fn formats() {
+        assert_eq!(date(1_790_424_000), "Sat Sep 26 12:00:00 UTC 2026");
+        assert_eq!(date(1_736_065_800), "Sun Jan  5 08:30:00 UTC 2025");
         assert_eq!(full(1_736_065_800), "2025-01-05 08:30:00.000000000 +0000");
     }
 

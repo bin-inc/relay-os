@@ -8,6 +8,7 @@ mod basic;
 mod change;
 mod ls;
 mod stat;
+mod system;
 mod text;
 
 /// One built-in command.
@@ -43,9 +44,29 @@ pub const COMMANDS: &[Builtin] = &[
         run: change::cp,
     },
     Builtin {
+        name: "date",
+        help: "print the date and time (UTC)",
+        run: system::date,
+    },
+    Builtin {
+        name: "df",
+        help: "show the free space on /",
+        run: system::df,
+    },
+    Builtin {
+        name: "dmesg",
+        help: "print the kernel log",
+        run: system::dmesg,
+    },
+    Builtin {
         name: "echo",
         help: "print the arguments",
         run: basic::echo,
+    },
+    Builtin {
+        name: "free",
+        help: "show memory use",
+        run: system::free,
     },
     Builtin {
         name: "head",
@@ -73,9 +94,19 @@ pub const COMMANDS: &[Builtin] = &[
         run: change::mv,
     },
     Builtin {
+        name: "poweroff",
+        help: "sync and turn the machine off",
+        run: system::poweroff,
+    },
+    Builtin {
         name: "pwd",
         help: "print the current directory",
         run: basic::pwd,
+    },
+    Builtin {
+        name: "reboot",
+        help: "sync and restart the machine",
+        run: system::reboot,
     },
     Builtin {
         name: "rm",
@@ -91,6 +122,11 @@ pub const COMMANDS: &[Builtin] = &[
         name: "stat",
         help: "show everything about a file",
         run: stat::stat,
+    },
+    Builtin {
+        name: "sync",
+        help: "write cached changes to the disk",
+        run: system::sync,
     },
     Builtin {
         name: "tail",
