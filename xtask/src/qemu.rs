@@ -10,7 +10,8 @@ pub struct Qemu {
     pub disk: PathBuf,
     pub vars: PathBuf,
     pub headless: bool,
-    pub qmp_socket: Option<PathBuf>,
+    /// Abstract-namespace socket name for QMP (see `qmp_name`).
+    pub qmp_name: Option<String>,
 }
 
 impl Qemu {
@@ -25,7 +26,7 @@ impl Qemu {
             disk,
             vars,
             headless: false,
-            qmp_socket: None,
+            qmp_name: None,
         })
     }
 
@@ -58,12 +59,24 @@ impl Qemu {
         if self.headless {
             c.args(["-display", "none"]);
         }
-        if let Some(sock) = &self.qmp_socket {
-            c.arg("-qmp")
-                .arg(format!("unix:{},server=on,wait=off", sock.display()));
+        if let Some(name) = &self.qmp_name {
+            c.arg("-chardev")
+                .arg(format!(
+                    "socket,id=qmp,path={name},server=on,wait=off,abstract=on"
+                ))
+                .args(["-mon", "chardev=qmp,mode=control"]);
         }
         c
     }
+}
+
+/// A QMP socket name for one QEMU run. It lives in Linux's abstract socket
+/// namespace, so it has no filesystem path and no dependence on how deep the
+/// checkout is (Unix socket paths are limited to 108 bytes).
+pub fn qmp_name(tag: &str) -> String {
+    let mut name = format!("relay-qmp-{}-{tag}", std::process::id());
+    name.truncate(100);
+    name
 }
 
 /// QEMU tries `-accel` options in order. By default KVM, falling back to TCG
@@ -95,5 +108,42 @@ mod tests {
         assert_eq!(accelerators(Some("")), vec!["kvm", "tcg"]);
         assert_eq!(accelerators(Some("tcg")), vec!["tcg"]);
         assert_eq!(accelerators(Some("kvm, tcg")), vec!["kvm", "tcg"]);
+    }
+
+    /// Unix socket paths are limited to 108 bytes, which a deep checkout
+    /// exceeded; QMP therefore listens on an abstract socket (a name, no path).
+    #[test]
+    fn qmp_listens_on_an_abstract_socket() {
+        let deep = Path::new("/very/deep").join("x".repeat(200));
+        let q = Qemu {
+            disk: deep.join("disk.img"),
+            vars: deep.join("OVMF_VARS.fd"),
+            headless: true,
+            qmp_name: Some("relay-qmp-42-boot".into()),
+        };
+        let args: Vec<String> = q
+            .command()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let at = args.iter().position(|a| a == "-chardev").expect("-chardev");
+        assert_eq!(
+            args[at + 1],
+            "socket,id=qmp,path=relay-qmp-42-boot,server=on,wait=off,abstract=on"
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["-mon", "chardev=qmp,mode=control"])
+        );
+        assert!(!args.iter().any(|a| a == "-qmp"));
+    }
+
+    #[test]
+    fn qmp_names_are_short_and_unique_per_scenario() {
+        let a = qmp_name("boot");
+        assert!(a.starts_with("relay-qmp-") && a.ends_with("-boot"));
+        assert!(a.contains(&std::process::id().to_string()));
+        assert_ne!(a, qmp_name("panic_ud"));
+        assert!(qmp_name(&"s".repeat(300)).len() <= 100);
     }
 }
