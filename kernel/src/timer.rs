@@ -254,6 +254,40 @@ pub fn sleep(d: Duration) {
     }
 }
 
+/// Whether `ticks` over `seconds` is within 10% of the nominal rate (the
+/// timer self-check, cmdline `check=timer`).
+pub fn tick_check_ok(ticks: u64, seconds: u64) -> bool {
+    let expected = seconds * TICK_HZ;
+    ticks.abs_diff(expected) * 10 <= expected
+}
+
+/// Counts timer ticks over `seconds` changes of a once-a-second clock (the
+/// RTC's seconds register), starting at a change. `None` if the clock does
+/// not change within 5 s, measured with the TSC.
+pub fn count_ticks_over(seconds: u64, mut clock: impl FnMut() -> u8) -> Option<u64> {
+    let mut next_change = || {
+        let now = clock();
+        let deadline = rdtsc() + 5 * tsc_hz();
+        while clock() == now {
+            if rdtsc() > deadline {
+                return false;
+            }
+            core::hint::spin_loop();
+        }
+        true
+    };
+    if !next_change() {
+        return None;
+    }
+    let start = ticks();
+    for _ in 0..seconds {
+        if !next_change() {
+            return None;
+        }
+    }
+    Some(ticks() - start)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +341,16 @@ mod tests {
     fn lapic_rate_against_the_tsc() {
         // 2.4 MHz timer input (38.4 MHz crystal / 16) over 50 ms of a 2496 MHz TSC.
         assert_eq!(rate(120_000, 124_800_000, 2_496_000_000), 2_400_000);
+    }
+
+    #[test]
+    fn tick_check_allows_ten_percent() {
+        assert!(tick_check_ok(3000, 3));
+        assert!(tick_check_ok(2700, 3));
+        assert!(tick_check_ok(3300, 3));
+        assert!(!tick_check_ok(2699, 3));
+        assert!(!tick_check_ok(3301, 3));
+        assert!(!tick_check_ok(0, 3));
     }
 
     #[test]

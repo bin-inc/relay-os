@@ -12,6 +12,7 @@ pub mod console;
 pub mod klog;
 pub mod mm;
 pub mod panic_screen;
+pub mod rtc;
 pub mod serial;
 pub mod timer;
 
@@ -96,11 +97,35 @@ pub fn kernel_main(info: &'static BootInfo) -> ! {
         Err(e) => console::fail("timer", format_args!("{e}")),
     }
 
+    let century = acpi.and_then(|a| a.fadt).map_or(0, |f| f.century);
+    match rtc::init(century) {
+        Ok(t) => console::ok(format_args!("rtc: {t}")),
+        Err(raw) => console::fail("rtc", format_args!("invalid clock registers {raw:?}")),
+    }
+    if cmdline.check_timer {
+        check_timer();
+    }
+
     if let Some(t) = cmdline.panic_test {
         trigger(t);
     }
     kprintln!("relay: early boot complete");
     arch::idle_forever()
+}
+
+/// `check=timer`: the 1 kHz tick measured against the RTC's seconds.
+fn check_timer() {
+    const SECONDS: u64 = 3;
+    let expected = SECONDS * timer::TICK_HZ;
+    match timer::count_ticks_over(SECONDS, rtc::second) {
+        Some(n) if timer::tick_check_ok(n, SECONDS) => {
+            kprintln!("timer check: ok, {n} ticks in {SECONDS} RTC seconds")
+        }
+        Some(n) => kprintln!(
+            "timer check: FAILED, {n} ticks in {SECONDS} RTC seconds (expected {expected} +/- 10%)"
+        ),
+        None => kprintln!("timer check: FAILED, the RTC seconds do not change"),
+    }
 }
 
 /// Deliberate crashes for the panic-screen tests.
