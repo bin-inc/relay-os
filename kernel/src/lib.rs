@@ -5,6 +5,7 @@
 
 extern crate alloc;
 
+pub mod acpi;
 pub mod arch;
 pub mod cmdline;
 pub mod console;
