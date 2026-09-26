@@ -242,14 +242,18 @@ pub fn tsc_hz() -> u64 {
     TSC_HZ.load(Ordering::Relaxed)
 }
 
-/// Busy-waits at least `d` (spec §6.1). Normally the tick count says when;
-/// should ticks stop arriving, the TSC ends the wait after twice `d`, so it
-/// never hangs.
+/// TSC cycles in `d`, rounded up.
+pub fn sleep_cycles(d: Duration, tsc_hz: u64) -> u64 {
+    (d.as_nanos() * tsc_hz as u128).div_ceil(1_000_000_000) as u64
+}
+
+/// Busy-waits at least `d` (spec §6.1), measured with the TSC: the tick
+/// count cannot time a wait shorter than a tick, and the next tick may come
+/// right after the wait starts. Before `init` has found the TSC frequency
+/// there is no clock, and it returns at once.
 pub fn sleep(d: Duration) {
-    let ms = d.as_millis() as u64;
-    let end = ticks() + (ms * TICK_HZ).div_ceil(1000);
-    let deadline = rdtsc() + 2 * ms * tsc_hz() / 1000;
-    while ticks() < end && rdtsc() < deadline {
+    let end = rdtsc() + sleep_cycles(d, tsc_hz());
+    while rdtsc() < end {
         core::hint::spin_loop();
     }
 }
@@ -341,6 +345,25 @@ mod tests {
     fn lapic_rate_against_the_tsc() {
         // 2.4 MHz timer input (38.4 MHz crystal / 16) over 50 ms of a 2496 MHz TSC.
         assert_eq!(rate(120_000, 124_800_000, 2_496_000_000), 2_400_000);
+    }
+
+    #[test]
+    fn sleep_waits_whole_tsc_cycles_rounded_up() {
+        // Sub-millisecond waits (xHCI port resets need them) are not zero.
+        assert_eq!(
+            sleep_cycles(Duration::from_micros(10), 2_496_000_000),
+            24_960
+        );
+        assert_eq!(
+            sleep_cycles(Duration::from_nanos(1), 2_500_000_000),
+            3,
+            "2.5 rounds up"
+        );
+        assert_eq!(
+            sleep_cycles(Duration::from_millis(1500), 3_000_000_000),
+            4_500_000_000
+        );
+        assert_eq!(sleep_cycles(Duration::ZERO, 3_000_000_000), 0);
     }
 
     #[test]
