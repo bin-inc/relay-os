@@ -13,6 +13,7 @@ pub mod klog;
 pub mod mm;
 pub mod panic_screen;
 pub mod serial;
+pub mod timer;
 
 use boot_info::{BootInfo, MemoryKind, PHYS_OFFSET};
 use cmdline::{Cmdline, PanicTest};
@@ -79,16 +80,27 @@ pub fn kernel_main(info: &'static BootInfo) -> ! {
         }
     }
 
-    match acpi::init(info.rsdp_addr) {
-        Ok(a) => console::ok(format_args!("acpi: {a}")),
-        Err(e) => console::fail("acpi", format_args!("{e}")),
+    let acpi = match acpi::init(info.rsdp_addr) {
+        Ok(a) => {
+            console::ok(format_args!("acpi: {a}"));
+            Some(a)
+        }
+        Err(e) => {
+            console::fail("acpi", format_args!("{e}"));
+            None
+        }
+    };
+
+    match timer::init(acpi.and_then(|a| a.hpet), cmdline.tsc_hpet) {
+        Ok(t) => console::ok(format_args!("timer: {t}")),
+        Err(e) => console::fail("timer", format_args!("{e}")),
     }
 
     if let Some(t) = cmdline.panic_test {
         trigger(t);
     }
     kprintln!("relay: early boot complete");
-    arch::halt_forever()
+    arch::idle_forever()
 }
 
 /// Deliberate crashes for the panic-screen tests.

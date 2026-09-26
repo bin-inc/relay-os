@@ -13,3 +13,10 @@ pub fn halt_forever() -> ! {
         x86_64::instructions::hlt();
     }
 }
+
+/// Waits for interrupts forever: the CPU sleeps between timer ticks.
+pub fn idle_forever() -> ! {
+    loop {
+        x86_64::instructions::interrupts::enable_and_hlt();
+    }
+}
