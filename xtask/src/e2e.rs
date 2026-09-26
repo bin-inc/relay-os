@@ -17,7 +17,7 @@
 
 use crate::build;
 use crate::image::{self, Layout, esp_write, set_cmdline};
-use crate::qemu::Qemu;
+use crate::qemu::{self, Qemu};
 use crate::qmp::Qmp;
 use crate::util::{out_dir, root};
 use anyhow::{Context, Result, bail};
@@ -166,10 +166,9 @@ fn start(image: &Path, layout: &Layout, scenario: &Scenario, run_dir: &Path) -> 
     for (path, contents) in &scenario.esp_writes {
         esp_write(&q.disk, layout.esp, path, contents.as_bytes(), run_dir)?;
     }
-    let sock = run_dir.join("qmp.sock");
-    let _ = fs::remove_file(&sock);
+    let qmp_name = qemu::qmp_name(&scenario.name);
     q.headless = true;
-    q.qmp_socket = Some(sock.clone());
+    q.qmp_name = Some(qmp_name.clone());
     let mut child = q
         .command()
         .stdin(Stdio::piped())
@@ -192,7 +191,7 @@ fn start(image: &Path, layout: &Layout, scenario: &Scenario, run_dir: &Path) -> 
             let _ = log.write_all(&buf[..n]);
         }
     });
-    let qmp = Qmp::connect(&sock, Duration::from_secs(10))?;
+    let qmp = Qmp::connect(&qmp_name, Duration::from_secs(10))?;
     Ok(Running {
         child,
         stdin,

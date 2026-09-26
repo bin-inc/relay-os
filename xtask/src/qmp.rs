@@ -3,8 +3,8 @@
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::os::linux::net::SocketAddrExt;
+use std::os::unix::net::{SocketAddr, UnixStream};
 use std::time::{Duration, Instant};
 
 pub struct Qmp {
@@ -13,11 +13,13 @@ pub struct Qmp {
 }
 
 impl Qmp {
-    /// Connects (retrying while QEMU starts) and negotiates capabilities.
-    pub fn connect(socket: &Path, timeout: Duration) -> Result<Qmp> {
+    /// Connects to the abstract socket `name` (retrying while QEMU starts)
+    /// and negotiates capabilities.
+    pub fn connect(name: &str, timeout: Duration) -> Result<Qmp> {
+        let addr = SocketAddr::from_abstract_name(name.as_bytes())?;
         let deadline = Instant::now() + timeout;
         let stream = loop {
-            match UnixStream::connect(socket) {
+            match UnixStream::connect_addr(&addr) {
                 Ok(s) => break s,
                 Err(_) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(50))
@@ -57,5 +59,41 @@ impl Qmp {
             }
             return Ok(v.get("return").cloned().unwrap_or(Value::Null));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixListener};
+
+    /// A fake QEMU: greets, accepts `qmp_capabilities`, sends an event, then
+    /// answers one command.
+    #[test]
+    fn talks_to_qemu_over_an_abstract_socket() {
+        let name = format!("relay-qmp-test-{}", std::process::id());
+        let addr = SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+        let listener = UnixListener::bind_addr(&addr).unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut w = stream.try_clone().unwrap();
+            let mut r = BufReader::new(stream);
+            let mut line = String::new();
+            writeln!(w, r#"{{"QMP": {{"version": {{}}, "capabilities": []}}}}"#).unwrap();
+            r.read_line(&mut line).unwrap();
+            assert!(line.contains("qmp_capabilities"));
+            writeln!(w, r#"{{"return": {{}}}}"#).unwrap();
+            line.clear();
+            r.read_line(&mut line).unwrap();
+            assert!(line.contains("query-status"));
+            writeln!(w, r#"{{"event": "RESUME"}}"#).unwrap();
+            writeln!(w, r#"{{"return": {{"status": "running"}}}}"#).unwrap();
+        });
+        let mut q = Qmp::connect(&name, Duration::from_secs(5)).unwrap();
+        let status = q.execute("query-status", serde_json::json!({})).unwrap();
+        assert_eq!(status["status"], "running");
+        server.join().unwrap();
     }
 }

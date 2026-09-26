@@ -1,0 +1,7 @@
+# A mode larger than 1920x1080 (e.g. a 4K monitor's default) is used as-is,
+# and the terminal caps itself to the top-left 1920x1080.
+cmdline test=1 video=2560x1600
+timeout 30
+expect \[ ok \] console 2560x1600 \(120x33 cells\)
+expect relay: early boot complete
+screenshot-nonblank

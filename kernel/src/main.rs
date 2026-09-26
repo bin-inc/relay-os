@@ -10,10 +10,7 @@ pub extern "sysv64" fn _start(info: &'static BootInfo) -> ! {
     relay_kernel::kernel_main(info)
 }
 
-/// Replaced by the panic screen once the console exists.
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    loop {
-        x86_64::instructions::hlt();
-    }
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    relay_kernel::panic_screen::panic(info)
 }
