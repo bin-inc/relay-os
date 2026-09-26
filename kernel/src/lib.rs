@@ -107,6 +107,23 @@ pub fn kernel_main(info: &'static BootInfo) -> ! {
         check_timer();
     }
 
+    let ecam = acpi.map_or(&[][..], |a| a.ecam.as_slice());
+    match pci::init(ecam) {
+        Ok(devices) => {
+            // The xHCI controllers matter for USB (plan 4) and on a photo
+            // of the NUC's screen; the rest goes to the kernel log.
+            for d in devices {
+                if d.is_xhci() {
+                    kprintln!("pci: {d}");
+                } else {
+                    klogln!("pci: {d}");
+                }
+            }
+            console::ok(format_args!("pci: {}", pci::Summary(devices)));
+        }
+        Err(e) => console::fail("pci", format_args!("{e}")),
+    }
+
     if let Some(t) = cmdline.panic_test {
         trigger(t);
     }

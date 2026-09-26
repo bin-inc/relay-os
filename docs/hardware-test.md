@@ -67,6 +67,31 @@ at the leftmost one:
 | Loader text, then squares, then nothing | Boot stopped at the leftmost square | Note the count and colour of the last square |
 | Garbled or blue-tinted text | Pixel format mismatch | Photograph the screen; note W×H |
 
+## Check 1b — kernel core (plan 2, optional)
+
+One boot answers everything: memory, ACPI, timer, RTC, PCI and the timer
+self-check.
+
+1. In Mint: `cargo xtask flash --kernel --cmdline check=timer`.
+2. Boot the stick. After about 5 s the screen shows, below the check 1 lines
+   (values from the NUC's firmware tables and Linux's view of the machine):
+   - `[ ok ] memory: N MiB free of 15948 MiB, heap 32 MiB` — N a little
+     below 15948.
+   - `[ ok ] acpi: 30 tables, ECAM 0xc0000000 buses 0-255, HPET 0xfed00000, S5 7/0`
+   - `[ ok ] timer: TSC 2496.000 MHz (CPUID 0x15), 1000 Hz tick (xAPIC)`
+   - `[ ok ] rtc: <date and time>` — the current UTC time (Mint keeps the
+     RTC in UTC; `timedatectl` says "RTC in local TZ: no").
+   - `timer check: ok, N ticks in 3 RTC seconds` — N close to 3000.
+   - `pci: 00:0d.0 8086:461e 0c0330 USB xHCI, bar0 mem64 0x603d190000 64K`
+   - `pci: 00:14.0 8086:51ed 0c0330 USB xHCI, bar0 mem64 0x603d180000 64K`
+   - `[ ok ] pci: 24 devices on buses 00 01 72, xHCI at 00:0d.0 00:14.0` —
+     `lspci | wc -l` in Mint also says 24.
+   - `relay: early boot complete`
+3. Photograph the screen, then restore: `cargo xtask flash --kernel`.
+
+A `[FAIL]` line names the step and the reason; boot carries on after it
+(except for memory, which stops the machine).
+
 ## Results log
 
 | Date | Check | Commit | Result | Notes (W×H, N MiB, …) |

@@ -320,6 +320,77 @@ impl fmt::Display for Summary<'_> {
     }
 }
 
+/// Configuration space through the ECAM window, mapped uncached.
+struct Ecam {
+    /// Virtual address of bus 0's configuration space.
+    base: u64,
+}
+
+impl ConfigSpace for Ecam {
+    fn read32(&mut self, a: PciAddress, offset: u16) -> u32 {
+        let p = (self.base + a.ecam_offset() + offset as u64) as *const u32;
+        // SAFETY: inside the mapped ECAM window of an enumerated bus.
+        unsafe { core::ptr::read_volatile(p) }
+    }
+
+    fn write32(&mut self, a: PciAddress, offset: u16, value: u32) {
+        let p = (self.base + a.ecam_offset() + offset as u64) as *mut u32;
+        unsafe { core::ptr::write_volatile(p, value) }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum PciError {
+    NoEcam,
+    Map(crate::mm::paging::MapError),
+    NoDevices,
+}
+
+impl fmt::Display for PciError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            PciError::NoEcam => write!(f, "no ECAM window (ACPI has no MCFG table)"),
+            PciError::Map(e) => write!(f, "cannot map ECAM: {e}"),
+            PciError::NoDevices => write!(f, "no devices found"),
+        }
+    }
+}
+
+static DEVICES: spin::Once<Vec<PciDevice>> = spin::Once::new();
+
+/// The devices found by `init` (empty before it, or if it failed).
+pub fn devices() -> &'static [PciDevice] {
+    DEVICES.get().map_or(&[], |d| d.as_slice())
+}
+
+/// Enumerates every bus of every ECAM window of PCI segment 0 (the only
+/// segment a PC like the NUC has).
+pub fn init(ecam: &[crate::acpi::tables::EcamRegion]) -> Result<&'static [PciDevice], PciError> {
+    use crate::mm::{self, paging::Cache};
+    let mut found = Vec::new();
+    // A window whose bus range is backwards is firmware garbage.
+    let mut windows = ecam
+        .iter()
+        .filter(|r| r.segment == 0 && r.start_bus <= r.end_bus)
+        .peekable();
+    if windows.peek().is_none() {
+        return Err(PciError::NoEcam);
+    }
+    for r in windows {
+        let first = r.base.saturating_add((r.start_bus as u64) << 20);
+        let len = (r.end_bus as u64 - r.start_bus as u64 + 1) << 20;
+        mm::map_mmio(first, len, Cache::Uncached).map_err(PciError::Map)?;
+        let mut cfg = Ecam {
+            base: boot_info::PHYS_OFFSET + r.base,
+        };
+        found.extend(enumerate(&mut cfg, r.start_bus, r.end_bus));
+    }
+    if found.is_empty() {
+        return Err(PciError::NoDevices);
+    }
+    Ok(DEVICES.call_once(|| found))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
