@@ -44,6 +44,10 @@ pub fn init(fb: &FramebufferInfo) {
             core::slice::from_raw_parts_mut((&raw mut SHADOW).cast::<u32>(), MAX_W * MAX_H),
         )
     };
+    // Clear the whole framebuffer, not just the terminal area: the loader's
+    // progress squares sit at the right edge, beyond 1920 px on wide modes,
+    // and must not survive a successful boot. Black is 0 in both formats.
+    fb_slice.fill(0);
     let mut term = Terminal::new(width, height, format, cells, shadow);
     term.flush(fb_slice, stride);
     *CONSOLE.lock() = Some(Console {
