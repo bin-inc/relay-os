@@ -11,6 +11,8 @@ const BLOCK_BITMAP: usize = 0;
 const INODE_BITMAP: usize = 4;
 const INODE_TABLE: usize = 8;
 const FREE_BLOCKS: usize = 12;
+const FREE_INODES: usize = 14;
+const USED_DIRS: usize = 16;
 
 /// The group descriptor table, with a note of whether it changed since it
 /// was last written.
@@ -110,6 +112,22 @@ impl Groups {
     pub fn set_free_blocks(&mut self, g: u32, n: u16) {
         self.set16(g, FREE_BLOCKS, n);
     }
+
+    pub fn free_inodes(&self, g: u32) -> u16 {
+        u16_at(&self.raw, self.at(g, FREE_INODES))
+    }
+
+    pub fn set_free_inodes(&mut self, g: u32, n: u16) {
+        self.set16(g, FREE_INODES, n);
+    }
+
+    pub fn used_dirs(&self, g: u32) -> u16 {
+        u16_at(&self.raw, self.at(g, USED_DIRS))
+    }
+
+    pub fn set_used_dirs(&mut self, g: u32, n: u16) {
+        self.set16(g, USED_DIRS, n);
+    }
 }
 
 /// Checks that every group's superblock copy, bitmaps and inode table lie
@@ -151,6 +169,7 @@ mod tests {
             blocks_per_group: 100,
             inodes_per_group: 32,
             inode_size: 256,
+            first_ino: 11,
             groups: 2,
             gdt_blocks: 1,
             reserved_gdt_blocks: 0,
@@ -186,7 +205,10 @@ mod tests {
         let mut t = table(&[[3, 4, 5], [103, 104, 105]]);
         assert!(!t.is_dirty());
         t.set_free_blocks(1, 77);
+        t.set_free_inodes(1, 5);
+        t.set_used_dirs(1, 3);
         assert_eq!((t.free_blocks(0), t.free_blocks(1)), (0, 77));
+        assert_eq!((t.free_inodes(1), t.used_dirs(1)), (5, 3));
         assert_eq!(&t.raw()[32 + 12..32 + 14], &[77, 0]);
         assert!(t.is_dirty());
         t.set_clean();

@@ -443,3 +443,27 @@ pub fn bmap(img: &Path, path: &str, lbs: &[u64]) -> Vec<u64> {
     assert_eq!(out.len(), lbs.len(), "{out:?}");
     out.iter().map(|l| l.trim().parse().unwrap()).collect()
 }
+
+/// One line of `debugfs -R "ls -l <dir>"`.
+#[derive(Debug)]
+pub struct LsEntry {
+    pub ino: u64,
+    pub mode: u32,
+    pub name: String,
+}
+
+/// `debugfs -R "ls -l <dir>"`, parsed (names must not contain spaces).
+pub fn debugfs_ls(img: &Path, dir: &str) -> Vec<LsEntry> {
+    debugfs(img, &format!("ls -l \"{dir}\""))
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            LsEntry {
+                ino: f[0].parse().unwrap(),
+                mode: u32::from_str_radix(f[1], 8).unwrap(),
+                name: f.last().unwrap().to_string(),
+            }
+        })
+        .collect()
+}

@@ -19,6 +19,7 @@ mod file;
 mod group;
 mod inode;
 mod le;
+mod ops;
 mod superblock;
 
 use alloc::boxed::Box;
@@ -29,7 +30,7 @@ use cache::BlockCache;
 use core::fmt;
 use group::Groups;
 use superblock::{Geometry, STATE_ERROR, STATE_VALID, Superblock};
-use vfs::{BlockDevice, DirEntry, Env, Errno, FileSystem, Ino, Stat, StatFs};
+use vfs::{BlockDevice, DirEntry, Env, Errno, FileSystem, FileType, Ino, Stat, StatFs};
 
 /// The block cache's default size (spec §8.3).
 pub const CACHE_BYTES: usize = 8 << 20;
@@ -257,7 +258,7 @@ fn read_groups<D: BlockDevice>(cache: &mut BlockCache<D>, geo: &Geometry) -> Res
     Ok(Groups::new(raw, geo.groups))
 }
 
-/// Namespace changes come later; until then they are `EROFS`.
+/// Removing and renaming come later; until then they are `EROFS`.
 impl<D: BlockDevice> FileSystem for Ext2<D> {
     fn root(&self) -> Ino {
         superblock::ROOT_INO as Ino
@@ -295,12 +296,12 @@ impl<D: BlockDevice> FileSystem for Ext2<D> {
         self.inode_touch(ino)
     }
 
-    fn create(&mut self, _: Ino, _: &[u8]) -> Result<Ino, Errno> {
-        Err(Errno::EROFS)
+    fn create(&mut self, dir: Ino, name: &[u8]) -> Result<Ino, Errno> {
+        self.make(dir, name, FileType::Regular)
     }
 
-    fn mkdir(&mut self, _: Ino, _: &[u8]) -> Result<Ino, Errno> {
-        Err(Errno::EROFS)
+    fn mkdir(&mut self, dir: Ino, name: &[u8]) -> Result<Ino, Errno> {
+        self.make(dir, name, FileType::Directory)
     }
 
     fn unlink(&mut self, _: Ino, _: &[u8]) -> Result<(), Errno> {

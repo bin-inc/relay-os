@@ -2,7 +2,7 @@
 //! where an inode lives on the disk, and the block map's index math.
 
 use crate::Ext2;
-use crate::le::{set_u32, u16_at, u32_at};
+use crate::le::{set_u16, set_u32, u16_at, u32_at};
 use alloc::vec::Vec;
 use vfs::{BlockDevice, Errno, FileType, Ino, Stat};
 
@@ -21,6 +21,7 @@ const MTIME: usize = 16;
 const GID: usize = 24;
 const LINKS: usize = 26;
 const BLOCKS: usize = 28;
+const FLAGS: usize = 32;
 const I_BLOCK: usize = 40;
 const FILE_ACL: usize = 104;
 const SIZE_HIGH: usize = 108;
@@ -30,6 +31,14 @@ const GID_HIGH: usize = 122;
 const EXTRA_ISIZE: usize = 128;
 const CTIME_EXTRA: usize = 132;
 const MTIME_EXTRA: usize = 136;
+const ATIME_EXTRA: usize = 140;
+const CRTIME: usize = 144;
+/// What e2fsprogs gives new large inodes: every extra field up to
+/// `i_crtime_extra`.
+const NEW_EXTRA_ISIZE: u16 = 32;
+
+/// `i_flags`: the directory has an htree index.
+pub const INDEX_FL: u32 = 0x1000;
 
 const S_IFMT: u16 = 0o170000;
 
@@ -56,6 +65,31 @@ pub struct Inode {
 }
 
 impl Inode {
+    /// A new inode of `size` bytes on the disk (spec §8.2): zeroed, then
+    /// `mode`, one link (two for a directory), owned by root, all times
+    /// `now`. Large inodes also get `i_extra_isize` and a creation time,
+    /// as e2fsprogs gives them.
+    pub fn fresh(ino: u32, size: usize, mode: u16, now: u32) -> Inode {
+        let mut inode = Inode {
+            ino,
+            raw: alloc::vec![0; size],
+        };
+        set_u16(&mut inode.raw, MODE, mode);
+        let links = if inode.kind() == Some(FileType::Directory) {
+            2
+        } else {
+            1
+        };
+        inode.set_links(links);
+        if size > EXTRA_ISIZE {
+            set_u16(&mut inode.raw, EXTRA_ISIZE, NEW_EXTRA_ISIZE);
+            set_u32(&mut inode.raw, CRTIME, now);
+        }
+        inode.set_time(ATIME, ATIME_EXTRA, now);
+        inode.touch(now);
+        inode
+    }
+
     /// `raw` is at least the 128 bytes of a revision 0 inode.
     pub fn new(ino: u32, raw: &[u8]) -> Inode {
         assert!(raw.len() >= 128);
@@ -130,6 +164,18 @@ impl Inode {
 
     pub fn links(&self) -> u16 {
         self.u16(LINKS)
+    }
+
+    pub fn set_links(&mut self, n: u16) {
+        set_u16(&mut self.raw, LINKS, n);
+    }
+
+    pub fn flags(&self) -> u32 {
+        self.u32(FLAGS)
+    }
+
+    pub fn set_flags(&mut self, flags: u32) {
+        set_u32(&mut self.raw, FLAGS, flags);
     }
 
     /// Space used in 512-byte units, indirect and EA blocks included.
@@ -420,6 +466,24 @@ mod tests {
         let mut dir = raw_inode(&[(MODE, &0o040755u16.to_le_bytes())]);
         dir.set_size(0x1_0000_0400);
         assert_eq!(&dir.raw()[SIZE_HIGH..SIZE_HIGH + 4], &[0; 4]);
+    }
+
+    #[test]
+    fn new_inodes_look_like_e2fsprogs_ones() {
+        let file = Inode::fresh(12, 256, 0o100644, 777);
+        assert_eq!(
+            (file.kind(), file.mode(), file.links()),
+            (Some(FileType::Regular), 0o100644, 1)
+        );
+        assert_eq!((file.atime(), file.mtime(), file.ctime()), (777, 777, 777));
+        assert_eq!(
+            (file.uid(), file.gid(), file.size(), file.blocks()),
+            (0, 0, 0, 0)
+        );
+        assert_eq!(u16_at(file.raw(), EXTRA_ISIZE), 32);
+        assert_eq!(u32_at(file.raw(), CRTIME), 777);
+        let dir = Inode::fresh(13, 128, 0o040755, 5);
+        assert_eq!((dir.links(), dir.raw().len()), (2, 128));
     }
 
     #[test]

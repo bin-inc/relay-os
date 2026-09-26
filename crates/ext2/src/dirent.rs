@@ -4,8 +4,9 @@
 //! block exactly. Without the `filetype` feature, name_len is 16 bits and
 //! there is no type byte.
 
-use crate::le::{u16_at, u32_at};
+use crate::le::{set_u16, set_u32, u16_at, u32_at};
 use alloc::vec::Vec;
+use vfs::FileType;
 
 /// Bytes before an entry's name.
 pub const HEADER: usize = 8;
@@ -30,6 +31,95 @@ impl Entry {
 /// The smallest record holding a name of `name_len` bytes.
 pub fn rec_len_for(name_len: usize) -> usize {
     (HEADER + name_len + 3) & !3
+}
+
+/// The file type byte of an entry for an inode of type `kind` (with the
+/// `filetype` feature).
+pub fn type_byte(kind: FileType) -> u8 {
+    match kind {
+        FileType::Regular => 1,
+        FileType::Directory => 2,
+        FileType::CharDev => 3,
+        FileType::BlockDev => 4,
+        FileType::Fifo => 5,
+        FileType::Socket => 6,
+        FileType::Symlink => 7,
+    }
+}
+
+/// Writes an entry at `offset`. Without `filetype` the type byte is the
+/// high half of the name length, so it is not written.
+fn put(
+    block: &mut [u8],
+    offset: usize,
+    rec_len: usize,
+    name: &[u8],
+    inode: u32,
+    file_type: Option<u8>,
+) {
+    set_u32(block, offset, inode);
+    set_u16(block, offset + 4, rec_len as u16);
+    match file_type {
+        Some(t) => {
+            block[offset + 6] = name.len() as u8;
+            block[offset + 7] = t;
+        }
+        None => set_u16(block, offset + 6, name.len() as u16),
+    }
+    block[offset + HEADER..][..name.len()].copy_from_slice(name);
+}
+
+/// Sets the record length of the entry at `offset`.
+fn set_rec_len(block: &mut [u8], offset: usize, rec_len: usize) {
+    set_u16(block, offset + 4, rec_len as u16);
+}
+
+/// An entry with room for a new name of `name_len` bytes: an unused one
+/// large enough, or a used one whose record has that much to spare after
+/// its own name.
+pub fn room(entries: &[Entry], name_len: usize) -> Option<Entry> {
+    let need = rec_len_for(name_len);
+    entries.iter().copied().find(|e| {
+        if e.inode == 0 {
+            e.rec_len >= need
+        } else {
+            e.rec_len >= rec_len_for(e.name_len) + need
+        }
+    })
+}
+
+/// Adds `name` → `inode` in the room [`room`] found at `at`: reusing an
+/// unused entry, or splitting the spare space off a used one.
+/// `file_type` is `None` without the `filetype` feature.
+pub fn insert(block: &mut [u8], at: Entry, name: &[u8], inode: u32, file_type: Option<u8>) {
+    if at.inode == 0 {
+        put(block, at.offset, at.rec_len, name, inode, file_type);
+    } else {
+        let keep = rec_len_for(at.name_len);
+        set_rec_len(block, at.offset, keep);
+        put(
+            block,
+            at.offset + keep,
+            at.rec_len - keep,
+            name,
+            inode,
+            file_type,
+        );
+    }
+}
+
+/// Makes `block` an empty directory block: one unused entry covering it.
+pub fn init_empty(block: &mut [u8]) {
+    block.fill(0);
+    set_rec_len(block, 0, block.len());
+}
+
+/// Makes `block` a new directory's first block: `.` and `..`.
+pub fn init_dir(block: &mut [u8], inode: u32, parent: u32, filetype: bool) {
+    let t = filetype.then(|| type_byte(FileType::Directory));
+    block.fill(0);
+    put(block, 0, 12, b".", inode, t);
+    put(block, 12, block.len() - 12, b"..", parent, t);
 }
 
 /// Why a directory block does not parse: what is wrong, and where.
@@ -224,5 +314,46 @@ mod tests {
         assert_eq!(names(&swapped, true), Err((0, "misplaced . or ..")));
         let late: [(u32, usize, &[u8]); 3] = [(2, 12, b"."), (2, 12, b".."), (5, 40, b"..")];
         assert_eq!(names(&late, true), Err((24, "misplaced . or ..")));
+    }
+
+    #[test]
+    fn new_names_split_spare_space_or_reuse_unused_entries() {
+        for filetype in [true, false] {
+            let t = filetype.then_some(1);
+            let mut b = vec![0u8; 64];
+            init_dir(&mut b, 12, 2, filetype);
+            let e = parse(&b, filetype, 100).unwrap();
+            assert_eq!((e[0].rec_len, e[1].rec_len, e[1].inode), (12, 52, 2));
+            // `..` needs 12 of its 52 bytes: a 40-byte record splits off.
+            let at = room(&e, 20).unwrap();
+            insert(&mut b, at, b"twenty-characters-xx", 13, t);
+            let e = parse(&b, filetype, 100).unwrap();
+            assert_eq!(e.len(), 3);
+            assert_eq!((e[1].rec_len, e[2].offset, e[2].rec_len), (12, 24, 40));
+            assert_eq!(e[2].name(&b), b"twenty-characters-xx");
+            assert_eq!(room(&e, 20), None, "full");
+            assert_eq!(room(&e, 4).map(|e| e.offset), Some(24), "12 spare bytes");
+            if filetype {
+                assert_eq!(b[24 + 7], 1);
+            }
+        }
+        let mut b = vec![0u8; 32];
+        init_empty(&mut b);
+        let e = parse(&b, true, 100).unwrap();
+        assert_eq!((e.len(), e[0].inode, e[0].rec_len), (1, 0, 32));
+        insert(&mut b, room(&e, 3).unwrap(), b"new", 7, Some(2));
+        let e = parse(&b, true, 100).unwrap();
+        assert_eq!(
+            (e[0].inode, e[0].rec_len, e[0].name(&b)),
+            (7, 32, &b"new"[..])
+        );
+        assert_eq!(room(&e, 12), Some(e[0]), "the rest of the reused entry");
+    }
+
+    #[test]
+    fn file_type_bytes_are_ext2s() {
+        assert_eq!(type_byte(FileType::Regular), 1);
+        assert_eq!(type_byte(FileType::Directory), 2);
+        assert_eq!(type_byte(FileType::Symlink), 7);
     }
 }

@@ -65,7 +65,7 @@ impl<D: BlockDevice> Ext2<D> {
     /// and the indirect blocks leading to it if missing. New blocks are
     /// zeroed in the cache, never read. The free count is checked first,
     /// so a full filesystem gives `ENOSPC` without a half-built path.
-    fn bmap_alloc(&mut self, inode: &mut Inode, lb: u64) -> Result<u32, Errno> {
+    pub(crate) fn bmap_alloc(&mut self, inode: &mut Inode, lb: u64) -> Result<u32, Errno> {
         let path = map_path(lb, self.per_block()).ok_or(Errno::EFBIG)?;
         // ptrs[level]: the pointer at that level, 0 where missing.
         let mut ptrs = [0u32; 4];
