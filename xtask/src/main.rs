@@ -4,6 +4,7 @@ mod build;
 mod ci;
 mod config;
 mod e2e;
+mod flash;
 mod font;
 mod image;
 mod qemu;
@@ -48,6 +49,25 @@ enum Cmd {
         #[arg(long)]
         e2e_only: bool,
     },
+    /// Write to the Kingston test stick.
+    Flash {
+        /// Replace loader and kernel only; keep files on /.
+        #[arg(long, conflicts_with = "full", required_unless_present = "full")]
+        kernel: bool,
+        /// Repartition and reformat the whole stick.
+        #[arg(long)]
+        full: bool,
+        /// Skip the typed confirmation for --full.
+        #[arg(long)]
+        yes: bool,
+        /// Kernel command line to put on the stick (e.g. `video=1280x720`).
+        #[arg(long, default_value = "")]
+        cmdline: String,
+    },
+    /// e2fsck the stick's root filesystem and list its files.
+    VerifyUsb,
+    /// Write a udev rule giving you access to the test stick.
+    SetupUdev,
     /// Formatting check and clippy (warnings are errors) on every crate.
     Lint,
     /// Host unit tests.
@@ -82,6 +102,21 @@ fn main() -> Result<()> {
             }
             e2e::run_all(scenario.as_deref())?;
         }
+        Cmd::Flash {
+            kernel,
+            full,
+            yes,
+            cmdline,
+        } => {
+            let a = build::build()?;
+            if full {
+                flash::flash_full(&a, &cmdline, yes)?;
+            } else if kernel {
+                flash::flash_kernel(&a, &cmdline)?;
+            }
+        }
+        Cmd::VerifyUsb => flash::verify_usb()?,
+        Cmd::SetupUdev => flash::setup_udev()?,
         Cmd::Lint => ci::lint()?,
         Cmd::Unit => ci::unit_tests()?,
         Cmd::Ci => {
