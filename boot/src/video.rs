@@ -28,8 +28,8 @@ pub fn setup(cmdline: &str) -> uefi::Result<FramebufferInfo> {
         .filter(|(_, m)| pixel_format(m.info().pixel_format()).is_some())
         .map(|(i, m)| (i, m.info().resolution().0, m.info().resolution().1))
         .collect();
-    if let Some(i) = choose(&candidates, cmdline_mode(cmdline), native) {
-        let current = gop.current_mode_info().resolution();
+    let current = gop.current_mode_info().resolution();
+    if let Some(i) = choose(&candidates, cmdline_mode(cmdline), native, current) {
         if modes[i].info().resolution() != current {
             gop.set_mode(&modes[i])?;
         }
