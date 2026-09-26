@@ -57,7 +57,13 @@ pub struct Ext2<D: BlockDevice> {
     sb: Superblock,
     geo: Geometry,
     groups: Groups,
+    /// Changes are refused: mounted read-only, or shut down.
     read_only: bool,
+    /// Nothing is ever written: mounted read-only or fallen back to it.
+    never_write: bool,
+    /// `s_state` as found at mount, written back by `shutdown` (as Linux
+    /// does): only a filesystem that was clean is marked clean again.
+    mount_state: u16,
 }
 
 /// Logs `ext2: <what>`.
@@ -92,8 +98,7 @@ impl<D: BlockDevice> Ext2<D> {
         let groups = read_groups(&mut cache, &geo)
             .inspect_err(|_| log(env_ref, format_args!("cannot read the group descriptors")))?;
         group::check(&groups, &geo).map_err(|why| refuse(&why))?;
-        // Only read-only mounting so far.
-        let read_only = true;
+        let mut read_only = opts.read_only;
         let unsupported = sb.unsupported_ro_compat();
         if unsupported != 0 {
             let names = superblock::ro_compat_names(unsupported);
@@ -101,6 +106,7 @@ impl<D: BlockDevice> Ext2<D> {
                 env_ref,
                 format_args!("unsupported ro_compat features: {names}; mounting read-only"),
             );
+            read_only = true;
         }
         if sb.state() & STATE_VALID == 0 {
             log(
@@ -114,14 +120,26 @@ impl<D: BlockDevice> Ext2<D> {
                 format_args!("warning: filesystem has errors, run e2fsck"),
             );
         }
-        Ok(Ext2 {
+        let sb_state = sb.state();
+        let mut fs = Ext2 {
             cache,
             env,
             sb,
             geo,
             groups,
             read_only,
-        })
+            never_write: read_only,
+            mount_state: sb_state,
+        };
+        if !read_only {
+            // In use until `shutdown` marks it clean again.
+            let state = fs.sb.state() & !STATE_VALID;
+            fs.sb.set_state(state);
+            fs.sb.set_mnt_count(fs.sb.mnt_count().wrapping_add(1));
+            fs.sb.set_mtime(fs.now());
+            fs.flush()?;
+        }
+        Ok(fs)
     }
 
     /// Whether changes are refused: mounted read-only, fallen back to
@@ -134,6 +152,42 @@ impl<D: BlockDevice> Ext2<D> {
     /// unwritten changes are dropped).
     pub fn into_device(self) -> D {
         self.cache.into_inner()
+    }
+
+    /// The current time as the 32-bit seconds ext2 stores.
+    pub(crate) fn now(&self) -> u32 {
+        self.env.now().min(u32::MAX as u64) as u32
+    }
+
+    /// Writes the superblock and its backups into the cache if it
+    /// changed. The backups follow every write (spec §8.2).
+    fn write_super(&mut self) -> Result<(), Errno> {
+        if !self.sb.is_dirty() {
+            return Ok(());
+        }
+        let now = self.now();
+        self.sb.stamp_wtime(now);
+        for g in (0..self.geo.groups).filter(|&g| self.geo.has_super(g)) {
+            let (block, offset) = self.geo.super_location(g);
+            self.sb.copy_to(&mut self.cache.write(block)?[offset..], g);
+        }
+        self.sb.set_clean();
+        Ok(())
+    }
+
+    /// Writes every change to the device and flushes it. A write error is
+    /// logged (it reaches `dmesg`); the failed blocks stay dirty for the
+    /// next try.
+    fn flush(&mut self) -> Result<(), Errno> {
+        let result = self.write_super().and_then(|()| self.cache.sync());
+        if result.is_err() {
+            let left = self.cache.dirty_blocks();
+            log(
+                &*self.env,
+                format_args!("write error, {left} blocks not written"),
+            );
+        }
+        result
     }
 
     /// Like Linux's ext2: sizes without the metadata, and space reserved
@@ -243,11 +297,25 @@ impl<D: BlockDevice> FileSystem for Ext2<D> {
         Ok(self.fs_stat())
     }
 
+    /// Also after `shutdown`: whatever a failed shutdown left unwritten is
+    /// written now.
     fn sync(&mut self) -> Result<(), Errno> {
-        Ok(())
+        if self.never_write {
+            return Ok(());
+        }
+        self.flush()
     }
 
+    /// Changes are refused from now on, even if writing fails; then `sync`
+    /// or another `shutdown` retries until everything is on the device.
     fn shutdown(&mut self) -> Result<(), Errno> {
-        Ok(())
+        if self.never_write {
+            return Ok(());
+        }
+        if !self.read_only {
+            self.sb.set_state(self.mount_state);
+            self.read_only = true;
+        }
+        self.flush()
     }
 }
