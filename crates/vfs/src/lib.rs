@@ -10,7 +10,11 @@ extern crate alloc;
 
 mod block;
 mod errno;
+mod fs;
+mod memfs;
 pub mod path;
 
 pub use block::{BlockDevice, IoError, check_request};
 pub use errno::Errno;
+pub use fs::{DirEntry, Env, FileSystem, FileType, Ino, Stat, StatFs};
+pub use memfs::{MAX_FILE_SIZE, MemFs};
