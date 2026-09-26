@@ -3,7 +3,7 @@
 //! Everything here is `#[repr(C)]` and contains no pointers into loader
 //! memory except `memory_map_ptr`, which is a kernel-virtual address inside
 //! the linear physical-memory map.
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
 /// `"RELAYBOO"` in ASCII, little-endian.
 pub const BOOT_INFO_MAGIC: u64 = u64::from_le_bytes(*b"RELAYBOO");
@@ -18,8 +18,6 @@ pub const PHYS_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 pub const KERNEL_STACK_BOTTOM: u64 = 0xFFFF_FE00_0000_1000;
 pub const KERNEL_STACK_SIZE: u64 = 64 * 1024;
 pub const KERNEL_STACK_TOP: u64 = KERNEL_STACK_BOTTOM + KERNEL_STACK_SIZE;
-/// UEFI memory type (OS-defined range) the loader uses for kernel pages.
-pub const UEFI_KERNEL_MEMORY_TYPE: u32 = 0x8000_5245;
 
 pub const CMDLINE_MAX: usize = 256;
 
@@ -53,6 +51,46 @@ pub struct FramebufferInfo {
     pub format: PixelFormat,
 }
 
+/// Colours (0xRRGGBB) of the boot-progress squares, stage 1 first.
+pub const STAGE_COLORS: [u32; 12] = [
+    0xFF0000, 0xFF8000, 0xFFFF00, 0x00FF00, 0x00FFFF, 0x0040FF, 0xFF00FF, 0xFFFFFF, 0x808080,
+    0xFF8080, 0x80FF80, 0x8080FF,
+];
+const STAGE_SIZE: u32 = 24;
+const STAGE_GAP: u32 = 8;
+const STAGE_TOP: u32 = 8;
+
+impl FramebufferInfo {
+    /// Paints the square for boot `stage` (1-based) along the top edge of the
+    /// screen, stage 1 rightmost. This works where no console does: in the
+    /// loader after it has taken over the GOP, and in the kernel before its
+    /// console exists. The last square on screen shows how far boot got.
+    /// Squares are clipped to the visible area.
+    ///
+    /// # Safety
+    /// `base` must be the virtual address of the framebuffer (identity-mapped
+    /// in the loader, `PHYS_OFFSET + phys_addr` in the kernel), valid for
+    /// `stride * height` pixels.
+    pub unsafe fn mark_stage(&self, base: u64, stage: u32) {
+        let rgb = STAGE_COLORS[(stage.max(1) as usize - 1) % STAGE_COLORS.len()];
+        let px = match self.format {
+            PixelFormat::Bgr => rgb,
+            PixelFormat::Rgb => ((rgb & 0xFF) << 16) | (rgb & 0xFF00) | (rgb >> 16),
+        };
+        let right = self
+            .width
+            .saturating_sub(stage.max(1) * (STAGE_SIZE + STAGE_GAP) - STAGE_SIZE);
+        let left = right.saturating_sub(STAGE_SIZE);
+        let bottom = (STAGE_TOP + STAGE_SIZE).min(self.height);
+        for y in STAGE_TOP..bottom {
+            for x in left..right.min(self.width) {
+                let offset = (y as usize * self.stride as usize + x as usize) * 4;
+                unsafe { core::ptr::write_volatile((base as usize + offset) as *mut u32, px) };
+            }
+        }
+    }
+}
+
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemoryKind {
@@ -62,6 +100,8 @@ pub enum MemoryKind {
     AcpiNvs = 4,
     Reserved = 5,
     Mmio = 6,
+    /// Not produced by relay-boot: the kernel image is reported as
+    /// `Bootloader`, and `BootInfo::kernel_phys_*` gives its exact range.
     Kernel = 7,
 }
 
@@ -183,6 +223,59 @@ mod tests {
         assert_eq!(bi.cmdline().len(), CMDLINE_MAX);
         bi.cmdline[0] = 0xFF;
         assert_eq!(bi.cmdline(), "");
+    }
+
+    fn fb(width: u32, height: u32, stride: u32, format: PixelFormat) -> FramebufferInfo {
+        FramebufferInfo {
+            phys_addr: 0,
+            size: u64::from(stride * height * 4),
+            width,
+            height,
+            stride,
+            format,
+        }
+    }
+
+    #[test]
+    fn stage_marks_are_squares_along_the_top_right() {
+        let info = fb(200, 100, 256, PixelFormat::Bgr);
+        let mut px = vec![0u32; 256 * 100];
+        unsafe { info.mark_stage(px.as_mut_ptr() as u64, 1) };
+        // Stage 1 is the rightmost square: x 168..192, y 8..32.
+        let red = STAGE_COLORS[0];
+        assert_eq!(px[8 * 256 + 168], red);
+        assert_eq!(px[31 * 256 + 191], red);
+        assert_eq!(px[8 * 256 + 192], 0, "gap to the right edge");
+        assert_eq!(px[7 * 256 + 168], 0, "top margin");
+        assert_eq!(px[32 * 256 + 168], 0, "square is 24 px tall");
+        unsafe { info.mark_stage(px.as_mut_ptr() as u64, 2) };
+        assert_eq!(
+            px[8 * 256 + 136],
+            STAGE_COLORS[1],
+            "stage 2 sits left of stage 1"
+        );
+    }
+
+    #[test]
+    fn stage_marks_follow_the_pixel_format() {
+        let info = fb(64, 40, 64, PixelFormat::Rgb);
+        let mut px = vec![0u32; 64 * 40];
+        unsafe { info.mark_stage(px.as_mut_ptr() as u64, 2) };
+        // Stage 2 is orange 0xFF8000; RGB memory order stores it as 0x0080FF.
+        assert_eq!(STAGE_COLORS[1], 0xFF8000);
+        assert_eq!(px[8 * 64], 0x0080FF, "leftmost column of the square");
+    }
+
+    #[test]
+    fn stage_marks_never_write_outside_the_framebuffer() {
+        let info = fb(10, 12, 10, PixelFormat::Bgr);
+        let mut px = vec![0u32; 10 * 12 + 16];
+        px[120..].fill(0xDEAD_BEEF);
+        for stage in 1..=20 {
+            unsafe { info.mark_stage(px.as_mut_ptr() as u64, stage) };
+        }
+        assert!(px[120..].iter().all(|&p| p == 0xDEAD_BEEF));
+        assert!(px[..80].iter().all(|&p| p == 0), "rows above y=8 untouched");
     }
 
     #[test]

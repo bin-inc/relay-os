@@ -17,10 +17,10 @@ fn pixel_format(f: gop::PixelFormat) -> Option<PixelFormat> {
 pub fn setup(cmdline: &str) -> uefi::Result<FramebufferInfo> {
     let handle = boot::get_handle_for_protocol::<GraphicsOutput>()?;
     let native = boot::get_handle_for_protocol::<gop::EdidDiscovered>()
-        .and_then(boot::open_protocol_exclusive::<gop::EdidDiscovered>)
+        .and_then(crate::proto::get::<gop::EdidDiscovered>)
         .ok()
         .and_then(|e| e.edid().and_then(edid_native));
-    let mut gop = boot::open_protocol_exclusive::<GraphicsOutput>(handle)?;
+    let mut gop = crate::proto::get::<GraphicsOutput>(handle)?;
     let modes: alloc::vec::Vec<_> = gop.modes().collect();
     let candidates: alloc::vec::Vec<(usize, usize, usize)> = modes
         .iter()
@@ -28,11 +28,11 @@ pub fn setup(cmdline: &str) -> uefi::Result<FramebufferInfo> {
         .filter(|(_, m)| pixel_format(m.info().pixel_format()).is_some())
         .map(|(i, m)| (i, m.info().resolution().0, m.info().resolution().1))
         .collect();
-    if let Some(i) = choose(&candidates, cmdline_mode(cmdline), native) {
-        let current = gop.current_mode_info().resolution();
-        if modes[i].info().resolution() != current {
-            gop.set_mode(&modes[i])?;
-        }
+    let current = gop.current_mode_info().resolution();
+    if let Some(i) = choose(&candidates, cmdline_mode(cmdline), native, current)
+        && modes[i].info().resolution() != current
+    {
+        gop.set_mode(&modes[i])?;
     }
     let info = gop.current_mode_info();
     let format = pixel_format(info.pixel_format()).ok_or(uefi::Status::UNSUPPORTED)?;

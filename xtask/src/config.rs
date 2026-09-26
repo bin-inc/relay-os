@@ -1,5 +1,12 @@
 //! Fixed facts about the build outputs, the disk layout and the test hardware.
 
+/// The Kingston DataTraveler 3.0 test stick, by its reported serial number.
+pub const USB_SERIAL: &str = "08606E6D413FB27127135F8E";
+pub const USB_BY_ID: &str =
+    "/dev/disk/by-id/usb-Kingston_DataTraveler_3.0_08606E6D413FB27127135F8E-0:0";
+/// Refuse to touch anything bigger than this.
+pub const USB_MAX_BYTES: u64 = 64 << 30;
+
 pub const OVMF_CODE: &str = "/usr/share/OVMF/OVMF_CODE_4M.fd";
 pub const OVMF_VARS: &str = "/usr/share/OVMF/OVMF_VARS_4M.fd";
 

@@ -11,6 +11,8 @@
 //! expect <regex>                   (waits for serial output, ANSI stripped)
 //! send <text>                      (types <text> + Enter over serial)
 //! screenshot-nonblank              (QMP screendump; top rows not one colour)
+//! alive 12                         (fails if QEMU exits within 12 seconds)
+//! screenshot-pixel 2540 20 #000000 (QMP screendump; that pixel has that colour)
 //! ```
 //!
 //! QEMU is killed at the end of every scenario.
@@ -37,6 +39,15 @@ pub enum Step {
     Expect(String),
     Send(String),
     ScreenshotNonblank,
+    /// QEMU must still be running after this many seconds (for example after
+    /// a loader error, which must not power the machine off).
+    Alive(u64),
+    /// Pixel (x, y) of a fresh screenshot must have this RGB colour.
+    ScreenshotPixel {
+        x: usize,
+        y: usize,
+        rgb: [u8; 3],
+    },
 }
 
 #[derive(Debug, PartialEq)]
@@ -87,6 +98,10 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
             }
             "send" => Step::Send(rest.to_string()),
             "screenshot-nonblank" => Step::ScreenshotNonblank,
+            "screenshot-pixel" => {
+                parse_pixel_step(rest).with_context(|| format!("{name}:{line_no}"))?
+            }
+            "alive" => Step::Alive(rest.parse().with_context(|| format!("{name}:{line_no}"))?),
             other => bail!("{name}:{line_no}: unknown step '{other}'"),
         };
         steps.push((line_no, step));
@@ -99,15 +114,31 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
     })
 }
 
+fn parse_pixel_step(rest: &str) -> Result<Step> {
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    let [x, y, colour] = parts[..] else {
+        bail!("expected: screenshot-pixel <x> <y> <#rrggbb>");
+    };
+    let hex = colour
+        .strip_prefix('#')
+        .filter(|h| h.len() == 6)
+        .context("colour must be #rrggbb")?;
+    let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).context("colour must be #rrggbb");
+    Ok(Step::ScreenshotPixel {
+        x: x.parse()?,
+        y: y.parse()?,
+        rgb: [byte(0)?, byte(2)?, byte(4)?],
+    })
+}
+
 /// Removes ANSI escape sequences and carriage returns.
 pub fn strip_ansi(s: &str) -> String {
     let re = Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-Z\\-_]|\r").unwrap();
     re.replace_all(s, "").into_owned()
 }
 
-/// True if the first `rows` pixel rows of a binary PPM (P6) contain at least
-/// two different colours.
-pub fn ppm_top_is_nonblank(ppm: &[u8], rows: usize) -> Result<bool> {
+/// Parses a binary PPM (P6, maxval 255) into `(width, height, pixel data)`.
+fn parse_ppm(ppm: &[u8]) -> Result<(usize, usize, &[u8])> {
     // Header: "P6" whitespace width whitespace height whitespace maxval single-whitespace.
     let mut fields = Vec::new();
     let mut pos = 0;
@@ -129,13 +160,30 @@ pub fn ppm_top_is_nonblank(ppm: &[u8], rows: usize) -> Result<bool> {
     }
     let width: usize = fields[1].parse()?;
     let height: usize = fields[2].parse()?;
-    let data = &ppm[pos + 1..];
-    let n = width * rows.min(height) * 3;
-    if data.len() < n {
+    let data = &ppm[(pos + 1).min(ppm.len())..];
+    if data.len() < width * height * 3 {
         bail!("truncated PPM data");
     }
+    Ok((width, height, data))
+}
+
+/// True if the first `rows` pixel rows of a binary PPM (P6) contain at least
+/// two different colours.
+pub fn ppm_top_is_nonblank(ppm: &[u8], rows: usize) -> Result<bool> {
+    let (width, height, data) = parse_ppm(ppm)?;
+    let n = width * rows.min(height) * 3;
     let (pixels, _) = data[..n].as_chunks::<3>();
     Ok(pixels.iter().any(|px| px != &pixels[0]))
+}
+
+/// The RGB value of pixel (x, y) of a binary PPM (P6).
+pub fn ppm_pixel(ppm: &[u8], x: usize, y: usize) -> Result<[u8; 3]> {
+    let (width, height, data) = parse_ppm(ppm)?;
+    if x >= width || y >= height {
+        bail!("pixel ({x}, {y}) is outside the {width}x{height} screenshot");
+    }
+    let o = (y * width + x) * 3;
+    Ok([data[o], data[o + 1], data[o + 2]])
 }
 
 struct Running {
@@ -226,6 +274,35 @@ fn run_step(r: &mut Running, step: &Step, timeout: &mut Duration, run_dir: &Path
             r.stdin.write_all(text.as_bytes())?;
             r.stdin.write_all(b"\r")?;
             r.stdin.flush()?;
+        }
+        Step::Alive(secs) => {
+            let deadline = Instant::now() + Duration::from_secs(*secs);
+            while Instant::now() < deadline {
+                if let Ok(Some(status)) = r.child.try_wait() {
+                    bail!(
+                        "QEMU exited ({status}) within {secs} s; the machine powered off or reset"
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        Step::ScreenshotPixel { x, y, rgb } => {
+            let file = run_dir.join("screen.ppm");
+            r.qmp
+                .execute("screendump", serde_json::json!({ "filename": file }))?;
+            let got = ppm_pixel(&fs::read(&file)?, *x, *y)?;
+            if got != *rgb {
+                bail!(
+                    "pixel ({x}, {y}) is #{:02x}{:02x}{:02x}, expected #{:02x}{:02x}{:02x} ({})",
+                    got[0],
+                    got[1],
+                    got[2],
+                    rgb[0],
+                    rgb[1],
+                    rgb[2],
+                    file.display()
+                );
+            }
         }
         Step::ScreenshotNonblank => {
             let file = run_dir.join("screen.ppm");
@@ -330,6 +407,42 @@ mod tests {
         );
         assert!(parse_scenario("x", "esp-write relative x").is_err());
         assert!(parse_scenario("x", "expect a\nesp-write /x y").is_err());
+    }
+
+    #[test]
+    fn parses_alive_step() {
+        let s = parse_scenario("x", "alive 12").unwrap();
+        assert_eq!(s.steps, vec![(1, Step::Alive(12))]);
+        assert!(parse_scenario("x", "alive soon").is_err());
+    }
+
+    #[test]
+    fn parses_screenshot_pixel_step() {
+        let s = parse_scenario("x", "screenshot-pixel 2540 20 #000000").unwrap();
+        assert_eq!(
+            s.steps,
+            vec![(
+                1,
+                Step::ScreenshotPixel {
+                    x: 2540,
+                    y: 20,
+                    rgb: [0, 0, 0]
+                }
+            )]
+        );
+        assert!(parse_scenario("x", "screenshot-pixel 1 2").is_err());
+        assert!(parse_scenario("x", "screenshot-pixel 1 2 red").is_err());
+    }
+
+    #[test]
+    fn reads_one_ppm_pixel() {
+        let mut ppm = b"P6\n3 2\n255\n".to_vec();
+        ppm.extend(std::iter::repeat_n(0u8, 3 * 2 * 3));
+        let n = ppm.len();
+        ppm[n - 3..].copy_from_slice(&[0xFF, 0x80, 0x00]); // (2, 1)
+        assert_eq!(ppm_pixel(&ppm, 2, 1).unwrap(), [0xFF, 0x80, 0x00]);
+        assert_eq!(ppm_pixel(&ppm, 0, 0).unwrap(), [0, 0, 0]);
+        assert!(ppm_pixel(&ppm, 3, 0).is_err(), "x out of range");
     }
 
     #[test]

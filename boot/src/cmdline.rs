@@ -3,7 +3,8 @@
 use boot_info::CMDLINE_MAX;
 
 /// Turns the file contents into the command line handed to the kernel:
-/// invalid UTF-8 is cut at the first bad byte, surrounding whitespace
+/// invalid UTF-8 is cut at the first bad byte, a leading byte-order mark and
+/// surrounding whitespace
 /// (including CR/LF from editors) is trimmed, and the result is shortened to
 /// fit `CMDLINE_MAX` bytes without splitting a character.
 pub fn normalize(raw: &[u8]) -> &str {
@@ -11,7 +12,9 @@ pub fn normalize(raw: &[u8]) -> &str {
         Ok(t) => t,
         Err(e) => core::str::from_utf8(&raw[..e.valid_up_to()]).unwrap_or(""),
     };
-    let mut t = text.trim();
+    // A UTF-8 byte-order mark (some Windows editors write one) is not
+    // whitespace, so strip it explicitly.
+    let mut t = text.trim_start_matches('\u{FEFF}').trim();
     if t.len() > CMDLINE_MAX {
         let mut end = CMDLINE_MAX;
         while !t.is_char_boundary(end) {
@@ -34,6 +37,17 @@ mod tests {
         );
         assert_eq!(normalize(b""), "");
         assert_eq!(normalize(b"\n\n"), "");
+    }
+
+    /// Windows editors may save a UTF-8 byte-order mark; without stripping it
+    /// the first word (e.g. `test=1`) is silently not recognised.
+    #[test]
+    fn strips_a_leading_utf8_byte_order_mark() {
+        assert_eq!(
+            normalize(b"\xEF\xBB\xBFtest=1 video=1280x720\r\n"),
+            "test=1 video=1280x720"
+        );
+        assert_eq!(normalize(b"\xEF\xBB\xBF"), "");
     }
 
     #[test]

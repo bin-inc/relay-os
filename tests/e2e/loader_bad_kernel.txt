@@ -1,6 +1,9 @@
-# A corrupt kernel.elf stops the loader with a readable message instead of
-# a hang or a reset loop.
+# A corrupt kernel.elf stops the loader with a readable message that stays on
+# screen: no hang without explanation, no reset loop, and no power-off (the
+# uefi crate's default panic handler shut the machine down after 10 s).
 esp-write /EFI/RELAY/kernel.elf this is not an ELF file
 timeout 30
 expect relay-boot \d+\.\d+\.\d+
 expect kernel\.elf is not a valid kernel: TooShort
+expect relay-boot: System halted\. Hold the power button to turn the machine off\.
+alive 15

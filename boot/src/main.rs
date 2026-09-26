@@ -8,10 +8,12 @@
 extern crate alloc;
 
 mod paging;
+mod proto;
 mod video;
 
 use alloc::vec::Vec;
 use boot_info::*;
+use core::sync::atomic::{AtomicBool, Ordering};
 use relay_boot::{cmdline as cmdline_text, elf, memmap};
 use uefi::boot::{self, AllocateType, MemoryType};
 use uefi::mem::memory_map::MemoryMap;
@@ -19,6 +21,7 @@ use uefi::prelude::*;
 use uefi::proto::device_path::media::PartitionSignature;
 use uefi::proto::device_path::{DevicePath, DevicePathNodeEnum};
 use uefi::proto::loaded_image::LoadedImage;
+use uefi::proto::media::fs::SimpleFileSystem;
 use uefi::table::cfg::ConfigTableEntry;
 use uefi::{CStr16, cstr16, println};
 use x86_64::structures::paging::PageTableFlags as F;
@@ -28,6 +31,26 @@ const CMDLINE_PATH: &CStr16 = cstr16!("\\EFI\\RELAY\\cmdline");
 /// Spare memory-map slots for descriptors created by our own allocations.
 const MMAP_SLACK: usize = 64;
 
+/// Set just before ExitBootServices; from then on the firmware console is gone.
+static BOOT_SERVICES_EXITED: AtomicBool = AtomicBool::new(false);
+
+/// Prints the message while the firmware console still works, then halts.
+/// It never resets or powers off: the `uefi` crate's handler shut the machine
+/// down after 10 s, taking the message with it.
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    if !BOOT_SERVICES_EXITED.load(Ordering::SeqCst) {
+        println!("[PANIC] relay-boot: {}", info.message());
+        if let Some(loc) = info.location() {
+            println!("  at {}:{}", loc.file(), loc.line());
+        }
+        println!("relay-boot: System halted. Hold the power button to turn the machine off.");
+    }
+    loop {
+        x86_64::instructions::hlt();
+    }
+}
+
 fn alloc_pages(ty: MemoryType, count: usize) -> *mut u8 {
     let p = boot::allocate_pages(AllocateType::AnyPages, ty, count).expect("out of memory");
     unsafe { core::ptr::write_bytes(p.as_ptr(), 0, count * 4096) };
@@ -35,15 +58,21 @@ fn alloc_pages(ty: MemoryType, count: usize) -> *mut u8 {
 }
 
 fn read_file(path: &CStr16) -> Option<Vec<u8>> {
-    let sfs = boot::get_image_file_system(boot::image_handle()).ok()?;
-    uefi::fs::FileSystem::new(sfs).read(path).ok()
+    let image = proto::get::<LoadedImage>(boot::image_handle()).ok()?;
+    let sfs = proto::get::<SimpleFileSystem>(image.device()?).ok()?;
+    // The FileSystem owns the protocol and would close it on drop; keep it
+    // open (see proto::get).
+    let mut fs = core::mem::ManuallyDrop::new(uefi::fs::FileSystem::new(
+        core::mem::ManuallyDrop::into_inner(sfs),
+    ));
+    fs.read(path).ok()
 }
 
 /// GPT partition GUID of the partition this loader was started from.
 fn boot_partition_guid() -> Option<[u8; 16]> {
-    let image = boot::open_protocol_exclusive::<LoadedImage>(boot::image_handle()).ok()?;
+    let image = proto::get::<LoadedImage>(boot::image_handle()).ok()?;
     let device = image.device()?;
-    let path = boot::open_protocol_exclusive::<DevicePath>(device).ok()?;
+    let path = proto::get::<DevicePath>(device).ok()?;
     path.node_iter().find_map(|node| match node.as_enum() {
         Ok(DevicePathNodeEnum::MediaHardDrive(hd)) => match hd.partition_signature() {
             PartitionSignature::Guid(g) => Some(g.to_bytes()),
@@ -78,7 +107,10 @@ fn load_kernel(file: &[u8], tables: &mut paging::Tables) -> (u64, u64, u64) {
     };
     let (vstart, vend) = k.span();
     let pages = ((vend - vstart) / 4096) as usize;
-    let base = alloc_pages(MemoryType::custom(UEFI_KERNEL_MEMORY_TYPE), pages) as u64;
+    // Standard LOADER_DATA, like the Linux EFI stub: with an OS-defined memory
+    // type the NUC 12 firmware never returned from ExitBootServices. The
+    // kernel's exact range is passed in BootInfo::kernel_phys_*.
+    let base = alloc_pages(MemoryType::LOADER_DATA, pages) as u64;
     for s in k.segments() {
         let dst = (base + (s.vaddr - vstart)) as *mut u8;
         let src = &file[s.file_offset as usize..(s.file_offset + s.file_size) as usize];
@@ -122,11 +154,18 @@ fn main() -> Status {
     let cmdline_file = read_file(CMDLINE_PATH).unwrap_or_default();
     let cmdline = cmdline_text::normalize(&cmdline_file);
     let fb = video::setup(cmdline).expect("no usable 32-bpp GOP framebuffer");
+    // Boot-progress squares (see FramebufferInfo::mark_stage): the firmware
+    // console stops drawing once we hold the GOP, and the NUC has no serial
+    // port, so these are the only progress signal on real hardware.
+    let mark = |stage| unsafe { fb.mark_stage(fb.phys_addr, stage) };
+    mark(1);
     let guid = boot_partition_guid();
     let rsdp_addr = rsdp();
+    mark(2);
 
     let mut tables = paging::Tables::new();
     let (entry, kernel_phys, kernel_len) = load_kernel(&kernel_file, &mut tables);
+    mark(3);
     drop(kernel_file);
 
     // Linear map of RAM (from the current memory map) and the framebuffer.
@@ -135,6 +174,7 @@ fn main() -> Status {
     drop(mmap);
     tables.map_linear(0, memmap::linear_map_end(descs.iter().copied()));
     tables.map_linear(fb.phys_addr, fb.phys_addr + fb.size);
+    mark(4);
 
     // Kernel stack below a guard page.
     let stack_pages = (KERNEL_STACK_SIZE / 4096) as usize;
@@ -151,6 +191,7 @@ fn main() -> Status {
     let tramp = enter_kernel as *const () as u64 & !0xFFF;
     tables.map_4k(tramp, tramp, F::empty());
     tables.map_4k(tramp + 4096, tramp + 4096, F::empty());
+    mark(5);
 
     // Everything the kernel reads must be allocated before ExitBootServices.
     // Size the region array from the memory map as it is now (after all the
@@ -162,9 +203,13 @@ fn main() -> Status {
     let info_phys = alloc_pages(MemoryType::LOADER_DATA, 1) as u64;
     let region_bytes = slots * core::mem::size_of::<MemoryRegion>();
     let regions_phys = alloc_pages(MemoryType::LOADER_DATA, region_bytes.div_ceil(4096)) as u64;
+    mark(6);
 
     println!("relay-boot: starting kernel");
+    mark(7);
+    BOOT_SERVICES_EXITED.store(true, Ordering::SeqCst);
     let final_map = unsafe { boot::exit_boot_services(None) };
+    mark(8);
     let regions =
         unsafe { core::slice::from_raw_parts_mut(regions_phys as *mut MemoryRegion, slots) };
     // No allocation from here on: the UEFI allocator is gone.
@@ -194,6 +239,7 @@ fn main() -> Status {
     };
     unsafe {
         core::ptr::write(info_phys as *mut BootInfo, info);
+        fb.mark_stage(fb.phys_addr, 9);
         x86_64::instructions::interrupts::disable();
         x86_64::registers::model_specific::Efer::update(|f| {
             f.insert(x86_64::registers::model_specific::EferFlags::NO_EXECUTE_ENABLE)

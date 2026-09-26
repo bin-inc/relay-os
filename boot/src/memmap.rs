@@ -1,6 +1,6 @@
 //! Translating the UEFI memory map into `boot_info::MemoryRegion`s.
 
-use boot_info::{MemoryKind, MemoryRegion, UEFI_KERNEL_MEMORY_TYPE};
+use boot_info::{MemoryKind, MemoryRegion};
 
 /// One UEFI memory descriptor, reduced to what we need.
 #[derive(Clone, Copy, Debug)]
@@ -18,7 +18,6 @@ pub fn kind_of(ty: u32) -> MemoryKind {
         9 => MemoryKind::AcpiReclaimable,
         10 => MemoryKind::AcpiNvs,
         11 | 12 => MemoryKind::Mmio,
-        UEFI_KERNEL_MEMORY_TYPE => MemoryKind::Kernel,
         _ => MemoryKind::Reserved,
     }
 }
@@ -86,7 +85,11 @@ mod tests {
         assert_eq!(kind_of(7), MemoryKind::Usable);
         assert_eq!(kind_of(4), MemoryKind::Usable);
         assert_eq!(kind_of(2), MemoryKind::Bootloader);
-        assert_eq!(kind_of(UEFI_KERNEL_MEMORY_TYPE), MemoryKind::Kernel);
+        assert_eq!(
+            kind_of(0x8000_5245),
+            MemoryKind::Reserved,
+            "OS-defined types"
+        );
         assert_eq!(kind_of(5), MemoryKind::Reserved);
         assert_eq!(kind_of(11), MemoryKind::Mmio);
     }
