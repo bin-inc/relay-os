@@ -17,10 +17,10 @@ fn pixel_format(f: gop::PixelFormat) -> Option<PixelFormat> {
 pub fn setup(cmdline: &str) -> uefi::Result<FramebufferInfo> {
     let handle = boot::get_handle_for_protocol::<GraphicsOutput>()?;
     let native = boot::get_handle_for_protocol::<gop::EdidDiscovered>()
-        .and_then(boot::open_protocol_exclusive::<gop::EdidDiscovered>)
+        .and_then(crate::proto::get::<gop::EdidDiscovered>)
         .ok()
         .and_then(|e| e.edid().and_then(edid_native));
-    let mut gop = boot::open_protocol_exclusive::<GraphicsOutput>(handle)?;
+    let mut gop = crate::proto::get::<GraphicsOutput>(handle)?;
     let modes: alloc::vec::Vec<_> = gop.modes().collect();
     let candidates: alloc::vec::Vec<(usize, usize, usize)> = modes
         .iter()

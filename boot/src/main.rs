@@ -8,6 +8,7 @@
 extern crate alloc;
 
 mod paging;
+mod proto;
 mod video;
 
 use alloc::vec::Vec;
@@ -19,6 +20,7 @@ use uefi::prelude::*;
 use uefi::proto::device_path::media::PartitionSignature;
 use uefi::proto::device_path::{DevicePath, DevicePathNodeEnum};
 use uefi::proto::loaded_image::LoadedImage;
+use uefi::proto::media::fs::SimpleFileSystem;
 use uefi::table::cfg::ConfigTableEntry;
 use uefi::{CStr16, cstr16, println};
 use x86_64::structures::paging::PageTableFlags as F;
@@ -35,15 +37,21 @@ fn alloc_pages(ty: MemoryType, count: usize) -> *mut u8 {
 }
 
 fn read_file(path: &CStr16) -> Option<Vec<u8>> {
-    let sfs = boot::get_image_file_system(boot::image_handle()).ok()?;
-    uefi::fs::FileSystem::new(sfs).read(path).ok()
+    let image = proto::get::<LoadedImage>(boot::image_handle()).ok()?;
+    let sfs = proto::get::<SimpleFileSystem>(image.device()?).ok()?;
+    // The FileSystem owns the protocol and would close it on drop; keep it
+    // open (see proto::get).
+    let mut fs = core::mem::ManuallyDrop::new(uefi::fs::FileSystem::new(
+        core::mem::ManuallyDrop::into_inner(sfs),
+    ));
+    fs.read(path).ok()
 }
 
 /// GPT partition GUID of the partition this loader was started from.
 fn boot_partition_guid() -> Option<[u8; 16]> {
-    let image = boot::open_protocol_exclusive::<LoadedImage>(boot::image_handle()).ok()?;
+    let image = proto::get::<LoadedImage>(boot::image_handle()).ok()?;
     let device = image.device()?;
-    let path = boot::open_protocol_exclusive::<DevicePath>(device).ok()?;
+    let path = proto::get::<DevicePath>(device).ok()?;
     path.node_iter().find_map(|node| match node.as_enum() {
         Ok(DevicePathNodeEnum::MediaHardDrive(hd)) => match hd.partition_signature() {
             PartitionSignature::Guid(g) => Some(g.to_bytes()),
