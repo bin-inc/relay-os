@@ -18,6 +18,11 @@ pub struct Cmdline {
     /// the panic screen in tests). `early` faults before the console starts,
     /// the others after boot.
     pub panic_test: Option<PanicTest>,
+    /// `tsc=hpet`: measure the TSC against the HPET even when CPUID knows
+    /// its frequency (exercises the QEMU path everywhere).
+    pub tsc_hpet: bool,
+    /// `check=timer`: count timer ticks over three RTC seconds at boot.
+    pub check_timer: bool,
 }
 
 impl Cmdline {
@@ -26,6 +31,8 @@ impl Cmdline {
         for word in s.split_whitespace() {
             match word.split_once('=') {
                 Some(("test", "1")) => c.test_mode = true,
+                Some(("tsc", "hpet")) => c.tsc_hpet = true,
+                Some(("check", "timer")) => c.check_timer = true,
                 Some(("panic", v)) => {
                     c.panic_test = match v {
                         "early" => Some(PanicTest::Early),
@@ -76,8 +83,17 @@ mod tests {
     }
 
     #[test]
+    fn timer_options() {
+        let c = Cmdline::parse("test=1 tsc=hpet check=timer");
+        assert!(c.tsc_hpet);
+        assert!(c.check_timer);
+        assert!(!Cmdline::parse("tsc=cpuid check=all").tsc_hpet);
+        assert!(!Cmdline::parse("check=all").check_timer);
+    }
+
+    #[test]
     fn unknown_values_are_ignored() {
-        let c = Cmdline::parse("test=0 panic=bogus foo");
+        let c = Cmdline::parse("test=0 panic=bogus foo tsc=bogus");
         assert_eq!(c, Cmdline::default());
     }
 }

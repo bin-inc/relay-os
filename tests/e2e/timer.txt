@@ -1,0 +1,8 @@
+# The 1 kHz tick against the CMOS clock: about 3000 ticks in three RTC
+# seconds. tsc=hpet takes the path QEMU takes without CPUID leaf 0x15 (the
+# TSC frequency measured against the HPET) whatever the host CPU offers.
+cmdline test=1 tsc=hpet check=timer
+timeout 30
+expect \[ ok \] timer: TSC \d+\.\d{3} MHz \(HPET\), 1000 Hz tick
+expect \[ ok \] rtc: 20\d\d-\d\d-\d\d \d\d:\d\d:\d\d UTC
+expect timer check: ok, \d+ ticks in 3 RTC seconds

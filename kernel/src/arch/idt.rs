@@ -1,6 +1,7 @@
-//! Interrupt descriptor table for the 32 CPU exceptions. Every exception is
-//! fatal in milestone 1: the entry stubs save all registers and call
-//! `exception_dispatch`, which draws the panic screen.
+//! Interrupt descriptor table. Every CPU exception is fatal in milestone 1:
+//! the entry stubs save all registers and call `exception_dispatch`, which
+//! draws the panic screen. Hardware interrupts have their own, returning
+//! stubs in `irq`.
 //!
 //! Entry stubs are naked functions (stable Rust), not the nightly-only
 //! `x86-interrupt` ABI.
@@ -199,20 +200,26 @@ extern "C" fn exception_dispatch(frame: &ExceptionFrame) -> ! {
     crate::panic_screen::exception(frame)
 }
 
+/// Gates for the 32 exceptions (double fault on its IST stack) and for
+/// every hardware interrupt vector, 32-255.
+fn gates(selector: u16) -> [Gate; 256] {
+    let mut gates = [Gate::MISSING; 256];
+    for (v, stub) in STUBS.iter().enumerate() {
+        let ist = if v == 8 {
+            super::gdt::DOUBLE_FAULT_IST
+        } else {
+            0
+        };
+        gates[v] = Gate::new(*stub as *const () as u64, selector, ist);
+    }
+    for v in super::irq::FIRST_VECTOR..=255 {
+        gates[v as usize] = Gate::new(super::irq::stub(v), selector, 0);
+    }
+    gates
+}
+
 pub fn init() {
-    let idt = IDT.call_once(|| {
-        let selector = CS::get_reg().0;
-        let mut gates = [Gate::MISSING; 256];
-        for (v, stub) in STUBS.iter().enumerate() {
-            let ist = if v == 8 {
-                super::gdt::DOUBLE_FAULT_IST
-            } else {
-                0
-            };
-            gates[v] = Gate::new(*stub as *const () as u64, selector, ist);
-        }
-        Idt(gates)
-    });
+    let idt = IDT.call_once(|| Idt(gates(CS::get_reg().0)));
     let ptr = DescriptorTablePointer {
         limit: (core::mem::size_of::<Idt>() - 1) as u16,
         base: VirtAddr::new(idt as *const Idt as u64),
@@ -242,6 +249,19 @@ mod tests {
         assert_eq!(core::mem::size_of::<ExceptionFrame>(), 22 * 8);
         assert_eq!(core::mem::offset_of!(ExceptionFrame, vector), 15 * 8);
         assert_eq!(core::mem::offset_of!(ExceptionFrame, rip), 17 * 8);
+    }
+
+    #[test]
+    fn every_vector_has_a_gate() {
+        let g = gates(0x08);
+        assert!(g.iter().all(|gate| gate.type_attr == 0x8E));
+        assert_eq!(g[8].ist, 1, "double fault on IST1");
+        assert_eq!(g[48].ist, 0);
+        let addr = |v: usize| {
+            g[v].offset_lo as u64 | (g[v].offset_mid as u64) << 16 | (g[v].offset_hi as u64) << 32
+        };
+        assert_eq!(addr(48), super::super::irq::stub(48));
+        assert_eq!(addr(255) - addr(254), 16);
     }
 
     #[test]
