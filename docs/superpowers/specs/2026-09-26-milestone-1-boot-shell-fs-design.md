@@ -877,3 +877,38 @@ Each step ends with something that can be tested.
      framebuffer (legend in `docs/hardware-test.md`), because the NUC has no
      serial port and the firmware console is unusable once the loader holds
      the display.
+8. **Decisions made while planning plan 2** (kernel core):
+   - **The kernel's linear map covers RAM only.** The kernel's own page
+     tables map RAM-type regions (usable, loader, ACPI) write-back and the
+     framebuffer write-combining. Everything else goes through `map_mmio`
+     (§5.3): device registers uncached, and ACPI tables that lie in reserved
+     memory write-back. Every physical page has at most one virtual address,
+     so two cache types can never alias.
+   - **The GDT and IDT load before the console** (§4.4 steps 1–2 swap
+     internally; the status lines keep their order). A fault before the
+     console starts still reaches the panic screen, which starts the console
+     itself.
+   - **Frames below 1 MiB are never allocated** (§5.1).
+   - **TSC frequency** (§4.4 step 5): CPUID leaf 0x15 when it reports the
+     crystal frequency. When leaf 0x15 has the ratio but no crystal, leaf
+     0x16's base frequency, as in Linux. Otherwise a measurement against the
+     HPET. The NUC reports 2496 MHz through leaf 0x15 (leaf 0x16 says 2500).
+     QEMU with KVM and `-cpu max` has no leaf 0x15, so QEMU measures. The
+     LAPIC timer is calibrated against the TSC.
+   - **The NUC has two xHCI controllers** (§2, §5.5). `00:0d.0`
+     (`8086:461e`, Thunderbolt 4, BAR `0x603D190000`) enumerates before
+     `00:14.0` (`8086:51ed`, BAR `0x603D180000`), which is the one with the
+     keyboard and the stick. PCI reports every xHCI controller. Plan 4
+     chooses the controller and enables memory decoding and bus mastering
+     on it.
+   - **The PCI device list goes to the kernel log** and serial. The screen
+     shows only the xHCI lines and a summary, because the NUC's terminal has
+     33 rows.
+   - **Every interrupt vector from 32 up has a gate.** An interrupt the
+     firmware left pending on an unused vector is counted and ended with an
+     EOI. One that fires 1000 times panics as an interrupt storm, naming the
+     vector. The LAPIC's other interrupt sources are masked, and interrupts
+     left in service are ended before interrupts are enabled.
+   - **New cmdline words:** `panic=early` (test), `tsc=hpet` (measure the
+     TSC against the HPET even when CPUID knows it) and `check=timer` (count
+     timer ticks over three RTC seconds at boot).

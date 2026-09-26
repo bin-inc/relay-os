@@ -2,7 +2,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`
 
-The milestone is split into six plans. Each one ends with software that can be tested by itself. Each plan is written just before it is executed, so it builds on the code that actually exists and on what the previous NUC check showed. Plan 1 is written in full; plans 2–6 are summarised here so their scope and order are agreed up front.
+The milestone is split into six plans. Each one ends with software that can be tested by itself. Each plan is written just before it is executed, so it builds on the code that actually exists and on what the previous NUC check showed. Plans 1 and 2 are written in full; plans 3–6 are summarised here so their scope and order are agreed up front.
 
 ```
 Plan 1 ──► Plan 2 ──► Plan 4 ──► Plan 5 ──► Plan 6
@@ -28,3 +28,13 @@ Plan 3 has no dependency on plans 1–2 beyond the workspace. It can be executed
 - **Interrupts (plan 2).** Plan 1 never enables interrupts. Plan 2 adds IRQ vectors 32+, masks the legacy PIC, and handles LAPIC EOI. The e2e scenarios gain a timer-tick check.
 - **Paths not covered by QEMU (plans 4–5).** 64-byte contexts, scratchpad buffers, BIOS handoff and SuperSpeed port reset only get host unit tests (against a fake register file) plus the NUC checks. Plan 4 must log each of these steps to `dmesg` in enough detail to debug from a photo of the screen.
 - **The e2e runner grows** with steps `key` (QMP `send-key`), `reboot` (relaunch on the same disk) and `poweroff`, plus a filesystem check after every scenario, when plans 4–5 need them.
+- **Two xHCI controllers on the NUC (plan 4).** `00:0d.0` (Thunderbolt 4) enumerates before `00:14.0` (PCH), and only `00:14.0` has the keyboard and the stick. Plan 2 reports both (`pci::devices()`, `PciDevice::is_xhci`). Plan 4 must choose a controller, for example the one with connected ports, instead of taking the first, and then call `pci::enable_memory_and_bus_master` on it.
+- **Services plan 2 leaves for later plans.** `mm::map_mmio` and the frame allocator (DMA buffers need a small `alloc_dma` on top in plan 4), `timer::{uptime, sleep, ticks}`, `rtc::now_unix`, and `acpi::get()` with the FADT reset and PM1 registers and `\_S5` (plan 5's `reboot` and `poweroff`). `klogln!` writes to the kernel log without the screen.
+- **Deferred findings from plan 1's final review (plan 6).**
+  - #5: the EDID comes from the first `EdidDiscovered` handle, not the GOP's own. Switching could lose native-mode detection on the NUC.
+  - #6: a `set_mode` error aborts boot with a misleading message instead of keeping the current mode.
+  - #7b: the cmdline limit is 256 bytes; the spec says at most 255.
+  - #9: the QMP abstract socket name is predictable (no access control on shared hosts).
+  - #11: the loader-rules test greps only `main.rs`, `video.rs` and `paging.rs`.
+
+  Plan 2 fixed #8 (early GDT/IDT) and #10 (QEMU start-up failures in the e2e runner).
