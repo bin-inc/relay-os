@@ -174,8 +174,9 @@ fn main() -> Status {
     mark(6);
 
     println!("relay-boot: starting kernel");
-    let final_map = unsafe { boot::exit_boot_services(None) };
     mark(7);
+    let final_map = unsafe { boot::exit_boot_services(None) };
+    mark(8);
     let regions =
         unsafe { core::slice::from_raw_parts_mut(regions_phys as *mut MemoryRegion, slots) };
     // No allocation from here on: the UEFI allocator is gone.
@@ -205,7 +206,7 @@ fn main() -> Status {
     };
     unsafe {
         core::ptr::write(info_phys as *mut BootInfo, info);
-        fb.mark_stage(fb.phys_addr, 8);
+        fb.mark_stage(fb.phys_addr, 9);
         x86_64::instructions::interrupts::disable();
         x86_64::registers::model_specific::Efer::update(|f| {
             f.insert(x86_64::registers::model_specific::EferFlags::NO_EXECUTE_ENABLE)

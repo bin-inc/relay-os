@@ -21,13 +21,13 @@ pub fn kernel_main(info: &'static BootInfo) -> ! {
         serial::write(b"relay: BootInfo magic/version mismatch; halting\n");
         arch::halt_forever();
     }
-    // Boot-progress squares 9-10 (1-8 are the loader's); console::init
+    // Boot-progress squares 10-11 (1-9 are the loader's); console::init
     // clears them once text output works.
     let fb = info.framebuffer;
     let mark = |stage| unsafe { fb.mark_stage(PHYS_OFFSET + fb.phys_addr, stage) };
-    mark(9);
-    serial::init();
     mark(10);
+    serial::init();
+    mark(11);
     console::init(&info.framebuffer);
     kprintln!("Relay OS {VERSION}");
     let (cols, rows) = console::size().unwrap_or((0, 0));
