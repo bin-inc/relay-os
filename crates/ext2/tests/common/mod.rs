@@ -356,3 +356,49 @@ pub fn debugfs_stat(img: &Path, path: &str) -> DebugfsStat {
         text,
     }
 }
+
+/// `dumpe2fs` (every group).
+pub fn dumpe2fs(path: &Path) -> String {
+    let out = run({
+        let mut c = tool("dumpe2fs");
+        c.arg(path);
+        c
+    });
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// A number from `dumpe2fs -h`.
+pub fn sb_field(path: &Path, key: &str) -> u64 {
+    field(&dumpe2fs_h(path), key).parse().unwrap()
+}
+
+/// A seeded splitmix64 generator, so random tests replay exactly.
+pub struct Rng(u64);
+
+impl Rng {
+    pub fn new(seed: u64) -> Rng {
+        Rng(seed)
+    }
+
+    pub fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// A number below `n` (which must not be 0).
+    pub fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+
+    /// True with probability `percent`/100.
+    pub fn chance(&mut self, percent: u64) -> bool {
+        self.below(100) < percent
+    }
+
+    pub fn bytes(&mut self, len: usize) -> Vec<u8> {
+        (0..len).map(|_| self.next() as u8).collect()
+    }
+}

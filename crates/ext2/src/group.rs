@@ -122,6 +122,7 @@ mod tests {
             reserved_gdt_blocks: 0,
             inode_table_blocks: 8,
             backups: crate::superblock::Backups::Sparse,
+            filetype: true,
         }
     }
 

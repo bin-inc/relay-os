@@ -11,6 +11,8 @@
 extern crate alloc;
 
 pub mod cache;
+mod dir;
+mod dirent;
 mod file;
 mod group;
 mod inode;
@@ -52,6 +54,7 @@ impl Default for MountOptions {
 pub struct Ext2<D: BlockDevice> {
     cache: BlockCache<D>,
     env: Box<dyn Env>,
+    sb: Superblock,
     geo: Geometry,
     groups: Groups,
     read_only: bool,
@@ -114,6 +117,7 @@ impl<D: BlockDevice> Ext2<D> {
         Ok(Ext2 {
             cache,
             env,
+            sb,
             geo,
             groups,
             read_only,
@@ -130,6 +134,20 @@ impl<D: BlockDevice> Ext2<D> {
     /// unwritten changes are dropped).
     pub fn into_device(self) -> D {
         self.cache.into_inner()
+    }
+
+    /// Like Linux's ext2: sizes without the metadata, and space reserved
+    /// for root is free but not available.
+    fn fs_stat(&self) -> StatFs {
+        let free = self.sb.free_blocks_count() as u64;
+        StatFs {
+            block_size: self.geo.block_size as u64,
+            blocks: (self.geo.blocks_count as u64).saturating_sub(self.geo.overhead()),
+            free_blocks: free,
+            avail_blocks: free.saturating_sub(self.sb.r_blocks_count() as u64),
+            files: self.geo.inodes_count as u64,
+            free_files: self.sb.free_inodes_count() as u64,
+        }
     }
 
     /// Logs corrupt metadata and gives the error to return for it.
@@ -173,12 +191,12 @@ impl<D: BlockDevice> FileSystem for Ext2<D> {
         self.inode_stat(ino)
     }
 
-    fn lookup(&mut self, _: Ino, _: &[u8]) -> Result<Ino, Errno> {
-        Err(Errno::EIO)
+    fn lookup(&mut self, dir: Ino, name: &[u8]) -> Result<Ino, Errno> {
+        self.dir_lookup(dir, name)
     }
 
-    fn read_dir(&mut self, _: Ino) -> Result<Vec<DirEntry>, Errno> {
-        Err(Errno::EIO)
+    fn read_dir(&mut self, dir: Ino) -> Result<Vec<DirEntry>, Errno> {
+        self.dir_list(dir)
     }
 
     fn read_link(&mut self, ino: Ino) -> Result<Vec<u8>, Errno> {
@@ -222,7 +240,7 @@ impl<D: BlockDevice> FileSystem for Ext2<D> {
     }
 
     fn statfs(&mut self) -> Result<StatFs, Errno> {
-        Err(Errno::EIO)
+        Ok(self.fs_stat())
     }
 
     fn sync(&mut self) -> Result<(), Errno> {

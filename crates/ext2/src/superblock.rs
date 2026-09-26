@@ -76,6 +76,9 @@ const RO_COMPAT_NAMES: &[(u32, &str)] = &[
 // Field offsets.
 const INODES_COUNT: usize = 0;
 const BLOCKS_COUNT: usize = 4;
+const R_BLOCKS_COUNT: usize = 8;
+const FREE_BLOCKS_COUNT: usize = 12;
+const FREE_INODES_COUNT: usize = 16;
 const FIRST_DATA_BLOCK: usize = 20;
 const LOG_BLOCK_SIZE: usize = 24;
 const BLOCKS_PER_GROUP: usize = 32;
@@ -110,6 +113,19 @@ impl Superblock {
 
     fn u16(&self, at: usize) -> u16 {
         u16_at(&self.raw, at)
+    }
+
+    /// Blocks reserved for root.
+    pub fn r_blocks_count(&self) -> u32 {
+        self.u32(R_BLOCKS_COUNT)
+    }
+
+    pub fn free_blocks_count(&self) -> u32 {
+        self.u32(FREE_BLOCKS_COUNT)
+    }
+
+    pub fn free_inodes_count(&self) -> u32 {
+        self.u32(FREE_INODES_COUNT)
     }
 
     pub fn state(&self) -> u16 {
@@ -157,6 +173,8 @@ pub struct Geometry {
     /// Blocks of each group's inode table.
     pub inode_table_blocks: u32,
     pub backups: Backups,
+    /// Directory entries carry a file type byte.
+    pub filetype: bool,
 }
 
 impl Geometry {
@@ -197,6 +215,16 @@ impl Geometry {
         } else {
             0
         }
+    }
+
+    /// Blocks holding metadata, as Linux counts them for `statfs`: the
+    /// blocks before the first group, superblock and descriptor copies,
+    /// bitmaps and inode tables (reserved descriptor blocks are not).
+    pub fn overhead(&self) -> u64 {
+        let copies = (0..self.groups).filter(|&g| self.has_super(g)).count() as u64;
+        self.first_data_block as u64
+            + copies * (1 + self.gdt_blocks as u64)
+            + self.groups as u64 * (2 + self.inode_table_blocks as u64)
     }
 }
 
@@ -286,6 +314,7 @@ pub fn check(sb: &Superblock, device_bytes: u64) -> Result<Geometry, String> {
         reserved_gdt_blocks: sb.u16(RESERVED_GDT_BLOCKS) as u32,
         inode_table_blocks: (ipg * inode_size).div_ceil(block_size),
         backups,
+        filetype: sb.u32(FEATURE_INCOMPAT) & INCOMPAT_FILETYPE != 0,
     })
 }
 
@@ -363,6 +392,10 @@ mod tests {
         assert_eq!(geo.group_blocks(2), 20000 - 16385);
         assert_eq!(geo.backups, Backups::All);
         assert_eq!(geo.super_blocks(2), 2);
+        assert!(geo.filetype);
+        // 1 block before group 0, 3 × (superblock + descriptors), 3 × (two
+        // bitmaps + 128 inode table blocks).
+        assert_eq!(geo.overhead(), 1 + 3 * 2 + 3 * 130);
     }
 
     #[test]
