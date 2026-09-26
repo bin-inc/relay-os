@@ -18,6 +18,7 @@ const SIZE: usize = 4;
 const ATIME: usize = 8;
 const CTIME: usize = 12;
 const MTIME: usize = 16;
+const DTIME: usize = 20;
 const GID: usize = 24;
 const LINKS: usize = 26;
 const BLOCKS: usize = 28;
@@ -219,6 +220,11 @@ impl Inode {
         self.set_time(MTIME, MTIME_EXTRA, t);
     }
 
+    /// The deletion time; it has no extra field.
+    pub fn set_dtime(&mut self, t: u32) {
+        set_u32(&mut self.raw, DTIME, t);
+    }
+
     /// A change to the data: mtime and ctime become `t`.
     pub fn touch(&mut self, t: u32) {
         self.set_mtime(t);
@@ -242,6 +248,10 @@ impl Inode {
     /// The extended attribute block, 0 if none.
     pub fn file_acl(&self) -> u32 {
         self.u32(FILE_ACL)
+    }
+
+    pub fn set_file_acl(&mut self, block: u32) {
+        set_u32(&mut self.raw, FILE_ACL, block);
     }
 
     /// A symlink whose target lives in `i_block`: it has no blocks but an

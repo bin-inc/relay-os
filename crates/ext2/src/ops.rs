@@ -1,4 +1,5 @@
-//! Namespace changes (spec §8.2): creating files and directories.
+//! Namespace changes (spec §8.2): creating and removing files and
+//! directories.
 
 use crate::Ext2;
 use crate::dirent;
@@ -69,5 +70,46 @@ impl<D: BlockDevice> Ext2<D> {
             inode.set_size(self.geo.block_size as u64);
         }
         self.add_entry(parent, name, inode.ino, kind)
+    }
+
+    /// Drops one link of a non-directory, freeing it with the last.
+    fn drop_link(&mut self, inode: &mut Inode) -> Result<(), Errno> {
+        inode.set_links(inode.links().saturating_sub(1));
+        inode.set_ctime(self.now());
+        if inode.links() == 0 {
+            self.release_inode(inode)
+        } else {
+            self.write_inode(inode)
+        }
+    }
+
+    pub(crate) fn remove_file(&mut self, dir: Ino, name: &[u8]) -> Result<(), Errno> {
+        let mut parent = self.dir_for_change(dir, name)?;
+        let found = self.find_entry(&parent, name)?.ok_or(Errno::ENOENT)?;
+        let mut inode = self.entry_inode(&parent, &found)?;
+        if inode.kind() == Some(FileType::Directory) {
+            return Err(Errno::EISDIR);
+        }
+        self.remove_entry(&mut parent, &found)?;
+        self.write_inode(&parent)?;
+        self.drop_link(&mut inode)
+    }
+
+    pub(crate) fn remove_dir(&mut self, dir: Ino, name: &[u8]) -> Result<(), Errno> {
+        let mut parent = self.dir_for_change(dir, name)?;
+        let found = self.find_entry(&parent, name)?.ok_or(Errno::ENOENT)?;
+        let mut inode = self.entry_inode(&parent, &found)?;
+        if inode.kind() != Some(FileType::Directory) {
+            return Err(Errno::ENOTDIR);
+        }
+        if !self.dir_is_empty(&inode)? {
+            return Err(Errno::ENOTEMPTY);
+        }
+        self.remove_entry(&mut parent, &found)?;
+        // Its `..` no longer counts.
+        parent.set_links(parent.links().saturating_sub(1));
+        self.write_inode(&parent)?;
+        inode.set_ctime(self.now());
+        self.release_inode(&mut inode)
     }
 }

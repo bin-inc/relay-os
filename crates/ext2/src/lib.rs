@@ -258,7 +258,7 @@ fn read_groups<D: BlockDevice>(cache: &mut BlockCache<D>, geo: &Geometry) -> Res
     Ok(Groups::new(raw, geo.groups))
 }
 
-/// Removing and renaming come later; until then they are `EROFS`.
+/// Renaming comes later; until then it is `EROFS`.
 impl<D: BlockDevice> FileSystem for Ext2<D> {
     fn root(&self) -> Ino {
         superblock::ROOT_INO as Ino
@@ -304,12 +304,12 @@ impl<D: BlockDevice> FileSystem for Ext2<D> {
         self.make(dir, name, FileType::Directory)
     }
 
-    fn unlink(&mut self, _: Ino, _: &[u8]) -> Result<(), Errno> {
-        Err(Errno::EROFS)
+    fn unlink(&mut self, dir: Ino, name: &[u8]) -> Result<(), Errno> {
+        self.remove_file(dir, name)
     }
 
-    fn rmdir(&mut self, _: Ino, _: &[u8]) -> Result<(), Errno> {
-        Err(Errno::EROFS)
+    fn rmdir(&mut self, dir: Ino, name: &[u8]) -> Result<(), Errno> {
+        self.remove_dir(dir, name)
     }
 
     fn rename(&mut self, _: Ino, _: &[u8], _: Ino, _: &[u8]) -> Result<(), Errno> {

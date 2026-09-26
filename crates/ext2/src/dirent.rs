@@ -108,6 +108,15 @@ pub fn insert(block: &mut [u8], at: Entry, name: &[u8], inode: u32, file_type: O
     }
 }
 
+/// Removes `entry` from `block`: its record joins the previous entry's in
+/// the block, or, first in the block, it just becomes unused.
+pub fn remove(block: &mut [u8], entry: Entry, prev: Option<Entry>) {
+    match prev {
+        Some(prev) => set_rec_len(block, prev.offset, prev.rec_len + entry.rec_len),
+        None => set_u32(block, entry.offset, 0),
+    }
+}
+
 /// Makes `block` an empty directory block: one unused entry covering it.
 pub fn init_empty(block: &mut [u8]) {
     block.fill(0);
@@ -355,5 +364,20 @@ mod tests {
         assert_eq!(type_byte(FileType::Regular), 1);
         assert_eq!(type_byte(FileType::Directory), 2);
         assert_eq!(type_byte(FileType::Symlink), 7);
+    }
+
+    #[test]
+    fn removed_entries_merge_into_the_previous_one() {
+        let mut b = block(&[(12, 12, b"a"), (13, 12, b"b"), (14, 40, b"c")], true);
+        let e = parse(&b, true, 100).unwrap();
+        remove(&mut b, e[1], Some(e[0]));
+        let e = parse(&b, true, 100).unwrap();
+        assert_eq!(e.len(), 2);
+        assert_eq!((e[0].rec_len, e[1].name(&b)), (24, &b"c"[..]));
+        // The first entry of a block has nothing to merge into.
+        remove(&mut b, e[0], None);
+        let e = parse(&b, true, 100).unwrap();
+        assert_eq!((e[0].inode, e[0].rec_len), (0, 24));
+        assert_eq!(room(&e, 12).map(|e| e.offset), Some(0), "reusable");
     }
 }

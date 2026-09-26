@@ -4,7 +4,12 @@
 
 use crate::Ext2;
 use crate::bitmap;
-use vfs::{BlockDevice, Errno};
+use crate::inode::Inode;
+use crate::le::{set_u32, u32_at};
+use vfs::{BlockDevice, Errno, FileType};
+
+/// `h_magic` of an extended attribute block.
+const EA_MAGIC: u32 = 0xEA02_0000;
 
 impl<D: BlockDevice> Ext2<D> {
     /// The group holding block `block` and its index there.
@@ -146,6 +151,63 @@ impl<D: BlockDevice> Ext2<D> {
         }
         bitmap::clear(self.cache.write(bitmap)?, i);
         self.count_free_inodes(g, 1, dir);
+        Ok(())
+    }
+
+    /// Frees an inode that lost its last link, and what it owns: its data
+    /// blocks, its extended attribute block, its bitmap bit. Fast symlinks
+    /// and device nodes keep other things than block pointers in
+    /// `i_block`, which is left alone. The inode stays as Linux leaves it:
+    /// no links, dtime set.
+    pub(crate) fn release_inode(&mut self, inode: &mut Inode) -> Result<(), Errno> {
+        let kind = inode.kind();
+        let pointers = match kind {
+            Some(FileType::Regular | FileType::Directory) => true,
+            Some(FileType::Symlink) => !inode.is_fast_symlink(self.geo.block_size),
+            _ => false,
+        };
+        let result = if pointers {
+            self.free_from(inode, 0)
+        } else {
+            Ok(())
+        };
+        if result.is_ok() {
+            self.release_ea_block(inode)?;
+            inode.set_size(0);
+        }
+        inode.set_links(0);
+        inode.set_dtime(self.now());
+        self.write_inode(inode)?;
+        result?;
+        self.free_inode(inode.ino, kind == Some(FileType::Directory))
+    }
+
+    /// Drops `inode`'s reference to its extended attribute block, freeing
+    /// the block with its last user (`mke2fs` enables `ext_attr` by
+    /// default, so foreign images have them).
+    fn release_ea_block(&mut self, inode: &mut Inode) -> Result<(), Errno> {
+        let block = inode.file_acl();
+        if block == 0 {
+            return Ok(());
+        }
+        if self.bad_block(block) {
+            self.log(format_args!("inode {}: bad EA block {block}", inode.ino));
+        } else {
+            let data = self.cache.read(block as u64)?;
+            let (magic, refs) = (u32_at(data, 0), u32_at(data, 4));
+            if magic != EA_MAGIC {
+                self.log(format_args!(
+                    "inode {}: EA block {block} is corrupt",
+                    inode.ino
+                ));
+            } else if refs > 1 {
+                set_u32(self.cache.write(block as u64)?, 4, refs - 1);
+            } else {
+                self.free_block(block)?;
+            }
+        }
+        inode.set_file_acl(0);
+        inode.add_blocks(self.geo.block_size, -1);
         Ok(())
     }
 }
