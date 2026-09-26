@@ -60,6 +60,22 @@ impl Groups {
             ),
         ]
     }
+
+    /// Whether `block` holds metadata: a superblock or descriptor copy
+    /// (reserved descriptor blocks included), a bitmap or an inode table,
+    /// or lies before the first group. No data or indirect block does, so a
+    /// block pointer to one is corrupt.
+    pub fn is_metadata(&self, geo: &Geometry, block: u32) -> bool {
+        let Some(rel) = block.checked_sub(geo.first_data_block) else {
+            return true;
+        };
+        let g = rel / geo.blocks_per_group;
+        g < self.count
+            && self
+                .metadata(geo, g)
+                .iter()
+                .any(|&(first, len, _)| (first..first + len).contains(&(block as u64)))
+    }
 }
 
 /// Checks that every group's superblock copy, bitmaps and inode table lie
@@ -96,8 +112,11 @@ mod tests {
         Geometry {
             block_size: 1024,
             blocks_count: 181,
+            inodes_count: 64,
             first_data_block: 1,
             blocks_per_group: 100,
+            inodes_per_group: 32,
+            inode_size: 256,
             groups: 2,
             gdt_blocks: 1,
             reserved_gdt_blocks: 0,
@@ -164,5 +183,17 @@ mod tests {
         for (descs, reason) in bad {
             assert_eq!(check(&table(&descs), &geo()), Err(reason.into()));
         }
+    }
+
+    #[test]
+    fn metadata_blocks_are_known() {
+        let t = table(&[[3, 4, 5], [103, 104, 105]]);
+        let geo = geo();
+        let meta: Vec<u32> = (0..181).filter(|&b| t.is_metadata(&geo, b)).collect();
+        let mut want = vec![0, 1, 2, 3, 4];
+        want.extend(5..13);
+        want.extend([101, 102, 103, 104]);
+        want.extend(105..113);
+        assert_eq!(meta, want);
     }
 }

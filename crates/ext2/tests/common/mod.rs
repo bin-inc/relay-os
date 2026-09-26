@@ -313,3 +313,46 @@ pub fn peek(path: &Path, offset: u64, len: usize) -> Vec<u8> {
     f.read_exact_at(&mut buf, offset).unwrap();
     buf
 }
+
+/// The fields of `debugfs -R "stat <path>"`.
+#[derive(Debug)]
+pub struct DebugfsStat {
+    pub ino: u64,
+    pub mode: u16,
+    pub uid: u32,
+    pub gid: u32,
+    pub size: u64,
+    pub links: u32,
+    pub blockcount: u64,
+    pub mtime: u64,
+    /// The text, for other fields.
+    pub text: String,
+}
+
+/// `debugfs -R "stat <path>"`, parsed.
+pub fn debugfs_stat(img: &Path, path: &str) -> DebugfsStat {
+    let text = debugfs(img, &format!("stat \"{path}\""));
+    // The first value after `key:` on any line.
+    let value = |key: &str| -> String {
+        let at = text
+            .find(&format!("{key}:"))
+            .unwrap_or_else(|| panic!("no {key} for {path}: {text}"));
+        let rest = &text[at + key.len() + 1..];
+        rest.split_whitespace().next().unwrap().to_string()
+    };
+    let number = |key: &str| -> u64 { value(key).parse().unwrap() };
+    let mtime = value("mtime");
+    let mtime = mtime.trim_start_matches("0x");
+    let mtime = mtime.split(':').next().unwrap();
+    DebugfsStat {
+        ino: number("Inode"),
+        mode: u16::from_str_radix(&value("Mode"), 8).unwrap(),
+        uid: number("User") as u32,
+        gid: number("Group") as u32,
+        size: number("Size"),
+        links: number("Links") as u32,
+        blockcount: number("Blockcount"),
+        mtime: u64::from_str_radix(mtime, 16).unwrap(),
+        text,
+    }
+}

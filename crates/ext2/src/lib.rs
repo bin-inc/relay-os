@@ -11,7 +11,9 @@
 extern crate alloc;
 
 pub mod cache;
+mod file;
 mod group;
+mod inode;
 mod le;
 mod superblock;
 
@@ -49,6 +51,9 @@ impl Default for MountOptions {
 /// A mounted ext2 filesystem on a block device.
 pub struct Ext2<D: BlockDevice> {
     cache: BlockCache<D>,
+    env: Box<dyn Env>,
+    geo: Geometry,
+    groups: Groups,
     read_only: bool,
 }
 
@@ -106,7 +111,13 @@ impl<D: BlockDevice> Ext2<D> {
                 format_args!("warning: filesystem has errors, run e2fsck"),
             );
         }
-        Ok(Ext2 { cache, read_only })
+        Ok(Ext2 {
+            cache,
+            env,
+            geo,
+            groups,
+            read_only,
+        })
     }
 
     /// Whether changes are refused: mounted read-only, fallen back to
@@ -119,6 +130,12 @@ impl<D: BlockDevice> Ext2<D> {
     /// unwritten changes are dropped).
     pub fn into_device(self) -> D {
         self.cache.into_inner()
+    }
+
+    /// Logs corrupt metadata and gives the error to return for it.
+    pub(crate) fn corrupt(&self, what: fmt::Arguments<'_>) -> Errno {
+        log(&*self.env, what);
+        Errno::EIO
     }
 }
 
@@ -146,15 +163,14 @@ fn read_groups<D: BlockDevice>(cache: &mut BlockCache<D>, geo: &Geometry) -> Res
     Ok(Groups::new(raw, geo.groups))
 }
 
-/// Reading arrives first; until then every operation fails and every
-/// change is `EROFS`.
+/// Only reading so far: every change is `EROFS`.
 impl<D: BlockDevice> FileSystem for Ext2<D> {
     fn root(&self) -> Ino {
         superblock::ROOT_INO as Ino
     }
 
-    fn stat(&mut self, _: Ino) -> Result<Stat, Errno> {
-        Err(Errno::EIO)
+    fn stat(&mut self, ino: Ino) -> Result<Stat, Errno> {
+        self.inode_stat(ino)
     }
 
     fn lookup(&mut self, _: Ino, _: &[u8]) -> Result<Ino, Errno> {
@@ -165,12 +181,12 @@ impl<D: BlockDevice> FileSystem for Ext2<D> {
         Err(Errno::EIO)
     }
 
-    fn read_link(&mut self, _: Ino) -> Result<Vec<u8>, Errno> {
-        Err(Errno::EIO)
+    fn read_link(&mut self, ino: Ino) -> Result<Vec<u8>, Errno> {
+        self.link_target(ino)
     }
 
-    fn read_at(&mut self, _: Ino, _: u64, _: &mut [u8]) -> Result<usize, Errno> {
-        Err(Errno::EIO)
+    fn read_at(&mut self, ino: Ino, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+        self.file_read(ino, offset, buf)
     }
 
     fn write_at(&mut self, _: Ino, _: u64, _: &[u8]) -> Result<usize, Errno> {

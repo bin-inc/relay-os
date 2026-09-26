@@ -143,8 +143,11 @@ pub enum Backups {
 pub struct Geometry {
     pub block_size: usize,
     pub blocks_count: u32,
+    pub inodes_count: u32,
     pub first_data_block: u32,
     pub blocks_per_group: u32,
+    pub inodes_per_group: u32,
+    pub inode_size: u32,
     pub groups: u32,
     /// Blocks of the group descriptor table.
     pub gdt_blocks: u32,
@@ -273,8 +276,11 @@ pub fn check(sb: &Superblock, device_bytes: u64) -> Result<Geometry, String> {
     Ok(Geometry {
         block_size: block_size as usize,
         blocks_count: blocks,
+        inodes_count: inodes,
         first_data_block,
         blocks_per_group: bpg,
+        inodes_per_group: ipg,
+        inode_size,
         groups,
         gdt_blocks: gdt_blocks as u32,
         reserved_gdt_blocks: sb.u16(RESERVED_GDT_BLOCKS) as u32,
