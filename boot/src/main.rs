@@ -86,7 +86,10 @@ fn load_kernel(file: &[u8], tables: &mut paging::Tables) -> (u64, u64, u64) {
     };
     let (vstart, vend) = k.span();
     let pages = ((vend - vstart) / 4096) as usize;
-    let base = alloc_pages(MemoryType::custom(UEFI_KERNEL_MEMORY_TYPE), pages) as u64;
+    // Standard LOADER_DATA, like the Linux EFI stub: with an OS-defined memory
+    // type the NUC 12 firmware never returned from ExitBootServices. The
+    // kernel's exact range is passed in BootInfo::kernel_phys_*.
+    let base = alloc_pages(MemoryType::LOADER_DATA, pages) as u64;
     for s in k.segments() {
         let dst = (base + (s.vaddr - vstart)) as *mut u8;
         let src = &file[s.file_offset as usize..(s.file_offset + s.file_size) as usize];

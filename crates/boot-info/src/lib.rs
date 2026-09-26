@@ -18,8 +18,6 @@ pub const PHYS_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 pub const KERNEL_STACK_BOTTOM: u64 = 0xFFFF_FE00_0000_1000;
 pub const KERNEL_STACK_SIZE: u64 = 64 * 1024;
 pub const KERNEL_STACK_TOP: u64 = KERNEL_STACK_BOTTOM + KERNEL_STACK_SIZE;
-/// UEFI memory type (OS-defined range) the loader uses for kernel pages.
-pub const UEFI_KERNEL_MEMORY_TYPE: u32 = 0x8000_5245;
 
 pub const CMDLINE_MAX: usize = 256;
 
@@ -102,6 +100,8 @@ pub enum MemoryKind {
     AcpiNvs = 4,
     Reserved = 5,
     Mmio = 6,
+    /// Not produced by relay-boot: the kernel image is reported as
+    /// `Bootloader`, and `BootInfo::kernel_phys_*` gives its exact range.
     Kernel = 7,
 }
 

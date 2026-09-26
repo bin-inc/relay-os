@@ -13,16 +13,19 @@ mod tests {
     /// later ExitBootServices never returns. Like the Linux EFI stub, the
     /// loader only uses non-exclusive GET_PROTOCOL opens (`proto::get`).
     #[test]
-    fn loader_never_opens_firmware_protocols_exclusively() {
+    fn loader_avoids_firmware_features_linux_does_not_use() {
         for (file, src) in [
             ("main.rs", include_str!("main.rs")),
             ("video.rs", include_str!("video.rs")),
             ("paging.rs", include_str!("paging.rs")),
         ] {
+            // OS-defined memory types (0x8000_0000+) are legal but never used
+            // by the Linux EFI stub; the loader sticks to standard types.
             for banned in [
                 "open_protocol_exclusive",
                 "get_image_file_system",
                 "Exclusive",
+                "MemoryType::custom",
             ] {
                 assert!(!src.contains(banned), "{file} uses {banned}");
             }
