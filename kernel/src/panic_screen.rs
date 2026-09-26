@@ -20,6 +20,7 @@ fn begin(tail: &mut [u8]) -> usize {
         arch::halt_forever();
     }
     unsafe { console::force_unlock() };
+    console::init_if_needed();
     let n = klog::KLOG.lock().tail_lines(TAIL_LINES, tail);
     kprint!("\x1b[0m\x1b[97;41m\x1b[2J\x1b[H");
     kprintln!("*** KERNEL PANIC ***");

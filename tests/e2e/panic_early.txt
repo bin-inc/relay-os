@@ -1,0 +1,10 @@
+# A fault before the console exists still reaches the panic screen: the
+# kernel loads its own GDT and IDT first, and the panic path starts the
+# console itself (the NUC has no serial port to fall back on).
+cmdline test=1 panic=early
+timeout 30
+expect triggering Early
+expect KERNEL PANIC
+expect CPU exception 14: page fault \(error code 0x0\)
+expect System halted
+screenshot-nonblank
