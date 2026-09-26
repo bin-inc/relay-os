@@ -1,0 +1,14 @@
+[package]
+name = "relay-boot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Pure, host-testable logic lives in the library. The UEFI application (the
+# binary) is added in a later task and only builds for x86_64-unknown-uefi.
+[lib]
+name = "relay_boot"
+path = "src/lib.rs"
+
+[dependencies]
+boot-info.workspace = true
