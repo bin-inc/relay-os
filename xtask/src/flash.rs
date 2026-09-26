@@ -13,11 +13,22 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub struct Stick {
-    /// Whole-disk device, e.g. /dev/sda.
+    /// Whole-disk device the by-id link resolved to, e.g. /dev/sda. Used only
+    /// for the sysfs and mount checks; tools are given `Stick::target()`.
     pub dev: PathBuf,
     /// Kernel name, e.g. sda.
     pub name: String,
     pub bytes: u64,
+}
+
+impl Stick {
+    /// What every tool opens: the serial-pinned by-id link, resolved by the
+    /// kernel on each open. If the stick is pulled, the link disappears and
+    /// the tool fails; another disk that inherits the /dev/sdX name is never
+    /// reachable through it.
+    pub fn target() -> &'static Path {
+        Path::new(USB_BY_ID)
+    }
 }
 
 /// Facts about a block device, read from sysfs; split out so the safety
@@ -114,7 +125,7 @@ fn ensure_access(stick: &Stick, write: bool) -> Result<()> {
     match fs::OpenOptions::new()
         .read(true)
         .write(write)
-        .open(&stick.dev)
+        .open(Stick::target())
     {
         Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => bail!(
@@ -134,9 +145,9 @@ pub fn flash_kernel(art: &Artifacts, cmdline: &str) -> Result<()> {
     let stick = resolve()?;
     unmount_all(&stick)?;
     ensure_access(&stick, true)?;
-    let layout = image::read_layout(&stick.dev)
+    let layout = image::read_layout(Stick::target())
         .context("stick has no Relay OS layout; run `cargo xtask flash --full` first")?;
-    image::write_esp(&stick.dev, layout.esp, art, cmdline, false)?;
+    image::write_esp(Stick::target(), layout.esp, art, cmdline, false)?;
     sync()?;
     println!(
         "updated loader and kernel on {} ({})",
@@ -164,19 +175,21 @@ pub fn flash_full(art: &Artifacts, cmdline: &str, yes: bool) -> Result<()> {
             bail!("aborted");
         }
     }
+    // The prompt can wait indefinitely: check everything again before writing.
+    let stick = resolve()?;
     unmount_all(&stick)?;
     ensure_access(&stick, true)?;
-    image::partition(&stick.dev, false)?;
-    let layout = image::read_layout(&stick.dev)?;
-    image::write_esp(&stick.dev, layout.esp, art, cmdline, true)?;
+    image::partition(Stick::target(), false)?;
+    let layout = image::read_layout(Stick::target())?;
+    image::write_esp(Stick::target(), layout.esp, art, cmdline, true)?;
     let staging = image::stage_rootfs()?;
     println!(
         "creating ext2 on {:.1} GB (takes a minute)...",
         layout.root.bytes() as f64 / 1e9
     );
-    image::make_ext2(&stick.dev, layout.root, &staging)?;
+    image::make_ext2(Stick::target(), layout.root, &staging)?;
     sync()?;
-    image::fsck(&stick.dev, layout.root)?;
+    image::fsck(Stick::target(), layout.root)?;
     println!(
         "done. Linux still sees the old partition table: replug the stick before mounting it."
     );
@@ -223,11 +236,11 @@ fn list_tree(target: &str, dir: &str, out: &mut Vec<String>) -> Result<()> {
 pub fn verify_usb() -> Result<()> {
     let stick = resolve()?;
     ensure_access(&stick, false)?;
-    let Layout { root, .. } = image::read_layout(&stick.dev)?;
-    image::fsck(&stick.dev, root).context("filesystem check FAILED")?;
+    let Layout { root, .. } = image::read_layout(Stick::target())?;
+    image::fsck(Stick::target(), root).context("filesystem check FAILED")?;
     println!("e2fsck: clean");
     let mut lines = Vec::new();
-    list_tree(&e2fs_target(&stick.dev, root), "/", &mut lines)?;
+    list_tree(&e2fs_target(Stick::target(), root), "/", &mut lines)?;
     for l in lines {
         println!("{l}");
     }
@@ -283,6 +296,25 @@ mod tests {
                 ("/dev/sda1".to_string(), "/media/maw/RELAYESP".to_string()),
             ]
         );
+    }
+
+    /// Tools open the stick through the serial-pinned by-id link on every
+    /// run, so a disk that inherits the stick's /dev/sdX name (stick pulled
+    /// during the ERASE prompt) can never be written.
+    #[test]
+    fn tools_address_the_stick_by_id_not_by_dev_name() {
+        let src = include_str!("flash.rs");
+        let code = &src[..src.find("#[cfg(test)]").unwrap()];
+        for call in ["image::", "e2fs_target("] {
+            for line in code.lines().filter(|l| l.contains(call)) {
+                assert!(
+                    !line.contains("stick.dev"),
+                    "uses /dev/sdX: {}",
+                    line.trim()
+                );
+            }
+        }
+        assert_eq!(Stick::target(), std::path::Path::new(USB_BY_ID));
     }
 
     #[test]
