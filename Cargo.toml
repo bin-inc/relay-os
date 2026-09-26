@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = ["crates/boot-info"]
+default-members = ["crates/boot-info"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+boot-info = { path = "crates/boot-info" }
+term = { path = "crates/term" }
+uefi = { version = "0.41", default-features = false }
+x86_64 = { version = "0.15.5", default-features = false, features = ["instructions"] }
+bitflags = "2"
+spin = { version = "0.12", default-features = false, features = ["mutex", "spin_mutex", "once"] }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+# The profile used for everything that runs on the target: optimised, but with
+# debug assertions and overflow checks so kernel bugs reach the panic screen.
+[profile.relay]
+inherits = "release"
+debug = true
+debug-assertions = true
+overflow-checks = true
