@@ -10,6 +10,8 @@
 
 extern crate alloc;
 
+mod allocator;
+mod bitmap;
 pub mod cache;
 mod dir;
 mod dirent;
@@ -175,17 +177,32 @@ impl<D: BlockDevice> Ext2<D> {
         Ok(())
     }
 
+    /// Writes the group descriptor table (the primary copy) into the cache
+    /// if it changed.
+    fn write_groups(&mut self) -> Result<(), Errno> {
+        if !self.groups.is_dirty() {
+            return Ok(());
+        }
+        let bs = self.geo.block_size;
+        for (i, chunk) in self.groups.raw().chunks_exact(bs).enumerate() {
+            let block = self.geo.first_data_block as u64 + 1 + i as u64;
+            self.cache.zeroed(block)?.copy_from_slice(chunk);
+        }
+        self.groups.set_clean();
+        Ok(())
+    }
+
     /// Writes every change to the device and flushes it. A write error is
     /// logged (it reaches `dmesg`); the failed blocks stay dirty for the
     /// next try.
     fn flush(&mut self) -> Result<(), Errno> {
-        let result = self.write_super().and_then(|()| self.cache.sync());
+        let result = self
+            .write_groups()
+            .and_then(|()| self.write_super())
+            .and_then(|()| self.cache.sync());
         if result.is_err() {
             let left = self.cache.dirty_blocks();
-            log(
-                &*self.env,
-                format_args!("write error, {left} blocks not written"),
-            );
+            self.log(format_args!("write error, {left} blocks not written"));
         }
         result
     }
@@ -204,9 +221,14 @@ impl<D: BlockDevice> Ext2<D> {
         }
     }
 
+    /// Logs `ext2: <what>`.
+    pub(crate) fn log(&self, what: fmt::Arguments<'_>) {
+        log(&*self.env, what);
+    }
+
     /// Logs corrupt metadata and gives the error to return for it.
     pub(crate) fn corrupt(&self, what: fmt::Arguments<'_>) -> Errno {
-        log(&*self.env, what);
+        self.log(what);
         Errno::EIO
     }
 }
@@ -235,7 +257,7 @@ fn read_groups<D: BlockDevice>(cache: &mut BlockCache<D>, geo: &Geometry) -> Res
     Ok(Groups::new(raw, geo.groups))
 }
 
-/// Only reading so far: every change is `EROFS`.
+/// Namespace changes come later; until then they are `EROFS`.
 impl<D: BlockDevice> FileSystem for Ext2<D> {
     fn root(&self) -> Ino {
         superblock::ROOT_INO as Ino
@@ -261,16 +283,16 @@ impl<D: BlockDevice> FileSystem for Ext2<D> {
         self.file_read(ino, offset, buf)
     }
 
-    fn write_at(&mut self, _: Ino, _: u64, _: &[u8]) -> Result<usize, Errno> {
-        Err(Errno::EROFS)
+    fn write_at(&mut self, ino: Ino, offset: u64, buf: &[u8]) -> Result<usize, Errno> {
+        self.file_write(ino, offset, buf)
     }
 
-    fn truncate(&mut self, _: Ino, _: u64) -> Result<(), Errno> {
-        Err(Errno::EROFS)
+    fn truncate(&mut self, ino: Ino, size: u64) -> Result<(), Errno> {
+        self.file_truncate(ino, size)
     }
 
-    fn touch(&mut self, _: Ino) -> Result<(), Errno> {
-        Err(Errno::EROFS)
+    fn touch(&mut self, ino: Ino) -> Result<(), Errno> {
+        self.inode_touch(ino)
     }
 
     fn create(&mut self, _: Ino, _: &[u8]) -> Result<Ino, Errno> {

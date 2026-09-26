@@ -161,6 +161,10 @@ impl Superblock {
         self.u32(FREE_BLOCKS_COUNT)
     }
 
+    pub fn set_free_blocks_count(&mut self, n: u32) {
+        self.set_u32(FREE_BLOCKS_COUNT, n);
+    }
+
     pub fn free_inodes_count(&self) -> u32 {
         self.u32(FREE_INODES_COUNT)
     }
@@ -194,6 +198,10 @@ impl Superblock {
 
     pub fn feature_ro_compat(&self) -> u32 {
         self.u32(FEATURE_RO_COMPAT)
+    }
+
+    pub fn set_feature_ro_compat(&mut self, bits: u32) {
+        self.set_u32(FEATURE_RO_COMPAT, bits);
     }
 
     /// The ro_compat features this driver cannot keep consistent, which

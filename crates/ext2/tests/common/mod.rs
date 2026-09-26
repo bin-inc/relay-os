@@ -402,3 +402,44 @@ impl Rng {
         (0..len).map(|_| self.next() as u8).collect()
     }
 }
+
+/// Runs a `debugfs` script (one command per line) and gives the output
+/// lines that are not command echoes.
+pub fn debugfs_script(img: &Path, script: &str) -> Vec<String> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = tool("debugfs")
+        .arg("-f")
+        .arg("-")
+        .arg(img)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.starts_with("debugfs"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The physical blocks `debugfs` maps logical blocks `lbs` of `path` to
+/// (0 for a hole).
+pub fn bmap(img: &Path, path: &str, lbs: &[u64]) -> Vec<u64> {
+    let script: String = lbs
+        .iter()
+        .map(|lb| format!("bmap \"{path}\" {lb}\n"))
+        .collect();
+    let out = debugfs_script(img, &script);
+    assert_eq!(out.len(), lbs.len(), "{out:?}");
+    out.iter().map(|l| l.trim().parse().unwrap()).collect()
+}
