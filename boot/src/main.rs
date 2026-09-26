@@ -13,6 +13,7 @@ mod video;
 
 use alloc::vec::Vec;
 use boot_info::*;
+use core::sync::atomic::{AtomicBool, Ordering};
 use relay_boot::{cmdline as cmdline_text, elf, memmap};
 use uefi::boot::{self, AllocateType, MemoryType};
 use uefi::mem::memory_map::MemoryMap;
@@ -29,6 +30,26 @@ const KERNEL_PATH: &CStr16 = cstr16!("\\EFI\\RELAY\\kernel.elf");
 const CMDLINE_PATH: &CStr16 = cstr16!("\\EFI\\RELAY\\cmdline");
 /// Spare memory-map slots for descriptors created by our own allocations.
 const MMAP_SLACK: usize = 64;
+
+/// Set just before ExitBootServices; from then on the firmware console is gone.
+static BOOT_SERVICES_EXITED: AtomicBool = AtomicBool::new(false);
+
+/// Prints the message while the firmware console still works, then halts.
+/// It never resets or powers off: the `uefi` crate's handler shut the machine
+/// down after 10 s, taking the message with it.
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    if !BOOT_SERVICES_EXITED.load(Ordering::SeqCst) {
+        println!("[PANIC] relay-boot: {}", info.message());
+        if let Some(loc) = info.location() {
+            println!("  at {}:{}", loc.file(), loc.line());
+        }
+        println!("relay-boot: System halted. Hold the power button to turn the machine off.");
+    }
+    loop {
+        x86_64::instructions::hlt();
+    }
+}
 
 fn alloc_pages(ty: MemoryType, count: usize) -> *mut u8 {
     let p = boot::allocate_pages(AllocateType::AnyPages, ty, count).expect("out of memory");
@@ -186,6 +207,7 @@ fn main() -> Status {
 
     println!("relay-boot: starting kernel");
     mark(7);
+    BOOT_SERVICES_EXITED.store(true, Ordering::SeqCst);
     let final_map = unsafe { boot::exit_boot_services(None) };
     mark(8);
     let regions =

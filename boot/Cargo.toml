@@ -19,5 +19,5 @@ test = false
 boot-info.workspace = true
 
 [target.'cfg(target_os = "uefi")'.dependencies]
-uefi = { workspace = true, features = ["alloc", "global_allocator", "panic_handler", "logger"] }
+uefi = { workspace = true, features = ["alloc", "global_allocator", "logger"] }
 x86_64.workspace = true

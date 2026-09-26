@@ -62,7 +62,7 @@ at the leftmost one:
 | What you see | Likely cause | Next step |
 |---|---|---|
 | No Kingston entry under F10 | Stick not FAT32/GPT, or not detected | Re-run `flash --full`; try another USB port |
-| `relay-boot 0.1.0` then a panic message | Loader error (text says which) | Photograph the screen |
+| `[PANIC] relay-boot: …` and `System halted` | Loader error (text says which); the machine stays on | Photograph the screen, then hold the power button |
 | Loader text, then squares, then nothing | Boot stopped at the leftmost square | Note the count and colour of the last square |
 | Garbled or blue-tinted text | Pixel format mismatch | Photograph the screen; note W×H |
 

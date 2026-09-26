@@ -11,6 +11,7 @@
 //! expect <regex>                   (waits for serial output, ANSI stripped)
 //! send <text>                      (types <text> + Enter over serial)
 //! screenshot-nonblank              (QMP screendump; top rows not one colour)
+//! alive 12                         (fails if QEMU exits within 12 seconds)
 //! ```
 //!
 //! QEMU is killed at the end of every scenario.
@@ -37,6 +38,9 @@ pub enum Step {
     Expect(String),
     Send(String),
     ScreenshotNonblank,
+    /// QEMU must still be running after this many seconds (for example after
+    /// a loader error, which must not power the machine off).
+    Alive(u64),
 }
 
 #[derive(Debug, PartialEq)]
@@ -87,6 +91,7 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
             }
             "send" => Step::Send(rest.to_string()),
             "screenshot-nonblank" => Step::ScreenshotNonblank,
+            "alive" => Step::Alive(rest.parse().with_context(|| format!("{name}:{line_no}"))?),
             other => bail!("{name}:{line_no}: unknown step '{other}'"),
         };
         steps.push((line_no, step));
@@ -227,6 +232,17 @@ fn run_step(r: &mut Running, step: &Step, timeout: &mut Duration, run_dir: &Path
             r.stdin.write_all(b"\r")?;
             r.stdin.flush()?;
         }
+        Step::Alive(secs) => {
+            let deadline = Instant::now() + Duration::from_secs(*secs);
+            while Instant::now() < deadline {
+                if let Ok(Some(status)) = r.child.try_wait() {
+                    bail!(
+                        "QEMU exited ({status}) within {secs} s; the machine powered off or reset"
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
         Step::ScreenshotNonblank => {
             let file = run_dir.join("screen.ppm");
             r.qmp
@@ -330,6 +346,13 @@ mod tests {
         );
         assert!(parse_scenario("x", "esp-write relative x").is_err());
         assert!(parse_scenario("x", "expect a\nesp-write /x y").is_err());
+    }
+
+    #[test]
+    fn parses_alive_step() {
+        let s = parse_scenario("x", "alive 12").unwrap();
+        assert_eq!(s.steps, vec![(1, Step::Alive(12))]);
+        assert!(parse_scenario("x", "alive soon").is_err());
     }
 
     #[test]
