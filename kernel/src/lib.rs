@@ -3,6 +3,8 @@
 //! tested on the host with `cargo test -p relay-kernel --lib`.
 #![cfg_attr(not(test), no_std)]
 
+extern crate alloc;
+
 pub mod arch;
 pub mod cmdline;
 pub mod console;
@@ -61,6 +63,20 @@ pub fn kernel_main(info: &'static BootInfo) -> ! {
         map.len(),
         info.cmdline()
     ));
+
+    match mm::init(info) {
+        Ok(s) => console::ok(format_args!(
+            "memory: {} MiB free of {} MiB, heap {} MiB",
+            (s.free_frames * mm::frame::FRAME_SIZE) >> 20,
+            (s.total_frames * mm::frame::FRAME_SIZE) >> 20,
+            s.heap.total >> 20
+        )),
+        Err(e) => {
+            // Nothing later can work without memory.
+            console::fail("memory", format_args!("{e}"));
+            arch::halt_forever();
+        }
+    }
 
     if let Some(t) = cmdline.panic_test {
         trigger(t);

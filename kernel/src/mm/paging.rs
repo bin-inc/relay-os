@@ -76,6 +76,19 @@ pub enum MapError {
     },
     /// Addresses and lengths must be multiples of 4 KiB.
     Unaligned,
+    /// The physical range lies beyond what the linear map can cover.
+    OutOfRange,
+}
+
+impl core::fmt::Display for MapError {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        match self {
+            MapError::OutOfMemory => write!(f, "out of memory for page tables"),
+            MapError::Conflict { virt } => write!(f, "{virt:#x} is already mapped differently"),
+            MapError::Unaligned => write!(f, "range is not page-aligned"),
+            MapError::OutOfRange => write!(f, "physical address beyond the linear map"),
+        }
+    }
 }
 
 fn index(virt: u64, level: u32) -> usize {

@@ -98,6 +98,10 @@ pub fn write_bytes(bytes: &[u8]) {
     if let Some(c) = CONSOLE.lock().as_mut() {
         c.term.write_bytes(bytes);
         c.term.flush(c.fb, c.stride);
+        // The framebuffer is write-combining: drain the CPU's WC buffers so
+        // the text is on screen even if the CPU halts right after (the
+        // panic screen's last line).
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     }
 }
 

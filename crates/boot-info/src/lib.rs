@@ -18,14 +18,21 @@ pub const PHYS_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 pub const KERNEL_STACK_BOTTOM: u64 = 0xFFFF_FE00_0000_1000;
 pub const KERNEL_STACK_SIZE: u64 = 64 * 1024;
 pub const KERNEL_STACK_TOP: u64 = KERNEL_STACK_BOTTOM + KERNEL_STACK_SIZE;
+/// Physical addresses below this can be reached through the linear map.
+pub const PHYS_MAP_MAX: u64 = 64 << 40;
+/// The kernel heap: a fixed virtual region, backed by frames when the kernel
+/// sets it up.
+pub const HEAP_BASE: u64 = 0xFFFF_C000_0000_0000;
+pub const HEAP_SIZE: u64 = 32 << 20;
 
 pub const CMDLINE_MAX: usize = 256;
 
-// The virtual layout must not overlap: the linear map may cover up to 64 TiB
-// of physical address space, then comes the stack (with its guard page),
-// then the kernel image.
+// The virtual layout must not overlap: the linear map covers up to 64 TiB of
+// physical address space, then come the heap, the stack (with its guard
+// page) and the kernel image.
 const _: () = {
-    assert!(PHYS_OFFSET + (64u64 << 40) <= KERNEL_STACK_BOTTOM - 0x1000);
+    assert!(PHYS_OFFSET + PHYS_MAP_MAX <= HEAP_BASE);
+    assert!(HEAP_BASE + HEAP_SIZE <= KERNEL_STACK_BOTTOM - 0x1000);
     assert!(KERNEL_STACK_TOP < KERNEL_BASE);
     assert!(KERNEL_STACK_TOP.is_multiple_of(16));
 };
