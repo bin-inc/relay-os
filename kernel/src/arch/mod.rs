@@ -2,6 +2,9 @@
 
 pub mod gdt;
 pub mod idt;
+pub mod irq;
+pub mod lapic;
+pub mod pic;
 
 /// Stops the CPU for good (interrupts stay disabled).
 pub fn halt_forever() -> ! {
