@@ -3,10 +3,13 @@
 //! tested on the host with `cargo test -p relay-kernel --lib`.
 #![cfg_attr(not(test), no_std)]
 
+extern crate alloc;
+
 pub mod arch;
 pub mod cmdline;
 pub mod console;
 pub mod klog;
+pub mod mm;
 pub mod panic_screen;
 pub mod serial;
 
@@ -26,18 +29,25 @@ pub fn kernel_main(info: &'static BootInfo) -> ! {
     let fb = info.framebuffer;
     let mark = |stage| unsafe { fb.mark_stage(PHYS_OFFSET + fb.phys_addr, stage) };
     mark(10);
+    // Our own GDT and IDT come first: until they are loaded the CPU uses the
+    // firmware's, and a fault would triple-fault without a word. From here
+    // on the panic screen starts the console itself if it has to.
+    console::set_framebuffer(&info.framebuffer);
+    arch::gdt::init();
+    arch::idt::init();
+    let cmdline = Cmdline::parse(info.cmdline());
     serial::init();
+    if cmdline.panic_test == Some(PanicTest::Early) {
+        trigger(PanicTest::Early);
+    }
     mark(11);
-    console::init(&info.framebuffer);
+    console::init();
     kprintln!("Relay OS {VERSION}");
     let (cols, rows) = console::size().unwrap_or((0, 0));
     console::ok(format_args!(
         "console {}x{} ({cols}x{rows} cells)",
         fb.width, fb.height
     ));
-
-    arch::gdt::init();
-    arch::idt::init();
     console::ok(format_args!("cpu tables"));
 
     // SAFETY: built by relay-boot, lives forever.
@@ -47,13 +57,26 @@ pub fn kernel_main(info: &'static BootInfo) -> ! {
         .filter(|r| r.kind == MemoryKind::Usable)
         .map(|r| r.len)
         .sum();
-    let cmdline = Cmdline::parse(info.cmdline());
     console::ok(format_args!(
         "boot info: {} MiB usable in {} regions, cmdline '{}'",
         usable >> 20,
         map.len(),
         info.cmdline()
     ));
+
+    match mm::init(info) {
+        Ok(s) => console::ok(format_args!(
+            "memory: {} MiB free of {} MiB, heap {} MiB",
+            (s.free_frames * mm::frame::FRAME_SIZE) >> 20,
+            (s.total_frames * mm::frame::FRAME_SIZE) >> 20,
+            s.heap.total >> 20
+        )),
+        Err(e) => {
+            // Nothing later can work without memory.
+            console::fail("memory", format_args!("{e}"));
+            arch::halt_forever();
+        }
+    }
 
     if let Some(t) = cmdline.panic_test {
         trigger(t);
@@ -66,7 +89,7 @@ pub fn kernel_main(info: &'static BootInfo) -> ! {
 fn trigger(t: PanicTest) {
     kprintln!("relay: triggering {t:?} as requested");
     match t {
-        PanicTest::PageFault => unsafe {
+        PanicTest::Early | PanicTest::PageFault => unsafe {
             core::ptr::read_volatile(0x0000_7FFF_DEAD_0000 as *const u64);
         },
         PanicTest::InvalidOpcode => unsafe { core::arch::asm!("ud2") },

@@ -2,6 +2,8 @@
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PanicTest {
+    /// A page fault before the console exists.
+    Early,
     PageFault,
     InvalidOpcode,
     Panic,
@@ -12,8 +14,9 @@ pub enum PanicTest {
 pub struct Cmdline {
     /// `test=1`: running under the automated QEMU tests.
     pub test_mode: bool,
-    /// `panic=pagefault|ud|panic|stack`: deliberately crash after boot
-    /// (exercises the panic screen in tests).
+    /// `panic=early|pagefault|ud|panic|stack`: deliberately crash (exercises
+    /// the panic screen in tests). `early` faults before the console starts,
+    /// the others after boot.
     pub panic_test: Option<PanicTest>,
 }
 
@@ -25,6 +28,7 @@ impl Cmdline {
                 Some(("test", "1")) => c.test_mode = true,
                 Some(("panic", v)) => {
                     c.panic_test = match v {
+                        "early" => Some(PanicTest::Early),
                         "pagefault" => Some(PanicTest::PageFault),
                         "ud" => Some(PanicTest::InvalidOpcode),
                         "panic" => Some(PanicTest::Panic),
@@ -53,6 +57,10 @@ mod tests {
         let c = Cmdline::parse("video=1280x720 test=1 panic=pagefault");
         assert!(c.test_mode);
         assert_eq!(c.panic_test, Some(PanicTest::PageFault));
+        assert_eq!(
+            Cmdline::parse("panic=early").panic_test,
+            Some(PanicTest::Early)
+        );
         assert_eq!(
             Cmdline::parse("panic=ud").panic_test,
             Some(PanicTest::InvalidOpcode)

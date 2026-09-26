@@ -5,5 +5,6 @@ expect Relay OS \d+\.\d+\.\d+
 expect \[ ok \] console \d+x\d+ \(\d+x\d+ cells\)
 expect \[ ok \] cpu tables
 expect \[ ok \] boot info: \d+ MiB usable in \d+ regions, cmdline 'test=1'
+expect \[ ok \] memory: \d+ MiB free of \d+ MiB, heap 32 MiB
 expect relay: early boot complete
 screenshot-nonblank

@@ -239,7 +239,12 @@ fn start(image: &Path, layout: &Layout, scenario: &Scenario, run_dir: &Path) -> 
             let _ = log.write_all(&buf[..n]);
         }
     });
-    let qmp = Qmp::connect(&qmp_name, Duration::from_secs(10))?;
+    let qmp = wait_for_qmp(
+        &mut child,
+        &qmp_name,
+        Duration::from_secs(10),
+        &run_dir.join("qemu.stderr"),
+    )?;
     Ok(Running {
         child,
         stdin,
@@ -247,6 +252,28 @@ fn start(image: &Path, layout: &Layout, scenario: &Scenario, run_dir: &Path) -> 
         qmp,
         consumed: 0,
     })
+}
+
+/// Connects to QEMU's QMP socket, giving up early if QEMU exits first (a bad
+/// option, a missing firmware file): then the error shows QEMU's stderr
+/// instead of a bare "Connection refused" after the full timeout.
+fn wait_for_qmp(child: &mut Child, name: &str, timeout: Duration, stderr: &Path) -> Result<Qmp> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let text = fs::read_to_string(stderr).unwrap_or_default();
+            bail!(
+                "QEMU exited ({status}) during start-up; its stderr ({}):\n{}",
+                stderr.display(),
+                text.trim_end()
+            );
+        }
+        match Qmp::connect(name, Duration::from_millis(200)) {
+            Ok(q) => return Ok(q),
+            Err(e) if Instant::now() > deadline => return Err(e),
+            Err(_) => {}
+        }
+    }
 }
 
 fn run_step(r: &mut Running, step: &Step, timeout: &mut Duration, run_dir: &Path) -> Result<()> {
@@ -443,6 +470,31 @@ mod tests {
         assert_eq!(ppm_pixel(&ppm, 2, 1).unwrap(), [0xFF, 0x80, 0x00]);
         assert_eq!(ppm_pixel(&ppm, 0, 0).unwrap(), [0, 0, 0]);
         assert!(ppm_pixel(&ppm, 3, 0).is_err(), "x out of range");
+    }
+
+    #[test]
+    fn qemu_dying_at_start_up_is_reported_with_its_stderr() {
+        let dir = out_dir().join("e2e-selftest");
+        fs::create_dir_all(&dir).unwrap();
+        let stderr = dir.join("qemu.stderr");
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "echo 'qemu: could not load firmware' >&2; exit 1"])
+            .stderr(fs::File::create(&stderr).unwrap())
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        let err = wait_for_qmp(
+            &mut child,
+            "relay-qmp-selftest-nobody-listens",
+            Duration::from_secs(10),
+            &stderr,
+        )
+        .err()
+        .expect("must fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("exited"), "{msg}");
+        assert!(msg.contains("could not load firmware"), "{msg}");
+        assert!(started.elapsed() < Duration::from_secs(5), "gave up early");
     }
 
     #[test]

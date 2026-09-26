@@ -3,7 +3,7 @@
 use crate::{klog, serial};
 use boot_info::{FramebufferInfo, PHYS_OFFSET, PixelFormat as BootFormat};
 use core::fmt::{self, Write};
-use spin::Mutex;
+use spin::{Mutex, Once};
 use term::{Cell, PixelFormat, Terminal};
 
 /// The terminal never covers more than this; a larger framebuffer keeps a
@@ -23,8 +23,34 @@ pub struct Console {
 
 pub static CONSOLE: Mutex<Option<Console>> = Mutex::new(None);
 
-/// Sets up the framebuffer terminal. Must be called once.
-pub fn init(fb: &FramebufferInfo) {
+/// The framebuffer the console draws on, recorded before anything can fault
+/// so the panic screen can start the console itself (see `init_if_needed`).
+static FRAMEBUFFER: Once<FramebufferInfo> = Once::new();
+
+/// Records the framebuffer for `init` and `init_if_needed`. The first call
+/// wins.
+pub fn set_framebuffer(fb: &FramebufferInfo) {
+    FRAMEBUFFER.call_once(|| *fb);
+}
+
+/// Sets up the framebuffer terminal on the framebuffer recorded with
+/// `set_framebuffer`. Does nothing if none was recorded.
+pub fn init() {
+    if let Some(fb) = FRAMEBUFFER.get() {
+        init_on(fb);
+    }
+}
+
+/// Starts the console if it is not running yet. For the panic path: a fault
+/// before `init` must still reach the screen, because the NUC has no serial
+/// port.
+pub fn init_if_needed() {
+    if CONSOLE.lock().is_none() {
+        init();
+    }
+}
+
+fn init_on(fb: &FramebufferInfo) {
     let width = (fb.width as usize).min(MAX_W);
     let height = (fb.height as usize).min(MAX_H);
     let format = match fb.format {
@@ -72,6 +98,10 @@ pub fn write_bytes(bytes: &[u8]) {
     if let Some(c) = CONSOLE.lock().as_mut() {
         c.term.write_bytes(bytes);
         c.term.flush(c.fb, c.stride);
+        // The framebuffer is write-combining: drain the CPU's WC buffers so
+        // the text is on screen even if the CPU halts right after (the
+        // panic screen's last line).
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     }
 }
 
