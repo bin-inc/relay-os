@@ -29,10 +29,10 @@ pub fn setup(cmdline: &str) -> uefi::Result<FramebufferInfo> {
         .map(|(i, m)| (i, m.info().resolution().0, m.info().resolution().1))
         .collect();
     let current = gop.current_mode_info().resolution();
-    if let Some(i) = choose(&candidates, cmdline_mode(cmdline), native, current) {
-        if modes[i].info().resolution() != current {
-            gop.set_mode(&modes[i])?;
-        }
+    if let Some(i) = choose(&candidates, cmdline_mode(cmdline), native, current)
+        && modes[i].info().resolution() != current
+    {
+        gop.set_mode(&modes[i])?;
     }
     let info = gop.current_mode_info();
     let format = pixel_format(info.pixel_format()).ok_or(uefi::Status::UNSUPPORTED)?;
