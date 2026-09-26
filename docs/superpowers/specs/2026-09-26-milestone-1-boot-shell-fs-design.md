@@ -863,3 +863,17 @@ Each step ends with something that can be tested.
    (§5.3).
 6. **CI gate added** (§9.5). It was not part of the original design; the
    user asked for it during planning.
+7. **Findings from NUC check 1** (real firmware behaved differently from
+   QEMU's OVMF):
+   - The loader opens firmware protocols only with `GET_PROTOCOL` and never
+     closes them, as the Linux EFI stub does. Exclusive opens made the NUC's
+     firmware stop its own text console.
+   - Kernel pages use the standard `LOADER_DATA` memory type. With an
+     OS-defined type the NUC's `ExitBootServices` never returned. The kernel
+     image is therefore reported as `Bootloader` memory, and
+     `BootInfo::kernel_phys_*` gives its range; `MemoryKind::Kernel` is not
+     produced.
+   - The loader and early kernel paint **boot-progress squares** on the
+     framebuffer (legend in `docs/hardware-test.md`), because the NUC has no
+     serial port and the firmware console is unusable once the loader holds
+     the display.

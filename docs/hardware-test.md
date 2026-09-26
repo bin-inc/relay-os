@@ -39,15 +39,38 @@ normally.
 
 ### If it fails
 
+The NUC has no serial port, and the firmware console stops drawing once the
+loader holds the display, so the loader and the early kernel paint **progress
+squares** along the top-right edge of the screen, stage 1 rightmost. The
+kernel console clears them once it works, so seeing them means boot stopped
+at the leftmost one:
+
+| # | Colour | Reached when… |
+|---|---|---|
+| 1 | red | video mode set |
+| 2 | orange | boot partition and ACPI lookups done |
+| 3 | yellow | kernel file loaded |
+| 4 | green | page tables for RAM and screen built |
+| 5 | cyan | kernel stack and jump code mapped |
+| 6 | blue | boot-info memory reserved |
+| 7 | magenta | last loader message printed; next is ExitBootServices |
+| 8 | white | ExitBootServices returned |
+| 9 | grey | boot info written; next is the jump to the kernel |
+| 10 | pink | kernel running on its own page tables |
+| 11 | light green | kernel serial probe done; next is the console |
+
 | What you see | Likely cause | Next step |
 |---|---|---|
 | No Kingston entry under F10 | Stick not FAT32/GPT, or not detected | Re-run `flash --full`; try another USB port |
 | `relay-boot 0.1.0` then a panic message | Loader error (text says which) | Photograph the screen |
-| `relay-boot: starting kernel`, then nothing | Kernel crashed before the console | Try `flash --kernel --cmdline video=1280x720` |
+| Loader text, then squares, then nothing | Boot stopped at the leftmost square | Note the count and colour of the last square |
 | Garbled or blue-tinted text | Pixel format mismatch | Photograph the screen; note W×H |
 
 ## Results log
 
 | Date | Check | Commit | Result | Notes (W×H, N MiB, …) |
 |---|---|---|---|---|
-| | | | | |
+| 2026-09-26 | 1 (runs 1–5) | `6026534`…`f8bc08e` | Fail | Loader stopped inside ExitBootServices (square 7 of 9, no reset). Two loader bugs found: exclusive protocol opens stopped the firmware text console; kernel pages in an OS-defined memory type (`0x80005245`) made ExitBootServices hang. Fixed in `f8bc08e`, `8b8f13e`. |
+| 2026-09-26 | 1, `video=1920x1200` | `8b8f13e` | Pass | `console 1920x1200 (120x33 cells)`, 15948 MiB usable in 32 regions. |
+| 2026-09-26 | 1, default cmdline | `8b8f13e` | Pass | Loader switched the ASUS PA248QV from native 1920×1200 to 1920×1080: `console 1920x1080 (120x33 cells)`, 15948 MiB usable in 32 regions. |
+| 2026-09-26 | 1, `panic=pagefault` | `8b8f13e` | Pass | Red panic screen: `CPU exception 14: page fault (error code 0x0)`, `CR2=0x00007fffdead0000`, log tail shown, `System halted.` |
