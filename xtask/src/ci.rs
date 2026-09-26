@@ -139,6 +139,32 @@ mod tests {
         assert!(all.contains(&cmd(&["test", "--package", "relay-kernel", "--lib"])));
     }
 
+    /// Actions run with the workflow's token, and a tag can be moved to other
+    /// code, so every `uses:` names a full commit SHA, with the release it
+    /// came from as a comment (`# v1.2.3`).
+    #[test]
+    fn workflow_actions_are_pinned_to_commit_shas() {
+        let workflow = std::fs::read_to_string(root().join(".github/workflows/ci.yml")).unwrap();
+        let uses: Vec<&str> = workflow
+            .lines()
+            .filter_map(|l| l.trim().trim_start_matches("- ").strip_prefix("uses: "))
+            .collect();
+        assert!(!uses.is_empty());
+        for u in uses {
+            let (action, rest) = u.split_once('@').unwrap_or((u, ""));
+            let (sha, comment) = rest.split_once(' ').unwrap_or((rest, ""));
+            let is_sha = sha.len() == 40
+                && sha
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c));
+            assert!(is_sha, "{action} is not pinned to a commit SHA: {u}");
+            assert!(
+                comment.trim_start().starts_with("# v"),
+                "{action}: name the pinned release in a comment, e.g. `# v1.2.3`"
+            );
+        }
+    }
+
     /// The workflow installs the toolchain explicitly; it must be the one
     /// `rust-toolchain.toml` pins, and it must run the gates.
     #[test]
