@@ -117,6 +117,15 @@ pub fn remove(block: &mut [u8], entry: Entry, prev: Option<Entry>) {
     }
 }
 
+/// Points `entry` at another inode, of type `file_type` (`None` without
+/// the `filetype` feature).
+pub fn retarget(block: &mut [u8], entry: Entry, inode: u32, file_type: Option<u8>) {
+    set_u32(block, entry.offset, inode);
+    if let Some(t) = file_type {
+        block[entry.offset + 7] = t;
+    }
+}
+
 /// Makes `block` an empty directory block: one unused entry covering it.
 pub fn init_empty(block: &mut [u8]) {
     block.fill(0);
@@ -379,5 +388,18 @@ mod tests {
         let e = parse(&b, true, 100).unwrap();
         assert_eq!((e[0].inode, e[0].rec_len), (0, 24));
         assert_eq!(room(&e, 12).map(|e| e.offset), Some(0), "reusable");
+    }
+
+    #[test]
+    fn an_entry_can_point_elsewhere() {
+        let mut b = block(&[(12, 12, b"a"), (13, 52, b"b")], true);
+        let e = parse(&b, true, 100).unwrap();
+        retarget(&mut b, e[1], 40, Some(7));
+        let e = parse(&b, true, 100).unwrap();
+        assert_eq!((e[1].inode, e[1].name(&b), b[12 + 7]), (40, &b"b"[..], 7));
+        let mut b = block(&[(12, 64, b"a")], false);
+        retarget(&mut b, e[0], 41, None);
+        assert_eq!(parse(&b, false, 100).unwrap()[0].inode, 41);
+        assert_eq!(b[7], 0, "no type byte to write");
     }
 }

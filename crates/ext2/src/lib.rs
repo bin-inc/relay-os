@@ -20,6 +20,7 @@ mod group;
 mod inode;
 mod le;
 mod ops;
+mod rename;
 mod superblock;
 
 use alloc::boxed::Box;
@@ -258,7 +259,6 @@ fn read_groups<D: BlockDevice>(cache: &mut BlockCache<D>, geo: &Geometry) -> Res
     Ok(Groups::new(raw, geo.groups))
 }
 
-/// Renaming comes later; until then it is `EROFS`.
 impl<D: BlockDevice> FileSystem for Ext2<D> {
     fn root(&self) -> Ino {
         superblock::ROOT_INO as Ino
@@ -312,8 +312,8 @@ impl<D: BlockDevice> FileSystem for Ext2<D> {
         self.remove_dir(dir, name)
     }
 
-    fn rename(&mut self, _: Ino, _: &[u8], _: Ino, _: &[u8]) -> Result<(), Errno> {
-        Err(Errno::EROFS)
+    fn rename(&mut self, from_dir: Ino, from: &[u8], to_dir: Ino, to: &[u8]) -> Result<(), Errno> {
+        self.move_entry(from_dir, from, to_dir, to)
     }
 
     fn statfs(&mut self) -> Result<StatFs, Errno> {

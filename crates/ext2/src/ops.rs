@@ -7,7 +7,7 @@ use crate::inode::Inode;
 use vfs::{BlockDevice, Errno, FileType, Ino, path};
 
 /// Linux's ext2 limit on a directory's links, so subdirectories.
-const LINK_MAX: u16 = 32000;
+pub(crate) const LINK_MAX: u16 = 32000;
 
 impl<D: BlockDevice> Ext2<D> {
     /// Rules 1–4 of the contract for a change to `dir/name`: `ENOENT`,
@@ -73,7 +73,7 @@ impl<D: BlockDevice> Ext2<D> {
     }
 
     /// Drops one link of a non-directory, freeing it with the last.
-    fn drop_link(&mut self, inode: &mut Inode) -> Result<(), Errno> {
+    pub(crate) fn drop_link(&mut self, inode: &mut Inode) -> Result<(), Errno> {
         inode.set_links(inode.links().saturating_sub(1));
         inode.set_ctime(self.now());
         if inode.links() == 0 {
