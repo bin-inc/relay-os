@@ -1,0 +1,288 @@
+//! What a command gets to work with: the filesystem, the system, standard
+//! output (the screen or a redirection file) and the screen for errors;
+//! plus the helpers every command shares for options and GNU-style
+//! messages.
+
+use crate::io::{Console, System};
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt;
+use vfs::{Errno, Node, Vfs};
+
+/// Output to a file is collected up to this size before it is written.
+const FILE_BUFFER: usize = 4096;
+
+pub struct Ctx<'a> {
+    pub vfs: &'a mut dyn Vfs,
+    pub system: &'a mut dyn System,
+    console: &'a mut dyn Console,
+    out: Output,
+    /// Set by `reboot` and `poweroff` when the machine did not go away.
+    pub(crate) exit: bool,
+}
+
+enum Output {
+    Console,
+    File {
+        node: Node,
+        offset: u64,
+        buf: Vec<u8>,
+        /// The first write error; later output is dropped.
+        error: Option<Errno>,
+    },
+}
+
+impl<'a> Ctx<'a> {
+    /// `file`: the redirection target and the offset to write at.
+    pub(crate) fn new(
+        vfs: &'a mut dyn Vfs,
+        system: &'a mut dyn System,
+        console: &'a mut dyn Console,
+        file: Option<(Node, u64)>,
+    ) -> Ctx<'a> {
+        let out = match file {
+            Some((node, offset)) => Output::File {
+                node,
+                offset,
+                buf: Vec::new(),
+                error: None,
+            },
+            None => Output::Console,
+        };
+        Ctx {
+            vfs,
+            system,
+            console,
+            out,
+            exit: false,
+        }
+    }
+
+    /// Standard output.
+    pub fn out(&mut self, bytes: &[u8]) {
+        match &mut self.out {
+            Output::Console => self.console.write(bytes),
+            Output::File { buf, .. } => {
+                buf.extend_from_slice(bytes);
+                if buf.len() >= FILE_BUFFER {
+                    self.flush();
+                }
+            }
+        }
+    }
+
+    /// Errors always go to the screen, never into a redirection file.
+    pub fn err(&mut self, bytes: &[u8]) {
+        self.console.write(bytes);
+    }
+
+    pub fn columns(&self) -> usize {
+        self.console.columns()
+    }
+
+    /// Whether standard output is the screen (`ls` then lays out columns).
+    pub fn is_tty(&self) -> bool {
+        matches!(self.out, Output::Console)
+    }
+
+    /// The file standard output goes to, if any.
+    pub fn output_node(&self) -> Option<Node> {
+        match self.out {
+            Output::File { node, .. } => Some(node),
+            Output::Console => None,
+        }
+    }
+
+    fn flush(&mut self) {
+        let Output::File {
+            node,
+            offset,
+            buf,
+            error,
+        } = &mut self.out
+        else {
+            return;
+        };
+        let mut done = 0;
+        while error.is_none() && done < buf.len() {
+            match self.vfs.write_at(*node, *offset, &buf[done..]) {
+                // Nothing written would loop forever; the contract says
+                // that is ENOSPC.
+                Ok(0) => *error = Some(Errno::ENOSPC),
+                Ok(n) => {
+                    done += n;
+                    *offset += n as u64;
+                }
+                Err(e) => *error = Some(e),
+            }
+        }
+        buf.clear();
+    }
+
+    /// Writes what is left of the output; the first write error, if any.
+    pub(crate) fn finish(&mut self) -> Result<(), Errno> {
+        self.flush();
+        match self.out {
+            Output::File { error: Some(e), .. } => Err(e),
+            _ => Ok(()),
+        }
+    }
+
+    /// Prints `name: message` on the screen and returns exit status 1.
+    pub fn fail(&mut self, name: &str, message: fmt::Arguments<'_>) -> i32 {
+        self.err(format!("{name}: {message}\n").as_bytes());
+        1
+    }
+}
+
+/// `outln!(ctx, "…", args)`: a line on standard output.
+macro_rules! outln {
+    ($ctx:expr) => { $ctx.out(b"\n") };
+    ($ctx:expr, $($arg:tt)*) => {{
+        let mut line = alloc::format!($($arg)*);
+        line.push('\n');
+        $ctx.out(line.as_bytes());
+    }};
+}
+pub(crate) use outln;
+
+/// A command's parsed options.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Opts {
+    /// Every option in order, with its value if it takes one.
+    pub flags: Vec<(char, Option<String>)>,
+    pub operands: Vec<String>,
+}
+
+impl Opts {
+    pub fn has(&self, c: char) -> bool {
+        self.flags.iter().any(|(f, _)| *f == c)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OptError {
+    Invalid(char),
+    Unrecognized(String),
+    MissingValue(char),
+}
+
+impl fmt::Display for OptError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OptError::Invalid(c) => write!(f, "invalid option -- '{c}'"),
+            OptError::Unrecognized(s) => write!(f, "unrecognized option '{s}'"),
+            OptError::MissingValue(c) => write!(f, "option requires an argument -- '{c}'"),
+        }
+    }
+}
+
+/// Splits `args` into options and operands, GNU style: options may come
+/// anywhere, several may share one `-` (`-la`), `--` ends them, and `-` on
+/// its own is an operand. `flags` lists the options without a value,
+/// `valued` those that take one (`-n 5` or `-n5`).
+pub fn getopt(args: &[String], flags: &str, valued: &str) -> Result<Opts, OptError> {
+    let mut opts = Opts::default();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            opts.operands.extend(args.cloned());
+            break;
+        }
+        if arg.starts_with("--") {
+            return Err(OptError::Unrecognized(arg.clone()));
+        }
+        let Some(cluster) = arg.strip_prefix('-').filter(|c| !c.is_empty()) else {
+            opts.operands.push(arg.clone());
+            continue;
+        };
+        for (i, c) in cluster.char_indices() {
+            if flags.contains(c) {
+                opts.flags.push((c, None));
+            } else if valued.contains(c) {
+                let rest = &cluster[i + c.len_utf8()..];
+                let value = if rest.is_empty() {
+                    args.next().cloned().ok_or(OptError::MissingValue(c))?
+                } else {
+                    String::from(rest)
+                };
+                opts.flags.push((c, Some(value)));
+                break;
+            } else {
+                return Err(OptError::Invalid(c));
+            }
+        }
+    }
+    Ok(opts)
+}
+
+/// A name in single quotes, as GNU tools print it in messages (`'my file'`);
+/// double quotes if it contains a single quote.
+pub fn quote(name: &str) -> String {
+    if name.contains('\'') {
+        format!("\"{name}\"")
+    } else {
+        format!("'{name}'")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| String::from(*s)).collect()
+    }
+
+    #[test]
+    fn options_can_be_clustered_and_mixed_with_operands() {
+        let o = getopt(&args(&["-l", "dir", "-a", "x"]), "la", "").unwrap();
+        assert!(o.has('l') && o.has('a'));
+        assert_eq!(o.operands, ["dir", "x"]);
+        let o = getopt(&args(&["-la"]), "la", "").unwrap();
+        assert_eq!(o.flags, vec![('l', None), ('a', None)]);
+    }
+
+    #[test]
+    fn double_dash_ends_options_and_a_lone_dash_is_an_operand() {
+        let o = getopt(&args(&["-r", "--", "-f", "-"]), "rf", "").unwrap();
+        assert!(o.has('r') && !o.has('f'));
+        assert_eq!(o.operands, ["-f", "-"]);
+        let o = getopt(&args(&["-"]), "", "").unwrap();
+        assert_eq!(o.operands, ["-"]);
+    }
+
+    #[test]
+    fn options_with_values() {
+        let o = getopt(&args(&["-n", "5", "f"]), "", "n").unwrap();
+        assert_eq!(o.flags, vec![('n', Some("5".into()))]);
+        assert_eq!(o.operands, ["f"]);
+        let o = getopt(&args(&["-n3", "-n7"]), "", "n").unwrap();
+        assert_eq!(
+            o.flags,
+            vec![('n', Some("3".into())), ('n', Some("7".into()))]
+        );
+        assert_eq!(
+            getopt(&args(&["-n"]), "", "n"),
+            Err(OptError::MissingValue('n'))
+        );
+    }
+
+    #[test]
+    fn unknown_options_are_errors_with_gnu_wording() {
+        let e = getopt(&args(&["-lz"]), "la", "").unwrap_err();
+        assert_eq!(e.to_string(), "invalid option -- 'z'");
+        let e = getopt(&args(&["--all"]), "la", "").unwrap_err();
+        assert_eq!(e.to_string(), "unrecognized option '--all'");
+        let e = getopt(&args(&["-n"]), "", "n").unwrap_err();
+        assert_eq!(e.to_string(), "option requires an argument -- 'n'");
+    }
+
+    #[test]
+    fn quoting_like_gnu() {
+        assert_eq!(quote("notes"), "'notes'");
+        assert_eq!(quote("it's"), "\"it's\"");
+    }
+}

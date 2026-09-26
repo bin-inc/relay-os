@@ -9,5 +9,15 @@
 
 extern crate alloc;
 
+pub mod commands;
+mod ctx;
 pub mod editor;
+mod io;
 pub mod parser;
+mod shell;
+mod testing;
+
+pub use ctx::Ctx;
+pub use io::{Console, MemInfo, System};
+pub use shell::Shell;
+pub use vfs::Vfs;
