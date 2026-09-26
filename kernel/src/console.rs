@@ -105,6 +105,33 @@ pub fn write_bytes(bytes: &[u8]) {
     }
 }
 
+/// Writes to the kernel log and serial only, not the screen: detail that
+/// would scroll the startup lines away (`dmesg` shows it later).
+pub fn log_bytes(bytes: &[u8]) {
+    klog::KLOG.lock().write(bytes);
+    serial::write(bytes);
+}
+
+struct LogSink;
+
+impl Write for LogSink {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        log_bytes(s.as_bytes());
+        Ok(())
+    }
+}
+
+#[doc(hidden)]
+pub fn _log(args: fmt::Arguments) {
+    let _ = LogSink.write_fmt(args);
+}
+
+/// Like `kprintln!`, but to the kernel log and serial only.
+#[macro_export]
+macro_rules! klogln {
+    ($($arg:tt)*) => { $crate::console::_log(format_args!("{}\n", format_args!($($arg)*))) };
+}
+
 struct Sink;
 
 impl Write for Sink {

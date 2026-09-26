@@ -79,6 +79,11 @@ pub fn kernel_main(info: &'static BootInfo) -> ! {
         }
     }
 
+    match acpi::init(info.rsdp_addr) {
+        Ok(a) => console::ok(format_args!("acpi: {a}")),
+        Err(e) => console::fail("acpi", format_args!("{e}")),
+    }
+
     if let Some(t) = cmdline.panic_test {
         trigger(t);
     }
