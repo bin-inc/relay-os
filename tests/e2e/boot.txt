@@ -1,0 +1,5 @@
+# The loader starts the kernel, which reports on the serial port.
+timeout 30
+expect relay-boot \d+\.\d+\.\d+
+expect relay-boot: starting kernel
+expect relay-kernel: entered
