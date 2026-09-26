@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/boot-info"]
-default-members = ["crates/boot-info"]
+members = ["crates/boot-info", "crates/term", "xtask"]
+default-members = ["crates/boot-info", "crates/term", "xtask"]
 
 [workspace.package]
 version = "0.1.0"
