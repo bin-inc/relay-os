@@ -6,8 +6,11 @@
 //! [`Terminal::flush`]; it is never read.
 #![cfg_attr(not(test), no_std)]
 
+pub mod ansi;
+pub mod color;
 pub mod font;
 
+pub use color::PixelFormat;
 pub use font::{GLYPH_H, GLYPH_W};
 
 #[cfg(test)]
