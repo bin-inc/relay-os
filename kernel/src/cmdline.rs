@@ -1,0 +1,75 @@
+//! Kernel command line (`\EFI\RELAY\cmdline`), space-separated words.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanicTest {
+    PageFault,
+    InvalidOpcode,
+    Panic,
+    StackOverflow,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Cmdline {
+    /// `test=1`: running under the automated QEMU tests.
+    pub test_mode: bool,
+    /// `panic=pagefault|ud|panic|stack`: deliberately crash after boot
+    /// (exercises the panic screen in tests).
+    pub panic_test: Option<PanicTest>,
+}
+
+impl Cmdline {
+    pub fn parse(s: &str) -> Cmdline {
+        let mut c = Cmdline::default();
+        for word in s.split_whitespace() {
+            match word.split_once('=') {
+                Some(("test", "1")) => c.test_mode = true,
+                Some(("panic", v)) => {
+                    c.panic_test = match v {
+                        "pagefault" => Some(PanicTest::PageFault),
+                        "ud" => Some(PanicTest::InvalidOpcode),
+                        "panic" => Some(PanicTest::Panic),
+                        "stack" => Some(PanicTest::StackOverflow),
+                        _ => None,
+                    }
+                }
+                _ => {} // unknown words are ignored (the loader uses video=)
+            }
+        }
+        c
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty() {
+        assert_eq!(Cmdline::parse(""), Cmdline::default());
+    }
+
+    #[test]
+    fn test_mode_and_panic_kinds() {
+        let c = Cmdline::parse("video=1280x720 test=1 panic=pagefault");
+        assert!(c.test_mode);
+        assert_eq!(c.panic_test, Some(PanicTest::PageFault));
+        assert_eq!(
+            Cmdline::parse("panic=ud").panic_test,
+            Some(PanicTest::InvalidOpcode)
+        );
+        assert_eq!(
+            Cmdline::parse("panic=panic").panic_test,
+            Some(PanicTest::Panic)
+        );
+        assert_eq!(
+            Cmdline::parse("panic=stack").panic_test,
+            Some(PanicTest::StackOverflow)
+        );
+    }
+
+    #[test]
+    fn unknown_values_are_ignored() {
+        let c = Cmdline::parse("test=0 panic=bogus foo");
+        assert_eq!(c, Cmdline::default());
+    }
+}
