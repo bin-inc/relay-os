@@ -106,6 +106,11 @@ impl Env for Clock {
     fn log(&self, _: &str) {}
 }
 
+/// An empty `MemFs` at the tests' time, to prepare for [`Harness::on`].
+pub fn memfs() -> MemFs {
+    MemFs::new(Box::new(Clock))
+}
+
 /// What the spy saw, and the failures it should inject.
 #[derive(Default)]
 pub struct SpyState {
@@ -220,19 +225,19 @@ pub struct Harness {
 impl Harness {
     /// The standard tree, current directory `/`.
     pub fn new() -> Harness {
-        Harness::on(MemFs::new(Box::new(Clock)))
+        Harness::on(memfs())
     }
 
     /// The standard tree on a filesystem holding at most `bytes` of data.
     pub fn with_capacity(bytes: u64) -> Harness {
-        Harness::on(MemFs::new(Box::new(Clock)).with_capacity(bytes))
+        Harness::on(memfs().with_capacity(bytes))
     }
 
     /// Nothing but an empty root directory.
     pub fn empty() -> Harness {
         let state = Rc::new(SpyState::default());
         let fs = Spy {
-            fs: MemFs::new(Box::new(Clock)),
+            fs: memfs(),
             state: state.clone(),
         };
         Harness {
@@ -243,7 +248,8 @@ impl Harness {
         }
     }
 
-    fn on(fs: MemFs) -> Harness {
+    /// The standard tree added to `fs`.
+    pub fn on(fs: MemFs) -> Harness {
         let (vfs, spy) = standard(fs);
         Harness {
             vfs,
@@ -257,6 +263,18 @@ impl Harness {
     pub fn run(&mut self, line: &str) -> (i32, String) {
         let status = Shell::new(&mut self.vfs, &mut self.console, &mut self.system).execute(line);
         (status, self.console.take())
+    }
+
+    /// Creates (or replaces) a file.
+    pub fn put(&mut self, path: &str, data: &[u8]) {
+        let node = match self.vfs.lookup(path.as_bytes()) {
+            Ok(node) => {
+                self.vfs.truncate(node, 0).unwrap();
+                node
+            }
+            Err(_) => self.vfs.create(path.as_bytes()).unwrap(),
+        };
+        self.vfs.write_at(node, 0, data).unwrap();
     }
 
     /// A file's contents.

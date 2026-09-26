@@ -16,6 +16,7 @@ mod io;
 pub mod parser;
 mod shell;
 mod testing;
+mod time;
 
 pub use ctx::Ctx;
 pub use io::{Console, MemInfo, System};

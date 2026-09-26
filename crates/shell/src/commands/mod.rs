@@ -5,6 +5,9 @@ use crate::ctx::Ctx;
 use alloc::string::String;
 
 mod basic;
+mod ls;
+mod stat;
+mod text;
 
 /// One built-in command.
 pub struct Builtin {
@@ -18,6 +21,11 @@ pub struct Builtin {
 
 /// Every command, sorted by name.
 pub const COMMANDS: &[Builtin] = &[
+    Builtin {
+        name: "cat",
+        help: "print files",
+        run: text::cat,
+    },
     Builtin {
         name: "cd",
         help: "change the current directory",
@@ -34,9 +42,19 @@ pub const COMMANDS: &[Builtin] = &[
         run: basic::echo,
     },
     Builtin {
+        name: "head",
+        help: "print the first lines of a file",
+        run: text::head,
+    },
+    Builtin {
         name: "help",
         help: "list the commands",
         run: basic::help,
+    },
+    Builtin {
+        name: "ls",
+        help: "list directory contents",
+        run: ls::ls,
     },
     Builtin {
         name: "pwd",
@@ -44,9 +62,24 @@ pub const COMMANDS: &[Builtin] = &[
         run: basic::pwd,
     },
     Builtin {
+        name: "stat",
+        help: "show everything about a file",
+        run: stat::stat,
+    },
+    Builtin {
+        name: "tail",
+        help: "print the last lines of a file",
+        run: text::tail,
+    },
+    Builtin {
         name: "uname",
         help: "print the system name",
         run: basic::uname,
+    },
+    Builtin {
+        name: "wc",
+        help: "count lines, words and bytes",
+        run: text::wc,
     },
 ];
 
