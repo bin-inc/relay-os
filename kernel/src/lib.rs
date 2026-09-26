@@ -10,20 +10,26 @@ pub mod klog;
 pub mod panic_screen;
 pub mod serial;
 
-use boot_info::{BootInfo, MemoryKind};
+use boot_info::{BootInfo, MemoryKind, PHYS_OFFSET};
 use cmdline::{Cmdline, PanicTest};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn kernel_main(info: &'static BootInfo) -> ! {
-    serial::init();
     if !info.is_valid() {
+        serial::init();
         serial::write(b"relay: BootInfo magic/version mismatch; halting\n");
         arch::halt_forever();
     }
+    // Boot-progress squares 9-10 (1-8 are the loader's); console::init
+    // clears them once text output works.
+    let fb = info.framebuffer;
+    let mark = |stage| unsafe { fb.mark_stage(PHYS_OFFSET + fb.phys_addr, stage) };
+    mark(9);
+    serial::init();
+    mark(10);
     console::init(&info.framebuffer);
     kprintln!("Relay OS {VERSION}");
-    let fb = &info.framebuffer;
     let (cols, rows) = console::size().unwrap_or((0, 0));
     console::ok(format_args!(
         "console {}x{} ({cols}x{rows} cells)",

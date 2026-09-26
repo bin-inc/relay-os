@@ -122,11 +122,18 @@ fn main() -> Status {
     let cmdline_file = read_file(CMDLINE_PATH).unwrap_or_default();
     let cmdline = cmdline_text::normalize(&cmdline_file);
     let fb = video::setup(cmdline).expect("no usable 32-bpp GOP framebuffer");
+    // Boot-progress squares (see FramebufferInfo::mark_stage): the firmware
+    // console stops drawing once we hold the GOP, and the NUC has no serial
+    // port, so these are the only progress signal on real hardware.
+    let mark = |stage| unsafe { fb.mark_stage(fb.phys_addr, stage) };
+    mark(1);
     let guid = boot_partition_guid();
     let rsdp_addr = rsdp();
+    mark(2);
 
     let mut tables = paging::Tables::new();
     let (entry, kernel_phys, kernel_len) = load_kernel(&kernel_file, &mut tables);
+    mark(3);
     drop(kernel_file);
 
     // Linear map of RAM (from the current memory map) and the framebuffer.
@@ -135,6 +142,7 @@ fn main() -> Status {
     drop(mmap);
     tables.map_linear(0, memmap::linear_map_end(descs.iter().copied()));
     tables.map_linear(fb.phys_addr, fb.phys_addr + fb.size);
+    mark(4);
 
     // Kernel stack below a guard page.
     let stack_pages = (KERNEL_STACK_SIZE / 4096) as usize;
@@ -151,6 +159,7 @@ fn main() -> Status {
     let tramp = enter_kernel as *const () as u64 & !0xFFF;
     tables.map_4k(tramp, tramp, F::empty());
     tables.map_4k(tramp + 4096, tramp + 4096, F::empty());
+    mark(5);
 
     // Everything the kernel reads must be allocated before ExitBootServices.
     // Size the region array from the memory map as it is now (after all the
@@ -162,9 +171,11 @@ fn main() -> Status {
     let info_phys = alloc_pages(MemoryType::LOADER_DATA, 1) as u64;
     let region_bytes = slots * core::mem::size_of::<MemoryRegion>();
     let regions_phys = alloc_pages(MemoryType::LOADER_DATA, region_bytes.div_ceil(4096)) as u64;
+    mark(6);
 
     println!("relay-boot: starting kernel");
     let final_map = unsafe { boot::exit_boot_services(None) };
+    mark(7);
     let regions =
         unsafe { core::slice::from_raw_parts_mut(regions_phys as *mut MemoryRegion, slots) };
     // No allocation from here on: the UEFI allocator is gone.
@@ -194,6 +205,7 @@ fn main() -> Status {
     };
     unsafe {
         core::ptr::write(info_phys as *mut BootInfo, info);
+        fb.mark_stage(fb.phys_addr, 8);
         x86_64::instructions::interrupts::disable();
         x86_64::registers::model_specific::Efer::update(|f| {
             f.insert(x86_64::registers::model_specific::EferFlags::NO_EXECUTE_ENABLE)
