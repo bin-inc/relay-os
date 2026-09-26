@@ -1,0 +1,11 @@
+# A page fault reaches the panic screen with the faulting address.
+cmdline test=1 panic=pagefault
+timeout 30
+expect triggering PageFault
+expect KERNEL PANIC
+expect CPU exception 14: page fault \(error code 0x0\)
+expect CR2=0x00007fffdead0000
+expect last kernel log lines
+expect \[ ok \] cpu tables
+expect System halted
+screenshot-nonblank

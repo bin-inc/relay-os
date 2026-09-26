@@ -1,0 +1,6 @@
+# Stack overflow hits the guard page; the double-fault handler runs on its
+# own IST stack and still draws the panic screen.
+cmdline test=1 panic=stack
+timeout 30
+expect CPU exception 8: double fault
+expect System halted

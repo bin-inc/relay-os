@@ -1,0 +1,4 @@
+cmdline test=1 panic=ud
+timeout 30
+expect CPU exception 6: invalid opcode
+expect System halted

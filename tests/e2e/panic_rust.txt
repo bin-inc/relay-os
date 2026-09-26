@@ -1,0 +1,6 @@
+cmdline test=1 panic=panic
+timeout 30
+expect KERNEL PANIC
+expect test panic requested on the command line
+expect at kernel/src/lib\.rs:\d+:\d+
+expect System halted
