@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["boot", "kernel", "crates/boot-info", "crates/term", "xtask"]
-default-members = ["crates/boot-info", "crates/term", "xtask"]
+members = ["boot", "kernel", "crates/boot-info", "crates/term", "crates/vfs", "xtask"]
+default-members = ["crates/boot-info", "crates/term", "crates/vfs", "xtask"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 boot-info = { path = "crates/boot-info" }
 term = { path = "crates/term" }
+vfs = { path = "crates/vfs" }
 uefi = { version = "0.41", default-features = false }
 x86_64 = { version = "0.15.5", default-features = false, features = ["instructions"] }
 bitflags = "2"
