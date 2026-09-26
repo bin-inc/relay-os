@@ -26,8 +26,9 @@ normally.
 3. Within about 5 s the monitor must show, on black:
    - `Relay OS 0.1.0`
    - `[ ok ] console WxH (CxR cells)` — note W×H. It should be the monitor's
-     native resolution if that is at most 1920×1080, otherwise the largest
-     mode up to 1920×1080.
+     native resolution (1920×1200 on the ASUS PA248QV); the terminal uses at
+     most the top-left 1920×1080 of it, so wider or taller screens have a
+     black margin.
    - `[ ok ] cpu tables`
    - `[ ok ] boot info: N MiB usable in M regions, cmdline ''` — N should be
      roughly 15000.
@@ -73,4 +74,5 @@ at the leftmost one:
 | 2026-09-26 | 1 (runs 1–5) | `6026534`…`f8bc08e` | Fail | Loader stopped inside ExitBootServices (square 7 of 9, no reset). Two loader bugs found: exclusive protocol opens stopped the firmware text console; kernel pages in an OS-defined memory type (`0x80005245`) made ExitBootServices hang. Fixed in `f8bc08e`, `8b8f13e`. |
 | 2026-09-26 | 1, `video=1920x1200` | `8b8f13e` | Pass | `console 1920x1200 (120x33 cells)`, 15948 MiB usable in 32 regions. |
 | 2026-09-26 | 1, default cmdline | `8b8f13e` | Pass | Loader switched the ASUS PA248QV from native 1920×1200 to 1920×1080: `console 1920x1080 (120x33 cells)`, 15948 MiB usable in 32 regions. |
+| 2026-09-26 | 1, default cmdline (after review fix) | `8cd8ec7` | Pass | Native mode kept: `console 1920x1200 (120x33 cells)`, 15948 MiB usable in 32 regions, no progress squares left. The earlier default-cmdline row switched to 1920×1080 against spec §4.2.3 (fixed in `b7817b3`). |
 | 2026-09-26 | 1, `panic=pagefault` | `8b8f13e` | Pass | Red panic screen: `CPU exception 14: page fault (error code 0x0)`, `CR2=0x00007fffdead0000`, log tail shown, `System halted.` |
