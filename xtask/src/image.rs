@@ -151,6 +151,33 @@ pub fn write_esp(
     Ok(())
 }
 
+/// Replaces one file (absolute ESP path, `/` separators) on an existing ESP.
+pub fn esp_write(
+    target: &Path,
+    esp: Partition,
+    path: &str,
+    contents: &[u8],
+    scratch: &Path,
+) -> Result<()> {
+    let file = scratch.join("esp-write.tmp");
+    fs::write(&file, contents)?;
+    run(mtools("mcopy")
+        .args(["-o", "-i", &mtools_target(target, esp)])
+        .arg(&file)
+        .arg(format!("::{path}")))
+}
+
+/// Replaces only the cmdline file on an existing ESP.
+pub fn set_cmdline(target: &Path, esp: Partition, cmdline: &str, scratch: &Path) -> Result<()> {
+    esp_write(
+        target,
+        esp,
+        "/EFI/RELAY/cmdline",
+        cmdline.as_bytes(),
+        scratch,
+    )
+}
+
 /// Builds the staging tree for `/`: the fixed directories plus `rootfs/`.
 pub fn stage_rootfs() -> Result<PathBuf> {
     let staging = out_dir().join("rootfs-staging");

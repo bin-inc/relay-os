@@ -1,0 +1,6 @@
+# A corrupt kernel.elf stops the loader with a readable message instead of
+# a hang or a reset loop.
+esp-write /EFI/RELAY/kernel.elf this is not an ELF file
+timeout 30
+expect relay-boot \d+\.\d+\.\d+
+expect kernel\.elf is not a valid kernel: TooShort
