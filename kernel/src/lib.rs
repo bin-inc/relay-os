@@ -5,6 +5,7 @@
 
 extern crate alloc;
 
+pub mod acpi;
 pub mod arch;
 pub mod cmdline;
 pub mod console;
@@ -76,6 +77,11 @@ pub fn kernel_main(info: &'static BootInfo) -> ! {
             console::fail("memory", format_args!("{e}"));
             arch::halt_forever();
         }
+    }
+
+    match acpi::init(info.rsdp_addr) {
+        Ok(a) => console::ok(format_args!("acpi: {a}")),
+        Err(e) => console::fail("acpi", format_args!("{e}")),
     }
 
     if let Some(t) = cmdline.panic_test {

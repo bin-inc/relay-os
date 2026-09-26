@@ -6,5 +6,8 @@ expect \[ ok \] console \d+x\d+ \(\d+x\d+ cells\)
 expect \[ ok \] cpu tables
 expect \[ ok \] boot info: \d+ MiB usable in \d+ regions, cmdline 'test=1'
 expect \[ ok \] memory: \d+ MiB free of \d+ MiB, heap 32 MiB
+expect acpi: tables FACP APIC HPET MCFG WAET BGRT
+expect acpi: FADT reset io 0xcf9 <- 0xf, PM1a_CNT io 0x604, PM1b_CNT none, century register 0x32
+expect \[ ok \] acpi: 6 tables, ECAM 0xe0000000 buses 0-255, HPET 0xfed00000, S5 0/0
 expect relay: early boot complete
 screenshot-nonblank
