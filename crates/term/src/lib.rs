@@ -9,9 +9,11 @@
 pub mod ansi;
 pub mod color;
 pub mod font;
+mod terminal;
 
 pub use color::PixelFormat;
 pub use font::{GLYPH_H, GLYPH_W};
+pub use terminal::{Cell, MAX_ROWS, Terminal, geometry};
 
 #[cfg(test)]
 mod tests {
