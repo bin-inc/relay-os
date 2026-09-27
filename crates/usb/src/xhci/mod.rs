@@ -2,8 +2,17 @@
 // The driver is built bottom-up: parts land before their users.
 #![allow(dead_code)]
 
+/// Logs one line starting "xhci <name>: ", as every line of this driver
+/// does (spec §13: the NUC is debugged from a photo of `dmesg`).
+macro_rules! xlog {
+    ($hal:expr, $name:expr, $($arg:tt)*) => {
+        $crate::Hal::log($hal, format_args!("xhci {}: {}", $name, format_args!($($arg)*)))
+    };
+}
+
 mod caps;
 mod context;
+mod init;
 mod regs;
 mod ring;
 mod trb;

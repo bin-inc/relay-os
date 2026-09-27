@@ -61,6 +61,20 @@ pub struct FakeConfig {
     pub endless_caps: bool,
     /// Knob: every register reads 0xFFFF_FFFF (powered down or gone).
     pub all_ones: bool,
+    /// The legacy support capability says the BIOS owns the controller.
+    pub bios_owned: bool,
+    /// How long the BIOS takes to let go once asked; `None`: it never does.
+    pub bios_release: Option<Duration>,
+    /// USBLEGCTLSTS as the BIOS left it.
+    pub legacy_ctlsts: u32,
+    /// The controller is running when the driver finds it.
+    pub running: bool,
+    /// How long HCH takes to follow R/S = 0; `None`: it never halts.
+    pub halt_time: Option<Duration>,
+    /// How long HCRST takes to clear; `None`: it never does.
+    pub reset_time: Option<Duration>,
+    /// How long CNR stays set after HCRST cleared; `None`: forever.
+    pub cnr_time: Option<Duration>,
 }
 
 /// Capabilities at `offsets`, each pointing to the next.
@@ -119,6 +133,13 @@ impl FakeConfig {
             protocol_name: u32::from_le_bytes(*b"USB "),
             endless_caps: false,
             all_ones: false,
+            bios_owned: false,
+            bios_release: None,
+            legacy_ctlsts: 0,
+            running: false,
+            halt_time: Some(Duration::ZERO),
+            reset_time: Some(Duration::ZERO),
+            cnr_time: Some(Duration::ZERO),
         }
     }
 
@@ -197,9 +218,21 @@ impl FakeConfig {
             protocol_name: u32::from_le_bytes(*b"USB "),
             endless_caps: false,
             all_ones: false,
+            bios_owned: true,
+            bios_release: Some(Duration::from_millis(5)),
+            // SMIs on (bits 0, 4, 13-15) and pending (29-31); bit 8 is
+            // reserved and must survive.
+            legacy_ctlsts: 0xE000_E111,
+            running: true,
+            halt_time: Some(Duration::from_millis(1)),
+            reset_time: Some(Duration::from_millis(2)),
+            cnr_time: Some(Duration::from_millis(10)),
         }
     }
 }
+
+/// Something the fake does at a set time.
+type Action = Box<dyn FnOnce(&mut FakeXhci, &Dma)>;
 
 /// The fake controller: registers, and (as tasks add them) rings, slots
 /// and ports. `FakeHal` routes every register access and every tick of
@@ -223,6 +256,12 @@ pub struct FakeXhci {
     legacy: [u32; 2],
     cap_reads: usize,
     highest_read: usize,
+    /// Due actions, in the order they were scheduled.
+    timers: Vec<(Duration, Action)>,
+    /// When HCRST was last written.
+    hcrst_at: Option<Duration>,
+    /// Writes to the extended capability space.
+    cap_writes: usize,
 }
 
 impl FakeXhci {
@@ -246,14 +285,79 @@ impl FakeXhci {
             legacy: [0; 2],
             cap_reads: 0,
             highest_read: 0,
+            timers: Vec::new(),
+            hcrst_at: None,
+            cap_writes: 0,
         };
+        x.legacy = [
+            if x.config.bios_owned {
+                regs::BIOS_OWNED
+            } else {
+                0
+            },
+            x.config.legacy_ctlsts,
+        ];
+        if x.config.running {
+            x.usbcmd = regs::RUN;
+            x.usbsts = 0;
+        }
         x.power_on_ports();
         x
     }
 
     /// Lets the controller act on everything due by `now`.
-    pub fn advance_to(&mut self, now: Duration, _dma: &Dma) {
+    pub fn advance_to(&mut self, now: Duration, dma: &Dma) {
+        while let Some(i) = self.next_due(now) {
+            let (when, action) = self.timers.remove(i);
+            self.now = self.now.max(when);
+            action(self, dma);
+        }
         self.now = now;
+    }
+
+    /// The earliest action due by `now` (the first scheduled among equals).
+    fn next_due(&self, now: Duration) -> Option<usize> {
+        let mut best: Option<usize> = None;
+        for (i, (when, _)) in self.timers.iter().enumerate() {
+            if *when <= now && best.is_none_or(|b| *when < self.timers[b].0) {
+                best = Some(i);
+            }
+        }
+        best
+    }
+
+    /// Runs `action` once the clock reaches `when`.
+    pub fn at(&mut self, when: Duration, action: impl FnOnce(&mut FakeXhci, &Dma) + 'static) {
+        self.timers.push((when, Box::new(action)));
+    }
+
+    /// Runs `action` `delay` from now: how tests unplug a device halfway
+    /// through a driver call.
+    pub fn after(&mut self, delay: Duration, action: impl FnOnce(&mut FakeXhci, &Dma) + 'static) {
+        self.at(self.now + delay, action);
+    }
+
+    /// The knobs, to turn one while the driver runs (the controller
+    /// falling off the bus, say).
+    pub fn config_mut(&mut self) -> &mut FakeConfig {
+        &mut self.config
+    }
+
+    pub fn usbcmd(&self) -> u32 {
+        self.usbcmd
+    }
+
+    pub fn usbsts(&self) -> u32 {
+        self.usbsts
+    }
+
+    /// USBLEGSUP and USBLEGCTLSTS.
+    pub fn legacy(&self) -> [u32; 2] {
+        self.legacy
+    }
+
+    pub fn cap_writes(&self) -> usize {
+        self.cap_writes
     }
 
     /// Reads of the extended capability area so far.
