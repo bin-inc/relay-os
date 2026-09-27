@@ -14,6 +14,7 @@ mod caps;
 mod command;
 mod context;
 mod init;
+mod port;
 mod regs;
 mod ring;
 mod start;
@@ -62,6 +63,16 @@ impl fmt::Display for ControllerInfo {
     }
 }
 
+/// A root port whose state changed since the last `port_changes()`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PortChange {
+    pub port: u8,
+    pub connected: bool,
+    /// A connect or disconnect happened (CSC was set): a device that is
+    /// attached on this port is gone, even if something is connected now.
+    pub reconnected: bool,
+}
+
 /// One xHCI controller, brought up by [`Xhci::new`].
 pub struct Xhci<H: Hal> {
     hal: H,
@@ -78,6 +89,10 @@ pub struct Xhci<H: Hal> {
     pending: Option<Pending>,
     /// A Command Ring Stopped event came since the last abort.
     ring_stopped: bool,
+    /// Ports a Port Status Change Event named since `port_changes` looked.
+    port_flags: Vec<bool>,
+    /// `port_changes` has not run yet: every port counts.
+    first_scan: bool,
     /// Set when the controller stopped working: nothing is sent to it any
     /// more (`UsbError::ControllerDead`).
     dead: bool,

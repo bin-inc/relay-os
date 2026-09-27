@@ -97,8 +97,10 @@ impl FakeXhci {
         }
     }
 
-    pub fn read(&mut self, offset: usize, _dma: &Dma) -> u32 {
+    pub fn read(&mut self, offset: usize, dma: &Dma) -> u32 {
         self.check_access(offset);
+        // Whatever happened since the last tick is visible now.
+        self.flush_events(dma);
         self.highest_read = self.highest_read.max(offset);
         if self.config.all_ones {
             return 0xFFFF_FFFF;
@@ -247,6 +249,7 @@ impl FakeXhci {
         self.config_reg = 0;
         self.portsc.iter_mut().for_each(|p| *p = 0);
         self.power_on_ports();
+        self.reconnect_ports();
         (self.iman, self.imod, self.erstsz, self.erstba) = (0, 0, 0, 0);
         (self.event_ring, self.erdp, self.ehb) = (None, 0, false);
         self.pending_events.clear();
@@ -307,7 +310,7 @@ impl FakeXhci {
             o if o >= PORTS => {
                 let (port, reg) = ((o - PORTS) / 0x10, (o - PORTS) % 0x10);
                 if reg == 0 {
-                    self.write_portsc(port, value);
+                    self.write_portsc(port, value, dma);
                 }
             }
             _ => panic!("fake xhci: write to read-only operational register {offset:#x}"),
@@ -335,15 +338,6 @@ impl FakeXhci {
             0x30 | 0x34 => self.write_erstba(offset == 0x34, value, dma),
             0x38 | 0x3C => self.write_erdp(offset == 0x3C, value),
             _ => {}
-        }
-    }
-
-    /// Port power; the rest of PORTSC comes with the port model.
-    fn write_portsc(&mut self, index: usize, value: u32) {
-        self.port_writes += 1;
-        if self.config.ppc && value & PP != 0 && self.portsc[index] & PP == 0 {
-            self.portsc[index] |= PP;
-            self.powered_at = Some(self.now);
         }
     }
 }

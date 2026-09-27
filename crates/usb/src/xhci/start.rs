@@ -21,6 +21,9 @@ use core::time::Duration;
 /// powered or reset (USB 2.0 7.1.7.3, TSIGATT), so devices present at boot
 /// are connected when the first `port_changes` looks.
 const ATTACH_TIME: Duration = Duration::from_millis(100);
+/// How long `Xhci::new` waits at most, in all, for USB 3 links present at
+/// boot to finish training.
+const SETTLE_LIMIT: Duration = Duration::from_secs(1);
 /// The only page size this driver sets up scratchpad buffers for.
 const PAGE: usize = 4096;
 
@@ -201,6 +204,7 @@ impl<H: Hal> Xhci<H> {
     /// (the PCI address, "00:14.0") starts every log line. On an error
     /// everything allocated is freed again.
     pub fn new(hal: H, mmio_phys: u64, mmio_len: usize, name: &str) -> Result<Xhci<H>, UsbError> {
+        let started = hal.now();
         let Some(base) = hal.map_mmio(mmio_phys, mmio_len) else {
             xlog!(
                 &hal,
@@ -318,18 +322,33 @@ impl<H: Hal> Xhci<H> {
             pending: None,
             ring_stopped: false,
             dead: false,
+            port_flags: alloc::vec![false; params.ports as usize],
+            first_scan: true,
         };
-        xhci.settle_ports(settle_from);
+        xhci.settle_ports(started, settle_from);
         Ok(xhci)
     }
 
     /// Waits until 100 ms after the ports were last powered or reset, so
-    /// that devices present at boot have signalled their attach.
-    fn settle_ports(&mut self, since: Duration) {
+    /// that devices present at boot have signalled their attach, then,
+    /// polling, up to 1 s after `started` in all while a USB 3 link still
+    /// trains (in Polling it shows no connection yet).
+    fn settle_ports(&mut self, started: Duration, since: Duration) {
         let start = self.hal.now();
         self.hal.sleep((since + ATTACH_TIME).saturating_sub(start));
+        while self.usb3_link_training().is_some() && self.hal.now() - started < SETTLE_LIMIT {
+            self.poll();
+            self.hal.sleep(Duration::from_millis(1));
+        }
         let waited = (self.hal.now() - start).as_millis();
-        xlog!(&self.hal, &self.name, "ports settled after {waited} ms");
+        match self.usb3_link_training() {
+            Some(port) => xlog!(
+                &self.hal,
+                &self.name,
+                "port {port}: USB 3 link still training after {waited} ms"
+            ),
+            None => xlog!(&self.hal, &self.name, "ports settled after {waited} ms"),
+        }
     }
 }
 

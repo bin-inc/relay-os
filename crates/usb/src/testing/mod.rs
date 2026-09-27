@@ -3,9 +3,11 @@
 // Helpers serve tests across the crate; not every build uses all of them.
 #![allow(dead_code)]
 
+mod device;
 mod hal;
 mod xhci;
 
+pub use device::FakeUsbDevice;
 pub use hal::{FAKE_BAR, FAKE_BAR_LEN, FakeHal};
 pub use xhci::{ExtCap, FakeConfig};
 

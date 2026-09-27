@@ -7,8 +7,8 @@ use super::init::{REGISTER_TIMEOUT, wait_for};
 use super::regs::{ALL_ONES, CA, CRCR, EHB, ERDP, HCE, HCH, HSE, RUN, USBCMD, USBSTS};
 use super::ring::TRBS;
 use super::trb::{
-    COMMAND_ABORTED, COMMAND_COMPLETION, COMMAND_RING_STOPPED, HOST_CONTROLLER_EVENT, SUCCESS, Trb,
-    command_name, completion_name,
+    COMMAND_ABORTED, COMMAND_COMPLETION, COMMAND_RING_STOPPED, HOST_CONTROLLER_EVENT,
+    PORT_STATUS_CHANGE, SUCCESS, Trb, command_name, completion_name,
 };
 use crate::{Hal, UsbError};
 use core::sync::atomic::{Ordering, fence};
@@ -189,6 +189,7 @@ impl<H: Hal> Xhci<H> {
     fn handle_event(&mut self, event: Trb) {
         match event.trb_type() {
             COMMAND_COMPLETION => self.command_completed(event),
+            PORT_STATUS_CHANGE => self.port_event(event.port_id()),
             HOST_CONTROLLER_EVENT => xlog!(
                 &self.hal,
                 &self.name,
