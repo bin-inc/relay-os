@@ -1,0 +1,21 @@
+# The shell at the end of boot, typed at over COM1: the empty read-only /
+# of spec §10 and the commands that report on the machine.
+timeout 30
+expect root@relay:/# $
+send echo hello, world
+expect \nhello, world\n
+send uname -a
+expect \nRelay relay 0\.1\.0 x86_64\n
+send ls -a /
+expect \n\.\s+\.\.\n
+send touch /f
+expect \ntouch: cannot touch '/f': Read-only file system\n
+send date
+expect \n(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \w{3} [ \d]\d \d\d:\d\d:\d\d UTC 20\d\d\n
+send free
+expect \nMem:\s+\d+\s+\d+\s+\d+\nHeap:\s+32768\s+\d+\s+\d+\n
+send dmesg
+expect \n\[ ok \] pci: .*\n
+send nosuch
+expect \nrelay-sh: nosuch: command not found\n
+expect root@relay:/# $

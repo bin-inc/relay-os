@@ -45,6 +45,11 @@ impl<const N: usize> Ring<N> {
         self.buf[(self.start + i) % N]
     }
 
+    /// The whole log, oldest byte first (for `dmesg`).
+    pub fn to_vec(&self) -> alloc::vec::Vec<u8> {
+        (0..self.len).map(|i| self.byte(i)).collect()
+    }
+
     /// Copies the newest `n` complete-or-partial lines into `out` (oldest
     /// first) and returns the number of bytes written. If they do not fit,
     /// the oldest bytes are dropped.
@@ -143,6 +148,15 @@ mod tests {
         let mut b = *b"[\x1b[32m ok \x1b[0m] x\x1b[";
         let n = strip_ansi_in_place(&mut b);
         assert_eq!(&b[..n], b"[ ok ] x");
+    }
+
+    #[test]
+    fn the_whole_log_comes_out_oldest_first() {
+        let mut r: Ring<8> = Ring::new();
+        r.write(b"abc");
+        assert_eq!(r.to_vec(), b"abc");
+        r.write(b"defghij");
+        assert_eq!(r.to_vec(), b"cdefghij");
     }
 
     #[test]

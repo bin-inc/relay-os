@@ -1,5 +1,7 @@
 //! COM1 (16550 UART at 0x3F8). Present in QEMU, absent on the NUC; the probe
-//! makes every call a no-op when there is no UART.
+//! makes every call a no-op when there is no UART. Output mirrors the
+//! console; input joins the keyboard's (spec §7.2), polled, without
+//! interrupts.
 
 use spin::Mutex;
 use x86_64::instructions::port::Port;
@@ -46,6 +48,16 @@ impl SerialPort {
         }
     }
 
+    /// A received byte, if one is waiting (Line Status bit 0, Data Ready).
+    fn read_byte(&mut self) -> Option<u8> {
+        unsafe {
+            if Port::<u8>::new(self.base + 5).read() & 0x01 == 0 {
+                return None;
+            }
+            Some(Port::<u8>::new(self.base).read())
+        }
+    }
+
     /// Writes bytes, translating `\n` to `\r\n`.
     pub fn write(&mut self, bytes: &[u8]) {
         for &b in bytes {
@@ -61,6 +73,12 @@ pub static SERIAL: Mutex<Option<SerialPort>> = Mutex::new(None);
 
 pub fn init() {
     *SERIAL.lock() = unsafe { SerialPort::probe(COM1) };
+}
+
+/// The next byte received on COM1, if any. Never waits; `None` on machines
+/// without a UART (the NUC).
+pub fn read_byte() -> Option<u8> {
+    SERIAL.lock().as_mut().and_then(|s| s.read_byte())
 }
 
 pub fn write(bytes: &[u8]) {

@@ -14,6 +14,17 @@ pub fn halt_forever() -> ! {
     }
 }
 
+/// Sleeps until the next interrupt (the 1 kHz tick) when interrupts are on;
+/// without them (the timer failed to start) it only pauses briefly, so
+/// callers that poll keep running.
+pub fn wait_for_interrupt() {
+    if x86_64::instructions::interrupts::are_enabled() {
+        x86_64::instructions::hlt();
+    } else {
+        core::hint::spin_loop();
+    }
+}
+
 /// Waits for interrupts forever: the CPU sleeps between timer ticks.
 pub fn idle_forever() -> ! {
     loop {
