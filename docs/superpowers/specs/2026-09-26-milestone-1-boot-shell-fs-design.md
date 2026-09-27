@@ -968,3 +968,80 @@ Each step ends with something that can be tested.
      raw mode with `stty` (restored at the end and after a panic), shows
      ext2's mount warnings, and ends on `reboot`, `poweroff` or the end of
      input, always with a clean shutdown. `free` has no figures on the host.
+10. **Decisions made while planning plan 4** (USB keyboard):
+   - **The `Hal` also carries register access and the log** (refines
+     §6.1). `map_mmio` returns the registers' virtual address, and
+     `read32`/`write32` read and write them, so host tests run the driver
+     against a fake controller that sees every access with its real
+     semantics (write-one-to-clear bits, doorbells). `map_mmio` and
+     `alloc_dma` return `None` on failure instead of panicking; `log` adds a
+     line to `dmesg`. `DmaBuf` is reached only through bounds-checked
+     volatile accessors, and `alloc_dma` returns page-aligned memory.
+   - **Class drivers see a `Bus`, not the xHCI driver:** control requests,
+     IN transfers that complete later, and halt recovery. `poll()` never
+     waits; what needs a control transfer (the Caps Lock LED, recovering a
+     failed endpoint) runs in a separate `service` step from the console's
+     idle loop, where blocking is allowed.
+   - **Every xHCI controller is started** (§5.5), not just the first
+     (the NUC's Thunderbolt xHCI enumerates before the PCH's). Each PCI
+     function is put into power state D0 first (firmware may leave an
+     unused controller in D3hot), with its BARs written back if leaving
+     D3hot reset it, then memory decoding and bus mastering are enabled. `[ ok ] usb` needs one working controller; one that fails
+     gets a line of its own and is skipped. Controllers without 64-bit DMA
+     or with a page size other than 4 KiB are refused.
+   - **Hot-plug on root ports.** Devices are set up when they appear, at
+     boot and later (after a 100 ms debounce), and dropped when they are
+     unplugged, also when unplugged and replugged between two looks; this
+     runs from the console's idle loop.
+   - **Waits and resets the spec leaves open.** After start the driver
+     waits until 100 ms after the ports were reset or powered (USB 2.0's
+     TSIGATT) and up to 1 s while a USB 3 link is still training, so
+     devices present at boot are on the boot screen. A port reset waits
+     500 ms. A USB 3 port that trains gets a hot reset before enumeration,
+     as in Linux; one that does not train gets one warm reset instead.
+     Devices get 10 ms after `SET_ADDRESS`. A command that times out
+     aborts the command ring (all 64 bits of CRCR written), the driver
+     waits for Command Ring Stopped, and the TRB becomes a No Op; a
+     controller whose abort fails, or that reports a host system error, is
+     halted and not used again. USB timeouts are measured with the TSC, so
+     they expire even if the LAPIC timer did not start; without a TSC
+     frequency USB is not started.
+   - **Memory the controller may still use is never freed:** a slot's
+     memory is freed only after Disable Slot succeeded (otherwise it is
+     kept, and logged), and nothing of a dead controller is freed.
+   - **Keyboard details.** `SET_PROTOCOL(boot)` must succeed (otherwise
+     the device's boot line says `keyboard not started: <reason>`); a
+     stalled `SET_IDLE` is only logged. A report with ErrorRollOver, POSTFail or
+     ErrorUndefined in any key slot changes nothing, and a usage listed
+     twice is one key. Caps Lock and its LED are per keyboard, and the LED
+     is sent once per change. Keypad keys always give digits (Num Lock is
+     not tracked); lock keys do not repeat; the newest key repeats, and
+     after a long pause it repeats once, not in a burst. When a keyboard's
+     endpoint fails, every held key is released, and recovery is tried
+     once a second, three times.
+   - **Console input** (§7.2): keyboard and COM1 bytes join one queue with
+     4 KiB of type-ahead. A Ctrl-C typed while a command runs drops what
+     was typed before it, as a terminal does. Keys send what a Linux
+     terminal sends: Ctrl with a letter its control code, Enter CR,
+     Backspace DEL, Insert/Delete/Page Up/Page Down `ESC [ 2~/3~/5~/6~`.
+     Between polls the console sleeps until the next timer tick.
+   - **The shell's output goes to the screen and serial, not into the
+     kernel log**, so `dmesg` shows what the kernel reported.
+   - **Until plan 5** the boot shows `[FAIL] mount /: no storage driver
+     yet`, the shell runs on the empty read-only `/` of §10, and `reboot`
+     and `poweroff` print the safe-to-power-off message and halt. The
+     `relay: early boot complete` line is gone: the prompt is the last
+     line.
+   - **New cmdline word `debug=usb`** also shows the USB log on screen, for
+     a NUC whose keyboard does not work (no serial port, no `dmesg`).
+   - **The e2e `key <text>` step** types over QMP `send-key` and then
+     presses Enter, like `send`; `{up}`, `{backspace}`, `{caps_lock}`,
+     `{ctrl-c}` and similar name keys without a character. Each press is
+     held 30 ms, and the step returns once QEMU has played them all.
+   - **What QEMU 8.2 really does** (corrects §9.3's known gaps):
+     `qemu-xhci` numbers its USB 3 ports 1-4 and its USB 2 ports 5-8, and
+     `usb-storage` connects at SuperSpeed, so a SuperSpeed port is
+     exercised in QEMU too; `usb-kbd` is high-speed. 64-byte contexts,
+     scratchpad buffers, the BIOS handoff, port power control, low- and
+     full-speed devices and a USB 3 port that needs a warm reset remain
+     covered only by host tests against a fake controller and by the NUC.
