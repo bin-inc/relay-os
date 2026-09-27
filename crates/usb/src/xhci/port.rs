@@ -6,7 +6,8 @@ use super::caps::PortProtocol;
 use super::context::speed_from_id;
 use super::init::wait_for;
 use super::regs::{
-    ALL_ONES, CCS, CHANGE_BITS, CSC, PED, PLS_SHIFT, PR, PRC, SPEED_SHIFT, WPR, WRC, portsc_neutral,
+    ALL_ONES, CCS, CHANGE_BITS, CSC, PED, PLC, PLS_SHIFT, PR, PRC, SPEED_SHIFT, WPR, WRC,
+    portsc_neutral,
 };
 use super::{PortChange, Xhci};
 use crate::{Hal, Speed, UsbError};
@@ -179,7 +180,11 @@ impl<H: Hal> Xhci<H> {
     /// U0, a hot reset (PR) resets the device, as Linux does, so one that
     /// kept its address across HCRST (the stick the machine booted from)
     /// starts afresh. A link not in U0 within 500 ms, or in SS.Inactive or
-    /// Compliance, gets one warm reset instead.
+    /// Compliance, gets one warm reset instead. A reset that leaves the
+    /// device connected also clears the connect and link state changes it
+    /// caused (a warm reset retrains the link), as Linux does: otherwise the
+    /// next `port_changes` would take the reset for a replug and set the
+    /// device up again.
     fn reset_usb3(&mut self, port: u8) -> Result<(), UsbError> {
         let (ok, sc) = self.wait_port(port, |sc| {
             trained(sc) || matches!(link_state(sc), SS_INACTIVE | COMPLIANCE)
@@ -188,7 +193,7 @@ impl<H: Hal> Xhci<H> {
             self.regs
                 .set_portsc(&self.hal, port, portsc_neutral(sc) | PR);
             let (ok, sc) = self.wait_port(port, |sc| sc & PRC != 0);
-            self.clear_changes(port, sc, PRC);
+            self.clear_changes(port, sc, PRC | retrained(sc));
             if !ok || !trained(sc) {
                 return Err(self.port_failed(port, sc, "hot reset"));
             }
@@ -206,12 +211,18 @@ impl<H: Hal> Xhci<H> {
         self.regs
             .set_portsc(&self.hal, port, portsc_neutral(sc) | WPR);
         let (ok, sc) = self.wait_port(port, |sc| sc & (PRC | WRC) != 0);
-        self.clear_changes(port, sc, PRC | WRC);
+        self.clear_changes(port, sc, PRC | WRC | retrained(sc));
         if !ok || !trained(sc) {
             return Err(self.port_failed(port, sc, "warm reset"));
         }
         Ok(())
     }
+}
+
+/// The change bits a USB 3 reset leaves behind on a port whose device is
+/// still there: a real unplug during the reset must still be seen.
+fn retrained(sc: u32) -> u32 {
+    if trained(sc) { CSC | PLC } else { 0 }
 }
 
 #[cfg(test)]
@@ -303,7 +314,11 @@ mod tests {
         assert_eq!(pr_writes(&hal, 13), 1, "one hot reset");
         assert_eq!(wpr_writes(&hal), 0);
         let sc = hal.fake().portsc(13);
-        assert_eq!(sc & (PED | CHANGE_BITS), PED | CSC, "enabled, PRC cleared");
+        assert_eq!(
+            sc & (PED | CHANGE_BITS),
+            PED,
+            "enabled; PRC cleared, and CSC too, as Linux clears it after a SuperSpeed reset"
+        );
         assert!(hal.log_text().contains("port 13: reset done, SuperSpeed"));
     }
 
@@ -330,7 +345,11 @@ mod tests {
         assert_eq!(
             hal.fake().portsc(14) & CHANGE_BITS,
             0,
-            "PRC and WRC cleared"
+            "PRC and WRC cleared, and the CSC and PLC the retraining set"
+        );
+        assert!(
+            xhci.port_changes().is_empty(),
+            "the warm reset is not a replug: the device is not set up twice"
         );
         assert!(
             hal.log_text()

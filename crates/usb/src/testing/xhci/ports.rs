@@ -24,6 +24,7 @@ const PIC: u32 = 3 << 14;
 const LWS: u32 = 1 << 16;
 pub const CSC: u32 = 1 << 17;
 pub const WRC: u32 = 1 << 19;
+pub const PLC: u32 = 1 << 22;
 pub const PRC: u32 = 1 << 21;
 /// CSC, PEC, WRC, OCC, PRC, PLC, CEC: RW1C.
 pub const CHANGES: u32 = 0x7F << 17;
@@ -223,7 +224,9 @@ impl FakeXhci {
 
     /// PR or WPR: the port is disabled while the reset runs; afterwards
     /// PRC (and WRC) is set and, with a device, the port is enabled (on a
-    /// USB 3 port: in U0).
+    /// USB 3 port: in U0). A warm reset takes the link down and trains it
+    /// again, so it also reports a connect and a link state change (CSC,
+    /// PLC), which is why Linux clears both after every SuperSpeed reset.
     fn start_reset(&mut self, i: usize, warm: bool) {
         if self.portsc[i] & PP == 0 {
             return;
@@ -240,7 +243,12 @@ impl FakeXhci {
             if x.devices[i].is_some() && x.port_generation[i] == generation {
                 x.enable(i, generation);
             }
-            x.set_changes(i, if warm { PRC | WRC } else { PRC });
+            let changes = match (warm, x.devices[i].is_some()) {
+                (true, true) => PRC | WRC | CSC | PLC,
+                (true, false) => PRC | WRC,
+                (false, _) => PRC,
+            };
+            x.set_changes(i, changes);
         });
     }
 }
