@@ -77,6 +77,16 @@ pub fn bios_handoff<H: Hal>(hal: &H, regs: &Regs, caps: &CapList, name: &str) {
         xlog!(hal, name, "no legacy support capability");
         return;
     };
+    // The list comes from the hardware: its capability may sit where the
+    // control register after it is outside the BAR.
+    if regs.try_read(hal, at + LEGCTLSTS).is_none() {
+        xlog!(
+            hal,
+            name,
+            "legacy support at {at:#x}: control register outside the BAR; no handoff"
+        );
+        return;
+    }
     let sup = regs.read(hal, at);
     regs.write(hal, at, sup | OS_OWNED);
     let outcome = if sup & BIOS_OWNED == 0 {

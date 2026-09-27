@@ -356,7 +356,7 @@ impl<H: Hal> Xhci<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{ExtCap, FAKE_BAR, FAKE_BAR_LEN, FakeConfig, FakeHal, start};
+    use crate::testing::{ExtCap, FAKE_BAR, FAKE_BAR_LEN, FakeCap, FakeConfig, FakeHal, start};
 
     fn new(hal: &FakeHal) -> Result<Xhci<FakeHal>, UsbError> {
         Xhci::new(hal.clone(), FAKE_BAR, FAKE_BAR_LEN, "00:14.0")
@@ -585,5 +585,26 @@ mod tests {
         assert!(hal.log_text().contains(
             "xhci 00:14.0: USB 3.0 protocol capability names no ports (first 0, count 0); ignored"
         ));
+    }
+
+    #[test]
+    fn a_legacy_capability_in_the_last_dword_is_not_a_panic() {
+        // A garbage capability list (a half-powered controller) can put
+        // USB Legacy Support where its control register is outside the BAR.
+        let mut config = FakeConfig::intel();
+        config.xecp = FAKE_BAR_LEN - 4;
+        config.caps = vec![FakeCap {
+            offset: FAKE_BAR_LEN - 4,
+            next: 0,
+            cap: ExtCap::Legacy,
+        }];
+        let hal = FakeHal::with_controller(config);
+        let _ = Xhci::new(hal.clone(), FAKE_BAR, FAKE_BAR_LEN, "00:0d.0");
+        assert!(
+            hal.log_text()
+                .contains("legacy support at 0xfffc: control register outside the BAR; no handoff"),
+            "{}",
+            hal.log_text()
+        );
     }
 }

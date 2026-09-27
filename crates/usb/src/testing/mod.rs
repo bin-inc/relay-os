@@ -9,7 +9,7 @@ mod xhci;
 
 pub use device::FakeUsbDevice;
 pub use hal::{FAKE_BAR, FAKE_BAR_LEN, FakeHal};
-pub use xhci::{ExtCap, FakeConfig};
+pub use xhci::{ExtCap, FakeCap, FakeConfig};
 
 use crate::xhci::Xhci;
 
