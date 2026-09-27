@@ -175,8 +175,9 @@ pub fn rm(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
 /// kernel's small stack. Returns whether everything went.
 fn remove_tree(ctx: &mut Ctx<'_>, top: &[u8]) -> bool {
     let mut ok = true;
-    let mut stack = match children(ctx, top) {
-        Ok(names) => vec![(top.to_vec(), names)],
+    let above = ctx.vfs.lookup(&path::join(top, b".."));
+    let mut stack = match above.and_then(|parent| children(ctx, top, parent)) {
+        Ok((node, names)) => vec![(top.to_vec(), node, names)],
         Err(e) => {
             ctx.fail(
                 "rm",
@@ -185,9 +186,9 @@ fn remove_tree(ctx: &mut Ctx<'_>, top: &[u8]) -> bool {
             return false;
         }
     };
-    while let Some((dir, pending)) = stack.last_mut() {
+    while let Some((dir, node, pending)) = stack.last_mut() {
         let Some(name) = pending.pop() else {
-            let (dir, _) = stack.pop().expect("not empty");
+            let (dir, _, _) = stack.pop().expect("not empty");
             if let Err(e) = ctx.vfs.rmdir(&dir) {
                 ctx.fail(
                     "rm",
@@ -197,6 +198,7 @@ fn remove_tree(ctx: &mut Ctx<'_>, top: &[u8]) -> bool {
             }
             continue;
         };
+        let parent = *node;
         let child = path::join(dir, &name);
         let is_dir = ctx
             .vfs
@@ -204,7 +206,8 @@ fn remove_tree(ctx: &mut Ctx<'_>, top: &[u8]) -> bool {
             .and_then(|n| ctx.vfs.stat(n))
             .map(|st| st.kind == FileType::Directory);
         let result = match is_dir {
-            Ok(true) => children(ctx, &child).map(|names| stack.push((child.clone(), names))),
+            Ok(true) => children(ctx, &child, parent)
+                .map(|(node, names)| stack.push((child.clone(), node, names))),
             Ok(false) => ctx.vfs.unlink(&child),
             Err(e) => Err(e),
         };
@@ -219,20 +222,30 @@ fn remove_tree(ctx: &mut Ctx<'_>, top: &[u8]) -> bool {
     ok
 }
 
-/// A directory's names without `.` and `..`. A name that could not be
-/// created (empty, or with a `/`) is left out rather than joined into a
-/// path that leads somewhere else; the directory then stays, not empty.
-fn children(ctx: &mut Ctx<'_>, dir: &[u8]) -> Result<Vec<Vec<u8>>, Errno> {
+/// Directory `dir`, reached from `parent`, and its names without `.` and
+/// `..`. The directory must be where its path says: its `.` is itself and
+/// its `..` is `parent` (unless a mount lies between). A corrupt disk can
+/// hold an entry naming a directory that lives elsewhere; following it
+/// would take the walk out of its target, so that is `EIO`. A name that
+/// could not be created (empty, or with a `/`) is left out rather than
+/// joined into a path that leads somewhere else; the directory then
+/// stays, not empty.
+fn children(ctx: &mut Ctx<'_>, dir: &[u8], parent: Node) -> Result<(Node, Vec<Vec<u8>>), Errno> {
     let node = ctx.vfs.lookup(dir)?;
-    let mut names: Vec<Vec<u8>> = ctx
-        .vfs
-        .read_dir(node)?
+    let entries = ctx.vfs.read_dir(node)?;
+    let ino_of = |name: &[u8]| entries.iter().find(|e| e.name == name).map(|e| e.ino);
+    if ino_of(b".") != Some(node.ino)
+        || (parent.mount == node.mount && ino_of(b"..") != Some(parent.ino))
+    {
+        return Err(Errno::EIO);
+    }
+    let mut names: Vec<Vec<u8>> = entries
         .into_iter()
         .map(|e| e.name)
         .filter(|n| path::check_name(n).is_ok())
         .collect();
     names.sort();
-    Ok(names)
+    Ok((node, names))
 }
 
 /// The sources and where each goes, for `cp` and `mv`: `src dst`, or
@@ -438,7 +451,7 @@ pub fn mv(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use crate::testing::Harness;
+    use crate::testing::{Harness, memfs};
     use alloc::string::String;
 
     #[test]
@@ -610,6 +623,36 @@ mod tests {
             (1, "rm: cannot remove '/': Is a directory\n".into())
         );
         assert!(h.exists("/etc/motd"));
+    }
+
+    /// A corrupt disk can hold a directory entry naming a directory that
+    /// lives elsewhere; `rm -r` must not follow it out of its target.
+    #[test]
+    fn rm_r_does_not_follow_an_alias_out_of_its_target() {
+        let mut fs = memfs();
+        let root = vfs::FileSystem::root(&fs);
+        let keep = vfs::FileSystem::mkdir(&mut fs, root, b"keep").unwrap();
+        vfs::FileSystem::create(&mut fs, keep, b"important").unwrap();
+        let junk = vfs::FileSystem::mkdir(&mut fs, root, b"junk").unwrap();
+        fs.link(junk, b"evil", keep).unwrap();
+        let mut h = Harness::on(fs);
+        assert_eq!(
+            h.run("rm -r /junk"),
+            (
+                1,
+                "rm: cannot remove '/junk/evil': Input/output error\n\
+                 rm: cannot remove '/junk': Directory not empty\n"
+                    .into()
+            )
+        );
+        assert_eq!(
+            h.run("rm -r /junk/evil"),
+            (
+                1,
+                "rm: cannot remove '/junk/evil': Input/output error\n".into()
+            )
+        );
+        assert!(h.exists("/keep/important"));
     }
 
     #[test]

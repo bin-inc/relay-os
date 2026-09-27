@@ -169,6 +169,10 @@ impl Superblock {
         self.u32(FREE_INODES_COUNT)
     }
 
+    pub fn set_free_inodes_count(&mut self, n: u32) {
+        self.set_u32(FREE_INODES_COUNT, n);
+    }
+
     pub fn state(&self) -> u16 {
         self.u16(STATE)
     }
@@ -232,6 +236,8 @@ pub struct Geometry {
     pub blocks_per_group: u32,
     pub inodes_per_group: u32,
     pub inode_size: u32,
+    /// The first inode not reserved for the filesystem itself.
+    pub first_ino: u32,
     pub groups: u32,
     /// Blocks of the group descriptor table.
     pub gdt_blocks: u32,
@@ -388,6 +394,7 @@ pub fn check(sb: &Superblock, device_bytes: u64) -> Result<Geometry, String> {
         blocks_per_group: bpg,
         inodes_per_group: ipg,
         inode_size,
+        first_ino,
         groups,
         gdt_blocks: gdt_blocks as u32,
         reserved_gdt_blocks: sb.u16(RESERVED_GDT_BLOCKS) as u32,

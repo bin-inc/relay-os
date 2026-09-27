@@ -4,14 +4,18 @@
 
 use crate::Ext2;
 use crate::dirent::{self, Entry};
-use crate::inode::Inode;
+use crate::inode::{INDEX_FL, Inode};
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use vfs::{BlockDevice, DirEntry, Errno, FileType, Ino};
 
 /// Where a directory entry was found.
 pub(crate) struct Found {
+    /// The physical block holding it.
+    pub block: u32,
     pub entry: Entry,
+    /// The entry before it in the same block.
+    pub prev: Option<Entry>,
 }
 
 impl<D: BlockDevice> Ext2<D> {
@@ -87,11 +91,15 @@ impl<D: BlockDevice> Ext2<D> {
 
     /// The entry called `name` in `dir`.
     pub(crate) fn find_entry(&mut self, dir: &Inode, name: &[u8]) -> Result<Option<Found>, Errno> {
-        self.scan_dir(dir, |_, _, data, entries| {
-            entries
+        self.scan_dir(dir, |_, block, data, entries| {
+            let i = entries
                 .iter()
-                .find(|e| e.inode != 0 && e.name(data) == name)
-                .map(|&entry| Found { entry })
+                .position(|e| e.inode != 0 && e.name(data) == name)?;
+            Some(Found {
+                block,
+                entry: entries[i],
+                prev: i.checked_sub(1).map(|p| entries[p]),
+            })
         })
     }
 
@@ -118,5 +126,86 @@ impl<D: BlockDevice> Ext2<D> {
             None::<()>
         })?;
         Ok(out)
+    }
+
+    /// Adds the entry `name` → `ino` (of type `kind`) to `dir`, in the first
+    /// block with room, else in a new block at the end. Only the new block
+    /// can fail to fit (`ENOSPC`), before anything changed. The caller
+    /// writes `dir` back.
+    pub(crate) fn add_entry(
+        &mut self,
+        dir: &mut Inode,
+        name: &[u8],
+        ino: u32,
+        kind: FileType,
+    ) -> Result<(), Errno> {
+        let spot = self.scan_dir(dir, |_, block, _, entries| {
+            dirent::room(entries, name.len()).map(|at| (block, at))
+        })?;
+        let (block, at) = match spot {
+            Some(spot) => spot,
+            None => {
+                let bs = self.geo.block_size as u64;
+                if dir.size() + bs > u32::MAX as u64 {
+                    return Err(Errno::ENOSPC);
+                }
+                let block = self.bmap_alloc(dir, dir.size() / bs)?;
+                dirent::init_empty(self.cache.write(block as u64)?);
+                dir.set_size(dir.size() + bs);
+                let at = Entry {
+                    offset: 0,
+                    inode: 0,
+                    rec_len: bs as usize,
+                    name_len: 0,
+                };
+                (block, at)
+            }
+        };
+        let file_type = self.geo.filetype.then(|| dirent::type_byte(kind));
+        dirent::insert(self.cache.write(block as u64)?, at, name, ino, file_type);
+        self.changed_dir(dir);
+        Ok(())
+    }
+
+    /// Notes a change to `dir`'s entries: mtime and ctime, and an htree
+    /// index this driver does not maintain is dropped (the directory reads
+    /// linearly just as well).
+    pub(crate) fn changed_dir(&mut self, dir: &mut Inode) {
+        dir.set_flags(dir.flags() & !INDEX_FL);
+        dir.touch(self.now());
+    }
+
+    /// Removes a found entry from `dir`. The caller writes `dir` back.
+    pub(crate) fn remove_entry(&mut self, dir: &mut Inode, found: &Found) -> Result<(), Errno> {
+        dirent::remove(
+            self.cache.write(found.block as u64)?,
+            found.entry,
+            found.prev,
+        );
+        self.changed_dir(dir);
+        Ok(())
+    }
+
+    /// Whether `dir` holds nothing but `.` and `..`.
+    pub(crate) fn dir_is_empty(&mut self, dir: &Inode) -> Result<bool, Errno> {
+        let other = self.scan_dir(dir, |_, _, data, entries| {
+            entries
+                .iter()
+                .find(|e| e.inode != 0 && !matches!(e.name(data), b"." | b".."))
+                .map(|_| ())
+        })?;
+        Ok(other.is_none())
+    }
+
+    /// The inode a directory entry names, which must be in use.
+    pub(crate) fn entry_inode(&mut self, dir: &Inode, found: &Found) -> Result<Inode, Errno> {
+        let ino = found.entry.inode;
+        match self.inode(ino as Ino) {
+            Err(Errno::ENOENT) => Err(self.corrupt(format_args!(
+                "directory {}: entry for unused inode {ino}",
+                dir.ino
+            ))),
+            other => other,
+        }
     }
 }
