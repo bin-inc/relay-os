@@ -83,6 +83,20 @@ impl MemFs {
         self.new_node(dir, name, 0o777, Body::Symlink(target.to_vec()))
     }
 
+    /// Enters inode `target` in `dir` once more (tests only). Unlike a
+    /// real hard link it accepts a directory, to model the alias a corrupt
+    /// disk can hold.
+    pub fn link(&mut self, dir: Ino, name: &[u8], target: Ino) -> Result<(), Errno> {
+        self.check_change(dir, name)?;
+        self.node(target)?;
+        if self.entries(dir)?.contains_key(name) {
+            return Err(Errno::EEXIST);
+        }
+        self.entries_mut(dir)?.insert(name.to_vec(), target);
+        self.node_mut(target)?.nlink += 1;
+        Ok(())
+    }
+
     fn node(&self, ino: Ino) -> Result<&Node, Errno> {
         self.nodes.get(&ino).ok_or(Errno::ENOENT)
     }
@@ -680,6 +694,17 @@ mod tests {
         assert_eq!(fs.stat(f), Err(Errno::ENOENT));
         assert_eq!(fs.statfs().unwrap().free_blocks, 1);
         assert_eq!(fs.unlink(ROOT, b"f"), Err(Errno::ENOENT));
+    }
+
+    #[test]
+    fn link_enters_an_inode_again() {
+        let mut fs = fs();
+        let d = fs.mkdir(ROOT, b"d").unwrap();
+        fs.link(ROOT, b"alias", d).unwrap();
+        assert_eq!(fs.lookup(ROOT, b"alias").unwrap(), d);
+        assert_eq!(fs.stat(d).unwrap().nlink, 3);
+        assert_eq!(fs.link(ROOT, b"alias", d), Err(Errno::EEXIST));
+        assert_eq!(fs.link(ROOT, b"x", 99), Err(Errno::ENOENT));
     }
 
     #[test]
