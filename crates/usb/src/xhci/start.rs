@@ -315,6 +315,9 @@ impl<H: Hal> Xhci<H> {
             scratchpads: mem.scratchpads,
             commands: mem.commands,
             events: mem.events,
+            pending: None,
+            ring_stopped: false,
+            dead: false,
         };
         xhci.settle_ports(settle_from);
         Ok(xhci)

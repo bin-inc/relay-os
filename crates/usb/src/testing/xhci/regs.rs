@@ -18,6 +18,7 @@ const PORTS: usize = 0x400;
 pub const RUN: u32 = 1 << 0;
 pub const HCRST: u32 = 1 << 1;
 pub const HCH: u32 = 1 << 0;
+pub const HSE: u32 = 1 << 2;
 pub const CNR: u32 = 1 << 11;
 /// USBSTS bits software clears by writing 1: HSE, EINT, PCD, SRE.
 const USBSTS_RW1C: u32 = 1 << 2 | 1 << 3 | 1 << 4 | 1 << 10;
@@ -126,6 +127,7 @@ impl FakeXhci {
             Block::Capability(o) => panic!("fake xhci: write to capability register {o:#x}"),
             Block::Operational(o) => self.op_write(o, value, dma),
             Block::Runtime(o) => self.runtime_write(o, value, dma),
+            Block::Doorbell(0) => self.command_doorbell(value),
             Block::Doorbell(_) => {}
             Block::Extended(o) => self.extended_write(o, value),
         }
@@ -247,6 +249,8 @@ impl FakeXhci {
         self.power_on_ports();
         (self.iman, self.imod, self.erstsz, self.erstba) = (0, 0, 0, 0);
         (self.event_ring, self.erdp, self.ehb) = (None, 0, false);
+        self.pending_events.clear();
+        self.slots.iter_mut().for_each(|s| *s = None);
         self.hcrst_at = Some(self.now);
         if let Some(delay) = self.config.reset_time {
             self.after(delay, |x, _| {

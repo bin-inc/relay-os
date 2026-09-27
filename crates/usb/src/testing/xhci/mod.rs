@@ -3,8 +3,12 @@
 //! a driver bug fails its test instead of passing by luck. It decodes
 //! registers, TRBs and contexts with its own constants, not the driver's.
 
+mod commands;
 mod regs;
 mod rings;
+
+pub use commands::Executed;
+use commands::FakeSlot;
 
 use super::hal::Dma;
 use core::time::Duration;
@@ -78,6 +82,13 @@ pub struct FakeConfig {
     pub cnr_time: Option<Duration>,
     /// How long HCH takes to clear after R/S = 1; `None`: it never runs.
     pub run_time: Option<Duration>,
+    /// Knob: commands of this TRB type never complete.
+    pub hang_command: Option<u32>,
+    /// Knob: CRCR.CA never stops the command ring (CRR stays 1).
+    pub abort_never_completes: bool,
+    /// Knob: an abort leaves the dequeue pointer on the aborted command, so
+    /// the ring resumes on it (some controllers; xHCI 4.6.1.2 allows both).
+    pub abort_keeps_dequeue: bool,
 }
 
 /// Capabilities at `offsets`, each pointing to the next.
@@ -144,6 +155,9 @@ impl FakeConfig {
             reset_time: Some(Duration::ZERO),
             cnr_time: Some(Duration::ZERO),
             run_time: Some(Duration::ZERO),
+            hang_command: None,
+            abort_never_completes: false,
+            abort_keeps_dequeue: false,
         }
     }
 
@@ -232,6 +246,9 @@ impl FakeConfig {
             reset_time: Some(Duration::from_millis(2)),
             cnr_time: Some(Duration::from_millis(10)),
             run_time: Some(Duration::from_micros(500)),
+            hang_command: None,
+            abort_never_completes: false,
+            abort_keeps_dequeue: false,
         }
     }
 }
@@ -296,6 +313,20 @@ pub struct FakeXhci {
     hcrst_at: Option<Duration>,
     /// Writes to the extended capability space.
     cap_writes: usize,
+    /// Events waiting for the controller to run.
+    pending_events: Vec<[u32; 4]>,
+    events_posted: usize,
+    erdp_writes: usize,
+    /// Slots 1..=MaxSlots (index 0 unused).
+    slots: Vec<Option<FakeSlot>>,
+    /// Every command executed, in order.
+    executed: Vec<Executed>,
+    /// The command TRB the ring is stuck on.
+    hung: Option<u64>,
+    aborts: usize,
+    /// CRCR's low half was written with CA; the abort happens once the
+    /// high half follows.
+    abort_requested: bool,
 }
 
 impl FakeXhci {
@@ -329,6 +360,14 @@ impl FakeXhci {
             timers: Vec::new(),
             hcrst_at: None,
             cap_writes: 0,
+            pending_events: Vec::new(),
+            events_posted: 0,
+            erdp_writes: 0,
+            slots: Vec::new(),
+            executed: Vec::new(),
+            hung: None,
+            aborts: 0,
+            abort_requested: false,
         };
         x.legacy = [
             if x.config.bios_owned {
@@ -342,6 +381,7 @@ impl FakeXhci {
             x.usbcmd = regs::RUN;
             x.usbsts = 0;
         }
+        x.slots = (0..=x.config.max_slots).map(|_| None).collect();
         x.power_on_ports();
         x
     }
@@ -354,6 +394,8 @@ impl FakeXhci {
             action(self, dma);
         }
         self.now = now;
+        self.process_commands(dma);
+        self.flush_events(dma);
     }
 
     /// The earliest action due by `now` (the first scheduled among equals).
@@ -438,6 +480,51 @@ impl FakeXhci {
     /// When software last powered a port on.
     pub fn powered_at(&self) -> Option<Duration> {
         self.powered_at
+    }
+
+    /// Event Handler Busy: set with the first event after software last
+    /// cleared it through ERDP.
+    pub fn ehb(&self) -> bool {
+        self.ehb
+    }
+
+    /// ERDP as software last wrote it (without flags).
+    pub fn erdp(&self) -> u64 {
+        self.erdp
+    }
+
+    pub fn events_posted(&self) -> usize {
+        self.events_posted
+    }
+
+    /// Writes of ERDP's high half: one per update.
+    pub fn erdp_writes(&self) -> usize {
+        self.erdp_writes
+    }
+
+    pub fn executed(&self) -> &[Executed] {
+        &self.executed
+    }
+
+    /// The command TRB the ring hangs on.
+    pub fn hung(&self) -> Option<u64> {
+        self.hung
+    }
+
+    /// Command ring aborts (CRCR.CA) that took effect.
+    pub fn aborts(&self) -> usize {
+        self.aborts
+    }
+
+    pub fn slot_enabled(&self, slot: usize) -> bool {
+        self.slots.get(slot).is_some_and(Option::is_some)
+    }
+
+    /// USBSTS.HSE (xHCI 4.10.2.6): the controller halts at once.
+    pub fn host_system_error(&mut self) {
+        self.usbsts |= regs::HSE | regs::HCH;
+        self.usbcmd &= !regs::RUN;
+        self.crr = false;
     }
 
     /// Reads of the extended capability area so far.

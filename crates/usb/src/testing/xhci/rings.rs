@@ -2,6 +2,9 @@
 //! and ERDP, with the checks the controller makes when it starts.
 
 use super::regs::{HCH, set_half};
+
+/// CRCR: Command Abort.
+const CA: u32 = 1 << 2;
 use super::{Consumer, EventRing, FakeXhci};
 use crate::testing::hal::Dma;
 
@@ -13,8 +16,19 @@ impl FakeXhci {
     }
 
     /// CRCR (xHCI 5.4.5): the ring pointer takes effect with the high half.
+    /// While the ring runs only an abort may be written: CA in the low half,
+    /// acted on once the high half follows (as some controllers need).
     pub(super) fn write_crcr(&mut self, high: bool, value: u32, dma: &Dma) {
         if self.crr {
+            if !high && value & CA != 0 {
+                self.abort_requested = true;
+                return;
+            }
+            if high && self.abort_requested {
+                self.abort_requested = false;
+                self.abort_commands(dma);
+                return;
+            }
             panic!("fake xhci: CRCR written while the command ring runs");
         }
         set_half(&mut self.crcr, high, value);
@@ -62,6 +76,7 @@ impl FakeXhci {
     pub(super) fn write_erdp(&mut self, high: bool, value: u32) {
         if high {
             set_half(&mut self.erdp, true, value);
+            self.erdp_writes += 1;
             self.check_erdp();
         } else {
             if value & super::regs::EHB != 0 {
@@ -69,6 +84,55 @@ impl FakeXhci {
             }
             set_half(&mut self.erdp, false, value & !0xF);
         }
+    }
+
+    /// Writes an event (xHCI 4.9.4): dwords 0-2, then the one with the
+    /// cycle bit. A full ring is a driver that stopped consuming.
+    pub fn post(&mut self, trb: [u32; 4], dma: &Dma) {
+        if !self.running() || self.event_ring.is_none() {
+            self.pending_events.push(trb);
+            return;
+        }
+        let erdp = self.erdp;
+        let Some(ring) = self.event_ring.as_mut() else {
+            return;
+        };
+        let dequeue = ((erdp - ring.base) / 16) as usize;
+        let next = (ring.enqueue + 1) % ring.size;
+        if next == dequeue {
+            panic!("fake xhci: event ring full");
+        }
+        let at = ring.base + 16 * ring.enqueue as u64;
+        for (i, &d) in trb[..3].iter().enumerate() {
+            dma.write32(at + 4 * i as u64, d);
+        }
+        dma.write32(at + 12, trb[3] & !1 | ring.cycle as u32);
+        ring.enqueue = next;
+        if next == 0 {
+            ring.cycle = !ring.cycle;
+        }
+        self.events_posted += 1;
+        if !self.ehb {
+            self.ehb = true;
+            self.iman |= 1;
+        }
+    }
+
+    /// Events that came while the controller was halted.
+    pub(super) fn flush_events(&mut self, dma: &Dma) {
+        if self.running() && self.event_ring.is_some() && !self.pending_events.is_empty() {
+            for trb in core::mem::take(&mut self.pending_events) {
+                self.post(trb, dma);
+            }
+        }
+    }
+
+    /// Events the controller has written that software has not consumed.
+    pub fn unconsumed_events(&self) -> usize {
+        self.event_ring.map_or(0, |r| {
+            let dequeue = ((self.erdp - r.base) / 16) as usize;
+            (r.enqueue + r.size - dequeue) % r.size
+        })
     }
 
     fn check_erdp(&self) {

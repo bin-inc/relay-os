@@ -132,6 +132,13 @@ impl FakeHal {
         hal
     }
 
+    /// Runs `f` on the fake controller with the DMA memory it reaches (to
+    /// post events or read what the driver wrote).
+    pub fn act<R>(&self, f: impl FnOnce(&mut FakeXhci, &Dma) -> R) -> R {
+        let mut x = self.fake();
+        f(&mut x, &self.0.dma.borrow())
+    }
+
     /// The fake controller, to plug devices, turn knobs and look inside.
     /// Drop the guard before calling the driver again.
     pub fn fake(&self) -> RefMut<'_, FakeXhci> {

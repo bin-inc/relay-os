@@ -11,6 +11,7 @@ macro_rules! xlog {
 }
 
 mod caps;
+mod command;
 mod context;
 mod init;
 mod regs;
@@ -22,6 +23,7 @@ use crate::{DmaBuf, Hal};
 use alloc::string::String;
 use alloc::vec::Vec;
 use caps::PortProtocol;
+use command::Pending;
 use core::fmt;
 use regs::Regs;
 use ring::{EventRing, ProducerRing};
@@ -72,6 +74,13 @@ pub struct Xhci<H: Hal> {
     scratchpads: Option<Scratchpads>,
     commands: ProducerRing,
     events: EventRing,
+    /// The command in flight (one at a time).
+    pending: Option<Pending>,
+    /// A Command Ring Stopped event came since the last abort.
+    ring_stopped: bool,
+    /// Set when the controller stopped working: nothing is sent to it any
+    /// more (`UsbError::ControllerDead`).
+    dead: bool,
 }
 
 impl<H: Hal> Xhci<H> {
