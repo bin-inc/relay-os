@@ -18,6 +18,7 @@ pub mod rtc;
 pub mod serial;
 pub mod session;
 pub mod timer;
+pub mod usb;
 
 use boot_info::{BootInfo, MemoryKind, PHYS_OFFSET};
 use cmdline::{Cmdline, PanicTest};
