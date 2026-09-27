@@ -24,7 +24,7 @@ fn stream(
     let end = ctx.vfs.stat(node)?.size;
     let mut buf = vec![0; CHUNK];
     let mut offset = offset;
-    while offset < end {
+    while offset < end && !ctx.interrupted() {
         let want = buf.len().min((end - offset) as usize);
         let n = ctx.vfs.read_at(node, offset, &mut buf[..want])?;
         if n == 0 || !f(ctx, &buf[..n]) {
@@ -360,6 +360,16 @@ mod tests {
         h.put("/tmp/big", big.as_bytes());
         h.run("cat /tmp/big > /tmp/copy");
         assert_eq!(h.get("/tmp/copy"), big.as_bytes());
+    }
+
+    #[test]
+    fn ctrl_c_stops_a_long_cat() {
+        let mut h = Harness::new();
+        h.put("/tmp/big", numbered(20_000).as_bytes());
+        h.console.interrupt = true;
+        assert_eq!(h.run("cat /tmp/big /etc/motd"), (130, "^C\n".into()));
+        h.console.interrupt = false;
+        assert_eq!(h.run("cat /etc/hostname"), (0, "relay\n".into()));
     }
 
     #[test]

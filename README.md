@@ -22,6 +22,7 @@ toolchain and targets are installed automatically from `rust-toolchain.toml`.
 | `cargo xtask test` | Host unit tests, then every QEMU scenario in `tests/e2e/` |
 | `cargo xtask qemu` | Boot the image in a QEMU window (serial on this terminal) |
 | `cargo xtask image` | Build `target/relay/relay-os.img` |
+| `cargo xtask host-shell <img>` | Run the shell on this machine over the image's ext2 partition (changes it in place; `poweroff` leaves) |
 | `cargo xtask flash --full` | Erase and write the Kingston test stick |
 | `cargo xtask flash --kernel` | Update loader and kernel on the stick, keep files |
 | `cargo xtask verify-usb` | `e2fsck` the stick and list its files |
@@ -45,6 +46,9 @@ the `e2e-logs` artefact. Hardware checks on the NUC stay manual
 | `kernel/` | `relay-kernel`, the higher-half kernel |
 | `crates/boot-info` | Loader → kernel hand-off structure |
 | `crates/term` | Framebuffer text terminal |
+| `crates/vfs` | Error numbers, block-device and filesystem traits, paths, mount table, in-memory filesystem |
+| `crates/ext2` | ext2 driver with its block cache |
+| `crates/shell` | Line editor, parser and built-in commands |
 | `xtask/` | Build, image, QEMU, test and flash tool |
 | `rootfs/` | Files copied into `/` |
 | `tests/e2e/` | QEMU end-to-end scenarios |

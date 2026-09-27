@@ -15,6 +15,12 @@ pub trait Console {
     fn write(&mut self, bytes: &[u8]);
     /// The screen's width in characters.
     fn columns(&self) -> usize;
+    /// Whether Ctrl-C was pressed while a command runs. Long commands ask
+    /// between pieces of work, so it must not wait for input. The default
+    /// never interrupts.
+    fn interrupted(&mut self) -> bool {
+        false
+    }
 }
 
 /// Memory figures for `free`, in bytes.

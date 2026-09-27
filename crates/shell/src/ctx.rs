@@ -20,6 +20,8 @@ pub struct Ctx<'a> {
     out: Output,
     /// Set by `reboot` and `poweroff` when the machine did not go away.
     pub(crate) exit: bool,
+    /// Ctrl-C stopped the command.
+    pub(crate) cancelled: bool,
 }
 
 enum Output {
@@ -56,6 +58,7 @@ impl<'a> Ctx<'a> {
             console,
             out,
             exit: false,
+            cancelled: false,
         }
     }
 
@@ -75,6 +78,16 @@ impl<'a> Ctx<'a> {
     /// Errors always go to the screen, never into a redirection file.
     pub fn err(&mut self, bytes: &[u8]) {
         self.console.write(bytes);
+    }
+
+    /// Whether Ctrl-C has stopped the command. Long loops (reading a file,
+    /// copying, removing a tree) ask between pieces and give up; the shell
+    /// then prints `^C` and the exit status is 130. Once true it stays true.
+    pub fn interrupted(&mut self) -> bool {
+        if !self.cancelled && self.console.interrupted() {
+            self.cancelled = true;
+        }
+        self.cancelled
     }
 
     pub fn columns(&self) -> usize {
