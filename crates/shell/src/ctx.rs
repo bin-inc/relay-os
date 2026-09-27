@@ -159,6 +159,15 @@ impl Opts {
     pub fn has(&self, c: char) -> bool {
         self.flags.iter().any(|(f, _)| *f == c)
     }
+
+    /// The value of the last `c` option.
+    pub fn value(&self, c: char) -> Option<&str> {
+        self.flags
+            .iter()
+            .rev()
+            .find(|(f, _)| *f == c)
+            .and_then(|(_, v)| v.as_deref())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -227,6 +236,17 @@ pub fn quote(name: &str) -> String {
     }
 }
 
+/// A name quoted only if the shell would need it (GNU's `cat: foo: …` but
+/// `cat: 'my file': …`).
+pub fn quote_if_needed(name: &str) -> String {
+    const SPECIAL: &str = " \t'\"\\$*?[]{}()<>|&;#!`";
+    if name.is_empty() || name.chars().any(|c| SPECIAL.contains(c) || c.is_control()) {
+        quote(name)
+    } else {
+        String::from(name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,5 +304,8 @@ mod tests {
     fn quoting_like_gnu() {
         assert_eq!(quote("notes"), "'notes'");
         assert_eq!(quote("it's"), "\"it's\"");
+        assert_eq!(quote_if_needed("notes.txt"), "notes.txt");
+        assert_eq!(quote_if_needed("my file"), "'my file'");
+        assert_eq!(quote_if_needed(""), "''");
     }
 }
