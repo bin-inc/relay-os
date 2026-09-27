@@ -14,6 +14,9 @@ pub mod bus;
 pub mod descriptor;
 mod error;
 mod hal;
+#[cfg(test)]
+mod testing;
+pub mod xhci;
 
 pub use bus::{Bus, Setup, Speed};
 pub use error::UsbError;
