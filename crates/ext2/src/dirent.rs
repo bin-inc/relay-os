@@ -1,0 +1,228 @@
+//! Directory blocks (spec §8.2): the entries of one block, parsed and
+//! validated in full on every read. An entry is inode (u32), rec_len
+//! (u16), name_len (u8), file type (u8), then the name; records tile the
+//! block exactly. Without the `filetype` feature, name_len is 16 bits and
+//! there is no type byte.
+
+use crate::le::{u16_at, u32_at};
+use alloc::vec::Vec;
+
+/// Bytes before an entry's name.
+pub const HEADER: usize = 8;
+
+/// One entry of a directory block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Entry {
+    /// Where it starts in the block.
+    pub offset: usize,
+    /// 0 for an unused entry.
+    pub inode: u32,
+    pub rec_len: usize,
+    pub name_len: usize,
+}
+
+impl Entry {
+    pub fn name<'a>(&self, block: &'a [u8]) -> &'a [u8] {
+        &block[self.offset + HEADER..][..self.name_len]
+    }
+}
+
+/// The smallest record holding a name of `name_len` bytes.
+pub fn rec_len_for(name_len: usize) -> usize {
+    (HEADER + name_len + 3) & !3
+}
+
+/// Why a directory block does not parse: what is wrong, and where.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Corrupt {
+    pub offset: usize,
+    pub what: &'static str,
+}
+
+/// Parses every entry of `block`. Used entries must name inodes up to
+/// `max_inode`.
+pub fn parse(block: &[u8], filetype: bool, max_inode: u32) -> Result<Vec<Entry>, Corrupt> {
+    let mut entries = Vec::new();
+    let mut offset = 0;
+    while offset < block.len() {
+        let bad = |what| Corrupt { offset, what };
+        if block.len() - offset < HEADER {
+            return Err(bad("entry header past the end of the block"));
+        }
+        let inode = u32_at(block, offset);
+        let rec_len = u16_at(block, offset + 4) as usize;
+        let name_len = if filetype {
+            block[offset + 6] as usize
+        } else {
+            u16_at(block, offset + 6) as usize
+        };
+        if !rec_len.is_multiple_of(4) || rec_len < HEADER {
+            return Err(bad("bad rec_len"));
+        }
+        if rec_len > block.len() - offset {
+            return Err(bad("rec_len past the end of the block"));
+        }
+        if name_len > 255 || rec_len_for(name_len) > rec_len {
+            return Err(bad("name longer than its record"));
+        }
+        if inode > max_inode {
+            return Err(bad("inode number out of range"));
+        }
+        entries.push(Entry {
+            offset,
+            inode,
+            rec_len,
+            name_len,
+        });
+        offset += rec_len;
+    }
+    Ok(entries)
+}
+
+/// Checks the names of the used entries of a block: none is empty or holds
+/// `/` or NUL, and `.` and `..` are only the first two entries of a
+/// directory's first block. Anything else would let a caller that joins
+/// names into paths wander out of the directory, or loop.
+pub fn check_names(block: &[u8], entries: &[Entry], first_block: bool) -> Result<(), Corrupt> {
+    for (i, e) in entries.iter().enumerate().filter(|(_, e)| e.inode != 0) {
+        let name = e.name(block);
+        let bad = |what| {
+            Err(Corrupt {
+                offset: e.offset,
+                what,
+            })
+        };
+        if name.is_empty() {
+            return bad("empty name");
+        }
+        if name.contains(&b'/') || name.contains(&0) {
+            return bad("name with / or NUL");
+        }
+        let place = match name {
+            b"." => Some(0),
+            b".." => Some(1),
+            _ => None,
+        };
+        if place.is_some_and(|p| !first_block || p != i) {
+            return bad("misplaced . or ..");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Packs `(inode, rec_len, name)` records (type byte 1, a file).
+    fn block(entries: &[(u32, usize, &[u8])], filetype: bool) -> Vec<u8> {
+        let mut b = Vec::new();
+        for &(inode, rec_len, name) in entries {
+            let start = b.len();
+            b.extend_from_slice(&inode.to_le_bytes());
+            b.extend_from_slice(&(rec_len as u16).to_le_bytes());
+            if filetype {
+                b.extend_from_slice(&[name.len() as u8, 1]);
+            } else {
+                b.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            }
+            b.extend_from_slice(name);
+            b.resize(start + rec_len, 0);
+        }
+        b
+    }
+
+    #[test]
+    fn records_round_names_up_to_four_bytes() {
+        assert_eq!(rec_len_for(1), 12);
+        assert_eq!(rec_len_for(4), 12);
+        assert_eq!(rec_len_for(5), 16);
+        assert_eq!(rec_len_for(255), 264);
+    }
+
+    #[test]
+    fn a_block_parses_into_its_entries() {
+        for filetype in [true, false] {
+            let b = block(
+                &[
+                    (2, 12, b"."),
+                    (2, 12, b".."),
+                    (0, 20, b"gone"),
+                    (12, 20, b"file"),
+                ],
+                filetype,
+            );
+            let e = parse(&b, filetype, 100).unwrap();
+            assert_eq!(e.len(), 4);
+            assert_eq!((e[2].offset, e[2].inode, e[2].rec_len), (24, 0, 20));
+            assert_eq!(e[3].name(&b), b"file");
+            assert_eq!(e[1].name(&b), b"..");
+        }
+    }
+
+    #[test]
+    fn corrupt_blocks_are_refused_not_panicked_on() {
+        let good = block(&[(2, 12, b"."), (2, 52, b"..")], true);
+        let bad = |patch: &dyn Fn(&mut Vec<u8>)| {
+            let mut b = good.clone();
+            patch(&mut b);
+            parse(&b, true, 100).unwrap_err()
+        };
+        assert_eq!(bad(&|b| b[4] = 0).what, "bad rec_len");
+        assert_eq!(bad(&|b| b[4] = 13).what, "bad rec_len");
+        assert_eq!(
+            bad(&|b| b[16] = 56).what,
+            "rec_len past the end of the block"
+        );
+        assert_eq!(bad(&|b| b[6] = 5).what, "name longer than its record");
+        assert_eq!(bad(&|b| b[12] = 101).offset, 12);
+        assert_eq!(
+            bad(&|b| b.truncate(60)).what,
+            "rec_len past the end of the block"
+        );
+        let tail = block(&[(2, 60, b".")], true);
+        let mut short = tail.clone();
+        short.extend_from_slice(&[0; 4]);
+        assert_eq!(
+            parse(&short, true, 100).unwrap_err().what,
+            "entry header past the end of the block"
+        );
+        // Without `filetype` the name length is 16 bits wide.
+        let mut wide = block(&[(2, 64, b"x")], false);
+        wide[7] = 1;
+        assert_eq!(
+            parse(&wide, false, 100).unwrap_err().what,
+            "name longer than its record"
+        );
+    }
+
+    #[test]
+    fn names_are_checked() {
+        let names = |entries: &[(u32, usize, &[u8])], first| {
+            let b = block(entries, true);
+            let e = parse(&b, true, 100).unwrap();
+            check_names(&b, &e, first).map_err(|c| (c.offset, c.what))
+        };
+        let dir: [(u32, usize, &[u8]); 3] = [(2, 12, b"."), (2, 12, b".."), (12, 40, b"f")];
+        assert_eq!(names(&dir, true), Ok(()));
+        assert_eq!(names(&dir, false), Err((0, "misplaced . or ..")));
+        assert_eq!(
+            names(&[(12, 12, b"a/b")], false),
+            Err((0, "name with / or NUL"))
+        );
+        assert_eq!(
+            names(&[(12, 12, b"a\x00")], false),
+            Err((0, "name with / or NUL"))
+        );
+        assert_eq!(names(&[(12, 12, b"")], false), Err((0, "empty name")));
+        assert_eq!(
+            names(&[(0, 12, b"")], false),
+            Ok(()),
+            "unused entries may be anything"
+        );
+        let swapped: [(u32, usize, &[u8]); 2] = [(2, 12, b".."), (2, 52, b".")];
+        assert_eq!(names(&swapped, true), Err((0, "misplaced . or ..")));
+        let late: [(u32, usize, &[u8]); 3] = [(2, 12, b"."), (2, 12, b".."), (5, 40, b"..")];
+        assert_eq!(names(&late, true), Err((24, "misplaced . or ..")));
+    }
+}

@@ -1,0 +1,362 @@
+//! Inodes (spec §8.2): the raw on-disk inode and its fields, file types,
+//! where an inode lives on the disk, and the block map's index math.
+
+use crate::Ext2;
+use crate::le::{u16_at, u32_at};
+use alloc::vec::Vec;
+use vfs::{BlockDevice, Errno, FileType, Ino, Stat};
+
+/// Direct block pointers in `i_block`; then single, double and triple
+/// indirect.
+pub const N_DIRECT: usize = 12;
+/// Bytes of `i_block`, which holds a fast symlink's target instead.
+pub const I_BLOCK_BYTES: usize = 60;
+
+const MODE: usize = 0;
+const UID: usize = 2;
+const SIZE: usize = 4;
+const ATIME: usize = 8;
+const CTIME: usize = 12;
+const MTIME: usize = 16;
+const GID: usize = 24;
+const LINKS: usize = 26;
+const BLOCKS: usize = 28;
+const I_BLOCK: usize = 40;
+const FILE_ACL: usize = 104;
+const SIZE_HIGH: usize = 108;
+const UID_HIGH: usize = 120;
+const GID_HIGH: usize = 122;
+
+const S_IFMT: u16 = 0o170000;
+
+/// The file type in an inode's mode; `None` for an unknown one.
+pub fn kind_of(mode: u16) -> Option<FileType> {
+    Some(match mode & S_IFMT {
+        0o010000 => FileType::Fifo,
+        0o020000 => FileType::CharDev,
+        0o040000 => FileType::Directory,
+        0o060000 => FileType::BlockDev,
+        0o100000 => FileType::Regular,
+        0o120000 => FileType::Symlink,
+        0o140000 => FileType::Socket,
+        _ => return None,
+    })
+}
+
+/// An inode as stored on the disk (all `inode_size` bytes, so fields this
+/// driver does not know survive a rewrite).
+#[derive(Clone)]
+pub struct Inode {
+    pub ino: u32,
+    raw: Vec<u8>,
+}
+
+impl Inode {
+    /// `raw` is at least the 128 bytes of a revision 0 inode.
+    pub fn new(ino: u32, raw: &[u8]) -> Inode {
+        assert!(raw.len() >= 128);
+        Inode {
+            ino,
+            raw: raw.to_vec(),
+        }
+    }
+
+    fn u16(&self, at: usize) -> u16 {
+        u16_at(&self.raw, at)
+    }
+
+    fn u32(&self, at: usize) -> u32 {
+        u32_at(&self.raw, at)
+    }
+
+    pub fn mode(&self) -> u16 {
+        self.u16(MODE)
+    }
+
+    pub fn kind(&self) -> Option<FileType> {
+        kind_of(self.mode())
+    }
+
+    pub fn uid(&self) -> u32 {
+        self.u16(UID) as u32 | (self.u16(UID_HIGH) as u32) << 16
+    }
+
+    pub fn gid(&self) -> u32 {
+        self.u16(GID) as u32 | (self.u16(GID_HIGH) as u32) << 16
+    }
+
+    /// The size in bytes; only regular files use the high 32 bits.
+    pub fn size(&self) -> u64 {
+        let high = match self.kind() {
+            Some(FileType::Regular) => self.u32(SIZE_HIGH) as u64,
+            _ => 0,
+        };
+        self.u32(SIZE) as u64 | high << 32
+    }
+
+    pub fn links(&self) -> u16 {
+        self.u16(LINKS)
+    }
+
+    /// Space used in 512-byte units, indirect and EA blocks included.
+    pub fn blocks(&self) -> u32 {
+        self.u32(BLOCKS)
+    }
+
+    pub fn atime(&self) -> u32 {
+        self.u32(ATIME)
+    }
+
+    pub fn ctime(&self) -> u32 {
+        self.u32(CTIME)
+    }
+
+    pub fn mtime(&self) -> u32 {
+        self.u32(MTIME)
+    }
+
+    /// Entry `i` (0..15) of `i_block`.
+    pub fn block(&self, i: usize) -> u32 {
+        self.u32(I_BLOCK + 4 * i)
+    }
+
+    /// The raw `i_block` bytes: a fast symlink's target.
+    pub fn block_bytes(&self) -> &[u8] {
+        &self.raw[I_BLOCK..I_BLOCK + I_BLOCK_BYTES]
+    }
+
+    /// The extended attribute block, 0 if none.
+    pub fn file_acl(&self) -> u32 {
+        self.u32(FILE_ACL)
+    }
+
+    /// A symlink whose target lives in `i_block`: it has no blocks but an
+    /// extended attribute block (Linux's rule).
+    pub fn is_fast_symlink(&self, block_size: usize) -> bool {
+        let ea_blocks = if self.file_acl() != 0 {
+            block_size as u32 / 512
+        } else {
+            0
+        };
+        self.kind() == Some(FileType::Symlink) && self.blocks() == ea_blocks
+    }
+}
+
+/// The largest file: what the block map reaches, limited (as Linux's ext2
+/// limits it) so that a dense file's `i_blocks`, counting data and
+/// indirect blocks in 512-byte units, fits in 32 bits.
+pub fn max_file_size(block_size: usize) -> u64 {
+    let bits = block_size.trailing_zeros();
+    let p = 1u64 << (bits - 2);
+    let limit = u32::MAX as u64 >> (bits - 9);
+    let mapped = N_DIRECT as u64 + p + p * p + p * p * p;
+    let meta = 1 + (1 + p) + (1 + p + p * p);
+    let blocks = if mapped + meta <= limit {
+        mapped
+    } else {
+        // The indirect blocks a file of `limit` blocks needs.
+        let mut rest = limit - N_DIRECT as u64 - p;
+        let mut meta = 1;
+        if rest < p * p {
+            meta += 1 + rest.div_ceil(p);
+        } else {
+            meta += 1 + p;
+            rest -= p * p;
+            meta += 1 + rest.div_ceil(p) + rest.div_ceil(p * p);
+        }
+        limit - meta
+    };
+    blocks << bits
+}
+
+/// Where a logical block sits in the block map: `index[0]` is the entry of
+/// `i_block`, followed by one index per level of indirection (`depth`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MapPath {
+    pub depth: usize,
+    pub index: [usize; 4],
+}
+
+/// The path to logical block `lb` with `per_block` pointers per indirect
+/// block; `None` past the triple indirect range.
+pub fn map_path(lb: u64, per_block: u64) -> Option<MapPath> {
+    let p = per_block;
+    let mut rest = lb;
+    if rest < N_DIRECT as u64 {
+        return Some(MapPath {
+            depth: 0,
+            index: [rest as usize, 0, 0, 0],
+        });
+    }
+    rest -= N_DIRECT as u64;
+    let mut span = 1;
+    for depth in 1..=3 {
+        span *= p;
+        if rest < span {
+            let mut index = [N_DIRECT + depth - 1, 0, 0, 0];
+            for (level, slot) in index.iter_mut().enumerate().skip(1).take(depth) {
+                let below = p.pow((depth - level) as u32);
+                *slot = (rest / below % p) as usize;
+            }
+            return Some(MapPath { depth, index });
+        }
+        rest -= span;
+    }
+    None
+}
+
+impl<D: BlockDevice> Ext2<D> {
+    /// The block holding inode `ino` and its offset there.
+    fn inode_location(&self, ino: u32) -> (u64, usize) {
+        let index = ino - 1;
+        let group = index / self.geo.inodes_per_group;
+        let byte = (index % self.geo.inodes_per_group) as u64 * self.geo.inode_size as u64;
+        let bs = self.geo.block_size as u64;
+        let block = self.groups.inode_table(group) as u64 + byte / bs;
+        (block, (byte % bs) as usize)
+    }
+
+    /// Inode `ino` as stored, in use or not. `ENOENT` for a number outside
+    /// the filesystem.
+    pub(crate) fn read_inode(&mut self, ino: Ino) -> Result<Inode, Errno> {
+        let ino = match u32::try_from(ino) {
+            Ok(n) if n >= 1 && n <= self.geo.inodes_count => n,
+            _ => return Err(Errno::ENOENT),
+        };
+        let (block, at) = self.inode_location(ino);
+        let size = self.geo.inode_size as usize;
+        let data = self.cache.read(block)?;
+        Ok(Inode::new(ino, &data[at..at + size]))
+    }
+
+    /// Inode `ino`, which must be in use: `ENOENT` otherwise (a stale
+    /// number must never reach freed blocks), `EIO` for an unknown type.
+    pub(crate) fn inode(&mut self, ino: Ino) -> Result<Inode, Errno> {
+        let inode = self.read_inode(ino)?;
+        if inode.links() == 0 {
+            return Err(Errno::ENOENT);
+        }
+        if inode.kind().is_none() {
+            return Err(self.corrupt(format_args!(
+                "inode {ino}: unknown mode {:#o}",
+                inode.mode()
+            )));
+        }
+        // Callers never see a size no file can have.
+        if inode.size() > max_file_size(self.geo.block_size) {
+            return Err(self.corrupt(format_args!(
+                "inode {ino}: size {} beyond the largest file",
+                inode.size()
+            )));
+        }
+        Ok(inode)
+    }
+
+    pub(crate) fn inode_stat(&mut self, ino: Ino) -> Result<Stat, Errno> {
+        let inode = self.inode(ino)?;
+        Ok(Stat {
+            ino,
+            kind: inode.kind().expect("checked by inode()"),
+            perm: inode.mode() & 0o7777,
+            nlink: inode.links() as u32,
+            uid: inode.uid(),
+            gid: inode.gid(),
+            size: inode.size(),
+            blocks: inode.blocks() as u64,
+            block_size: self.geo.block_size as u32,
+            atime: inode.atime() as u64,
+            mtime: inode.mtime() as u64,
+            ctime: inode.ctime() as u64,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn raw_inode(fields: &[(usize, &[u8])]) -> Inode {
+        let mut raw = [0u8; 256];
+        for (at, bytes) in fields {
+            raw[*at..*at + bytes.len()].copy_from_slice(bytes);
+        }
+        Inode::new(12, &raw)
+    }
+
+    #[test]
+    fn modes_give_file_types() {
+        assert_eq!(kind_of(0o100644), Some(FileType::Regular));
+        assert_eq!(kind_of(0o040755), Some(FileType::Directory));
+        assert_eq!(kind_of(0o120777), Some(FileType::Symlink));
+        assert_eq!(kind_of(0o020666), Some(FileType::CharDev));
+        assert_eq!(kind_of(0o060660), Some(FileType::BlockDev));
+        assert_eq!(kind_of(0o010644), Some(FileType::Fifo));
+        assert_eq!(kind_of(0o140755), Some(FileType::Socket));
+        assert_eq!(kind_of(0o000644), None);
+        assert_eq!(kind_of(0o170644), None);
+    }
+
+    #[test]
+    fn owners_and_sizes_combine_their_halves() {
+        let file = raw_inode(&[
+            (MODE, &0o100644u16.to_le_bytes()),
+            (UID, &[0x34, 0x12]),
+            (UID_HIGH, &[0x01, 0x00]),
+            (GID, &[7, 0]),
+            (SIZE, &[1, 0, 0, 0]),
+            (SIZE_HIGH, &[2, 0, 0, 0]),
+        ]);
+        assert_eq!((file.uid(), file.gid()), (0x1_1234, 7));
+        assert_eq!(file.size(), 0x2_0000_0001);
+        let dir = raw_inode(&[
+            (MODE, &0o040755u16.to_le_bytes()),
+            (SIZE, &[0, 4, 0, 0]),
+            (SIZE_HIGH, &[2, 0, 0, 0]),
+        ]);
+        assert_eq!(dir.size(), 1024, "the high half is not a directory's size");
+    }
+
+    #[test]
+    fn fast_symlinks_have_no_blocks_but_their_ea_block() {
+        let link = |blocks: u32, acl: u32| {
+            raw_inode(&[
+                (MODE, &0o120777u16.to_le_bytes()),
+                (BLOCKS, &blocks.to_le_bytes()),
+                (FILE_ACL, &acl.to_le_bytes()),
+            ])
+        };
+        assert!(link(0, 0).is_fast_symlink(1024));
+        assert!(link(2, 99).is_fast_symlink(1024));
+        assert!(!link(2, 0).is_fast_symlink(1024));
+        assert!(!link(8, 99).is_fast_symlink(1024));
+    }
+
+    #[test]
+    fn the_largest_file_is_linuxs() {
+        assert_eq!(max_file_size(1024), 16_843_020 * 1024);
+        assert_eq!(max_file_size(2048), 134_480_396 * 2048);
+        assert_eq!(max_file_size(4096), 536_346_110 * 4096);
+    }
+
+    #[test]
+    fn map_paths_cover_direct_to_triple_indirect() {
+        let p = 256;
+        let path = |lb| map_path(lb, p).map(|m| (m.depth, m.index));
+        assert_eq!(path(0), Some((0, [0, 0, 0, 0])));
+        assert_eq!(path(11), Some((0, [11, 0, 0, 0])));
+        assert_eq!(path(12), Some((1, [12, 0, 0, 0])));
+        assert_eq!(path(12 + 255), Some((1, [12, 255, 0, 0])));
+        assert_eq!(path(12 + 256), Some((2, [13, 0, 0, 0])));
+        assert_eq!(path(12 + 256 + 257), Some((2, [13, 1, 1, 0])));
+        assert_eq!(path(12 + 256 + 65535), Some((2, [13, 255, 255, 0])));
+        let triple = 12 + 256 + 65536;
+        assert_eq!(path(triple), Some((3, [14, 0, 0, 0])));
+        assert_eq!(path(triple + 65536 + 256 + 1), Some((3, [14, 1, 1, 1])));
+        assert_eq!(
+            path(triple + 256 * 65536 - 1),
+            Some((3, [14, 255, 255, 255]))
+        );
+        assert_eq!(path(triple + 256 * 65536), None);
+        assert_eq!(path(u64::MAX), None);
+    }
+}
