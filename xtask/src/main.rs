@@ -6,6 +6,7 @@ mod config;
 mod e2e;
 mod flash;
 mod font;
+mod host_shell;
 mod image;
 mod qemu;
 mod qmp;
@@ -48,6 +49,12 @@ enum Cmd {
         /// Skip the host unit tests.
         #[arg(long)]
         e2e_only: bool,
+    },
+    /// Run the shell on this machine over an image's ext2 root partition.
+    HostShell {
+        /// Image with a GPT and an ext2 root partition, e.g.
+        /// target/relay/relay-os.img (changed in place).
+        img: PathBuf,
     },
     /// Write to the Kingston test stick.
     Flash {
@@ -102,6 +109,7 @@ fn main() -> Result<()> {
             }
             e2e::run_all(scenario.as_deref())?;
         }
+        Cmd::HostShell { img } => host_shell::run(&img)?,
         Cmd::Flash {
             kernel,
             full,

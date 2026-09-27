@@ -460,8 +460,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "ext2",
  "regex",
  "serde_json",
+ "shell",
+ "vfs",
 ]
 
 [[package]]
