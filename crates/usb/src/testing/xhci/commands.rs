@@ -12,6 +12,7 @@ pub const LINK: u32 = 6;
 pub const ENABLE_SLOT: u32 = 9;
 pub const DISABLE_SLOT: u32 = 10;
 pub const ADDRESS_DEVICE: u32 = 11;
+pub const CONFIGURE_ENDPOINT: u32 = 12;
 pub const EVALUATE_CONTEXT: u32 = 13;
 pub const RESET_ENDPOINT: u32 = 14;
 pub const STOP_ENDPOINT: u32 = 15;
@@ -115,6 +116,7 @@ impl FakeXhci {
             ENABLE_SLOT => self.enable_slot(),
             DISABLE_SLOT => (self.disable_slot(slot_of(&trb), dma), slot_of(&trb)),
             ADDRESS_DEVICE => (self.address_device(&trb, dma), slot_of(&trb)),
+            CONFIGURE_ENDPOINT => (self.configure_endpoint(&trb, dma), slot_of(&trb)),
             EVALUATE_CONTEXT => (self.evaluate_context(&trb, dma), slot_of(&trb)),
             RESET_ENDPOINT => (self.reset_endpoint(&trb, dma), slot_of(&trb)),
             STOP_ENDPOINT => (self.stop_endpoint(&trb, dma), slot_of(&trb)),

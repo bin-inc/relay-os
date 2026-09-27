@@ -1,9 +1,12 @@
 //! Fake USB devices: what the fake controller talks to on its ports.
 
-use crate::bus::{GET_DESCRIPTOR, SET_CONFIGURATION};
+use crate::bus::{
+    CLEAR_FEATURE, ENDPOINT_HALT, GET_DESCRIPTOR, RECIPIENT_ENDPOINT, SET_CONFIGURATION,
+};
 use crate::descriptor::{CONFIGURATION, DEVICE};
 use crate::{Setup, Speed};
 use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 const SET_ADDRESS: u8 = 5;
@@ -20,6 +23,10 @@ pub trait FakeDevice {
     /// A control request with its OUT data; the IN data, or `None` if the
     /// device never answers it (NAKs until the host gives up).
     fn control(&mut self, setup: Setup, data_out: &[u8]) -> Option<Result<Vec<u8>, Stall>>;
+    /// Up to `max_len` bytes from IN `endpoint`; `None` is a NAK.
+    fn data_in(&mut self, endpoint: u8, max_len: usize) -> Option<Result<Vec<u8>, Stall>>;
+    /// `data` for OUT `endpoint`; `None` is a NAK.
+    fn data_out(&mut self, endpoint: u8, data: &[u8]) -> Option<Result<(), Stall>>;
 }
 
 /// A control request as the device got it.
@@ -46,6 +53,12 @@ pub struct FakeUsbDevice {
     configuration_limit: Option<usize>,
     address: u8,
     configuration_value: u8,
+    /// IN data tests pushed, per endpoint address.
+    data_in: BTreeMap<u8, VecDeque<Vec<u8>>>,
+    /// What OUT transfers brought, per endpoint address.
+    data_out: Vec<(u8, Vec<u8>)>,
+    /// Endpoints that answer with STALL until CLEAR_FEATURE(ENDPOINT_HALT).
+    halted: BTreeSet<u8>,
 }
 
 /// The Logitech K120's configuration (as in `descriptor.rs`'s tests): a
@@ -112,6 +125,9 @@ impl FakeUsbDevice {
             configuration_limit: None,
             address: 0,
             configuration_value: 0,
+            data_in: BTreeMap::new(),
+            data_out: Vec::new(),
+            halted: BTreeSet::new(),
         }))
     }
 
@@ -238,6 +254,24 @@ impl FakeUsbDevice {
         self.configuration_limit = Some(len);
     }
 
+    /// Queues `bytes` as the next IN transfer of `endpoint` (0x81, say).
+    pub fn push_in(&mut self, endpoint: u8, bytes: &[u8]) {
+        self.data_in
+            .entry(endpoint)
+            .or_default()
+            .push_back(bytes.to_vec());
+    }
+
+    /// Makes `endpoint` answer with STALL until the host clears the halt.
+    pub fn stall_endpoint(&mut self, endpoint: u8) {
+        self.halted.insert(endpoint);
+    }
+
+    /// What OUT transfers brought: endpoint and data.
+    pub fn data_out_received(&self) -> Vec<(u8, Vec<u8>)> {
+        self.data_out.clone()
+    }
+
     /// The address SET_ADDRESS gave it.
     pub fn address(&self) -> u8 {
         self.address
@@ -298,9 +332,30 @@ impl FakeDevice for FakeUsbDevice {
                 self.configuration_value = setup.value as u8;
                 Ok(Vec::new())
             }
+            (RECIPIENT_ENDPOINT, CLEAR_FEATURE) if setup.value == ENDPOINT_HALT => {
+                self.halted.remove(&(setup.index as u8));
+                Ok(Vec::new())
+            }
             _ if setup.is_in() => Ok(vec![0; setup.length as usize]),
             _ => Ok(Vec::new()),
         })
+    }
+
+    fn data_in(&mut self, endpoint: u8, max_len: usize) -> Option<Result<Vec<u8>, Stall>> {
+        if self.halted.contains(&endpoint) {
+            return Some(Err(Stall));
+        }
+        let mut data = self.data_in.get_mut(&endpoint)?.pop_front()?;
+        data.truncate(max_len);
+        Some(Ok(data))
+    }
+
+    fn data_out(&mut self, endpoint: u8, data: &[u8]) -> Option<Result<(), Stall>> {
+        if self.halted.contains(&endpoint) {
+            return Some(Err(Stall));
+        }
+        self.data_out.push((endpoint, data.to_vec()));
+        Some(Ok(()))
     }
 }
 
@@ -362,5 +417,20 @@ mod tests {
         assert_eq!(d.configuration_value(), 1);
         assert_eq!(d.requests().len(), 6);
         assert_eq!(d.address(), 3);
+    }
+
+    #[test]
+    fn in_data_is_handed_out_in_order_and_a_halt_lasts_until_cleared() {
+        let dev = FakeUsbDevice::k120();
+        let mut d = dev.borrow_mut();
+        assert_eq!(d.data_in(0x81, 8), None, "a NAK");
+        d.push_in(0x81, &[1, 2, 3]);
+        d.push_in(0x81, &[4; 20]);
+        assert_eq!(d.data_in(0x81, 8), Some(Ok(vec![1, 2, 3])));
+        assert_eq!(d.data_in(0x81, 8), Some(Ok(vec![4; 8])));
+        d.stall_endpoint(0x81);
+        assert_eq!(d.data_in(0x81, 8), Some(Err(Stall)));
+        d.control(Setup::clear_halt(0x81), &[]);
+        assert_eq!(d.data_in(0x81, 8), None);
     }
 }

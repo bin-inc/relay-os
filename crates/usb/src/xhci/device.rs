@@ -1,6 +1,7 @@
-//! Devices (spec §6.2 steps 1-5): enumeration on a root port. Each step
-//! logs why it failed; a failed attach disables its slot and frees
-//! everything it allocated, so a misbehaving device costs nothing else.
+//! Devices (spec §6.2 steps 1-5): enumeration on a root port, and
+//! detaching. Each step logs why it failed; a failed attach disables its
+//! slot and frees everything it allocated, so a misbehaving device costs
+//! nothing else.
 
 use super::context::{CONTROL, EndpointContext, Input, Output, SlotContext, speed_id};
 use super::regs::CCS;
@@ -22,7 +23,7 @@ pub const DEBOUNCE: Duration = Duration::from_millis(100);
 /// How long a device gets after SET_ADDRESS before its next request.
 const SET_ADDRESS_RECOVERY: Duration = Duration::from_millis(10);
 /// Input control context flags: A0 is the slot context, A1 EP0.
-const A0: u32 = 1 << 0;
+pub(super) const A0: u32 = 1 << 0;
 const A1: u32 = 1 << 1;
 
 /// EP0's context: control, 3 retries, `max_packet`, its ring, and an
@@ -38,7 +39,7 @@ fn ep0_context(max_packet: u16, dequeue: u64) -> EndpointContext {
     }
 }
 
-fn kind_name(kind: EndpointKind) -> &'static str {
+pub(super) fn kind_name(kind: EndpointKind) -> &'static str {
     match kind {
         EndpointKind::Control => "control",
         EndpointKind::Isochronous => "isochronous",
@@ -296,6 +297,23 @@ impl<H: Hal> Xhci<H> {
             s.max_packet0 = max_packet;
         }
         Ok(())
+    }
+
+    /// Forgets the device in `slot`: Disable Slot, free its rings, contexts
+    /// and buffers. Later events for it are ignored. If Disable Slot fails,
+    /// or the controller is dead, the memory is kept, as the controller may
+    /// still use it.
+    pub fn detach(&mut self, slot: u8) {
+        let Some(port) = self
+            .slots
+            .get(slot as usize)
+            .and_then(Option::as_ref)
+            .map(|s| s.port)
+        else {
+            return;
+        };
+        self.release_slot(slot);
+        xlog!(&self.hal, &self.name, "port {port}: slot {slot} released");
     }
 
     /// Disable Slot (a failure is logged; the slot is forgotten anyway),
@@ -623,5 +641,24 @@ mod tests {
                 "xhci 00:14.0: slot 1: Disable Slot failed (timed out); its memory is kept"
             )
         );
+    }
+
+    #[test]
+    fn detach_frees_everything_and_the_port_can_be_attached_again() {
+        let k120 = FakeUsbDevice::k120();
+        let (hal, mut xhci) = plugged(FakeConfig::intel(), 3, &k120);
+        let before = hal.outstanding_dma();
+        let d = xhci.attach(3).unwrap();
+        xhci.configure(&d, &[0, 1]).unwrap();
+        xhci.detach(d.slot);
+        assert_eq!(hal.outstanding_dma(), before);
+        assert!(!hal.fake().slot_enabled(d.slot as usize));
+        assert_eq!(xhci.dcbaa.read64(8 * d.slot as usize), 0);
+        assert_eq!(xhci.slot_of_port(3), None);
+        assert!(hal.log_text().contains("port 3: slot 1 released"));
+        xhci.detach(d.slot);
+        let again = xhci.attach(3).unwrap();
+        assert_eq!(again.slot, 1, "the lowest free slot");
+        xhci.configure(&again, &[0]).unwrap();
     }
 }

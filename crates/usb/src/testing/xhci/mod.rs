@@ -368,6 +368,8 @@ pub struct FakeXhci {
     abort_requested: bool,
     /// Endpoints (slot, DCI) with work: rung, or waiting for the device.
     active: std::collections::BTreeSet<(usize, usize)>,
+    /// Every control request relayed: slot, request, the slot's state.
+    requests: Vec<(usize, crate::Setup, u32)>,
 }
 
 impl FakeXhci {
@@ -415,6 +417,7 @@ impl FakeXhci {
             aborts: 0,
             abort_requested: false,
             active: Default::default(),
+            requests: Vec::new(),
         };
         x.legacy = [
             if x.config.bios_owned {
@@ -577,6 +580,12 @@ impl FakeXhci {
     /// Command ring aborts (CRCR.CA) that took effect.
     pub fn aborts(&self) -> usize {
         self.aborts
+    }
+
+    /// Every control request relayed to a device: slot, request, and the
+    /// slot's state (3 is Configured) when it went out.
+    pub fn requests(&self) -> &[(usize, crate::Setup, u32)] {
+        &self.requests
     }
 
     pub fn slot_enabled(&self, slot: usize) -> bool {

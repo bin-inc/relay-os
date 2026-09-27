@@ -72,7 +72,6 @@ pub const HCE: u32 = 1 << 12;
 // CRCR bits.
 pub const RCS: u32 = 1 << 0;
 pub const CA: u32 = 1 << 2;
-pub const CRR: u32 = 1 << 3;
 
 // Interrupter registers (xHCI 5.5.2), from the runtime base; interrupter 0
 // only.

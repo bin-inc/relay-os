@@ -10,6 +10,7 @@ use crate::testing::device::Stall;
 use crate::testing::hal::Dma;
 use core::time::Duration;
 
+const NORMAL: u32 = 1;
 const SETUP_STAGE: u32 = 2;
 const DATA_STAGE: u32 = 3;
 const STATUS_STAGE: u32 = 4;
@@ -95,6 +96,7 @@ impl FakeXhci {
             };
             let td = match trb_type(&trb) {
                 SETUP_STAGE if dci == 1 => self.control_td(slot, dma),
+                NORMAL if dci > 1 => self.normal_td(slot, dci, dma),
                 t => panic!("fake xhci: TRB type {t} on the ring of slot {slot} DCI {dci}"),
             };
             match td {
@@ -105,7 +107,7 @@ impl FakeXhci {
         }
     }
 
-    pub(super) fn post_transfer(
+    pub fn post_transfer(
         &mut self,
         slot: usize,
         dci: usize,
@@ -208,6 +210,8 @@ impl FakeXhci {
             self.fail(slot, 1, ep.ring, USB_TRANSACTION_ERROR, dma);
             return Td::Done;
         }
+        let state = self.slots[slot].as_ref().map_or(0, |s| s.state);
+        self.requests.push((slot, setup, state));
         let answer = dev.borrow_mut().control(setup, &out);
         let mut stage = after_setup;
         match answer {
@@ -264,6 +268,68 @@ impl FakeXhci {
             ep.ring = c;
         }
         Td::Done
+    }
+
+    /// A Normal TRB (xHCI 4.10.1): one TD, played against the device's
+    /// endpoint. A NAK leaves it waiting (tried again every tick).
+    fn normal_td(&mut self, slot: usize, dci: usize, dma: &Dma) -> Td {
+        let ep = self
+            .ring(slot, dci)
+            .expect("endpoint checked by the caller")
+            .clone();
+        let mut c = ep.ring;
+        let Some((at, trb)) = c.peek(dma) else {
+            return Td::Incomplete;
+        };
+        c.advance();
+        let (buffer, len) = (pointer(&trb), (trb[2] & 0x1_FFFF) as usize);
+        let address = (dci / 2) as u8 | if dci % 2 == 1 { 0x80 } else { 0 };
+        let port = self.slots[slot].as_ref().map_or(0, |s| s.port);
+        let Some(dev) = self.devices.get(port as usize - 1).cloned().flatten() else {
+            self.fail(slot, dci, ep.ring, USB_TRANSACTION_ERROR, dma);
+            return Td::Done;
+        };
+        let sent = if address & 0x80 != 0 {
+            match dev.borrow_mut().data_in(address, len) {
+                None => None,
+                Some(Err(Stall)) => Some(Err(STALL)),
+                Some(Ok(bytes)) if bytes.len() > len => Some(Err(BABBLE)),
+                Some(Ok(bytes)) => {
+                    dma.write_bytes(buffer, &bytes);
+                    Some(Ok(bytes.len()))
+                }
+            }
+        } else {
+            let data = dma.read_bytes(buffer, len);
+            dev.borrow_mut()
+                .data_out(address, &data)
+                .map(|r| r.map(|()| len).map_err(|Stall| STALL))
+        };
+        match sent {
+            None => {
+                if let Some(ep) = self.ring(slot, dci) {
+                    ep.busy = true;
+                }
+                Td::Waiting
+            }
+            Some(Err(code)) => {
+                self.fail(slot, dci, ep.ring, code, dma);
+                Td::Done
+            }
+            Some(Ok(n)) => {
+                let residual = (len - n) as u32;
+                if residual > 0 && trb[3] & ISP != 0 {
+                    self.post_transfer(slot, dci, at, SHORT_PACKET, residual, dma);
+                } else if trb[3] & IOC != 0 {
+                    self.post_transfer(slot, dci, at, SUCCESS, residual, dma);
+                }
+                if let Some(ep) = self.ring(slot, dci) {
+                    ep.ring = c;
+                    ep.busy = false;
+                }
+                Td::Done
+            }
+        }
     }
 
     /// The device on `port` went away: every TD in progress of its slot

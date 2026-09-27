@@ -346,6 +346,76 @@ impl FakeXhci {
         SUCCESS
     }
 
+    /// Configure Endpoint (xHCI 4.6.6): the added endpoints' contexts are
+    /// checked and copied, the dropped ones disabled.
+    pub(super) fn configure_endpoint(&mut self, trb: &[u32; 4], dma: &Dma) -> u32 {
+        let slot = (trb[3] >> 24) as usize;
+        match self.slot_state(slot) {
+            None => return SLOT_NOT_ENABLED,
+            Some(ADDRESSED | CONFIGURED) => {}
+            Some(_) => return CONTEXT_STATE_ERROR,
+        }
+        if trb[3] & 1 << 9 != 0 {
+            panic!("fake xhci: Configure Endpoint with Deconfigure is not modelled");
+        }
+        let stride = self.stride();
+        let input = self.input_context(trb, dma);
+        let (drop, add) = (dma.read32(input), dma.read32(input + 4));
+        if drop & 0b11 != 0 || add & 0b11 != 0b01 {
+            panic!(
+                "fake xhci: Configure Endpoint with drop {drop:#x} add {add:#x}: A0 only, no EP0"
+            );
+        }
+        let entries = dma.read32(input + stride) >> 27;
+        let highest = 31 - add.leading_zeros();
+        if entries < highest {
+            panic!("fake xhci: context entries {entries} below DCI {highest}");
+        }
+        let mut added = Vec::new();
+        for dci in 2..32usize {
+            if add & 1 << dci == 0 {
+                continue;
+            }
+            let at = input + (dci as u64 + 1) * stride;
+            let ep = self.read_endpoint(at, dma, "Configure Endpoint");
+            let types: &[u32] = if dci % 2 == 1 { &[5, 6, 7] } else { &[1, 2, 3] };
+            if !types.contains(&ep.ep_type) || ep.max_packet == 0 || ep.interval > 15 {
+                panic!("fake xhci: bad context for DCI {dci}: {ep:?}");
+            }
+            if ep.average_trb_length == 0 || (ep.ep_type % 4 == 3 && ep.max_esit_payload == 0) {
+                panic!("fake xhci: DCI {dci} lacks its average TRB length or ESIT payload");
+            }
+            added.push((dci, at, ep));
+        }
+        let s = self.slots[slot].as_mut().expect("slot checked above");
+        for dci in 2..32usize {
+            if drop & 1 << dci != 0 {
+                s.endpoints.remove(&dci);
+            }
+        }
+        for (dci, at, ep) in added {
+            let out = s.output + dci as u64 * stride;
+            for i in 0..5 {
+                dma.write32(out + 4 * i, dma.read32(at + 4 * i));
+            }
+            dma.write32(out, dma.read32(out) & !7 | RUNNING);
+            s.endpoints.insert(dci, ep);
+        }
+        s.context_entries = entries;
+        s.state = if s.endpoints.len() > 1 {
+            CONFIGURED
+        } else {
+            ADDRESSED
+        };
+        let d0 = dma.read32(s.output);
+        dma.write32(s.output, d0 & 0x07FF_FFFF | entries << 27);
+        dma.write32(
+            s.output + 12,
+            dma.read32(s.output + 12) & 0xFF | s.state << 27,
+        );
+        SUCCESS
+    }
+
     /// Disable Slot (xHCI 4.6.4): the slot and its endpoints are gone.
     pub(super) fn disable_slot(&mut self, slot: usize, dma: &Dma) -> u32 {
         match self.slots.get_mut(slot).and_then(Option::take) {

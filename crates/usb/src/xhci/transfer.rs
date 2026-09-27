@@ -2,10 +2,11 @@
 //! events to what is in flight, and putting an endpoint back in order
 //! after a STALL or a timeout.
 
-use super::context::{EP_DISABLED, EP_ERROR, EP_HALTED, EP_RUNNING, EP_STOPPED, Output};
+use super::context::{EP_DISABLED, EP_ERROR, EP_HALTED, EP_RUNNING, EP_STOPPED, Output, dci};
 use super::trb::{SHORT_PACKET, STALL, SUCCESS, Trb, completion_name};
-use super::{Control, Xhci};
-use crate::{Hal, Setup, UsbError};
+use super::{Control, Transfer, Xhci};
+use crate::{Bus, Hal, Setup, UsbError};
+use core::fmt;
 use core::sync::atomic::{Ordering, fence};
 use core::time::Duration;
 
@@ -158,10 +159,38 @@ impl<H: Hal> Xhci<H> {
         else {
             return;
         };
-        if event.endpoint_id() == EP0
-            && let Some(control) = s.control.as_mut()
-        {
-            control.on_event(&event);
+        let dci = event.endpoint_id();
+        if dci == EP0 {
+            if let Some(control) = s.control.as_mut() {
+                control.on_event(&event);
+            }
+            return;
+        }
+        let Some(ep) = s.endpoint(dci) else {
+            return;
+        };
+        let Transfer::Queued { trb, len } = ep.transfer else {
+            return;
+        };
+        if trb != event.pointer() {
+            return;
+        }
+        let code = event.completion_code();
+        let residual = event.transfer_length() as usize;
+        ep.transfer = Transfer::Done(match code {
+            SUCCESS | SHORT_PACKET => Ok(len.saturating_sub(residual)),
+            STALL => Err(UsbError::Stall),
+            code => Err(UsbError::Transfer(code)),
+        });
+        if !matches!(code, SUCCESS | SHORT_PACKET) {
+            xlog!(
+                &self.hal,
+                &self.name,
+                "slot {} endpoint {:#04x}: transfer failed: {}",
+                event.slot_id(),
+                ep.address,
+                completion_name(code)
+            );
         }
     }
 
@@ -184,14 +213,23 @@ impl<H: Hal> Xhci<H> {
     }
 
     fn set_dequeue(&mut self, slot: usize, dci: usize) -> Result<(), UsbError> {
-        let s = self.slots[slot].as_ref().ok_or(UsbError::Disconnected)?;
+        let s = self.slots[slot].as_mut().ok_or(UsbError::Disconnected)?;
         let dequeue = if dci == EP0 {
             s.ep0.enqueue_pointer()
         } else {
-            return Err(UsbError::Disconnected);
+            s.endpoint(dci)
+                .ok_or(UsbError::Disconnected)?
+                .ring
+                .enqueue_pointer()
         };
         self.command(Trb::set_tr_dequeue(slot as u8, dci, dequeue))?;
         Ok(())
+    }
+
+    /// The configured endpoint `address` of `slot`.
+    fn endpoint_mut(&mut self, slot: u8, address: u8) -> Option<&mut super::Endpoint> {
+        let s = self.slots.get_mut(slot as usize)?.as_mut()?;
+        s.endpoints.iter_mut().find(|e| e.address == address)
     }
 
     /// The endpoint's state as the controller last wrote it.
@@ -200,6 +238,87 @@ impl<H: Hal> Xhci<H> {
         Ok(Output::new(&s.output, self.info.context_size)
             .endpoint(dci)
             .state)
+    }
+}
+
+impl<H: Hal> Bus for Xhci<H> {
+    fn control(&mut self, slot: u8, setup: Setup, data: &mut [u8]) -> Result<usize, UsbError> {
+        self.control_transfer(slot, setup, data)
+    }
+
+    /// One Normal TRB (IOC + ISP) into the endpoint's own buffer.
+    fn queue_in(&mut self, slot: u8, endpoint: u8, len: usize) -> Result<(), UsbError> {
+        if self.dead {
+            return Err(UsbError::ControllerDead);
+        }
+        if len > DATA_BUFFER_SIZE {
+            return Err(UsbError::Unsupported("transfer over 4096 bytes"));
+        }
+        let ep = self
+            .endpoint_mut(slot, endpoint)
+            .ok_or(UsbError::Disconnected)?;
+        let Some(buffer) = &ep.buffer else {
+            return Err(UsbError::Unsupported("not an IN endpoint"));
+        };
+        if !matches!(ep.transfer, Transfer::Idle) {
+            return Err(UsbError::Unsupported("transfer already queued"));
+        }
+        let trb = ep.ring.push(Trb::normal(buffer.phys(), len as u32));
+        ep.transfer = Transfer::Queued { trb, len };
+        let dci = ep.dci as u32;
+        fence(Ordering::SeqCst);
+        self.regs.ring_doorbell(&self.hal, slot, dci);
+        Ok(())
+    }
+
+    fn take_in(
+        &mut self,
+        slot: u8,
+        endpoint: u8,
+        buf: &mut [u8],
+    ) -> Option<Result<usize, UsbError>> {
+        self.poll();
+        let Some(ep) = self.endpoint_mut(slot, endpoint) else {
+            return Some(Err(UsbError::Disconnected));
+        };
+        if !matches!(ep.transfer, Transfer::Done(_)) {
+            return None;
+        }
+        let Transfer::Done(result) = core::mem::replace(&mut ep.transfer, Transfer::Idle) else {
+            return None;
+        };
+        Some(result.map(|n| {
+            let n = n.min(buf.len());
+            if let Some(buffer) = &ep.buffer {
+                buffer.read_bytes(0, &mut buf[..n]);
+            }
+            n
+        }))
+    }
+
+    /// Reset Endpoint if the context says Halted (Stop Endpoint if it still
+    /// runs), Set TR Dequeue Pointer to the enqueue position, dropping
+    /// anything outstanding, then CLEAR_FEATURE(ENDPOINT_HALT).
+    fn clear_halt(&mut self, slot: u8, endpoint: u8) -> Result<(), UsbError> {
+        if self.dead {
+            return Err(UsbError::ControllerDead);
+        }
+        let dci = dci(endpoint);
+        let ep = self
+            .endpoint_mut(slot, endpoint)
+            .ok_or(UsbError::Disconnected)?;
+        ep.transfer = Transfer::Idle;
+        self.reposition(slot as usize, dci)?;
+        self.control_transfer(slot, Setup::clear_halt(endpoint), &mut [])?;
+        Ok(())
+    }
+
+    fn now(&self) -> Duration {
+        self.hal.now()
+    }
+
+    fn log(&self, args: fmt::Arguments) {
+        self.hal.log(args);
     }
 }
 
@@ -361,5 +480,272 @@ mod tests {
         hal.fake()
             .after(Duration::from_millis(5), |x, _| x.unplug(1));
         assert_eq!(get_device(&mut xhci, d.slot, 18), Err(UsbError::Timeout));
+    }
+
+    fn keyboard(config: FakeConfig, port: u8) -> (FakeHal, Xhci<FakeHal>, Device, Dev) {
+        let k120 = FakeUsbDevice::k120();
+        let (hal, mut xhci, d) = attached(config, port, &k120);
+        xhci.configure(&d, &[0]).unwrap();
+        (hal, xhci, d, k120)
+    }
+
+    /// `take_in` after letting the fake run for `ms` milliseconds.
+    fn take_after(
+        hal: &FakeHal,
+        xhci: &mut Xhci<FakeHal>,
+        slot: u8,
+        ms: u64,
+        buf: &mut [u8],
+    ) -> Option<Result<usize, UsbError>> {
+        hal.sleep(Duration::from_millis(ms));
+        xhci.take_in(slot, 0x81, buf)
+    }
+
+    #[test]
+    fn a_nakked_report_stays_pending_then_arrives_exactly_once() {
+        let (hal, mut xhci, d, k120) = keyboard(FakeConfig::basic(), 1);
+        let mut buf = [0; 8];
+        assert_eq!(xhci.take_in(d.slot, 0x81, &mut buf), None, "nothing queued");
+        xhci.queue_in(d.slot, 0x81, 8).unwrap();
+        for _ in 0..100 {
+            assert_eq!(take_after(&hal, &mut xhci, d.slot, 1, &mut buf), None);
+        }
+        k120.borrow_mut().push_in(0x81, &[0, 0, 4, 5, 6, 0, 0, 0]);
+        assert_eq!(
+            take_after(&hal, &mut xhci, d.slot, 1, &mut buf),
+            Some(Ok(8))
+        );
+        assert_eq!(buf, [0, 0, 4, 5, 6, 0, 0, 0]);
+        assert_eq!(
+            take_after(&hal, &mut xhci, d.slot, 1, &mut buf),
+            None,
+            "returned once"
+        );
+    }
+
+    #[test]
+    fn a_short_report_gives_its_length() {
+        let (hal, mut xhci, d, k120) = keyboard(FakeConfig::intel(), 2);
+        xhci.queue_in(d.slot, 0x81, 8).unwrap();
+        k120.borrow_mut().push_in(0x81, &[1, 2, 3]);
+        let mut buf = [0; 8];
+        assert_eq!(
+            take_after(&hal, &mut xhci, d.slot, 1, &mut buf),
+            Some(Ok(3))
+        );
+        assert_eq!(&buf[..3], [1, 2, 3]);
+        // A buffer smaller than what came gets what fits.
+        xhci.queue_in(d.slot, 0x81, 8).unwrap();
+        k120.borrow_mut().push_in(0x81, &[9; 8]);
+        let mut small = [0; 2];
+        assert_eq!(
+            take_after(&hal, &mut xhci, d.slot, 1, &mut small),
+            Some(Ok(2))
+        );
+    }
+
+    #[test]
+    fn a_stalled_endpoint_is_recovered_by_clear_halt() {
+        for (config, port) in [(FakeConfig::basic(), 1), (FakeConfig::intel(), 5)] {
+            let (hal, mut xhci, d, k120) = keyboard(config, port);
+            k120.borrow_mut().stall_endpoint(0x81);
+            xhci.queue_in(d.slot, 0x81, 8).unwrap();
+            let mut buf = [0; 8];
+            assert_eq!(
+                take_after(&hal, &mut xhci, d.slot, 1, &mut buf),
+                Some(Err(UsbError::Stall))
+            );
+            assert!(
+                hal.log_text()
+                    .contains("slot 1 endpoint 0x81: transfer failed: stall")
+            );
+            assert_eq!(
+                hal.fake().endpoint(d.slot as usize, 3).unwrap().state,
+                2,
+                "halted"
+            );
+            let n = hal.fake().executed().len();
+            xhci.clear_halt(d.slot, 0x81).unwrap();
+            // Reset Endpoint, Set TR Dequeue Pointer, then the request.
+            assert_eq!(commands_since(&hal, n), [14, 16]);
+            let last = k120.borrow().requests().pop().unwrap();
+            assert_eq!(last.setup, Setup::clear_halt(0x81));
+            xhci.queue_in(d.slot, 0x81, 8).unwrap();
+            k120.borrow_mut().push_in(0x81, &[7; 8]);
+            assert_eq!(
+                take_after(&hal, &mut xhci, d.slot, 1, &mut buf),
+                Some(Ok(8))
+            );
+        }
+    }
+
+    #[test]
+    fn clear_halt_on_a_running_endpoint_drops_what_was_queued() {
+        let (hal, mut xhci, d, k120) = keyboard(FakeConfig::basic(), 1);
+        xhci.queue_in(d.slot, 0x81, 8).unwrap();
+        hal.sleep(Duration::from_millis(1));
+        let n = hal.fake().executed().len();
+        xhci.clear_halt(d.slot, 0x81).unwrap();
+        // Not halted: Stop Endpoint instead of Reset Endpoint.
+        assert_eq!(commands_since(&hal, n), [15, 16]);
+        let mut buf = [0; 8];
+        assert_eq!(take_after(&hal, &mut xhci, d.slot, 1, &mut buf), None);
+        xhci.queue_in(d.slot, 0x81, 8).unwrap();
+        k120.borrow_mut().push_in(0x81, &[5; 8]);
+        assert_eq!(
+            take_after(&hal, &mut xhci, d.slot, 1, &mut buf),
+            Some(Ok(8))
+        );
+    }
+
+    #[test]
+    fn unplugging_fails_the_queued_transfer_and_detach_frees_everything() {
+        let k120 = FakeUsbDevice::k120();
+        let (hal, mut xhci) = start(FakeConfig::intel());
+        hal.fake().plug(3, k120.clone());
+        xhci.port_changes();
+        let before = hal.outstanding_dma();
+        let d = xhci.attach(3).unwrap();
+        xhci.configure(&d, &[0]).unwrap();
+        xhci.queue_in(d.slot, 0x81, 8).unwrap();
+        hal.fake().unplug(3);
+        let mut buf = [0; 8];
+        assert_eq!(
+            take_after(&hal, &mut xhci, d.slot, 1, &mut buf),
+            Some(Err(UsbError::Transfer(4)))
+        );
+        let changes = xhci.port_changes();
+        assert!(changes[0].reconnected && !changes[0].connected);
+        xhci.detach(d.slot);
+        assert_eq!(hal.outstanding_dma(), before);
+        assert_eq!(
+            xhci.take_in(d.slot, 0x81, &mut buf),
+            Some(Err(UsbError::Disconnected))
+        );
+    }
+
+    #[test]
+    fn a_bulk_in_transfer_gets_what_the_device_sent() {
+        let stick = FakeUsbDevice::kingston_stick();
+        let (hal, mut xhci, d) = attached(FakeConfig::intel(), 13, &stick);
+        xhci.configure(&d, &[0]).unwrap();
+        xhci.queue_in(d.slot, 0x81, 512).unwrap();
+        // A mass storage status wrapper: 13 bytes.
+        stick.borrow_mut().push_in(0x81, &[0x55; 13]);
+        let mut buf = [0; 512];
+        assert_eq!(
+            take_after(&hal, &mut xhci, d.slot, 1, &mut buf),
+            Some(Ok(13))
+        );
+        assert_eq!(buf[..13], [0x55; 13]);
+    }
+
+    #[test]
+    fn an_event_for_another_trb_does_not_finish_a_transfer() {
+        let (hal, mut xhci, d, k120) = keyboard(FakeConfig::basic(), 1);
+        xhci.queue_in(d.slot, 0x81, 8).unwrap();
+        hal.act(|x, dma| x.post_transfer(d.slot as usize, 3, 0x1000, 1, 0, dma));
+        let mut buf = [0; 8];
+        assert_eq!(take_after(&hal, &mut xhci, d.slot, 1, &mut buf), None);
+        k120.borrow_mut().push_in(0x81, &[3; 8]);
+        assert_eq!(
+            take_after(&hal, &mut xhci, d.slot, 1, &mut buf),
+            Some(Ok(8))
+        );
+    }
+
+    #[test]
+    fn events_for_a_detached_slot_are_ignored() {
+        let (hal, mut xhci, d, _k120) = keyboard(FakeConfig::basic(), 1);
+        xhci.queue_in(d.slot, 0x81, 8).unwrap();
+        xhci.detach(d.slot);
+        hal.act(|x, dma| {
+            x.post_transfer(1, 3, 0x1000, 1, 0, dma);
+            x.post_transfer(1, 1, 0x2000, 6, 0, dma);
+        });
+        xhci.poll();
+        assert_eq!(
+            xhci.control(d.slot, Setup::set_configuration(1), &mut []),
+            Err(UsbError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn in_transfers_the_driver_cannot_do_are_refused() {
+        let (_hal, mut xhci, d, _k120) = keyboard(FakeConfig::basic(), 1);
+        assert_eq!(
+            xhci.queue_in(d.slot, 0x82, 4),
+            Err(UsbError::Disconnected),
+            "interface 1"
+        );
+        assert_eq!(xhci.queue_in(9, 0x81, 8), Err(UsbError::Disconnected));
+        assert_eq!(
+            xhci.queue_in(d.slot, 0x81, 5000),
+            Err(UsbError::Unsupported("transfer over 4096 bytes"))
+        );
+        xhci.queue_in(d.slot, 0x81, 8).unwrap();
+        assert_eq!(
+            xhci.queue_in(d.slot, 0x81, 8),
+            Err(UsbError::Unsupported("transfer already queued"))
+        );
+        let mut buf = [0; 8];
+        assert_eq!(
+            xhci.take_in(d.slot, 0x82, &mut buf),
+            Some(Err(UsbError::Disconnected))
+        );
+        assert_eq!(xhci.clear_halt(d.slot, 0x83), Err(UsbError::Disconnected));
+    }
+
+    #[test]
+    fn the_bus_forwards_time_and_log_lines() {
+        let (hal, xhci, _d, _k120) = keyboard(FakeConfig::basic(), 1);
+        let before = hal.clock();
+        assert!(Bus::now(&xhci) > before);
+        Bus::log(&xhci, format_args!("hid: hello"));
+        assert!(hal.log_text().ends_with("hid: hello"));
+    }
+
+    #[test]
+    fn a_disable_slot_that_times_out_keeps_the_memory_the_controller_uses() {
+        let k120 = FakeUsbDevice::k120();
+        let (hal, mut xhci, d) = attached(FakeConfig::intel(), 3, &k120);
+        xhci.configure(&d, &[0]).unwrap();
+        xhci.queue_in(d.slot, 0x81, 8).unwrap();
+        hal.sleep(Duration::from_millis(20));
+        let before = hal.outstanding_dma();
+        hal.fake().config_mut().hang_command = Some(10); // Disable Slot
+        xhci.detach(d.slot);
+        assert!(
+            hal.fake().slot_enabled(d.slot as usize),
+            "the controller still has the slot"
+        );
+        assert_eq!(hal.outstanding_dma(), before, "nothing freed");
+        assert_eq!(xhci.slot_of_port(3), None);
+        assert!(
+            hal.log_text()
+                .contains("slot 1: Disable Slot failed (timed out); its memory is kept")
+        );
+        // The keyboard sends a report: the controller writes it into the
+        // endpoint buffer, which is still allocated (the fake panics on
+        // freed memory).
+        k120.borrow_mut().push_in(0x81, &[0, 0, 4, 0, 0, 0, 0, 0]);
+        hal.sleep(Duration::from_millis(20));
+    }
+
+    #[test]
+    fn detaching_on_a_dead_controller_frees_nothing() {
+        let (hal, mut xhci, d, _k120) = keyboard(FakeConfig::intel(), 3);
+        xhci.queue_in(d.slot, 0x81, 8).unwrap();
+        hal.fake().host_system_error();
+        xhci.poll();
+        let before = hal.outstanding_dma();
+        let commands = hal.fake().executed().len();
+        xhci.detach(d.slot);
+        assert_eq!(hal.outstanding_dma(), before);
+        assert_eq!(hal.fake().executed().len(), commands, "no command sent");
+        assert_eq!(xhci.slot_of_port(3), None);
+        assert!(hal.log_text().contains(
+            "slot 1: Disable Slot failed (controller stopped working); its memory is kept"
+        ));
     }
 }

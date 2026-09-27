@@ -1,7 +1,4 @@
 //! The xHCI host controller driver (spec §6.2).
-// The driver is built bottom-up: parts land before their users.
-#![allow(dead_code)]
-
 /// Logs one line starting "xhci <name>: ", as every line of this driver
 /// does (spec §13: the NUC is debugged from a photo of `dmesg`).
 macro_rules! xlog {
@@ -12,6 +9,7 @@ macro_rules! xlog {
 
 mod caps;
 mod command;
+mod configure;
 mod context;
 mod device;
 mod init;
@@ -100,6 +98,39 @@ struct Control {
     result: Option<Result<(), u8>>,
 }
 
+/// Where an endpoint's one transfer is.
+#[derive(Debug)]
+enum Transfer {
+    Idle,
+    /// A Normal TRB at `trb` for `len` bytes is on the ring.
+    Queued {
+        trb: u64,
+        len: usize,
+    },
+    /// Finished; `take_in` returns it once.
+    Done(Result<usize, UsbError>),
+}
+
+/// A configured endpoint other than EP0.
+#[derive(Debug)]
+struct Endpoint {
+    address: u8,
+    dci: usize,
+    ring: ProducerRing,
+    /// IN endpoints: the 4 KiB buffer their transfers land in.
+    buffer: Option<DmaBuf>,
+    transfer: Transfer,
+}
+
+impl Endpoint {
+    fn free<H: Hal>(self, hal: &H) {
+        self.ring.free(hal);
+        if let Some(buf) = self.buffer {
+            hal.free_dma(buf);
+        }
+    }
+}
+
 /// A device slot: its contexts, EP0 and the buffer control transfers use.
 #[derive(Debug)]
 struct Slot {
@@ -115,6 +146,8 @@ struct Slot {
     /// EP0's max packet size as its context has it.
     max_packet0: u16,
     control: Option<Control>,
+    /// What `configure` set up.
+    endpoints: Vec<Endpoint>,
 }
 
 impl Slot {
@@ -134,6 +167,7 @@ impl Slot {
                 data,
                 max_packet0: speed.default_max_packet0(),
                 control: None,
+                endpoints: Vec::new(),
             }),
             (output, input, ep0, data) => {
                 for buf in [output, input, data].into_iter().flatten() {
@@ -152,6 +186,13 @@ impl Slot {
         hal.free_dma(self.input);
         hal.free_dma(self.data);
         self.ep0.free(hal);
+        for ep in self.endpoints {
+            ep.free(hal);
+        }
+    }
+
+    fn endpoint(&mut self, dci: usize) -> Option<&mut Endpoint> {
+        self.endpoints.iter_mut().find(|e| e.dci == dci)
     }
 }
 
@@ -164,6 +205,8 @@ pub struct Xhci<H: Hal> {
     /// Each root port's protocol; index 0 is port 1.
     ports: Vec<Option<PortProtocol>>,
     dcbaa: DmaBuf,
+    // The controller uses these pages; the driver only owns them.
+    #[cfg_attr(not(test), expect(dead_code))]
     scratchpads: Option<Scratchpads>,
     commands: ProducerRing,
     events: EventRing,
