@@ -437,3 +437,35 @@ fn seeded_corruption_under_writes_never_panics() {
         let _ = fs.shutdown();
     }
 }
+
+/// A directory entry whose inode is a directory living elsewhere (one
+/// corrupt field; `debugfs link` makes it). Removing or moving it through
+/// the alias would free or re-parent the real directory behind its real
+/// parent's back, so it is refused as corrupt, and nothing changes.
+#[test]
+fn a_directory_reached_through_an_alias_is_not_removed_or_moved() {
+    let img = mkfs("remove-alias", 1024, 4 << 10, &[], None);
+    debugfs_w(&img, "mkdir keep");
+    debugfs_w(&img, "mkdir junk");
+    debugfs_w(&img, "link keep junk/evil");
+    let keep = ino_of(&img, "/keep");
+    let (mut fs, env) = mount(&img, rw());
+    let root = fs.root();
+    let junk = fs.lookup(root, b"junk").unwrap();
+    assert_eq!(fs.lookup(junk, b"evil").unwrap(), keep);
+    fs.mkdir(root, b"x").unwrap();
+    let root_links = fs.stat(root).unwrap().nlink;
+    assert_eq!(fs.rmdir(junk, b"evil"), Err(Errno::EIO));
+    assert_eq!(fs.rename(junk, b"evil", root, b"moved"), Err(Errno::EIO));
+    // Nor is it replaced through the alias.
+    assert_eq!(fs.rename(root, b"x", junk, b"evil"), Err(Errno::EIO));
+    assert!(env.logged("ext2:"), "{:?}", env.lines());
+    assert_eq!(fs.lookup(root, b"keep").unwrap(), keep);
+    assert_eq!(fs.stat(keep).unwrap().nlink, 2);
+    assert_eq!(fs.stat(root).unwrap().nlink, root_links);
+    assert_eq!(fs.lookup(keep, b"..").unwrap(), root);
+    // The real directory still goes the normal way.
+    fs.unlink(junk, b"evil").unwrap_err();
+    fs.rmdir(root, b"keep").unwrap();
+    fs.shutdown().unwrap();
+}

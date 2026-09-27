@@ -67,6 +67,9 @@ impl<D: BlockDevice> Ext2<D> {
         }
         let kind = src.kind().expect("in use");
         let src_is_dir = kind == FileType::Directory;
+        if src_is_dir {
+            self.check_parent(&src, from_dir)?;
+        }
         if src_is_dir && self.is_ancestor(src.ino, to_dir)? {
             return Err(Errno::EINVAL);
         }
@@ -74,6 +77,9 @@ impl<D: BlockDevice> Ext2<D> {
             Some(t) => {
                 let inode = self.entry_inode(&dst_parent, t)?;
                 let is_dir = inode.kind() == Some(FileType::Directory);
+                if is_dir {
+                    self.check_parent(&inode, to_dir)?;
+                }
                 if src_is_dir && !is_dir {
                     return Err(Errno::ENOTDIR);
                 }

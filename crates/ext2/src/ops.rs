@@ -72,6 +72,21 @@ impl<D: BlockDevice> Ext2<D> {
         self.add_entry(parent, name, inode.ino, kind)
     }
 
+    /// Checks that directory `dir`'s `..` names `parent`, the directory it
+    /// is found in. A directory entry naming a directory that lives
+    /// elsewhere (one corrupt field) must not be removed, moved or replaced
+    /// through: that would free or re-parent the real directory behind its
+    /// real parent's back.
+    pub(crate) fn check_parent(&mut self, dir: &Inode, parent: Ino) -> Result<(), Errno> {
+        match self.find_entry(dir, b"..")? {
+            Some(dotdot) if dotdot.entry.inode as Ino == parent => Ok(()),
+            _ => Err(self.corrupt(format_args!(
+                "directory {} is entered in {parent}, but its .. names another directory",
+                dir.ino
+            ))),
+        }
+    }
+
     /// Drops one link of a non-directory, freeing it with the last.
     pub(crate) fn drop_link(&mut self, inode: &mut Inode) -> Result<(), Errno> {
         inode.set_links(inode.links().saturating_sub(1));
@@ -102,6 +117,7 @@ impl<D: BlockDevice> Ext2<D> {
         if inode.kind() != Some(FileType::Directory) {
             return Err(Errno::ENOTDIR);
         }
+        self.check_parent(&inode, dir)?;
         if !self.dir_is_empty(&inode)? {
             return Err(Errno::ENOTEMPTY);
         }
