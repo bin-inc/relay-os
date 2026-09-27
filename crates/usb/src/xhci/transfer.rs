@@ -278,6 +278,11 @@ impl<H: Hal> Bus for Xhci<H> {
         buf: &mut [u8],
     ) -> Option<Result<usize, UsbError>> {
         self.poll();
+        // A dead controller finishes nothing: the class driver must hear
+        // that, or a keyboard would wait (and repeat a held key) for ever.
+        if self.dead {
+            return Some(Err(UsbError::ControllerDead));
+        }
         let Some(ep) = self.endpoint_mut(slot, endpoint) else {
             return Some(Err(UsbError::Disconnected));
         };
@@ -499,6 +504,26 @@ mod tests {
     ) -> Option<Result<usize, UsbError>> {
         hal.sleep(Duration::from_millis(ms));
         xhci.take_in(slot, 0x81, buf)
+    }
+
+    #[test]
+    fn a_dead_controller_fails_the_queued_transfer_instead_of_keeping_it_pending() {
+        // A keyboard waits for its report with `take_in`; if the controller
+        // dies it must hear so, or a held key would repeat for ever.
+        let (hal, mut xhci, d, _k120) = keyboard(FakeConfig::intel(), 3);
+        let mut buf = [0; 8];
+        xhci.queue_in(d.slot, 0x81, 8).unwrap();
+        assert_eq!(take_after(&hal, &mut xhci, d.slot, 1, &mut buf), None);
+        hal.fake().host_system_error();
+        assert_eq!(
+            take_after(&hal, &mut xhci, d.slot, 1, &mut buf),
+            Some(Err(UsbError::ControllerDead))
+        );
+        // And every later look says the same.
+        assert_eq!(
+            xhci.take_in(d.slot, 0x81, &mut buf),
+            Some(Err(UsbError::ControllerDead))
+        );
     }
 
     #[test]
