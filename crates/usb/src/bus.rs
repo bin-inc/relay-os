@@ -131,7 +131,8 @@ pub trait Bus {
     fn queue_in(&mut self, slot: u8, endpoint: u8, len: usize) -> Result<(), UsbError>;
     /// The outcome of the IN transfer on `endpoint` once it has finished:
     /// the bytes received are copied into `buf`. `None` while it is still
-    /// running (or none was queued). Never waits.
+    /// running (or none was queued), and `ControllerDead` on every call
+    /// once the controller stopped working. Never waits.
     fn take_in(
         &mut self,
         slot: u8,

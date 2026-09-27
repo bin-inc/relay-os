@@ -4,11 +4,14 @@
 //! registers, TRBs and contexts with its own constants, not the driver's.
 
 mod commands;
+mod ports;
 mod regs;
 mod rings;
+mod slots;
+mod transfers;
 
 pub use commands::Executed;
-use commands::FakeSlot;
+use slots::FakeSlot;
 
 use super::hal::Dma;
 use core::time::Duration;
@@ -89,6 +92,22 @@ pub struct FakeConfig {
     /// Knob: an abort leaves the dequeue pointer on the aborted command, so
     /// the ring resumes on it (some controllers; xHCI 4.6.1.2 allows both).
     pub abort_keeps_dequeue: bool,
+    /// How long a port reset takes; `None`: it never completes.
+    pub port_reset_time: Option<Duration>,
+    /// How long a USB 3 link trains (in Polling, CCS 0) after a connect.
+    pub usb3_training: Duration,
+    /// Knob: USB 3 links fail to train and end in SS.Inactive (CCS 1),
+    /// where only a warm reset helps.
+    pub usb3_link_fails: bool,
+    /// Knob: a short control data stage is reported as Success with the
+    /// residual, not as Short Packet (some controllers do).
+    pub short_as_success: bool,
+    /// Knob: an unplug fails the device's transfers in progress with a USB
+    /// Transaction Error, as Intel controllers do.
+    pub fail_transfers_on_unplug: bool,
+    /// How long a USB 2 device present when its port is reset or powered
+    /// takes to signal its attach (at most 100 ms, USB 2.0 7.1.7.3).
+    pub usb2_attach_delay: Duration,
 }
 
 /// Capabilities at `offsets`, each pointing to the next.
@@ -158,6 +177,12 @@ impl FakeConfig {
             hang_command: None,
             abort_never_completes: false,
             abort_keeps_dequeue: false,
+            port_reset_time: Some(ports::RESET_TIME),
+            usb3_training: Duration::from_millis(50),
+            usb3_link_fails: false,
+            usb2_attach_delay: Duration::from_millis(30),
+            short_as_success: false,
+            fail_transfers_on_unplug: true,
         }
     }
 
@@ -249,6 +274,12 @@ impl FakeConfig {
             hang_command: None,
             abort_never_completes: false,
             abort_keeps_dequeue: false,
+            port_reset_time: Some(ports::RESET_TIME),
+            usb3_training: Duration::from_millis(50),
+            usb3_link_fails: false,
+            usb2_attach_delay: Duration::from_millis(30),
+            short_as_success: false,
+            fail_transfers_on_unplug: true,
         }
     }
 }
@@ -291,6 +322,14 @@ pub struct FakeXhci {
     config_reg: u32,
     portsc: Vec<u32>,
     port_writes: usize,
+    portsc_writes: Vec<(u8, u32)>,
+    /// Which ports are USB 3 (from the Supported Protocol capabilities).
+    usb3: Vec<bool>,
+    devices: Vec<Option<ports::Device>>,
+    /// Bumped by every connect, disconnect and reset, so a timer set for
+    /// an earlier state does nothing.
+    port_generation: Vec<u64>,
+    reset_done: Vec<Option<Duration>>,
     iman: u32,
     imod: u32,
     erstsz: u32,
@@ -327,6 +366,10 @@ pub struct FakeXhci {
     /// CRCR's low half was written with CA; the abort happens once the
     /// high half follows.
     abort_requested: bool,
+    /// Endpoints (slot, DCI) with work: rung, or waiting for the device.
+    active: std::collections::BTreeSet<(usize, usize)>,
+    /// Every control request relayed: slot, request, the slot's state.
+    requests: Vec<(usize, crate::Setup, u32)>,
 }
 
 impl FakeXhci {
@@ -345,6 +388,11 @@ impl FakeXhci {
             config_reg: 0,
             portsc: vec![0; ports],
             port_writes: 0,
+            portsc_writes: Vec::new(),
+            usb3: vec![false; ports],
+            devices: vec![None; ports],
+            port_generation: vec![0; ports],
+            reset_done: vec![None; ports],
             iman: 0,
             imod: 0,
             erstsz: 0,
@@ -368,6 +416,8 @@ impl FakeXhci {
             hung: None,
             aborts: 0,
             abort_requested: false,
+            active: Default::default(),
+            requests: Vec::new(),
         };
         x.legacy = [
             if x.config.bios_owned {
@@ -382,6 +432,21 @@ impl FakeXhci {
             x.usbsts = 0;
         }
         x.slots = (0..=x.config.max_slots).map(|_| None).collect();
+        for cap in &x.config.caps {
+            if let ExtCap::Protocol {
+                major: 3,
+                first,
+                count,
+                ..
+            } = cap.cap
+            {
+                for p in first..first.saturating_add(count) {
+                    if let Some(u) = (p as usize).checked_sub(1).and_then(|i| x.usb3.get_mut(i)) {
+                        *u = true;
+                    }
+                }
+            }
+        }
         x.power_on_ports();
         x
     }
@@ -395,6 +460,7 @@ impl FakeXhci {
         }
         self.now = now;
         self.process_commands(dma);
+        self.process_transfers(dma);
         self.flush_events(dma);
     }
 
@@ -514,6 +580,12 @@ impl FakeXhci {
     /// Command ring aborts (CRCR.CA) that took effect.
     pub fn aborts(&self) -> usize {
         self.aborts
+    }
+
+    /// Every control request relayed to a device: slot, request, and the
+    /// slot's state (3 is Configured) when it went out.
+    pub fn requests(&self) -> &[(usize, crate::Setup, u32)] {
+        &self.requests
     }
 
     pub fn slot_enabled(&self, slot: usize) -> bool {

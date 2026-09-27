@@ -3,6 +3,7 @@
 //! and posts its completion; CRCR.CA aborts. Commands are decoded with the
 //! fake's own field layouts.
 
+use super::slots::FakeSlot;
 use super::{Consumer, FakeXhci};
 use crate::testing::hal::Dma;
 
@@ -10,6 +11,12 @@ use crate::testing::hal::Dma;
 pub const LINK: u32 = 6;
 pub const ENABLE_SLOT: u32 = 9;
 pub const DISABLE_SLOT: u32 = 10;
+pub const ADDRESS_DEVICE: u32 = 11;
+pub const CONFIGURE_ENDPOINT: u32 = 12;
+pub const EVALUATE_CONTEXT: u32 = 13;
+pub const RESET_ENDPOINT: u32 = 14;
+pub const STOP_ENDPOINT: u32 = 15;
+pub const SET_TR_DEQUEUE: u32 = 16;
 pub const NO_OP_COMMAND: u32 = 23;
 pub const TRANSFER_EVENT: u32 = 32;
 pub const COMMAND_COMPLETION: u32 = 33;
@@ -37,10 +44,6 @@ pub struct Executed {
     pub kind: u32,
     pub slot: usize,
 }
-
-/// A device slot as the controller sees it.
-#[derive(Debug, Default)]
-pub struct FakeSlot {}
 
 impl Consumer {
     /// The TRB at the dequeue pointer if software has handed it over,
@@ -111,7 +114,13 @@ impl FakeXhci {
         let (code, slot) = match kind {
             NO_OP_COMMAND => (SUCCESS, 0),
             ENABLE_SLOT => self.enable_slot(),
-            DISABLE_SLOT => (self.disable_slot(slot_of(&trb)), slot_of(&trb)),
+            DISABLE_SLOT => (self.disable_slot(slot_of(&trb), dma), slot_of(&trb)),
+            ADDRESS_DEVICE => (self.address_device(&trb, dma), slot_of(&trb)),
+            CONFIGURE_ENDPOINT => (self.configure_endpoint(&trb, dma), slot_of(&trb)),
+            EVALUATE_CONTEXT => (self.evaluate_context(&trb, dma), slot_of(&trb)),
+            RESET_ENDPOINT => (self.reset_endpoint(&trb, dma), slot_of(&trb)),
+            STOP_ENDPOINT => (self.stop_endpoint(&trb, dma), slot_of(&trb)),
+            SET_TR_DEQUEUE => (self.set_tr_dequeue(&trb, dma), slot_of(&trb)),
             _ => panic!("fake xhci: TRB type {kind} on the command ring"),
         };
         self.executed.push(Executed { addr, kind, slot });
@@ -139,13 +148,6 @@ impl FakeXhci {
                 (SUCCESS, s)
             }
             None => (NO_SLOTS, 0),
-        }
-    }
-
-    fn disable_slot(&mut self, slot: usize) -> u32 {
-        match self.slots.get_mut(slot).and_then(Option::take) {
-            Some(_) => SUCCESS,
-            None => SLOT_NOT_ENABLED,
         }
     }
 
