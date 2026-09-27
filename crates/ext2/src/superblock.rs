@@ -2,7 +2,7 @@
 //! the mount checks. The raw 1024 bytes are kept and patched in place, so
 //! fields this driver does not know survive a rewrite.
 
-use crate::le::{u16_at, u32_at};
+use crate::le::{set_u16, set_u32, u16_at, u32_at};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
@@ -83,20 +83,26 @@ const FIRST_DATA_BLOCK: usize = 20;
 const LOG_BLOCK_SIZE: usize = 24;
 const BLOCKS_PER_GROUP: usize = 32;
 const INODES_PER_GROUP: usize = 40;
+const MTIME: usize = 44;
+const WTIME: usize = 48;
+const MNT_COUNT: usize = 52;
 const MAGIC_AT: usize = 56;
 const STATE: usize = 58;
 const REV_LEVEL: usize = 76;
 const FIRST_INO: usize = 84;
 const INODE_SIZE: usize = 88;
+const BLOCK_GROUP_NR: usize = 90;
 const FEATURE_COMPAT: usize = 92;
 const FEATURE_INCOMPAT: usize = 96;
 const FEATURE_RO_COMPAT: usize = 100;
 const RESERVED_GDT_BLOCKS: usize = 206;
 const BACKUP_BGS: usize = 0x24C;
 
-/// The superblock as read from the disk.
+/// The superblock, with a note of whether it changed since it was last
+/// written.
 pub struct Superblock {
     raw: Box<[u8]>,
+    dirty: bool,
 }
 
 impl Superblock {
@@ -104,6 +110,37 @@ impl Superblock {
     pub fn new(raw: &[u8]) -> Superblock {
         Superblock {
             raw: raw[..SUPERBLOCK_SIZE].into(),
+            dirty: false,
+        }
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Copies the superblock into `buf` as the copy of group `group`
+    /// (`s_block_group_nr`).
+    pub fn copy_to(&self, buf: &mut [u8], group: u32) {
+        buf[..SUPERBLOCK_SIZE].copy_from_slice(&self.raw);
+        set_u16(buf, BLOCK_GROUP_NR, group as u16);
+    }
+
+    /// Notes that every copy has been written.
+    pub fn set_clean(&mut self) {
+        self.dirty = false;
+    }
+
+    fn set_u32(&mut self, at: usize, v: u32) {
+        if self.u32(at) != v {
+            set_u32(&mut self.raw, at, v);
+            self.dirty = true;
+        }
+    }
+
+    fn set_u16(&mut self, at: usize, v: u16) {
+        if self.u16(at) != v {
+            set_u16(&mut self.raw, at, v);
+            self.dirty = true;
         }
     }
 
@@ -124,6 +161,10 @@ impl Superblock {
         self.u32(FREE_BLOCKS_COUNT)
     }
 
+    pub fn set_free_blocks_count(&mut self, n: u32) {
+        self.set_u32(FREE_BLOCKS_COUNT, n);
+    }
+
     pub fn free_inodes_count(&self) -> u32 {
         self.u32(FREE_INODES_COUNT)
     }
@@ -132,8 +173,35 @@ impl Superblock {
         self.u16(STATE)
     }
 
+    pub fn set_state(&mut self, state: u16) {
+        self.set_u16(STATE, state);
+    }
+
+    pub fn mnt_count(&self) -> u16 {
+        self.u16(MNT_COUNT)
+    }
+
+    pub fn set_mnt_count(&mut self, n: u16) {
+        self.set_u16(MNT_COUNT, n);
+    }
+
+    /// The last mount time.
+    pub fn set_mtime(&mut self, t: u32) {
+        self.set_u32(MTIME, t);
+    }
+
+    /// The last write time. Set as the superblock is written, so it does
+    /// not count as a change of its own.
+    pub fn stamp_wtime(&mut self, t: u32) {
+        set_u32(&mut self.raw, WTIME, t);
+    }
+
     pub fn feature_ro_compat(&self) -> u32 {
         self.u32(FEATURE_RO_COMPAT)
+    }
+
+    pub fn set_feature_ro_compat(&mut self, bits: u32) {
+        self.set_u32(FEATURE_RO_COMPAT, bits);
     }
 
     /// The ro_compat features this driver cannot keep consistent, which
@@ -214,6 +282,17 @@ impl Geometry {
             1 + self.gdt_blocks + self.reserved_gdt_blocks
         } else {
             0
+        }
+    }
+
+    /// Where group `g`'s copy of the superblock is: its first block, at
+    /// byte 1024 of block 0 for the primary copy with blocks over 1 KiB.
+    pub fn super_location(&self, g: u32) -> (u64, usize) {
+        if g == 0 {
+            let offset = SUPERBLOCK_OFFSET as usize;
+            ((offset / self.block_size) as u64, offset % self.block_size)
+        } else {
+            (self.group_start(g), 0)
         }
     }
 
@@ -347,14 +426,6 @@ mod tests {
     use super::*;
     use alloc::vec::Vec;
 
-    fn set_u32(b: &mut [u8], at: usize, v: u32) {
-        b[at..at + 4].copy_from_slice(&v.to_le_bytes());
-    }
-
-    fn set_u16(b: &mut [u8], at: usize, v: u16) {
-        b[at..at + 2].copy_from_slice(&v.to_le_bytes());
-    }
-
     /// A 1 KiB-block filesystem of 20000 blocks: 3 groups of 8192 blocks
     /// and 512 inodes.
     fn sample() -> [u8; SUPERBLOCK_SIZE] {
@@ -419,6 +490,40 @@ mod tests {
         assert_eq!(geo.backups, Backups::Listed([1, 2]));
         assert!(geo.has_super(2));
         assert_eq!(geo.super_blocks(2), 5);
+    }
+
+    #[test]
+    fn copies_sit_at_the_start_of_their_group() {
+        let geo = check_with(|_| {}).unwrap();
+        assert_eq!(geo.super_location(0), (1, 0));
+        assert_eq!(geo.super_location(2), (16385, 0));
+        let geo4k = Geometry {
+            block_size: 4096,
+            first_data_block: 0,
+            blocks_per_group: 32768,
+            ..geo
+        };
+        assert_eq!(geo4k.super_location(0), (0, 1024));
+        assert_eq!(geo4k.super_location(1), (32768, 0));
+    }
+
+    #[test]
+    fn only_real_changes_make_the_superblock_dirty() {
+        let mut sb = Superblock::new(&sample());
+        sb.set_state(0);
+        sb.stamp_wtime(5);
+        assert!(!sb.is_dirty());
+        sb.set_state(STATE_VALID);
+        sb.set_mnt_count(3);
+        assert!(sb.is_dirty());
+        let mut copy = [0u8; SUPERBLOCK_SIZE];
+        sb.copy_to(&mut copy, 7);
+        sb.set_clean();
+        assert!(!sb.is_dirty());
+        assert_eq!(u16_at(&copy, STATE), STATE_VALID);
+        assert_eq!(u16_at(&copy, BLOCK_GROUP_NR), 7);
+        assert_eq!(u32_at(&copy, WTIME), 5);
+        assert_eq!(sb.mnt_count(), 3);
     }
 
     #[test]

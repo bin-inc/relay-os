@@ -1,7 +1,7 @@
 //! Block group descriptors (spec §8.2). The whole table is kept in memory
 //! as raw bytes, so fields this driver does not know survive a rewrite.
 
-use crate::le::u32_at;
+use crate::le::{set_u16, u16_at, u32_at};
 use crate::superblock::{DESC_SIZE, Geometry};
 use alloc::format;
 use alloc::string::String;
@@ -10,18 +10,44 @@ use alloc::vec::Vec;
 const BLOCK_BITMAP: usize = 0;
 const INODE_BITMAP: usize = 4;
 const INODE_TABLE: usize = 8;
+const FREE_BLOCKS: usize = 12;
 
-/// The group descriptor table.
+/// The group descriptor table, with a note of whether it changed since it
+/// was last written.
 pub struct Groups {
     raw: Vec<u8>,
     count: u32,
+    dirty: bool,
 }
 
 impl Groups {
     /// The table in `raw` (whole blocks) for `count` groups.
     pub fn new(raw: Vec<u8>, count: u32) -> Groups {
         assert!(raw.len() >= count as usize * DESC_SIZE as usize);
-        Groups { raw, count }
+        Groups {
+            raw,
+            count,
+            dirty: false,
+        }
+    }
+
+    /// The table as stored: whole blocks.
+    pub fn raw(&self) -> &[u8] {
+        &self.raw
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    pub fn set_clean(&mut self) {
+        self.dirty = false;
+    }
+
+    fn set16(&mut self, g: u32, field: usize, v: u16) {
+        let at = self.at(g, field);
+        set_u16(&mut self.raw, at, v);
+        self.dirty = true;
     }
 
     fn at(&self, g: u32, field: usize) -> usize {
@@ -75,6 +101,14 @@ impl Groups {
                 .metadata(geo, g)
                 .iter()
                 .any(|&(first, len, _)| (first..first + len).contains(&(block as u64)))
+    }
+
+    pub fn free_blocks(&self, g: u32) -> u16 {
+        u16_at(&self.raw, self.at(g, FREE_BLOCKS))
+    }
+
+    pub fn set_free_blocks(&mut self, g: u32, n: u16) {
+        self.set16(g, FREE_BLOCKS, n);
     }
 }
 
@@ -145,6 +179,18 @@ mod tests {
             (103, 104, 105)
         );
         assert_eq!(check(&t, &geo()), Ok(()));
+    }
+
+    #[test]
+    fn changed_counts_mark_the_table_dirty() {
+        let mut t = table(&[[3, 4, 5], [103, 104, 105]]);
+        assert!(!t.is_dirty());
+        t.set_free_blocks(1, 77);
+        assert_eq!((t.free_blocks(0), t.free_blocks(1)), (0, 77));
+        assert_eq!(&t.raw()[32 + 12..32 + 14], &[77, 0]);
+        assert!(t.is_dirty());
+        t.set_clean();
+        assert!(!t.is_dirty());
     }
 
     #[test]

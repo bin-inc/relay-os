@@ -2,7 +2,7 @@
 //! where an inode lives on the disk, and the block map's index math.
 
 use crate::Ext2;
-use crate::le::{u16_at, u32_at};
+use crate::le::{set_u32, u16_at, u32_at};
 use alloc::vec::Vec;
 use vfs::{BlockDevice, Errno, FileType, Ino, Stat};
 
@@ -26,6 +26,10 @@ const FILE_ACL: usize = 104;
 const SIZE_HIGH: usize = 108;
 const UID_HIGH: usize = 120;
 const GID_HIGH: usize = 122;
+// Large inodes only, as far as `i_extra_isize` reaches.
+const EXTRA_ISIZE: usize = 128;
+const CTIME_EXTRA: usize = 132;
+const MTIME_EXTRA: usize = 136;
 
 const S_IFMT: u16 = 0o170000;
 
@@ -69,6 +73,28 @@ impl Inode {
         u32_at(&self.raw, at)
     }
 
+    /// The inode as stored.
+    pub fn raw(&self) -> &[u8] {
+        &self.raw
+    }
+
+    /// Whether the 4-byte field at `at` exists: past the first 128 bytes
+    /// only as far as `i_extra_isize` says.
+    fn has_extra(&self, at: usize) -> bool {
+        self.raw.len() > EXTRA_ISIZE
+            && at + 4 <= EXTRA_ISIZE + self.u16(EXTRA_ISIZE) as usize
+            && at + 4 <= self.raw.len()
+    }
+
+    /// Sets a time in seconds. The matching `_extra` field (nanoseconds
+    /// and epoch bits) is zeroed, so it cannot shift the new time.
+    fn set_time(&mut self, at: usize, extra: usize, t: u32) {
+        set_u32(&mut self.raw, at, t);
+        if self.has_extra(extra) {
+            set_u32(&mut self.raw, extra, 0);
+        }
+    }
+
     pub fn mode(&self) -> u16 {
         self.u16(MODE)
     }
@@ -83,6 +109,14 @@ impl Inode {
 
     pub fn gid(&self) -> u32 {
         self.u16(GID) as u32 | (self.u16(GID_HIGH) as u32) << 16
+    }
+
+    /// Sets the size; only regular files keep the high 32 bits.
+    pub fn set_size(&mut self, size: u64) {
+        set_u32(&mut self.raw, SIZE, size as u32);
+        if self.kind() == Some(FileType::Regular) {
+            set_u32(&mut self.raw, SIZE_HIGH, (size >> 32) as u32);
+        }
     }
 
     /// The size in bytes; only regular files use the high 32 bits.
@@ -103,6 +137,22 @@ impl Inode {
         self.u32(BLOCKS)
     }
 
+    pub fn set_blocks(&mut self, sectors: u32) {
+        set_u32(&mut self.raw, BLOCKS, sectors);
+    }
+
+    /// Adds (or with a negative `delta`, removes) `i_blocks` for whole
+    /// filesystem blocks of `block_size` bytes.
+    pub fn add_blocks(&mut self, block_size: usize, delta: i32) {
+        let sectors = (block_size / 512) as u32;
+        let blocks = if delta >= 0 {
+            self.blocks().saturating_add(sectors * delta as u32)
+        } else {
+            self.blocks().saturating_sub(sectors * delta.unsigned_abs())
+        };
+        self.set_blocks(blocks);
+    }
+
     pub fn atime(&self) -> u32 {
         self.u32(ATIME)
     }
@@ -115,9 +165,27 @@ impl Inode {
         self.u32(MTIME)
     }
 
+    pub fn set_ctime(&mut self, t: u32) {
+        self.set_time(CTIME, CTIME_EXTRA, t);
+    }
+
+    pub fn set_mtime(&mut self, t: u32) {
+        self.set_time(MTIME, MTIME_EXTRA, t);
+    }
+
+    /// A change to the data: mtime and ctime become `t`.
+    pub fn touch(&mut self, t: u32) {
+        self.set_mtime(t);
+        self.set_ctime(t);
+    }
+
     /// Entry `i` (0..15) of `i_block`.
     pub fn block(&self, i: usize) -> u32 {
         self.u32(I_BLOCK + 4 * i)
+    }
+
+    pub fn set_block(&mut self, i: usize, block: u32) {
+        set_u32(&mut self.raw, I_BLOCK + 4 * i, block);
     }
 
     /// The raw `i_block` bytes: a fast symlink's target.
@@ -252,6 +320,13 @@ impl<D: BlockDevice> Ext2<D> {
         Ok(inode)
     }
 
+    pub(crate) fn write_inode(&mut self, inode: &Inode) -> Result<(), Errno> {
+        let (block, at) = self.inode_location(inode.ino);
+        let raw = inode.raw();
+        self.cache.write(block)?[at..at + raw.len()].copy_from_slice(raw);
+        Ok(())
+    }
+
     pub(crate) fn inode_stat(&mut self, ino: Ino) -> Result<Stat, Errno> {
         let inode = self.inode(ino)?;
         Ok(Stat {
@@ -314,6 +389,37 @@ mod tests {
             (SIZE_HIGH, &[2, 0, 0, 0]),
         ]);
         assert_eq!(dir.size(), 1024, "the high half is not a directory's size");
+    }
+
+    #[test]
+    fn setting_a_time_clears_its_extra_field_where_present() {
+        let mut large = raw_inode(&[
+            (EXTRA_ISIZE, &32u16.to_le_bytes()),
+            (CTIME_EXTRA, &[0xFF; 4]),
+            (MTIME_EXTRA, &[0xFF; 4]),
+        ]);
+        large.touch(1234);
+        assert_eq!((large.mtime(), large.ctime()), (1234, 1234));
+        assert_eq!(&large.raw()[CTIME_EXTRA..CTIME_EXTRA + 8], &[0; 8]);
+        // `i_extra_isize` 4 covers neither.
+        let mut small = raw_inode(&[(EXTRA_ISIZE, &4u16.to_le_bytes()), (CTIME_EXTRA, &[7; 4])]);
+        small.set_ctime(9);
+        assert_eq!(&small.raw()[CTIME_EXTRA..CTIME_EXTRA + 4], &[7; 4]);
+    }
+
+    #[test]
+    fn sizes_and_block_counts_are_set() {
+        let mut file = raw_inode(&[(MODE, &0o100644u16.to_le_bytes())]);
+        file.set_size(0x3_0000_0010);
+        assert_eq!(file.size(), 0x3_0000_0010);
+        file.add_blocks(4096, 3);
+        file.add_blocks(4096, -1);
+        assert_eq!(file.blocks(), 16);
+        file.add_blocks(1024, -100);
+        assert_eq!(file.blocks(), 0, "saturates");
+        let mut dir = raw_inode(&[(MODE, &0o040755u16.to_le_bytes())]);
+        dir.set_size(0x1_0000_0400);
+        assert_eq!(&dir.raw()[SIZE_HIGH..SIZE_HIGH + 4], &[0; 4]);
     }
 
     #[test]
