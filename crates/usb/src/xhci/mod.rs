@@ -15,9 +15,17 @@ mod context;
 mod init;
 mod regs;
 mod ring;
+mod start;
 mod trb;
 
+use crate::{DmaBuf, Hal};
+use alloc::string::String;
+use alloc::vec::Vec;
+use caps::PortProtocol;
 use core::fmt;
+use regs::Regs;
+use ring::{EventRing, ProducerRing};
+use start::Scratchpads;
 
 /// What the controller reported about itself (for the status line and
 /// dmesg).
@@ -49,6 +57,35 @@ impl fmt::Display for ControllerInfo {
             self.scratchpads,
             if self.scratchpads == 1 { "" } else { "s" },
         )
+    }
+}
+
+/// One xHCI controller, brought up by [`Xhci::new`].
+pub struct Xhci<H: Hal> {
+    hal: H,
+    name: String,
+    regs: Regs,
+    info: ControllerInfo,
+    /// Each root port's protocol; index 0 is port 1.
+    ports: Vec<Option<PortProtocol>>,
+    dcbaa: DmaBuf,
+    scratchpads: Option<Scratchpads>,
+    commands: ProducerRing,
+    events: EventRing,
+}
+
+impl<H: Hal> Xhci<H> {
+    pub fn info(&self) -> &ControllerInfo {
+        &self.info
+    }
+
+    /// The PCI address every log line starts with.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn hal(&self) -> &H {
+        &self.hal
     }
 }
 

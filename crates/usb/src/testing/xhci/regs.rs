@@ -21,7 +21,7 @@ pub const HCH: u32 = 1 << 0;
 pub const CNR: u32 = 1 << 11;
 /// USBSTS bits software clears by writing 1: HSE, EINT, PCD, SRE.
 const USBSTS_RW1C: u32 = 1 << 2 | 1 << 3 | 1 << 4 | 1 << 10;
-pub const CRR: u64 = 1 << 3;
+pub const CRR: u32 = 1 << 3;
 
 pub const PP: u32 = 1 << 9;
 
@@ -40,9 +40,10 @@ const IMOD: usize = 0x24;
 const ERSTSZ: usize = 0x28;
 const ERSTBA: usize = 0x30;
 const ERDP: usize = 0x38;
+pub const EHB: u32 = 1 << 3;
 
 /// Sets the low or high half of a 64-bit register.
-fn set_half(reg: &mut u64, high: bool, value: u32) {
+pub fn set_half(reg: &mut u64, high: bool, value: u32) {
     *reg = if high {
         *reg & 0xFFFF_FFFF | (value as u64) << 32
     } else {
@@ -113,7 +114,7 @@ impl FakeXhci {
         }
     }
 
-    pub fn write(&mut self, offset: usize, value: u32, _dma: &Dma) {
+    pub fn write(&mut self, offset: usize, value: u32, dma: &Dma) {
         self.check_access(offset);
         let block = self.block(offset);
         // xHCI 5.4.2: no operational or runtime register may be written
@@ -123,8 +124,8 @@ impl FakeXhci {
         }
         match block {
             Block::Capability(o) => panic!("fake xhci: write to capability register {o:#x}"),
-            Block::Operational(o) => self.op_write(o, value),
-            Block::Runtime(o) => self.runtime_write(o, value),
+            Block::Operational(o) => self.op_write(o, value, dma),
+            Block::Runtime(o) => self.runtime_write(o, value, dma),
             Block::Doorbell(_) => {}
             Block::Extended(o) => self.extended_write(o, value),
         }
@@ -214,7 +215,7 @@ impl FakeXhci {
         self.legacy[1] = old & !(SMI_ENABLES | SMI_STATUS) | value & SMI_ENABLES | status;
     }
 
-    fn write_usbcmd(&mut self, value: u32) {
+    fn write_usbcmd(&mut self, value: u32, dma: &Dma) {
         let was = self.usbcmd;
         if value & HCRST != 0 {
             if self.usbsts & HCH == 0 {
@@ -229,7 +230,7 @@ impl FakeXhci {
                 self.after(delay, |x, _| x.usbsts |= HCH);
             }
         } else if was & RUN == 0 && value & RUN != 0 {
-            self.usbsts &= !HCH;
+            self.start(dma);
         }
     }
 
@@ -239,12 +240,13 @@ impl FakeXhci {
         self.usbcmd = HCRST;
         self.usbsts = HCH | CNR;
         self.dnctrl = 0;
-        self.crcr = 0;
+        (self.crcr, self.command_ring, self.crr) = (0, None, false);
         self.dcbaap = 0;
         self.config_reg = 0;
         self.portsc.iter_mut().for_each(|p| *p = 0);
         self.power_on_ports();
-        (self.iman, self.imod, self.erstsz, self.erstba, self.erdp) = (0, 0, 0, 0, 0);
+        (self.iman, self.imod, self.erstsz, self.erstba) = (0, 0, 0, 0);
+        (self.event_ring, self.erdp, self.ehb) = (None, 0, false);
         self.hcrst_at = Some(self.now);
         if let Some(delay) = self.config.reset_time {
             self.after(delay, |x, _| {
@@ -263,7 +265,13 @@ impl FakeXhci {
             PAGESIZE => self.config.page_size,
             DNCTRL => self.dnctrl,
             // xHCI 5.4.5: only CRR reads back; the pointer reads as 0.
-            CRCR => (self.crcr & CRR) as u32,
+            CRCR => {
+                if self.crr {
+                    CRR
+                } else {
+                    0
+                }
+            }
             0x1C => 0,
             0x30 | 0x34 => half(self.dcbaap, offset == 0x34),
             CONFIG => self.config_reg,
@@ -275,18 +283,27 @@ impl FakeXhci {
         }
     }
 
-    fn op_write(&mut self, offset: usize, value: u32) {
+    fn op_write(&mut self, offset: usize, value: u32, dma: &Dma) {
         match offset {
-            USBCMD => self.write_usbcmd(value),
+            USBCMD => self.write_usbcmd(value, dma),
             USBSTS => self.usbsts &= !(value & USBSTS_RW1C),
             DNCTRL => self.dnctrl = value,
-            0x18 | 0x1C => set_half(&mut self.crcr, offset == 0x1C, value),
-            0x30 | 0x34 => set_half(&mut self.dcbaap, offset == 0x34, value),
-            CONFIG => self.config_reg = value,
+            0x18 | 0x1C => self.write_crcr(offset == 0x1C, value, dma),
+            0x30 | 0x34 => {
+                self.forbid_while_running("DCBAAP");
+                set_half(&mut self.dcbaap, offset == 0x34, value);
+            }
+            CONFIG => {
+                self.forbid_while_running("CONFIG");
+                if value & 0xFF > self.config.max_slots as u32 {
+                    panic!("fake xhci: MaxSlotsEn {} above MaxSlots", value & 0xFF);
+                }
+                self.config_reg = value;
+            }
             o if o >= PORTS => {
                 let (port, reg) = ((o - PORTS) / 0x10, (o - PORTS) % 0x10);
                 if reg == 0 {
-                    self.portsc[port] = value;
+                    self.write_portsc(port, value);
                 }
             }
             _ => panic!("fake xhci: write to read-only operational register {offset:#x}"),
@@ -299,19 +316,30 @@ impl FakeXhci {
             IMOD => self.imod,
             ERSTSZ => self.erstsz,
             0x30 | 0x34 => half(self.erstba, offset == 0x34),
-            0x38 | 0x3C => half(self.erdp, offset == 0x3C),
+            ERDP => self.erdp as u32 | if self.ehb { EHB } else { 0 },
+            0x3C => (self.erdp >> 32) as u32,
             _ => 0,
         }
     }
 
-    fn runtime_write(&mut self, offset: usize, value: u32) {
+    fn runtime_write(&mut self, offset: usize, value: u32, dma: &Dma) {
         match offset {
-            IMAN => self.iman = value,
+            // IP (bit 0) is RW1C.
+            IMAN => self.iman = value & 2 | self.iman & 1 & !value,
             IMOD => self.imod = value,
             ERSTSZ => self.erstsz = value & 0xFFFF,
-            0x30 | 0x34 => set_half(&mut self.erstba, offset == 0x34, value),
-            0x38 | 0x3C => set_half(&mut self.erdp, offset == 0x3C, value),
+            0x30 | 0x34 => self.write_erstba(offset == 0x34, value, dma),
+            0x38 | 0x3C => self.write_erdp(offset == 0x3C, value),
             _ => {}
+        }
+    }
+
+    /// Port power; the rest of PORTSC comes with the port model.
+    fn write_portsc(&mut self, index: usize, value: u32) {
+        self.port_writes += 1;
+        if self.config.ppc && value & PP != 0 && self.portsc[index] & PP == 0 {
+            self.portsc[index] |= PP;
+            self.powered_at = Some(self.now);
         }
     }
 }

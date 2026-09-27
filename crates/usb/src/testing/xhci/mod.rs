@@ -4,6 +4,7 @@
 //! registers, TRBs and contexts with its own constants, not the driver's.
 
 mod regs;
+mod rings;
 
 use super::hal::Dma;
 use core::time::Duration;
@@ -75,6 +76,8 @@ pub struct FakeConfig {
     pub reset_time: Option<Duration>,
     /// How long CNR stays set after HCRST cleared; `None`: forever.
     pub cnr_time: Option<Duration>,
+    /// How long HCH takes to clear after R/S = 1; `None`: it never runs.
+    pub run_time: Option<Duration>,
 }
 
 /// Capabilities at `offsets`, each pointing to the next.
@@ -140,6 +143,7 @@ impl FakeConfig {
             halt_time: Some(Duration::ZERO),
             reset_time: Some(Duration::ZERO),
             cnr_time: Some(Duration::ZERO),
+            run_time: Some(Duration::ZERO),
         }
     }
 
@@ -227,12 +231,30 @@ impl FakeConfig {
             halt_time: Some(Duration::from_millis(1)),
             reset_time: Some(Duration::from_millis(2)),
             cnr_time: Some(Duration::from_millis(10)),
+            run_time: Some(Duration::from_micros(500)),
         }
     }
 }
 
 /// Something the fake does at a set time.
 type Action = Box<dyn FnOnce(&mut FakeXhci, &Dma)>;
+
+/// A ring the fake consumes: the command ring or a transfer ring.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Consumer {
+    pub dequeue: u64,
+    /// The Consumer Cycle State.
+    pub cycle: bool,
+}
+
+/// The event ring the fake produces into (one segment).
+#[derive(Clone, Copy, Debug)]
+pub struct EventRing {
+    pub base: u64,
+    pub size: usize,
+    pub enqueue: usize,
+    pub cycle: bool,
+}
 
 /// The fake controller: registers, and (as tasks add them) rings, slots
 /// and ports. `FakeHal` routes every register access and every tick of
@@ -243,15 +265,27 @@ pub struct FakeXhci {
     usbcmd: u32,
     usbsts: u32,
     dnctrl: u32,
+    /// CRCR as written; the ring it names once the high half is written.
     crcr: u64,
+    command_ring: Option<Consumer>,
+    /// Command Ring Running.
+    crr: bool,
     dcbaap: u64,
     config_reg: u32,
     portsc: Vec<u32>,
+    port_writes: usize,
     iman: u32,
     imod: u32,
     erstsz: u32,
     erstba: u64,
+    event_ring: Option<EventRing>,
+    /// ERDP without its flag bits, and Event Handler Busy.
     erdp: u64,
+    ehb: bool,
+    /// The scratchpad pages DCBAA[0] named when the controller started.
+    scratchpad_pages: Vec<u64>,
+    /// When a port was last powered on.
+    powered_at: Option<Duration>,
     /// USBLEGSUP and USBLEGCTLSTS.
     legacy: [u32; 2],
     cap_reads: usize,
@@ -274,14 +308,21 @@ impl FakeXhci {
             usbsts: regs::HCH,
             dnctrl: 0,
             crcr: 0,
+            command_ring: None,
+            crr: false,
             dcbaap: 0,
             config_reg: 0,
             portsc: vec![0; ports],
+            port_writes: 0,
             iman: 0,
             imod: 0,
             erstsz: 0,
             erstba: 0,
+            event_ring: None,
             erdp: 0,
+            ehb: false,
+            scratchpad_pages: Vec::new(),
+            powered_at: None,
             legacy: [0; 2],
             cap_reads: 0,
             highest_read: 0,
@@ -358,6 +399,45 @@ impl FakeXhci {
 
     pub fn cap_writes(&self) -> usize {
         self.cap_writes
+    }
+
+    /// Whether R/S is set and the controller has left the halted state.
+    pub fn running(&self) -> bool {
+        self.usbsts & regs::HCH == 0
+    }
+
+    pub fn dcbaap(&self) -> u64 {
+        self.dcbaap
+    }
+
+    pub fn iman(&self) -> u32 {
+        self.iman
+    }
+
+    pub fn event_ring(&self) -> Option<EventRing> {
+        self.event_ring
+    }
+
+    pub fn command_ring(&self) -> Option<Consumer> {
+        self.command_ring
+    }
+
+    pub fn scratchpad_pages(&self) -> &[u64] {
+        &self.scratchpad_pages
+    }
+
+    pub fn portsc(&self, port: u8) -> u32 {
+        self.portsc[port as usize - 1]
+    }
+
+    /// PORTSC writes so far.
+    pub fn port_writes(&self) -> usize {
+        self.port_writes
+    }
+
+    /// When software last powered a port on.
+    pub fn powered_at(&self) -> Option<Duration> {
+        self.powered_at
     }
 
     /// Reads of the extended capability area so far.
