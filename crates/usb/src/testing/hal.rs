@@ -1,14 +1,22 @@
 //! A fake [`Hal`]: virtual time, DMA memory from the host heap (its
-//! physical address is its host address), and captured log lines.
+//! physical address is its host address), captured log lines, and the
+//! registers of a [`FakeXhci`], which sees every access and every tick.
 
+use super::xhci::{FakeConfig, FakeXhci};
 use crate::{DmaBuf, Hal};
 use core::fmt;
 use core::ptr::NonNull;
 use core::time::Duration;
 use std::alloc::{Layout, alloc_zeroed, dealloc};
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, RefCell, RefMut};
 use std::collections::BTreeMap;
 use std::rc::Rc;
+
+/// The fake controller's BAR: the only MMIO `map_mmio` accepts.
+pub const FAKE_BAR: u64 = 0xFE00_0000;
+pub const FAKE_BAR_LEN: usize = 0x1_0000;
+/// Where the BAR appears to be mapped.
+const FAKE_MMIO: usize = 0xFFFF_9000_FE00_0000;
 
 /// A shared handle: the driver owns one clone, the test another.
 #[derive(Clone)]
@@ -18,6 +26,7 @@ struct Inner {
     clock: Cell<Duration>,
     dma: RefCell<Dma>,
     log: RefCell<Vec<String>>,
+    xhci: RefCell<Option<FakeXhci>>,
 }
 
 /// Every DMA buffer handed out and not yet freed, by physical address.
@@ -104,12 +113,29 @@ impl Default for FakeHal {
 }
 
 impl FakeHal {
+    /// A machine without a controller (for rings and contexts).
     pub fn new() -> FakeHal {
         FakeHal(Rc::new(Inner {
             clock: Cell::new(Duration::ZERO),
             dma: RefCell::new(Dma::default()),
             log: RefCell::new(Vec::new()),
+            xhci: RefCell::new(None),
         }))
+    }
+
+    /// A machine with a fake controller at [`FAKE_BAR`].
+    pub fn with_controller(config: FakeConfig) -> FakeHal {
+        let hal = FakeHal::new();
+        *hal.0.xhci.borrow_mut() = Some(FakeXhci::new(config));
+        hal
+    }
+
+    /// The fake controller, to plug devices, turn knobs and look inside.
+    /// Drop the guard before calling the driver again.
+    pub fn fake(&self) -> RefMut<'_, FakeXhci> {
+        RefMut::map(self.0.xhci.borrow_mut(), |x| {
+            x.as_mut().expect("fake hal: no controller")
+        })
     }
 
     /// The virtual time, without advancing it (`now` advances it).
@@ -133,21 +159,36 @@ impl FakeHal {
     }
 
     fn advance(&self, d: Duration) {
-        self.0.clock.set(self.0.clock.get() + d);
+        let now = self.0.clock.get() + d;
+        self.0.clock.set(now);
+        if let Some(x) = self.0.xhci.borrow_mut().as_mut() {
+            x.advance_to(now, &self.0.dma.borrow());
+        }
+    }
+
+    /// The BAR offset of a mapped register address.
+    fn offset(&self, addr: usize) -> usize {
+        match addr.checked_sub(FAKE_MMIO) {
+            Some(o) if o < FAKE_BAR_LEN && o.is_multiple_of(4) => o,
+            _ => panic!("fake hal: register access at {addr:#x} outside the BAR"),
+        }
     }
 }
 
 impl Hal for FakeHal {
-    fn map_mmio(&self, _phys: u64, _len: usize) -> Option<usize> {
-        None
+    fn map_mmio(&self, phys: u64, len: usize) -> Option<usize> {
+        let present = self.0.xhci.borrow().is_some();
+        (present && phys == FAKE_BAR && len <= FAKE_BAR_LEN).then_some(FAKE_MMIO)
     }
 
     unsafe fn read32(&self, addr: usize) -> u32 {
-        panic!("fake hal: no controller for the read at {addr:#x}")
+        let offset = self.offset(addr);
+        self.fake().read(offset, &self.0.dma.borrow())
     }
 
-    unsafe fn write32(&self, addr: usize, _value: u32) {
-        panic!("fake hal: no controller for the write at {addr:#x}")
+    unsafe fn write32(&self, addr: usize, value: u32) {
+        let offset = self.offset(addr);
+        self.fake().write(offset, value, &self.0.dma.borrow());
     }
 
     fn alloc_dma(&self, size: usize, align: usize) -> Option<DmaBuf> {
@@ -260,6 +301,26 @@ mod tests {
         let a = hal.alloc_dma(64, 64).unwrap();
         assert!(hal.alloc_dma(64, 64).is_none());
         hal.free_dma(a);
+    }
+
+    #[test]
+    fn only_the_fake_bar_can_be_mapped() {
+        assert_eq!(FakeHal::new().map_mmio(FAKE_BAR, 4096), None);
+        let hal = FakeHal::with_controller(FakeConfig::basic());
+        assert_eq!(hal.map_mmio(FAKE_BAR + 0x1000, 4096), None);
+        assert_eq!(hal.map_mmio(FAKE_BAR, FAKE_BAR_LEN + 1), None);
+        let base = hal.map_mmio(FAKE_BAR, FAKE_BAR_LEN).unwrap();
+        // SAFETY: the fake checks every register address.
+        assert_eq!(unsafe { hal.read32(base) } >> 16, 0x0100);
+    }
+
+    #[test]
+    #[should_panic(expected = "outside the BAR")]
+    fn registers_past_the_bar_panic() {
+        let hal = FakeHal::with_controller(FakeConfig::basic());
+        let base = hal.map_mmio(FAKE_BAR, FAKE_BAR_LEN).unwrap();
+        // SAFETY: the fake checks every register address.
+        unsafe { hal.read32(base + FAKE_BAR_LEN) };
     }
 
     #[test]
