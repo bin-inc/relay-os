@@ -1,10 +1,11 @@
 //! The shell's surroundings in the kernel (spec §7.2, §7.3): the console as
-//! `shell::Console`, the clock, memory figures and kernel log as
-//! `shell::System`, and `vfs::Env` for filesystems.
+//! `shell::Console` (input from the USB keyboards and COM1), the clock,
+//! memory figures and kernel log as `shell::System`, and `vfs::Env` for
+//! filesystems.
 
 use crate::input::InputQueue;
 use crate::mm::{self, MemStats, frame::FRAME_SIZE};
-use crate::{arch, console, klog, klogln, rtc, serial};
+use crate::{arch, console, klog, klogln, rtc, serial, usb};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use shell::{Console, MemInfo, Shell, System};
@@ -13,7 +14,7 @@ use vfs::{Env, MemFs, MountTable};
 /// Bytes read from COM1 per poll at most, so a flood cannot starve the rest.
 const SERIAL_BURST: usize = 256;
 
-/// The screen and serial for output; COM1 for input.
+/// The screen and serial for output; the USB keyboards and COM1 for input.
 pub struct KernelConsole {
     input: InputQueue,
 }
@@ -27,6 +28,7 @@ impl KernelConsole {
 
     /// Moves whatever the input devices have into the queue. Never waits.
     fn poll(&mut self) {
+        usb::poll(&mut self.input);
         for _ in 0..SERIAL_BURST {
             match serial::read_byte() {
                 Some(b) => self.input.push(&[b]),
@@ -49,6 +51,10 @@ impl Console for KernelConsole {
             if let Some(b) = self.input.pop() {
                 return Some(b);
             }
+            // Nothing typed: time for the work that may wait (a keyboard
+            // plugged in, the Caps Lock LED), then sleep until the next
+            // tick.
+            usb::service();
             arch::wait_for_interrupt();
         }
     }

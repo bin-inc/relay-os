@@ -32,7 +32,8 @@ normally.
    - `[ ok ] cpu tables`
    - `[ ok ] boot info: N MiB usable in M regions, cmdline ''` — N should be
      roughly 15000.
-   - `relay: early boot complete`, followed by a solid block cursor.
+   - Since plan 4 more lines follow (checks 1b and 2), and the last one is
+     the shell prompt `root@relay:/# ` with a solid block cursor.
 4. Panic screen: in Mint run `cargo xtask flash --kernel --cmdline panic=pagefault`,
    boot the stick, and check for a red screen with
    `CPU exception 14: page fault` and `CR2=0x00007fffdead0000`.
@@ -86,11 +87,68 @@ self-check.
    - `pci: 00:14.0 8086:51ed 0c0330 USB xHCI, bar0 mem64 0x603d180000 64K`
    - `[ ok ] pci: 24 devices on buses 00 01 72, xHCI at 00:0d.0 00:14.0` —
      `lspci | wc -l` in Mint also says 24.
-   - `relay: early boot complete`
 3. Photograph the screen, then restore: `cargo xtask flash --kernel`.
 
 A `[FAIL]` line names the step and the reason; boot carries on after it
 (except for memory, which stops the machine).
+
+## Check 2 — typing on the K120 (plan 4)
+
+The K120 must be on the port it has in Mint (`lsusb -t`: bus 3 port 3), the
+Unifying receiver on port 1 and the stick on a USB 3 port.
+
+1. In Mint: `cargo xtask flash --kernel`.
+2. Boot the stick. After the check 1b lines the screen shows:
+   - one line for the Thunderbolt controller, `usb: 00:0d.0 xHCI …` if it
+     starts or `usb: 00:0d.0: controller not responding` if the firmware
+     left it powered off. Either is fine: nothing is plugged into it.
+   - `usb: 00:14.0 xHCI 1.20, N ports (N USB 2, N USB 3), 64-byte contexts,
+     N scratchpads`. Note N. 64-byte contexts and a nonzero scratchpad
+     count are the paths QEMU cannot test.
+   - one line per device, in port order:
+     - `usb: 00:14.0 port 1: 046d:c534 full-speed, keyboard` (the receiver)
+     - `usb: 00:14.0 port 3: 046d:c31c low-speed, keyboard` (the K120)
+     - `usb: 00:14.0 port N: 0951:1666 SuperSpeed, not claimed` (the stick,
+       on one of the USB 3 ports after the USB 2 ones; its driver comes
+       with plan 5)
+
+     The boot waits for them: at least 100 ms, and up to 1 s while a USB 3
+     link is still training (`dmesg`: `ports settled after N ms`).
+   - `[ ok ] usb: 2 controllers, 3 devices` (or 1 controller),
+     `[ ok ] keyboard: 2 keyboards`, `[FAIL] mount /: no storage driver
+     yet`, and the prompt `root@relay:/# `.
+3. On the K120, type and check each result:
+   - `echo hello`, Enter → `hello`.
+   - `echo Hello, World!` with Shift → `Hello, World!`.
+   - Caps Lock: the K120's Caps Lock light goes on; `echo abc` shows
+     `ABC`; Caps Lock again turns the light off.
+   - Backspace, ←/→, Home/End while editing a line; ↑/↓ for history.
+   - Hold a letter: after half a second it repeats, about 30 times a
+     second, and stops when released.
+   - `echo nope` then Ctrl-C → `^C` and a fresh prompt.
+   - `uname -a`, `date` (the current UTC time), `free`, `dmesg` (the
+     `xhci 00:14.0:` lines of every step).
+4. Unplug the K120, plug it back into the same port, and type `echo back`:
+   it works again (hot-plug; `dmesg` shows `port 3: disconnected, PORTSC …`,
+   then `port 3: connected` and the device set up again, possibly in the
+   same slot number).
+5. Photograph the screen after step 2 and after `dmesg`.
+
+### If it fails
+
+The NUC has no serial port, so a keyboard that does not work cannot run
+`dmesg`. Boot with the USB log on screen instead: in Mint
+`cargo xtask flash --kernel --cmdline debug=usb`, boot, and photograph the
+`xhci 00:14.0:` lines (they scroll; take several photos). Restore with
+`cargo xtask flash --kernel`.
+
+| What you see | Likely cause | Next step |
+|---|---|---|
+| `usb: 00:14.0: timed out` | Handoff or reset did not finish | `debug=usb`: the handoff and reset lines name the register |
+| `port 3: setup failed: …` | The K120's enumeration failed | `debug=usb`: the last `port 3` / `slot` line before the failure |
+| `port 3: … keyboard not started: …` | The K120 refused the boot protocol | Note the reason; `debug=usb` shows the `hid:` lines |
+| `[FAIL] keyboard: no USB keyboard found` and no `port 3` line | The K120 connected after the boot's wait, or not at all | Type anyway: a late keyboard is set up when it appears. If nothing works, `debug=usb`: a `port 3: connected` line means it appeared late, none means the port never saw it; the `ports settled` line shows the wait |
+| Keys show up twice or not at all | Firmware still emulating a keyboard (handoff) | `debug=usb`: the `legacy support` line |
 
 ## Results log
 
