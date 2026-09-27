@@ -15,6 +15,7 @@ pub mod descriptor;
 mod error;
 mod hal;
 pub mod hid;
+pub mod host;
 #[cfg(test)]
 mod testing;
 pub mod xhci;
