@@ -1,21 +1,51 @@
 //! Fake USB devices: what the fake controller talks to on its ports.
 
-use crate::Speed;
+use crate::bus::{GET_DESCRIPTOR, SET_CONFIGURATION};
+use crate::descriptor::{CONFIGURATION, DEVICE};
+use crate::{Setup, Speed};
 use std::cell::RefCell;
 use std::rc::Rc;
+
+const SET_ADDRESS: u8 = 5;
+
+/// A STALL handshake.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stall;
 
 /// A device as the fake controller sees it on a port.
 pub trait FakeDevice {
     fn speed(&self) -> Speed;
+    /// Endpoint 0's packet size: how the device splits a data stage.
+    fn max_packet0(&self) -> u16;
+    /// A control request with its OUT data; the IN data, or `None` if the
+    /// device never answers it (NAKs until the host gives up).
+    fn control(&mut self, setup: Setup, data_out: &[u8]) -> Option<Result<Vec<u8>, Stall>>;
 }
 
-/// A configurable device with its descriptors, modelled on real ones.
+/// A control request as the device got it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Request {
+    pub setup: Setup,
+    pub data: Vec<u8>,
+}
+
+/// A configurable device with its descriptors, modelled on real ones. It
+/// answers the standard requests itself and records every request.
 pub struct FakeUsbDevice {
     speed: Speed,
     /// The device descriptor (18 bytes).
     device: Vec<u8>,
     /// The whole configuration descriptor.
     configuration: Vec<u8>,
+    requests: Vec<Request>,
+    /// Knob: requests (bRequest, wValue) that are stalled.
+    stalls: Vec<(u8, u16)>,
+    /// Knob: this many requests from now on are never answered.
+    ignore: usize,
+    /// Knob: at most this many bytes of the configuration are sent.
+    configuration_limit: Option<usize>,
+    address: u8,
+    configuration_value: u8,
 }
 
 /// The Logitech K120's configuration (as in `descriptor.rs`'s tests): a
@@ -76,6 +106,12 @@ impl FakeUsbDevice {
             speed,
             device,
             configuration,
+            requests: Vec::new(),
+            stalls: Vec::new(),
+            ignore: 0,
+            configuration_limit: None,
+            address: 0,
+            configuration_value: 0,
         }))
     }
 
@@ -174,11 +210,97 @@ impl FakeUsbDevice {
     pub fn configuration_descriptor(&self) -> &[u8] {
         &self.configuration
     }
+
+    /// Replaces the descriptors (a device that sends a wrong one).
+    pub fn set_descriptors(&mut self, device: Vec<u8>, configuration: Vec<u8>) {
+        self.device = device;
+        self.configuration = configuration;
+    }
+
+    /// Every request so far, SET_ADDRESS from the controller included.
+    pub fn requests(&self) -> Vec<Request> {
+        self.requests.clone()
+    }
+
+    /// Stalls every `request` with `value` from now on.
+    pub fn stall_request(&mut self, request: u8, value: u16) {
+        self.stalls.push((request, value));
+    }
+
+    /// Never answers the next `n` requests of the driver (SET_ADDRESS,
+    /// which the controller sends, is always answered).
+    pub fn ignore_requests(&mut self, n: usize) {
+        self.ignore = n;
+    }
+
+    /// Sends at most `len` bytes of the configuration descriptor.
+    pub fn truncate_configuration(&mut self, len: usize) {
+        self.configuration_limit = Some(len);
+    }
+
+    /// The address SET_ADDRESS gave it.
+    pub fn address(&self) -> u8 {
+        self.address
+    }
+
+    /// The value SET_CONFIGURATION gave it.
+    pub fn configuration_value(&self) -> u8 {
+        self.configuration_value
+    }
+
+    fn descriptor(&self, setup: &Setup) -> Result<Vec<u8>, Stall> {
+        let mut d = match ((setup.value >> 8) as u8, setup.value as u8) {
+            (DEVICE, 0) => self.device.clone(),
+            (CONFIGURATION, 0) => {
+                let limit = self.configuration_limit.unwrap_or(usize::MAX);
+                self.configuration[..self.configuration.len().min(limit)].to_vec()
+            }
+            _ => return Err(Stall),
+        };
+        d.truncate(setup.length as usize);
+        Ok(d)
+    }
 }
 
 impl FakeDevice for FakeUsbDevice {
     fn speed(&self) -> Speed {
         self.speed
+    }
+
+    fn max_packet0(&self) -> u16 {
+        let raw = self.device[7];
+        if self.speed.is_superspeed() {
+            1 << raw
+        } else {
+            raw as u16
+        }
+    }
+
+    fn control(&mut self, setup: Setup, data_out: &[u8]) -> Option<Result<Vec<u8>, Stall>> {
+        self.requests.push(Request {
+            setup,
+            data: data_out.to_vec(),
+        });
+        if self.ignore > 0 && setup.request != SET_ADDRESS {
+            self.ignore -= 1;
+            return None;
+        }
+        if self.stalls.contains(&(setup.request, setup.value)) {
+            return Some(Err(Stall));
+        }
+        Some(match (setup.request_type, setup.request) {
+            (0x80, GET_DESCRIPTOR) => self.descriptor(&setup),
+            (0x00, SET_ADDRESS) => {
+                self.address = setup.value as u8;
+                Ok(Vec::new())
+            }
+            (0x00, SET_CONFIGURATION) => {
+                self.configuration_value = setup.value as u8;
+                Ok(Vec::new())
+            }
+            _ if setup.is_in() => Ok(vec![0; setup.length as usize]),
+            _ => Ok(Vec::new()),
+        })
     }
 }
 
@@ -205,5 +327,40 @@ mod tests {
         let stick = FakeUsbDevice::kingston_stick();
         let c = parse_configuration(stick.borrow().configuration_descriptor()).unwrap();
         assert_eq!(c.interfaces[0].endpoints[0].max_burst, 3);
+        assert_eq!(stick.borrow().max_packet0(), 512);
+        assert_eq!(
+            FakeUsbDevice::unifying_receiver().borrow().max_packet0(),
+            64
+        );
+    }
+
+    #[test]
+    fn standard_requests_are_answered_and_recorded() {
+        let dev = FakeUsbDevice::k120();
+        let mut d = dev.borrow_mut();
+        let got = d.control(Setup::get_descriptor(DEVICE, 0, 8), &[]);
+        assert_eq!(got.map(|r| r.map(|v| v.len())), Some(Ok(8)));
+        d.truncate_configuration(20);
+        let got = d.control(Setup::get_descriptor(CONFIGURATION, 0, 255), &[]);
+        assert_eq!(got.map(|r| r.map(|v| v.len())), Some(Ok(20)));
+        d.stall_request(GET_DESCRIPTOR, 0x0300);
+        assert_eq!(
+            d.control(Setup::get_descriptor(3, 0, 4), &[]),
+            Some(Err(Stall))
+        );
+        d.ignore_requests(1);
+        let set_address = Setup {
+            request: SET_ADDRESS,
+            ..Setup::set_configuration(3)
+        };
+        assert_eq!(d.control(set_address, &[]), Some(Ok(vec![])));
+        assert_eq!(d.control(Setup::set_configuration(1), &[]), None);
+        assert_eq!(
+            d.control(Setup::set_configuration(1), &[]),
+            Some(Ok(vec![]))
+        );
+        assert_eq!(d.configuration_value(), 1);
+        assert_eq!(d.requests().len(), 6);
+        assert_eq!(d.address(), 3);
     }
 }

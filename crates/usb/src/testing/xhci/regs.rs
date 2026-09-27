@@ -130,7 +130,7 @@ impl FakeXhci {
             Block::Operational(o) => self.op_write(o, value, dma),
             Block::Runtime(o) => self.runtime_write(o, value, dma),
             Block::Doorbell(0) => self.command_doorbell(value),
-            Block::Doorbell(_) => {}
+            Block::Doorbell(slot) => self.slot_doorbell(slot, value, dma),
             Block::Extended(o) => self.extended_write(o, value),
         }
     }
@@ -254,6 +254,7 @@ impl FakeXhci {
         (self.event_ring, self.erdp, self.ehb) = (None, 0, false);
         self.pending_events.clear();
         self.slots.iter_mut().for_each(|s| *s = None);
+        self.active.clear();
         self.hcrst_at = Some(self.now);
         if let Some(delay) = self.config.reset_time {
             self.after(delay, |x, _| {

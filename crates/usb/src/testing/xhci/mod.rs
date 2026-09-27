@@ -7,9 +7,11 @@ mod commands;
 mod ports;
 mod regs;
 mod rings;
+mod slots;
+mod transfers;
 
 pub use commands::Executed;
-use commands::FakeSlot;
+use slots::FakeSlot;
 
 use super::hal::Dma;
 use core::time::Duration;
@@ -97,6 +99,12 @@ pub struct FakeConfig {
     /// Knob: USB 3 links fail to train and end in SS.Inactive (CCS 1),
     /// where only a warm reset helps.
     pub usb3_link_fails: bool,
+    /// Knob: a short control data stage is reported as Success with the
+    /// residual, not as Short Packet (some controllers do).
+    pub short_as_success: bool,
+    /// Knob: an unplug fails the device's transfers in progress with a USB
+    /// Transaction Error, as Intel controllers do.
+    pub fail_transfers_on_unplug: bool,
     /// How long a USB 2 device present when its port is reset or powered
     /// takes to signal its attach (at most 100 ms, USB 2.0 7.1.7.3).
     pub usb2_attach_delay: Duration,
@@ -173,6 +181,8 @@ impl FakeConfig {
             usb3_training: Duration::from_millis(50),
             usb3_link_fails: false,
             usb2_attach_delay: Duration::from_millis(30),
+            short_as_success: false,
+            fail_transfers_on_unplug: true,
         }
     }
 
@@ -268,6 +278,8 @@ impl FakeConfig {
             usb3_training: Duration::from_millis(50),
             usb3_link_fails: false,
             usb2_attach_delay: Duration::from_millis(30),
+            short_as_success: false,
+            fail_transfers_on_unplug: true,
         }
     }
 }
@@ -354,6 +366,8 @@ pub struct FakeXhci {
     /// CRCR's low half was written with CA; the abort happens once the
     /// high half follows.
     abort_requested: bool,
+    /// Endpoints (slot, DCI) with work: rung, or waiting for the device.
+    active: std::collections::BTreeSet<(usize, usize)>,
 }
 
 impl FakeXhci {
@@ -400,6 +414,7 @@ impl FakeXhci {
             hung: None,
             aborts: 0,
             abort_requested: false,
+            active: Default::default(),
         };
         x.legacy = [
             if x.config.bios_owned {
@@ -442,6 +457,7 @@ impl FakeXhci {
         }
         self.now = now;
         self.process_commands(dma);
+        self.process_transfers(dma);
         self.flush_events(dma);
     }
 

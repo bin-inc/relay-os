@@ -324,6 +324,7 @@ impl<H: Hal> Xhci<H> {
             dead: false,
             port_flags: alloc::vec![false; params.ports as usize],
             first_scan: true,
+            slots: (0..=params.max_slots).map(|_| None).collect(),
         };
         xhci.settle_ports(started, settle_from);
         Ok(xhci)

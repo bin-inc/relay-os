@@ -8,7 +8,7 @@ use super::regs::{ALL_ONES, CA, CRCR, EHB, ERDP, HCE, HCH, HSE, RUN, USBCMD, USB
 use super::ring::TRBS;
 use super::trb::{
     COMMAND_ABORTED, COMMAND_COMPLETION, COMMAND_RING_STOPPED, HOST_CONTROLLER_EVENT,
-    PORT_STATUS_CHANGE, SUCCESS, Trb, command_name, completion_name,
+    PORT_STATUS_CHANGE, SUCCESS, TRANSFER_EVENT, Trb, command_name, completion_name,
 };
 use crate::{Hal, UsbError};
 use core::sync::atomic::{Ordering, fence};
@@ -190,6 +190,7 @@ impl<H: Hal> Xhci<H> {
         match event.trb_type() {
             COMMAND_COMPLETION => self.command_completed(event),
             PORT_STATUS_CHANGE => self.port_event(event.port_id()),
+            TRANSFER_EVENT => self.transfer_event(event),
             HOST_CONTROLLER_EVENT => xlog!(
                 &self.hal,
                 &self.name,

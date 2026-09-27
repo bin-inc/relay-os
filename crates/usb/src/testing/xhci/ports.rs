@@ -86,6 +86,9 @@ impl FakeXhci {
         if was & CCS != 0 {
             self.set_changes(i, CSC);
         }
+        if self.config.fail_transfers_on_unplug {
+            self.after(Duration::ZERO, move |x, dma| x.device_gone(port, dma));
+        }
     }
 
     pub fn device(&self, port: u8) -> Option<Device> {
