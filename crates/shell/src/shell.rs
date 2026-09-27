@@ -137,6 +137,10 @@ impl<'a> Shell<'a> {
             message = format!("{name}: write error: {e}\n");
             status = 1;
         }
+        if ctx.cancelled {
+            message = String::from("^C\n");
+            status = CANCELLED;
+        }
         self.stopped = ctx.exit;
         self.finish(status, message)
     }

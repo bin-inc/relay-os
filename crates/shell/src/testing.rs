@@ -19,6 +19,8 @@ pub struct TestConsole {
     pub input: VecDeque<u8>,
     pub output: Vec<u8>,
     pub columns: usize,
+    /// Ctrl-C was pressed while a command runs.
+    pub interrupt: bool,
 }
 
 impl TestConsole {
@@ -27,6 +29,7 @@ impl TestConsole {
             input: VecDeque::new(),
             output: Vec::new(),
             columns: 80,
+            interrupt: false,
         }
     }
 
@@ -56,6 +59,9 @@ impl Console for TestConsole {
     }
     fn columns(&self) -> usize {
         self.columns
+    }
+    fn interrupted(&mut self) -> bool {
+        self.interrupt
     }
 }
 

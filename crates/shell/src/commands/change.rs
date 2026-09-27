@@ -187,6 +187,9 @@ fn remove_tree(ctx: &mut Ctx<'_>, top: &[u8]) -> bool {
         }
     };
     while let Some((dir, node, pending)) = stack.last_mut() {
+        if ctx.interrupted() {
+            return false;
+        }
         let Some(name) = pending.pop() else {
             let (dir, _, _) = stack.pop().expect("not empty");
             if let Err(e) = ctx.vfs.rmdir(&dir) {
@@ -359,6 +362,9 @@ fn copy(ctx: &mut Ctx<'_>, src: &str, dst: &[u8]) -> Result<(), ()> {
     let mut buf = vec![0; CHUNK];
     let mut offset = 0;
     loop {
+        if ctx.interrupted() {
+            return Err(());
+        }
         let n = match ctx.vfs.read_at(from, offset, &mut buf) {
             Ok(0) => return Ok(()),
             Ok(n) => n,
@@ -666,6 +672,17 @@ mod tests {
         }
         assert_eq!(h.run("rm -r /tmp/d"), (0, "".into()));
         assert!(!h.exists("/tmp/d"));
+    }
+
+    #[test]
+    fn ctrl_c_stops_cp_and_rm_r() {
+        let mut h = Harness::new();
+        h.put("/tmp/big", &[1u8; 200_000]);
+        h.run("mkdir -p /tmp/tree/a/b");
+        h.console.interrupt = true;
+        assert_eq!(h.run("cp /tmp/big /tmp/copy"), (130, "^C\n".into()));
+        assert_eq!(h.run("rm -r /tmp/tree"), (130, "^C\n".into()));
+        assert!(h.exists("/tmp/tree/a/b"));
     }
 
     #[test]
