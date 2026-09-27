@@ -10,6 +10,8 @@
 //! timeout 20                       (seconds, for the following expects)
 //! expect <regex>                   (waits for serial output, ANSI stripped)
 //! send <text>                      (types <text> + Enter over serial)
+//! key <text>                       (types <text> + Enter on the USB keyboard,
+//!                                   QMP send-key; {up}, {ctrl-c}: see keys.rs)
 //! screenshot-nonblank              (QMP screendump; top rows not one colour)
 //! alive 12                         (fails if QEMU exits within 12 seconds)
 //! screenshot-pixel 2540 20 #000000 (QMP screendump; that pixel has that colour)
@@ -19,6 +21,7 @@
 
 use crate::build;
 use crate::image::{self, Layout, esp_write, set_cmdline};
+use crate::keys;
 use crate::qemu::{self, Qemu};
 use crate::qmp::Qmp;
 use crate::util::{out_dir, root};
@@ -32,12 +35,27 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_CMDLINE: &str = "test=1";
+/// How long each `key` press is held, in milliseconds: long enough for
+/// the guest to poll the keyboard (every 8 ms), far below the 500 ms
+/// repeat delay.
+const KEY_HOLD_MS: u64 = 30;
+/// Time for the guest to see the last release after QEMU has played it.
+const KEY_SETTLE_MS: u64 = 100;
+
+/// How long QEMU takes to play `presses` presses: it queues them and holds
+/// each for `KEY_HOLD_MS`. The `key` step waits that long, so its Enter
+/// cannot land in the middle of what a following `send` types.
+pub fn typing_time(presses: usize) -> Duration {
+    Duration::from_millis(KEY_HOLD_MS * presses as u64 + KEY_SETTLE_MS)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Step {
     Timeout(u64),
     Expect(String),
     Send(String),
+    /// Text typed on the emulated USB keyboard.
+    Key(String),
     ScreenshotNonblank,
     /// QEMU must still be running after this many seconds (for example after
     /// a loader error, which must not power the machine off).
@@ -97,6 +115,10 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
                 Step::Expect(rest.to_string())
             }
             "send" => Step::Send(rest.to_string()),
+            "key" => {
+                keys::presses(rest).with_context(|| format!("{name}:{line_no}"))?;
+                Step::Key(rest.to_string())
+            }
             "screenshot-nonblank" => Step::ScreenshotNonblank,
             "screenshot-pixel" => {
                 parse_pixel_step(rest).with_context(|| format!("{name}:{line_no}"))?
@@ -302,6 +324,20 @@ fn run_step(r: &mut Running, step: &Step, timeout: &mut Duration, run_dir: &Path
             r.stdin.write_all(b"\r")?;
             r.stdin.flush()?;
         }
+        Step::Key(text) => {
+            let presses = keys::presses(text)?;
+            for press in &presses {
+                let keys: Vec<_> = press
+                    .iter()
+                    .map(|k| serde_json::json!({ "type": "qcode", "data": k }))
+                    .collect();
+                r.qmp.execute(
+                    "send-key",
+                    serde_json::json!({ "keys": keys, "hold-time": KEY_HOLD_MS }),
+                )?;
+            }
+            std::thread::sleep(typing_time(presses.len()));
+        }
         Step::Alive(secs) => {
             let deadline = Instant::now() + Duration::from_secs(*secs);
             while Instant::now() < deadline {
@@ -434,6 +470,19 @@ mod tests {
         );
         assert!(parse_scenario("x", "esp-write relative x").is_err());
         assert!(parse_scenario("x", "expect a\nesp-write /x y").is_err());
+    }
+
+    #[test]
+    fn parses_key_steps() {
+        let s = parse_scenario("x", "key echo {up}").unwrap();
+        assert_eq!(s.steps, vec![(1, Step::Key("echo {up}".into()))]);
+        assert!(parse_scenario("x", "key {bogus}").is_err());
+    }
+
+    #[test]
+    fn a_key_step_waits_until_qemu_has_played_it() {
+        // "ls" and Enter: three presses of 30 ms, then the settling time.
+        assert_eq!(typing_time(3), Duration::from_millis(190));
     }
 
     #[test]
