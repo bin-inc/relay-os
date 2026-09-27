@@ -35,6 +35,8 @@ pub struct Dma {
     buffers: BTreeMap<u64, (NonNull<u8>, Layout)>,
     /// Allocations that still succeed; `None` is no limit.
     allocs_left: Option<usize>,
+    /// The one allocation (counting from 0) that fails, if any.
+    failing: Option<usize>,
 }
 
 impl Dma {
@@ -130,6 +132,13 @@ impl FakeHal {
         hal
     }
 
+    /// Runs `f` on the fake controller with the DMA memory it reaches (to
+    /// post events or read what the driver wrote).
+    pub fn act<R>(&self, f: impl FnOnce(&mut FakeXhci, &Dma) -> R) -> R {
+        let mut x = self.fake();
+        f(&mut x, &self.0.dma.borrow())
+    }
+
     /// The fake controller, to plug devices, turn knobs and look inside.
     /// Drop the guard before calling the driver again.
     pub fn fake(&self) -> RefMut<'_, FakeXhci> {
@@ -151,6 +160,11 @@ impl FakeHal {
     /// Lets `n` more allocations succeed, then fails every one.
     pub fn fail_alloc_after(&self, n: usize) {
         self.0.dma.borrow_mut().allocs_left = Some(n);
+    }
+
+    /// Fails only the allocation `n` from now (0 is the next one).
+    pub fn fail_one_alloc(&self, n: usize) {
+        self.0.dma.borrow_mut().failing = Some(n);
     }
 
     /// Every log line so far, one per line.
@@ -197,6 +211,13 @@ impl Hal for FakeHal {
             "fake hal: bad DMA request"
         );
         let mut dma = self.0.dma.borrow_mut();
+        if let Some(n) = dma.failing.as_mut() {
+            if *n == 0 {
+                dma.failing = None;
+                return None;
+            }
+            *n -= 1;
+        }
         if let Some(left) = dma.allocs_left.as_mut() {
             if *left == 0 {
                 return None;
@@ -300,7 +321,15 @@ mod tests {
         hal.fail_alloc_after(1);
         let a = hal.alloc_dma(64, 64).unwrap();
         assert!(hal.alloc_dma(64, 64).is_none());
+        assert!(hal.alloc_dma(64, 64).is_none());
         hal.free_dma(a);
+        let hal = FakeHal::new();
+        hal.fail_one_alloc(1);
+        let a = hal.alloc_dma(64, 64).unwrap();
+        assert!(hal.alloc_dma(64, 64).is_none());
+        let b = hal.alloc_dma(64, 64).unwrap();
+        hal.free_dma(a);
+        hal.free_dma(b);
     }
 
     #[test]

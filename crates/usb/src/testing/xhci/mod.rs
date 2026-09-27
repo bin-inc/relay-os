@@ -3,7 +3,12 @@
 //! a driver bug fails its test instead of passing by luck. It decodes
 //! registers, TRBs and contexts with its own constants, not the driver's.
 
+mod commands;
 mod regs;
+mod rings;
+
+pub use commands::Executed;
+use commands::FakeSlot;
 
 use super::hal::Dma;
 use core::time::Duration;
@@ -61,6 +66,29 @@ pub struct FakeConfig {
     pub endless_caps: bool,
     /// Knob: every register reads 0xFFFF_FFFF (powered down or gone).
     pub all_ones: bool,
+    /// The legacy support capability says the BIOS owns the controller.
+    pub bios_owned: bool,
+    /// How long the BIOS takes to let go once asked; `None`: it never does.
+    pub bios_release: Option<Duration>,
+    /// USBLEGCTLSTS as the BIOS left it.
+    pub legacy_ctlsts: u32,
+    /// The controller is running when the driver finds it.
+    pub running: bool,
+    /// How long HCH takes to follow R/S = 0; `None`: it never halts.
+    pub halt_time: Option<Duration>,
+    /// How long HCRST takes to clear; `None`: it never does.
+    pub reset_time: Option<Duration>,
+    /// How long CNR stays set after HCRST cleared; `None`: forever.
+    pub cnr_time: Option<Duration>,
+    /// How long HCH takes to clear after R/S = 1; `None`: it never runs.
+    pub run_time: Option<Duration>,
+    /// Knob: commands of this TRB type never complete.
+    pub hang_command: Option<u32>,
+    /// Knob: CRCR.CA never stops the command ring (CRR stays 1).
+    pub abort_never_completes: bool,
+    /// Knob: an abort leaves the dequeue pointer on the aborted command, so
+    /// the ring resumes on it (some controllers; xHCI 4.6.1.2 allows both).
+    pub abort_keeps_dequeue: bool,
 }
 
 /// Capabilities at `offsets`, each pointing to the next.
@@ -119,6 +147,17 @@ impl FakeConfig {
             protocol_name: u32::from_le_bytes(*b"USB "),
             endless_caps: false,
             all_ones: false,
+            bios_owned: false,
+            bios_release: None,
+            legacy_ctlsts: 0,
+            running: false,
+            halt_time: Some(Duration::ZERO),
+            reset_time: Some(Duration::ZERO),
+            cnr_time: Some(Duration::ZERO),
+            run_time: Some(Duration::ZERO),
+            hang_command: None,
+            abort_never_completes: false,
+            abort_keeps_dequeue: false,
         }
     }
 
@@ -197,8 +236,41 @@ impl FakeConfig {
             protocol_name: u32::from_le_bytes(*b"USB "),
             endless_caps: false,
             all_ones: false,
+            bios_owned: true,
+            bios_release: Some(Duration::from_millis(5)),
+            // SMIs on (bits 0, 4, 13-15) and pending (29-31); bit 8 is
+            // reserved and must survive.
+            legacy_ctlsts: 0xE000_E111,
+            running: true,
+            halt_time: Some(Duration::from_millis(1)),
+            reset_time: Some(Duration::from_millis(2)),
+            cnr_time: Some(Duration::from_millis(10)),
+            run_time: Some(Duration::from_micros(500)),
+            hang_command: None,
+            abort_never_completes: false,
+            abort_keeps_dequeue: false,
         }
     }
+}
+
+/// Something the fake does at a set time.
+type Action = Box<dyn FnOnce(&mut FakeXhci, &Dma)>;
+
+/// A ring the fake consumes: the command ring or a transfer ring.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Consumer {
+    pub dequeue: u64,
+    /// The Consumer Cycle State.
+    pub cycle: bool,
+}
+
+/// The event ring the fake produces into (one segment).
+#[derive(Clone, Copy, Debug)]
+pub struct EventRing {
+    pub base: u64,
+    pub size: usize,
+    pub enqueue: usize,
+    pub cycle: bool,
 }
 
 /// The fake controller: registers, and (as tasks add them) rings, slots
@@ -210,19 +282,51 @@ pub struct FakeXhci {
     usbcmd: u32,
     usbsts: u32,
     dnctrl: u32,
+    /// CRCR as written; the ring it names once the high half is written.
     crcr: u64,
+    command_ring: Option<Consumer>,
+    /// Command Ring Running.
+    crr: bool,
     dcbaap: u64,
     config_reg: u32,
     portsc: Vec<u32>,
+    port_writes: usize,
     iman: u32,
     imod: u32,
     erstsz: u32,
     erstba: u64,
+    event_ring: Option<EventRing>,
+    /// ERDP without its flag bits, and Event Handler Busy.
     erdp: u64,
+    ehb: bool,
+    /// The scratchpad pages DCBAA[0] named when the controller started.
+    scratchpad_pages: Vec<u64>,
+    /// When a port was last powered on.
+    powered_at: Option<Duration>,
     /// USBLEGSUP and USBLEGCTLSTS.
     legacy: [u32; 2],
     cap_reads: usize,
     highest_read: usize,
+    /// Due actions, in the order they were scheduled.
+    timers: Vec<(Duration, Action)>,
+    /// When HCRST was last written.
+    hcrst_at: Option<Duration>,
+    /// Writes to the extended capability space.
+    cap_writes: usize,
+    /// Events waiting for the controller to run.
+    pending_events: Vec<[u32; 4]>,
+    events_posted: usize,
+    erdp_writes: usize,
+    /// Slots 1..=MaxSlots (index 0 unused).
+    slots: Vec<Option<FakeSlot>>,
+    /// Every command executed, in order.
+    executed: Vec<Executed>,
+    /// The command TRB the ring is stuck on.
+    hung: Option<u64>,
+    aborts: usize,
+    /// CRCR's low half was written with CA; the abort happens once the
+    /// high half follows.
+    abort_requested: bool,
 }
 
 impl FakeXhci {
@@ -235,25 +339,192 @@ impl FakeXhci {
             usbsts: regs::HCH,
             dnctrl: 0,
             crcr: 0,
+            command_ring: None,
+            crr: false,
             dcbaap: 0,
             config_reg: 0,
             portsc: vec![0; ports],
+            port_writes: 0,
             iman: 0,
             imod: 0,
             erstsz: 0,
             erstba: 0,
+            event_ring: None,
             erdp: 0,
+            ehb: false,
+            scratchpad_pages: Vec::new(),
+            powered_at: None,
             legacy: [0; 2],
             cap_reads: 0,
             highest_read: 0,
+            timers: Vec::new(),
+            hcrst_at: None,
+            cap_writes: 0,
+            pending_events: Vec::new(),
+            events_posted: 0,
+            erdp_writes: 0,
+            slots: Vec::new(),
+            executed: Vec::new(),
+            hung: None,
+            aborts: 0,
+            abort_requested: false,
         };
+        x.legacy = [
+            if x.config.bios_owned {
+                regs::BIOS_OWNED
+            } else {
+                0
+            },
+            x.config.legacy_ctlsts,
+        ];
+        if x.config.running {
+            x.usbcmd = regs::RUN;
+            x.usbsts = 0;
+        }
+        x.slots = (0..=x.config.max_slots).map(|_| None).collect();
         x.power_on_ports();
         x
     }
 
     /// Lets the controller act on everything due by `now`.
-    pub fn advance_to(&mut self, now: Duration, _dma: &Dma) {
+    pub fn advance_to(&mut self, now: Duration, dma: &Dma) {
+        while let Some(i) = self.next_due(now) {
+            let (when, action) = self.timers.remove(i);
+            self.now = self.now.max(when);
+            action(self, dma);
+        }
         self.now = now;
+        self.process_commands(dma);
+        self.flush_events(dma);
+    }
+
+    /// The earliest action due by `now` (the first scheduled among equals).
+    fn next_due(&self, now: Duration) -> Option<usize> {
+        let mut best: Option<usize> = None;
+        for (i, (when, _)) in self.timers.iter().enumerate() {
+            if *when <= now && best.is_none_or(|b| *when < self.timers[b].0) {
+                best = Some(i);
+            }
+        }
+        best
+    }
+
+    /// Runs `action` once the clock reaches `when`.
+    pub fn at(&mut self, when: Duration, action: impl FnOnce(&mut FakeXhci, &Dma) + 'static) {
+        self.timers.push((when, Box::new(action)));
+    }
+
+    /// Runs `action` `delay` from now: how tests unplug a device halfway
+    /// through a driver call.
+    pub fn after(&mut self, delay: Duration, action: impl FnOnce(&mut FakeXhci, &Dma) + 'static) {
+        self.at(self.now + delay, action);
+    }
+
+    /// The knobs, to turn one while the driver runs (the controller
+    /// falling off the bus, say).
+    pub fn config_mut(&mut self) -> &mut FakeConfig {
+        &mut self.config
+    }
+
+    pub fn usbcmd(&self) -> u32 {
+        self.usbcmd
+    }
+
+    pub fn usbsts(&self) -> u32 {
+        self.usbsts
+    }
+
+    /// USBLEGSUP and USBLEGCTLSTS.
+    pub fn legacy(&self) -> [u32; 2] {
+        self.legacy
+    }
+
+    pub fn cap_writes(&self) -> usize {
+        self.cap_writes
+    }
+
+    /// Whether R/S is set and the controller has left the halted state.
+    pub fn running(&self) -> bool {
+        self.usbsts & regs::HCH == 0
+    }
+
+    pub fn dcbaap(&self) -> u64 {
+        self.dcbaap
+    }
+
+    pub fn iman(&self) -> u32 {
+        self.iman
+    }
+
+    pub fn event_ring(&self) -> Option<EventRing> {
+        self.event_ring
+    }
+
+    pub fn command_ring(&self) -> Option<Consumer> {
+        self.command_ring
+    }
+
+    pub fn scratchpad_pages(&self) -> &[u64] {
+        &self.scratchpad_pages
+    }
+
+    pub fn portsc(&self, port: u8) -> u32 {
+        self.portsc[port as usize - 1]
+    }
+
+    /// PORTSC writes so far.
+    pub fn port_writes(&self) -> usize {
+        self.port_writes
+    }
+
+    /// When software last powered a port on.
+    pub fn powered_at(&self) -> Option<Duration> {
+        self.powered_at
+    }
+
+    /// Event Handler Busy: set with the first event after software last
+    /// cleared it through ERDP.
+    pub fn ehb(&self) -> bool {
+        self.ehb
+    }
+
+    /// ERDP as software last wrote it (without flags).
+    pub fn erdp(&self) -> u64 {
+        self.erdp
+    }
+
+    pub fn events_posted(&self) -> usize {
+        self.events_posted
+    }
+
+    /// Writes of ERDP's high half: one per update.
+    pub fn erdp_writes(&self) -> usize {
+        self.erdp_writes
+    }
+
+    pub fn executed(&self) -> &[Executed] {
+        &self.executed
+    }
+
+    /// The command TRB the ring hangs on.
+    pub fn hung(&self) -> Option<u64> {
+        self.hung
+    }
+
+    /// Command ring aborts (CRCR.CA) that took effect.
+    pub fn aborts(&self) -> usize {
+        self.aborts
+    }
+
+    pub fn slot_enabled(&self, slot: usize) -> bool {
+        self.slots.get(slot).is_some_and(Option::is_some)
+    }
+
+    /// USBSTS.HSE (xHCI 4.10.2.6): the controller halts at once.
+    pub fn host_system_error(&mut self) {
+        self.usbsts |= regs::HSE | regs::HCH;
+        self.usbcmd &= !regs::RUN;
+        self.crr = false;
     }
 
     /// Reads of the extended capability area so far.

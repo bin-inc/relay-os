@@ -31,6 +31,33 @@ pub const CONFIG: usize = 0x38;
 const PORT_BASE: usize = 0x400;
 const PORT_STRIDE: usize = 0x10;
 
+// PORTSC bits (xHCI 5.4.8). PED and the change bits are RW1C: writing 1
+// to PED disables the port.
+pub const CCS: u32 = 1 << 0;
+pub const PED: u32 = 1 << 1;
+pub const PR: u32 = 1 << 4;
+pub const PLS_SHIFT: u32 = 5;
+pub const PP: u32 = 1 << 9;
+pub const SPEED_SHIFT: u32 = 10;
+const PIC: u32 = 3 << 14;
+pub const CSC: u32 = 1 << 17;
+pub const PEC: u32 = 1 << 18;
+pub const WRC: u32 = 1 << 19;
+pub const OCC: u32 = 1 << 20;
+pub const PRC: u32 = 1 << 21;
+pub const PLC: u32 = 1 << 22;
+pub const CEC: u32 = 1 << 23;
+const WAKE: u32 = 7 << 25;
+pub const WPR: u32 = 1 << 31;
+pub const CHANGE_BITS: u32 = CSC | PEC | WRC | OCC | PRC | PLC | CEC;
+
+/// The start of every PORTSC write: of what was read, only PP, PIC and
+/// the wake bits, which keep their value when written back. Writing back
+/// anything else would clear change bits by accident or disable the port.
+pub fn portsc_neutral(portsc: u32) -> u32 {
+    portsc & (PP | PIC | WAKE)
+}
+
 // USBCMD bits.
 pub const RUN: u32 = 1 << 0;
 pub const HCRST: u32 = 1 << 1;
@@ -308,6 +335,13 @@ mod tests {
         );
         let base = hal.map_mmio(FAKE_BAR, 0x1000).unwrap();
         assert!(Regs::new(&hal, base, 0x1000).is_err(), "a BAR cut short");
+    }
+
+    #[test]
+    fn a_neutral_portsc_write_keeps_only_power_indicator_and_wake_bits() {
+        let all = 0xFFFF_FFFF;
+        assert_eq!(portsc_neutral(all), PP | 3 << 14 | 7 << 25);
+        assert_eq!(portsc_neutral(PED | CHANGE_BITS | PR | WPR | CCS), 0);
     }
 
     #[test]

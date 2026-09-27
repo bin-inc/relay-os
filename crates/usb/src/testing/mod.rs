@@ -8,3 +8,14 @@ mod xhci;
 
 pub use hal::{FAKE_BAR, FAKE_BAR_LEN, FakeHal};
 pub use xhci::{ExtCap, FakeConfig};
+
+use crate::xhci::Xhci;
+
+/// A fake machine with a controller made from `config`, and the driver
+/// brought up on it as "00:14.0".
+pub fn start(config: FakeConfig) -> (FakeHal, Xhci<FakeHal>) {
+    let hal = FakeHal::with_controller(config);
+    let xhci = Xhci::new(hal.clone(), FAKE_BAR, FAKE_BAR_LEN, "00:14.0")
+        .unwrap_or_else(|e| panic!("the controller did not start: {e}\n{}", hal.log_text()));
+    (hal, xhci)
+}

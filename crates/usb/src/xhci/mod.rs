@@ -2,13 +2,32 @@
 // The driver is built bottom-up: parts land before their users.
 #![allow(dead_code)]
 
+/// Logs one line starting "xhci <name>: ", as every line of this driver
+/// does (spec §13: the NUC is debugged from a photo of `dmesg`).
+macro_rules! xlog {
+    ($hal:expr, $name:expr, $($arg:tt)*) => {
+        $crate::Hal::log($hal, format_args!("xhci {}: {}", $name, format_args!($($arg)*)))
+    };
+}
+
 mod caps;
+mod command;
 mod context;
+mod init;
 mod regs;
 mod ring;
+mod start;
 mod trb;
 
+use crate::{DmaBuf, Hal};
+use alloc::string::String;
+use alloc::vec::Vec;
+use caps::PortProtocol;
+use command::Pending;
 use core::fmt;
+use regs::Regs;
+use ring::{EventRing, ProducerRing};
+use start::Scratchpads;
 
 /// What the controller reported about itself (for the status line and
 /// dmesg).
@@ -40,6 +59,42 @@ impl fmt::Display for ControllerInfo {
             self.scratchpads,
             if self.scratchpads == 1 { "" } else { "s" },
         )
+    }
+}
+
+/// One xHCI controller, brought up by [`Xhci::new`].
+pub struct Xhci<H: Hal> {
+    hal: H,
+    name: String,
+    regs: Regs,
+    info: ControllerInfo,
+    /// Each root port's protocol; index 0 is port 1.
+    ports: Vec<Option<PortProtocol>>,
+    dcbaa: DmaBuf,
+    scratchpads: Option<Scratchpads>,
+    commands: ProducerRing,
+    events: EventRing,
+    /// The command in flight (one at a time).
+    pending: Option<Pending>,
+    /// A Command Ring Stopped event came since the last abort.
+    ring_stopped: bool,
+    /// Set when the controller stopped working: nothing is sent to it any
+    /// more (`UsbError::ControllerDead`).
+    dead: bool,
+}
+
+impl<H: Hal> Xhci<H> {
+    pub fn info(&self) -> &ControllerInfo {
+        &self.info
+    }
+
+    /// The PCI address every log line starts with.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn hal(&self) -> &H {
+        &self.hal
     }
 }
 
