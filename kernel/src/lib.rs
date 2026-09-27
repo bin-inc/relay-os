@@ -9,6 +9,7 @@ pub mod acpi;
 pub mod arch;
 pub mod cmdline;
 pub mod console;
+pub mod input;
 pub mod klog;
 pub mod mm;
 pub mod panic_screen;
