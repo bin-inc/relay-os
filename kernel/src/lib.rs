@@ -16,6 +16,7 @@ pub mod panic_screen;
 pub mod pci;
 pub mod rtc;
 pub mod serial;
+pub mod session;
 pub mod timer;
 
 use boot_info::{BootInfo, MemoryKind, PHYS_OFFSET};
@@ -128,8 +129,10 @@ pub fn kernel_main(info: &'static BootInfo) -> ! {
     if let Some(t) = cmdline.panic_test {
         trigger(t);
     }
-    kprintln!("relay: early boot complete");
-    arch::idle_forever()
+    // There is no storage driver yet, so the shell starts on an empty,
+    // read-only `/` (spec §10).
+    console::fail("mount /", format_args!("no storage driver yet"));
+    session::run_shell()
 }
 
 /// `check=timer`: the 1 kHz tick measured against the RTC's seconds.

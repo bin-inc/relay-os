@@ -3,7 +3,7 @@
 cmdline test=1 video=2560x1600
 timeout 30
 expect \[ ok \] console 2560x1600 \(120x33 cells\)
-expect relay: early boot complete
+expect root@relay:/# $
 screenshot-nonblank
 # After a successful boot no progress square is left on screen, including
 # outside the 1920x1080 terminal area (stage 1 sits at x 2528..2551, y 8..31).

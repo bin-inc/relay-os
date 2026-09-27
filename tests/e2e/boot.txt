@@ -1,5 +1,6 @@
-# The loader hands off, the kernel draws on the framebuffer and every
-# startup step reports ok.
+# The loader hands off, the kernel draws on the framebuffer, every startup
+# step reports ok, and the shell starts on an empty read-only / (there is
+# no storage driver yet).
 timeout 30
 expect Relay OS \d+\.\d+\.\d+
 expect \[ ok \] console \d+x\d+ \(\d+x\d+ cells\)
@@ -14,5 +15,6 @@ expect \[ ok \] rtc: 20\d\d-\d\d-\d\d \d\d:\d\d:\d\d UTC
 expect pci: 00:00\.0 8086:29c0 060000 host bridge
 expect pci: 00:02\.0 1b36:000d 0c0330 USB xHCI, bar0 mem64 0x[0-9a-f]+ 16K
 expect \[ ok \] pci: \d+ devices on bus 00, xHCI at 00:02\.0
-expect relay: early boot complete
+expect \[FAIL\] mount /: no storage driver yet
+expect root@relay:/# $
 screenshot-nonblank

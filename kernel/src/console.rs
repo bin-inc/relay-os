@@ -94,6 +94,13 @@ pub fn size() -> Option<(usize, usize)> {
 /// Writes raw bytes (UTF-8 + ANSI) to every console sink.
 pub fn write_bytes(bytes: &[u8]) {
     klog::KLOG.lock().write(bytes);
+    write_output(bytes);
+}
+
+/// Writes to the screen and serial but not the kernel log: the shell's
+/// output (`dmesg` shows what the kernel reported, not what commands
+/// printed).
+pub fn write_output(bytes: &[u8]) {
     serial::write(bytes);
     if let Some(c) = CONSOLE.lock().as_mut() {
         c.term.write_bytes(bytes);

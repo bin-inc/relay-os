@@ -265,8 +265,10 @@ name = "relay-kernel"
 version = "0.1.0"
 dependencies = [
  "boot-info",
+ "shell",
  "spin",
  "term",
+ "vfs",
  "x86_64",
 ]
 
