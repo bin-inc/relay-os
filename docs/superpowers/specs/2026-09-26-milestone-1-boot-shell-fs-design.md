@@ -1045,3 +1045,10 @@ Each step ends with something that can be tested.
      scratchpad buffers, the BIOS handoff, port power control, low- and
      full-speed devices and a USB 3 port that needs a warm reset remain
      covered only by host tests against a fake controller and by the NUC.
+   - **What the NUC really does** (NUC check 2, corrects §2 and §6.2): the
+     PCH xHCI `00:14.0` reports 32-byte contexts, not 64-byte ones, and 34
+     scratchpad buffers; the Thunderbolt xHCI `00:0d.0` starts as well
+     (4 ports, 34 scratchpads); the internal Bluetooth `8087:0033` sits on
+     port 10; the Unifying receiver's EP0 is 8 bytes. So 64-byte contexts
+     and fixing EP0's packet size with Evaluate Context are covered only by
+     host tests.

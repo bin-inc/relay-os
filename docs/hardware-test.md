@@ -99,22 +99,26 @@ Unifying receiver on port 1 and the stick on a USB 3 port.
 
 1. In Mint: `cargo xtask flash --kernel`.
 2. Boot the stick. After the check 1b lines the screen shows:
-   - one line for the Thunderbolt controller, `usb: 00:0d.0 xHCI …` if it
-     starts or `usb: 00:0d.0: controller not responding` if the firmware
-     left it powered off. Either is fine: nothing is plugged into it.
-   - `usb: 00:14.0 xHCI 1.20, N ports (N USB 2, N USB 3), 64-byte contexts,
-     N scratchpads`. Note N. 64-byte contexts and a nonzero scratchpad
-     count are the paths QEMU cannot test.
+   - `usb: 00:0d.0 xHCI 1.20, 4 ports (1 USB 2, 3 USB 3), 32-byte contexts,
+     34 scratchpads` (the Thunderbolt controller; nothing is plugged into
+     it). If the firmware left it powered off the line is
+     `usb: 00:0d.0: controller not responding` instead; that is fine too.
+   - `usb: 00:14.0 xHCI 1.20, 16 ports (12 USB 2, 4 USB 3), 32-byte
+     contexts, 34 scratchpads`. A nonzero scratchpad count is a path QEMU
+     cannot test (34 needs both halves of the count field). The NUC uses
+     32-byte contexts like QEMU; 64-byte ones are tested on the host only.
    - one line per device, in port order:
      - `usb: 00:14.0 port 1: 046d:c534 full-speed, keyboard` (the receiver)
      - `usb: 00:14.0 port 3: 046d:c31c low-speed, keyboard` (the K120)
-     - `usb: 00:14.0 port N: 0951:1666 SuperSpeed, not claimed` (the stick,
-       on one of the USB 3 ports after the USB 2 ones; its driver comes
-       with plan 5)
+     - `usb: 00:14.0 port 10: 8087:0033 full-speed, not claimed` (the
+       NUC's internal Bluetooth)
+     - `usb: 00:14.0 port 15: 0951:1666 SuperSpeed, not claimed` (the
+       stick on bus 4 port 3, the third USB 3 port; its driver comes with
+       plan 5)
 
      The boot waits for them: at least 100 ms, and up to 1 s while a USB 3
      link is still training (`dmesg`: `ports settled after N ms`).
-   - `[ ok ] usb: 2 controllers, 3 devices` (or 1 controller),
+   - `[ ok ] usb: 2 controllers, 4 devices` (or 1 controller),
      `[ ok ] keyboard: 2 keyboards`, `[FAIL] mount /: no storage driver
      yet`, and the prompt `root@relay:/# `.
 3. On the K120, type and check each result:
@@ -160,3 +164,4 @@ The NUC has no serial port, so a keyboard that does not work cannot run
 | 2026-09-26 | 1, default cmdline (after review fix) | `8cd8ec7` | Pass | Native mode kept: `console 1920x1200 (120x33 cells)`, 15948 MiB usable in 32 regions, no progress squares left. The earlier default-cmdline row switched to 1920×1080 against spec §4.2.3 (fixed in `b7817b3`). |
 | 2026-09-26 | 1, `panic=pagefault` | `8b8f13e` | Pass | Red panic screen: `CPU exception 14: page fault (error code 0x0)`, `CR2=0x00007fffdead0000`, log tail shown, `System halted.` |
 | 2026-09-26 | 1b, `check=timer` | `ba9dedf` | Pass | `memory: 15915 MiB free of 15948 MiB, heap 32 MiB`; `acpi: 30 tables, ECAM 0xc0000000 buses 0-255, HPET 0xfed00000, S5 7/0`; `timer: TSC 2496.000 MHz (CPUID 0x15), 1000 Hz tick (xAPIC)`; `rtc: 2026-09-26 13:45:11 UTC`; `timer check: ok, 3000 ticks in 3 RTC seconds`; xHCI `00:0d.0` (bar0 `0x603d190000` 64K) and `00:14.0` (bar0 `0x603d180000` 64K); `pci: 24 devices on buses 00 01 72` (matches `lspci`). Every step `[ ok ]`. |
+| 2026-09-28 | 2 | `a3db39a` | Pass | `usb: 00:0d.0 xHCI 1.20, 4 ports (1 USB 2, 3 USB 3), 32-byte contexts, 34 scratchpads`; `usb: 00:14.0 xHCI 1.20, 16 ports (12 USB 2, 4 USB 3), 32-byte contexts, 34 scratchpads`; port 1 `046d:c534 full-speed, keyboard` (EP0 8 bytes), port 3 `046d:c31c low-speed, keyboard`, port 10 `8087:0033 full-speed, not claimed` (internal Bluetooth, isochronous endpoints), port 15 `0951:1666 SuperSpeed, not claimed` (hot reset done); `usb: 2 controllers, 4 devices`, `keyboard: 2 keyboards`, `[FAIL] mount /: no storage driver yet` (expected), prompt. Typing on the K120: Shift, Caps Lock with its light, Backspace, arrows, history, repeat after about half a second, Ctrl-C, `dmesg`; unplugging and replugging the K120, then `echo back` works. |
