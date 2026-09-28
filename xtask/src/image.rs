@@ -271,6 +271,20 @@ pub fn make_ext2(target: &Path, part: Partition, staging: &Path) -> Result<()> {
         .arg(e2fs_target(target, part)))
 }
 
+/// Where the ext2 superblock's magic number is: 56 bytes into the
+/// superblock, which starts 1024 bytes into the partition.
+const EXT2_MAGIC_OFFSET: u64 = 1024 + 56;
+
+/// Writes the ext2 magic number (0xEF53) into `part`'s superblock, or
+/// zeroes it, so no ext2 driver recognises the filesystem.
+pub fn set_ext2_magic(target: &Path, part: Partition, present: bool) -> Result<()> {
+    use std::io::{Seek, SeekFrom};
+    let mut f = fs::OpenOptions::new().write(true).open(target)?;
+    f.seek(SeekFrom::Start(part.offset() + EXT2_MAGIC_OFFSET))?;
+    f.write_all(if present { &[0x53, 0xEF] } else { &[0, 0] })?;
+    Ok(())
+}
+
 /// The ext2 filesystem state in `part`'s superblock, as `dumpe2fs -h` names
 /// it: `clean` after a clean shutdown, `not clean` while mounted
 /// read-write (or after a machine stopped with it mounted).

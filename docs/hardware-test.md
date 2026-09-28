@@ -205,9 +205,11 @@ check 2 (the stick on bus 4 port 3 in Mint's `lsusb -t`).
 |---|---|---|
 | `port 15: … disk not started: …` and `[FAIL] mount /: no USB disk` | The stick's setup failed (the reason says which command) | `debug=usb`: the `storage: slot N:` lines with the sense of each failure |
 | `port 15: setup failed: …` | Enumeration failed three times | Replug the stick into the same port and reboot; `debug=usb` shows each try |
-| `[FAIL] mount /: no disk with the boot partition` | The loader's boot GUID matches no partition | Note the `boot info` line; `dmesg` shows the `storage:` GPT line |
+| `[FAIL] mount /: no disk with a GPT` | The stick was set up but its reads fail, or it has no GPT | `dmesg`: a `usb: 00:14.0 port 15: read at block N: …` line and the `storage: slot N:` lines with the sense mean the reads fail; `storage: 00:14.0 port 15: no valid GPT` means re-run `flash --full` |
+| `mount /: warning: no disk has the boot partition …; using …` above `[ ok ] mount /` | The loader's boot GUID matches no partition, and the one disk with an ESP and a Linux partition was used | Note the GUID in the warning and the `boot info` line; the files are usable |
+| `[FAIL] mount /: no disk with the boot partition` | No disk has the boot partition, and none has exactly one ESP and one Linux partition | `dmesg`: the `storage:` GPT lines list what each disk has |
 | `[FAIL] mount /: …; mounted read-only` | The stick refused a write (worn out or write-protected) | The files can be read; note the `usb: … write at block N:` line in `dmesg` |
-| `[FAIL] mount /: … partition 2: Invalid argument` | The ext2 root is not what `flash --full` writes | `dmesg` shows the `ext2:` reason; re-run `flash --full` |
+| `[FAIL] mount /: ext2 on 00:14.0 port 15 partition 2, 14.3 GiB: Invalid argument` | The ext2 root is not what `flash --full` writes | `dmesg` shows the `ext2:` reason; re-run `flash --full` |
 | A command prints `Input/output error` | A disk request failed after three tries | `dmesg`: the `storage:` and `usb:` lines name the command and block |
 | `reboot` leaves the screen as it is | No reset method worked (unlikely: the last is a triple fault) | Photograph the screen; hold the power button |
 | `verify-usb` reports errors | A write was lost or wrong | Do not flash again: keep the stick as it is and report the output |

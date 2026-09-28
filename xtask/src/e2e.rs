@@ -7,6 +7,8 @@
 //! # comment
 //! cmdline test=1 panic=pagefault   (before any other step; default "test=1")
 //! disk small                       (before any other step: the 32 MiB root)
+//! break-root                       (before any other step: the root's ext2
+//!                                   magic is zeroed until the scenario ends)
 //! esp-write /EFI/RELAY/kernel.elf garbage   (before boot: replace an ESP file)
 //! timeout 20                       (seconds, for the following expects)
 //! expect <regex>                   (waits for serial output, ANSI stripped)
@@ -102,6 +104,9 @@ pub struct Scenario {
     pub cmdline: String,
     /// `disk small`: boot the image with the 32 MiB root.
     pub small_disk: bool,
+    /// `break-root`: the root filesystem is unrecognisable while the
+    /// scenario runs.
+    pub break_root: bool,
     /// ESP files to overwrite before booting: (path, contents).
     pub esp_writes: Vec<(String, String)>,
     /// (line number, step)
@@ -111,6 +116,7 @@ pub struct Scenario {
 pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
     let mut cmdline = DEFAULT_CMDLINE.to_string();
     let mut small_disk = false;
+    let mut break_root = false;
     let mut esp_writes = Vec::new();
     let mut steps = Vec::new();
     for (i, raw) in text.lines().enumerate() {
@@ -134,6 +140,13 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
                     bail!("{name}:{line_no}: expected `disk small` before other steps");
                 }
                 small_disk = true;
+                continue;
+            }
+            "break-root" => {
+                if !steps.is_empty() {
+                    bail!("{name}:{line_no}: break-root must come before other steps");
+                }
+                break_root = true;
                 continue;
             }
             "esp-write" => {
@@ -177,6 +190,7 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
         name: name.to_string(),
         cmdline,
         small_disk,
+        break_root,
         esp_writes,
         steps,
     })
@@ -321,6 +335,9 @@ fn start(image: &Path, layout: &Layout, scenario: &Scenario, run_dir: &Path) -> 
     set_cmdline(&q.disk, layout.esp, &scenario.cmdline, run_dir)?;
     for (path, contents) in &scenario.esp_writes {
         esp_write(&q.disk, layout.esp, path, contents.as_bytes(), run_dir)?;
+    }
+    if scenario.break_root {
+        image::set_ext2_magic(&q.disk, layout.root, false)?;
     }
     q.headless = true;
     q.qmp_name = Some(qemu::qmp_name(&scenario.name));
@@ -567,6 +584,11 @@ pub fn run_scenario(image: &Path, layout: &Layout, scenario: &Scenario) -> Resul
     }
     let disk = r.qemu.disk.clone();
     drop(r);
+    // Repaired, the broken root must be as the machine found it: nothing
+    // was written to what it could not mount.
+    if scenario.break_root {
+        image::set_ext2_magic(&disk, layout.root, true)?;
+    }
     image::fsck(&disk, layout.root).with_context(|| {
         format!(
             "scenario '{}': e2fsck -fn on the disk it left",
@@ -713,6 +735,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(image::ext2_state(&img, whole).unwrap(), "not clean");
+    }
+
+    #[test]
+    fn parses_break_root() {
+        let s = parse_scenario("x", "break-root\nexpect a").unwrap();
+        assert!(s.break_root);
+        assert!(!parse_scenario("x", "expect a").unwrap().break_root);
+        assert!(parse_scenario("x", "expect a\nbreak-root").is_err());
+    }
+
+    #[test]
+    fn breaking_the_root_hides_it_until_it_is_restored() {
+        let dir = out_dir().join("e2e-selftest").join("break-root");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("fs.img");
+        crate::util::run(
+            std::process::Command::new("mke2fs")
+                .args(["-q", "-F", "-t", "ext2"])
+                .arg(&img)
+                .arg("1M"),
+        )
+        .unwrap();
+        let whole = Partition {
+            start_lba: 0,
+            sectors: 2048,
+        };
+        image::set_ext2_magic(&img, whole, false).unwrap();
+        assert!(image::fsck(&img, whole).is_err(), "no filesystem found");
+        image::set_ext2_magic(&img, whole, true).unwrap();
+        image::fsck(&img, whole).unwrap();
     }
 
     #[test]
