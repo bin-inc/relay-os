@@ -105,6 +105,24 @@ pub struct SoftOff {
     pub pm1b: Option<(Reg, u8)>,
 }
 
+/// The writes that switch the machine off, given what PM1a and PM1b
+/// control hold: the sleep types into both, then the same with `SLP_EN`, so
+/// PM1b is set up before PM1a starts the sleep (as Linux's
+/// `acpi_hw_legacy_sleep` does).
+pub fn soft_off_writes(off: &SoftOff, current_a: u16, current_b: u16) -> Vec<(Reg, u16)> {
+    let regs = [
+        Some((off.pm1a, current_a)),
+        off.pm1b.map(|b| (b, current_b)),
+    ];
+    let mut writes = Vec::new();
+    for enable in [0, SLP_EN] {
+        for ((reg, typ), current) in regs.iter().flatten() {
+            writes.push((*reg, pm1_sleep_value(*current, *typ) & !SLP_EN | enable));
+        }
+    }
+    writes
+}
+
 /// What `poweroff` writes, or why it cannot (the reason is logged, and the
 /// machine halts with the safe-to-power-off message).
 pub fn soft_off(fadt: Option<&Fadt>, s5: Option<SleepType>) -> Result<SoftOff, &'static str> {
@@ -220,8 +238,9 @@ pub fn poweroff(test_mode: bool) -> ! {
     let acpi = acpi::get();
     match soft_off(acpi.and_then(|a| a.fadt.as_ref()), acpi.and_then(|a| a.s5)) {
         Ok(off) => {
-            for (reg, typ) in [Some(off.pm1a), off.pm1b].into_iter().flatten() {
-                let value = pm1_sleep_value(read(reg) as u16, typ);
+            let current_a = read(off.pm1a.0) as u16;
+            let current_b = off.pm1b.map_or(0, |(reg, _)| read(reg) as u16);
+            for (reg, value) in soft_off_writes(&off, current_a, current_b) {
                 write(reg, value as u64);
             }
             timer::sleep(ATTEMPT_TIME);
@@ -406,6 +425,37 @@ mod tests {
                 3
             ))
         );
+    }
+
+    #[test]
+    fn both_sleep_types_are_written_before_either_enable() {
+        let a = Reg::Io {
+            port: 0x604,
+            bytes: 2,
+        };
+        let b = Reg::Io {
+            port: 0x608,
+            bytes: 2,
+        };
+        let off = SoftOff {
+            pm1a: (a, 7),
+            pm1b: Some((b, 3)),
+        };
+        // As Linux's acpi_hw_legacy_sleep: SLP_TYP to both, then SLP_EN.
+        assert_eq!(
+            soft_off_writes(&off, 0x0001, 0x0001),
+            [
+                (a, 0x0001 | 7 << 10),
+                (b, 0x0001 | 3 << 10),
+                (a, 0x0001 | 7 << 10 | SLP_EN),
+                (b, 0x0001 | 3 << 10 | SLP_EN),
+            ]
+        );
+        let only_a = SoftOff {
+            pm1a: (a, 0),
+            pm1b: None,
+        };
+        assert_eq!(soft_off_writes(&only_a, 0, 0), [(a, 0), (a, SLP_EN)]);
     }
 
     #[test]
