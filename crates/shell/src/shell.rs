@@ -203,9 +203,10 @@ impl<'a> Shell<'a> {
             }
             // The line runs as written; only its trace is trimmed.
             self.say(format!("+ {}\n", line.trim()).as_bytes());
-            // Before the command runs: `reboot` shuts the disk down, and a
-            // command that hangs leaves at least its name.
+            // On the disk before the command runs: a command that hangs
+            // leaves at least its name.
             self.write_transcript();
+            self.sync();
             status = self.execute(line);
             if status == CANCELLED || self.stopped {
                 break;
@@ -247,11 +248,15 @@ impl<'a> Shell<'a> {
     fn finish(&mut self, status: i32, message: String) -> i32 {
         self.say(message.as_bytes());
         self.write_transcript();
+        self.sync();
+        self.status = status;
+        status
+    }
+
+    fn sync(&mut self) {
         if let Err(e) = self.vfs.sync() {
             self.say(format!("{NAME}: sync failed: {e}\n").as_bytes());
         }
-        self.status = status;
-        status
     }
 }
 

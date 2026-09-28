@@ -5,8 +5,8 @@
 //! screen shows which command printed what. A failing command does not
 //! stop the script; Ctrl-C does. Everything the script shows on the screen,
 //! errors included, also goes into a transcript next to it (`x.sh` →
-//! `x.log`), written as each line ends, so it can be checked afterwards
-//! (`cargo xtask verify-usb`).
+//! `x.log`), written and synced as each line starts and ends, so it can be
+//! checked afterwards (`cargo xtask verify-usb`).
 
 use crate::ctx::{Ctx, getopt, quote, quote_if_needed};
 use alloc::format;
@@ -189,15 +189,17 @@ mod tests {
     }
 
     #[test]
-    fn every_line_is_synced_as_it_ends() {
+    fn every_line_is_synced_as_it_starts_and_ends() {
+        // The trace reaches the disk before the command runs, so a machine
+        // that hangs in it leaves the command's name in the transcript.
         let mut h = Harness::new();
         h.put(
             "/tmp/s.sh",
             b"echo a > /tmp/a\n# nothing\necho b > /tmp/b\n",
         );
         h.run("sh /tmp/s.sh");
-        // Two commands, then `sh` itself.
-        assert_eq!(h.spy.syncs.get(), 3);
+        // Two per command, then `sh` itself.
+        assert_eq!(h.spy.syncs.get(), 5);
         assert_eq!(h.get("/tmp/b"), b"b\n");
     }
 
