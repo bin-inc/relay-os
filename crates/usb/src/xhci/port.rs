@@ -39,7 +39,7 @@ impl<H: Hal> Xhci<H> {
     }
 
     /// Clears the change bits in `bits` (RW1C) and nothing else.
-    fn clear_changes(&self, port: u8, portsc: u32, bits: u32) {
+    pub(super) fn clear_changes(&self, port: u8, portsc: u32, bits: u32) {
         if portsc & bits != 0 {
             let value = portsc_neutral(portsc) | portsc & bits;
             self.regs.set_portsc(&self.hal, port, value);
