@@ -364,6 +364,15 @@ fn copy(ctx: &mut Ctx<'_>, src: &str, dst: &[u8]) -> Result<(), ()> {
             );
             return Err(());
         }
+        // A symbolic link (not followed in milestone 1) or a special
+        // file cannot be read: say so before the destination is touched.
+        Ok((_, st)) if st.kind != FileType::Regular => {
+            ctx.fail(
+                "cp",
+                format_args!("cannot open {} for reading: {}", quote(src), Errno::EINVAL),
+            );
+            return Err(());
+        }
         Ok((node, _)) => node,
         Err(e) => {
             ctx.fail("cp", format_args!("cannot stat {}: {e}", quote(src)));
@@ -638,6 +647,28 @@ mod tests {
                     .into()
             )
         );
+    }
+
+    #[test]
+    fn cp_of_a_symlink_leaves_the_destination_alone() {
+        // Links are not followed in milestone 1 (spec §8.1), so the source
+        // cannot be read; the destination must not be emptied first.
+        let mut fs = memfs();
+        let root = vfs::FileSystem::root(&fs);
+        fs.symlink(root, b"link", b"/etc/motd").unwrap();
+        let mut h = Harness::on(fs);
+        h.put("/tmp/b", b"keep");
+        assert_eq!(
+            h.run("cp /link /tmp/b"),
+            (
+                1,
+                "cp: cannot open '/link' for reading: Invalid argument\n".into()
+            )
+        );
+        assert_eq!(h.get("/tmp/b"), b"keep");
+        assert!(!h.exists("/tmp/link"));
+        h.run("cp /link /tmp");
+        assert!(!h.exists("/tmp/link"));
     }
 
     #[test]
