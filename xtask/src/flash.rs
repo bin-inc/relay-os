@@ -3,8 +3,9 @@
 //! run before any write. These commands never call sudo.
 
 use crate::build::Artifacts;
+use crate::checks::{self, Machine};
 use crate::config::{USB_BY_ID, USB_MAX_BYTES, USB_SERIAL};
-use crate::image::{self, Layout, e2fs_target};
+use crate::image::{self, Layout, Partition, e2fs_target};
 use crate::util::{out_dir, run, run_stdout};
 use anyhow::{Context, Result, bail};
 use std::fs;
@@ -196,33 +197,58 @@ pub fn flash_full(art: &Artifacts, cmdline: &str, yes: bool) -> Result<()> {
     Ok(())
 }
 
-/// Recursively lists an ext2 tree with debugfs (`ls -p` output is
-/// `/inode/mode/uid/gid/name/size/`).
-fn list_tree(target: &str, dir: &str, out: &mut Vec<String>) -> Result<()> {
+/// One entry of an ext2 directory, as debugfs lists it.
+struct Entry {
+    name: String,
+    mode: u32,
+    uid: String,
+    gid: String,
+    size: String,
+}
+
+/// The entries of `dir` with debugfs (`ls -p` output is
+/// `/inode/mode/uid/gid/name/size/`), without `.`, `..` and `lost+found`.
+/// A missing directory has none (debugfs reports it on stderr).
+fn list_dir(target: &str, dir: &str) -> Result<Vec<Entry>> {
     let text = run_stdout(
         Command::new("debugfs")
             .arg("-R")
             .arg(format!("ls -p \"{dir}\""))
             .arg(target),
     )?;
-    for line in text.lines() {
-        let f: Vec<&str> = line.split('/').collect();
-        if f.len() < 7 || f[5] == "." || f[5] == ".." || f[5] == "lost+found" {
-            continue;
-        }
-        let mode = u32::from_str_radix(f[2], 8).unwrap_or(0);
+    Ok(text
+        .lines()
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split('/').collect();
+            if f.len() < 7 || f[5] == "." || f[5] == ".." || f[5] == "lost+found" {
+                return None;
+            }
+            Some(Entry {
+                name: f[5].to_string(),
+                mode: u32::from_str_radix(f[2], 8).unwrap_or(0),
+                uid: f[3].to_string(),
+                gid: f[4].to_string(),
+                size: f[6].to_string(),
+            })
+        })
+        .collect())
+}
+
+/// Recursively lists an ext2 tree with debugfs.
+fn list_tree(target: &str, dir: &str, out: &mut Vec<String>) -> Result<()> {
+    for e in list_dir(target, dir)? {
         let path = if dir == "/" {
-            format!("/{}", f[5])
+            format!("/{}", e.name)
         } else {
-            format!("{dir}/{}", f[5])
+            format!("{dir}/{}", e.name)
         };
-        let is_dir = mode & 0o170000 == 0o040000;
+        let is_dir = e.mode & 0o170000 == 0o040000;
         out.push(format!(
             "{:06o} {:>4}:{:<4} {:>10}  {path}{}",
-            mode,
-            f[3],
-            f[4],
-            f[6],
+            e.mode,
+            e.uid,
+            e.gid,
+            e.size,
             if is_dir { "/" } else { "" }
         ));
         if is_dir {
@@ -232,7 +258,55 @@ fn list_tree(target: &str, dir: &str, out: &mut Vec<String>) -> Result<()> {
     Ok(())
 }
 
-/// `verify-usb`: e2fsck the stick's root and print its file tree.
+/// Where the NUC's check scripts are (`rootfs/root/checks/`).
+pub const CHECKS_DIR: &str = "/root/checks";
+
+/// Checks the transcript of every script in `CHECKS_DIR` on the ext2 root
+/// `root` of `target` as written on `machine` (spec §15 item 12). Returns
+/// the lines to print and whether every transcript there passed; a script
+/// without a transcript was not run, which is reported but not a failure.
+pub fn check_transcripts(
+    target: &Path,
+    root: Partition,
+    machine: Machine,
+    scratch: &Path,
+) -> Result<(Vec<String>, bool)> {
+    let mut scripts: Vec<String> = list_dir(&e2fs_target(target, root), CHECKS_DIR)?
+        .into_iter()
+        .map(|e| e.name)
+        .filter(|n| n.ends_with(".sh"))
+        .collect();
+    scripts.sort();
+    let (mut out, mut ok) = (Vec::new(), true);
+    for name in scripts {
+        let path = format!("{CHECKS_DIR}/{name}");
+        let log = shell::commands::transcript_name(&path);
+        let read = |p: &str| -> Result<Option<String>> {
+            Ok(image::read_ext2_file(target, root, p, scratch)?
+                .map(|d| String::from_utf8_lossy(&d).into_owned()))
+        };
+        let script = read(&path)?.with_context(|| format!("{path}: cannot read it"))?;
+        let Some(transcript) = read(&log)? else {
+            out.push(format!("{path}: not run (no {log})"));
+            continue;
+        };
+        let report = checks::check(&checks::parse(&script, machine)?, &transcript);
+        let verdict = if report.ok() { "ok" } else { "FAILED" };
+        out.push(format!(
+            "{path}: {verdict}, {} of {} commands as expected",
+            report.passed, report.commands
+        ));
+        out.extend(report.failures.iter().map(|f| format!("  {f}")));
+        ok &= report.ok();
+    }
+    if out.is_empty() {
+        out.push(format!("no check scripts in {CHECKS_DIR}"));
+    }
+    Ok((out, ok))
+}
+
+/// `verify-usb`: e2fsck the stick's root, print its file tree, and check
+/// the transcripts of the check scripts run on the NUC.
 pub fn verify_usb() -> Result<()> {
     let stick = resolve()?;
     ensure_access(&stick, false)?;
@@ -243,6 +317,18 @@ pub fn verify_usb() -> Result<()> {
     list_tree(&e2fs_target(Stick::target(), root), "/", &mut lines)?;
     for l in lines {
         println!("{l}");
+    }
+    let (report, ok) = check_transcripts(
+        Stick::target(),
+        root,
+        Machine::Nuc,
+        &out_dir().join("verify-usb"),
+    )?;
+    for l in report {
+        println!("{l}");
+    }
+    if !ok {
+        bail!("transcript check FAILED");
     }
     Ok(())
 }
@@ -272,6 +358,78 @@ pub fn setup_udev() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::image::Partition;
+
+    /// An ext2 image holding `files` (path, contents) under its root.
+    fn ext2_with(dir: &Path, files: &[(&str, &str)]) -> (PathBuf, Partition) {
+        let _ = fs::remove_dir_all(dir);
+        for (path, text) in files {
+            let p = dir.join("staging").join(path.trim_start_matches('/'));
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, text).unwrap();
+        }
+        fs::create_dir_all(dir.join("staging")).unwrap();
+        let img = dir.join("fs.img");
+        run(Command::new("mke2fs")
+            .args(["-q", "-F", "-t", "ext2", "-d"])
+            .arg(dir.join("staging"))
+            .arg(&img)
+            .arg("1M"))
+        .unwrap();
+        let whole = Partition {
+            start_lba: 0,
+            sectors: 2048,
+        };
+        (img, whole)
+    }
+
+    #[test]
+    fn transcripts_of_the_check_scripts_are_checked_as_on_the_nuc() {
+        let dir = out_dir().join("verify-usb-selftest");
+        let (img, root) = ext2_with(
+            &dir,
+            &[
+                (
+                    "/root/checks/a.sh",
+                    "uname\n#> Relay\ndmesg\n#nuc> .*Kingston.*\n#qemu> .*QEMU.*\n",
+                ),
+                (
+                    "/root/checks/a.log",
+                    "+ uname\nRelay\n+ dmesg\ndisk Kingston DataTraveler 3.0\n",
+                ),
+                ("/root/checks/b.sh", "cat /root/notes/a\n#> remember me\n"),
+                ("/root/checks/b.log", "+ cat /root/notes/a\nforgotten\n"),
+                ("/root/checks/c.sh", "ls\n"),
+                ("/root/checks/notes.txt", "not a script"),
+            ],
+        );
+        let (lines, ok) = check_transcripts(&img, root, Machine::Nuc, &dir).unwrap();
+        assert!(!ok);
+        assert_eq!(
+            lines,
+            [
+                "/root/checks/a.sh: ok, 2 of 2 commands as expected",
+                "/root/checks/b.sh: FAILED, 0 of 1 commands as expected",
+                "  line 1: `cat /root/notes/a`: expected /remember me/, printed `forgotten` (line 1)",
+                "/root/checks/c.sh: not run (no /root/checks/c.log)",
+            ]
+        );
+        let (lines, ok) = check_transcripts(&img, root, Machine::Qemu, &dir).unwrap();
+        assert!(!ok);
+        assert!(
+            lines[0].starts_with("/root/checks/a.sh: FAILED, 1 of 2"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_stick_without_check_scripts_passes() {
+        let dir = out_dir().join("verify-usb-selftest-empty");
+        let (img, root) = ext2_with(&dir, &[("/root/README", "hi")]);
+        let (lines, ok) = check_transcripts(&img, root, Machine::Nuc, &dir).unwrap();
+        assert!(ok);
+        assert_eq!(lines, ["no check scripts in /root/checks"]);
+    }
 
     fn ok_facts() -> DeviceFacts<'static> {
         DeviceFacts {
