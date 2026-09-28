@@ -55,6 +55,24 @@ pub fn root_text(disk: &str, number: u32, bytes: u64) -> String {
     format!("ext2 on {disk} partition {number}, {}", size_text(bytes))
 }
 
+/// How the root disk was chosen (spec §6.5): a log line when it has the
+/// boot partition, a warning for the screen when it is the fallback.
+pub fn choice_text(disk: &str, fallback: bool, boot: Option<Guid>) -> String {
+    const FALLBACK: &str = "the first disk with one ESP and one Linux partition";
+    match (fallback, boot.filter(|g| !g.is_zero())) {
+        (false, Some(g)) => {
+            format!("storage: root on {disk}, the disk with the boot partition {g}")
+        }
+        (false, None) => format!("storage: root on {disk}"),
+        (true, Some(g)) => format!(
+            "mount /: warning: no disk has the boot partition {g}; using {disk}, {FALLBACK}"
+        ),
+        (true, None) => format!(
+            "mount /: warning: the loader did not name the boot partition; using {disk}, {FALLBACK}"
+        ),
+    }
+}
+
 /// Startup step 9: the root filesystem, or the empty read-only `/` of spec
 /// §10 if there is none. Prints the `mount /` status line.
 pub fn mount_root(boot: Option<[u8; 16]>) -> Box<dyn FileSystem> {
@@ -107,11 +125,11 @@ fn try_mount_root(boot: Option<Guid>) -> Result<Mounted, String> {
         fallback,
     } = root::choose_root(&gpts, boot).map_err(|e| format!("{e}"))?;
     let dev: UsbDisk = disks.swap_remove(disk);
+    let how = choice_text(&dev.name, fallback, boot);
     if fallback {
-        kprintln!(
-            "mount /: warning: no disk has the boot partition; using {}",
-            dev.name
-        );
+        kprintln!("{how}");
+    } else {
+        klogln!("{how}");
     }
     let bytes =
         (partition.last_lba - partition.first_lba + 1).saturating_mul(dev.block_size() as u64);
@@ -240,6 +258,28 @@ mod tests {
         assert_eq!(size_text(15_501_000_000), "14.4 GiB");
         assert_eq!(size_text(30_277_632 * 512), "14.4 GiB");
         assert_eq!(size_text(u64::MAX), "17179869183.9 GiB");
+    }
+
+    #[test]
+    fn how_the_root_was_chosen_is_said() {
+        let esp = crate::block::gpt::Guid::from_fields(
+            0x5245_4C41,
+            0x5900,
+            0x4000,
+            [0x80, 0, 0, 0, 0, 0, 0, 0x02],
+        );
+        assert_eq!(
+            choice_text("00:02.0 port 2", false, Some(esp)),
+            "storage: root on 00:02.0 port 2, the disk with the boot partition 52454C41-5900-4000-8000-000000000002"
+        );
+        assert_eq!(
+            choice_text("00:14.0 port 15", true, Some(esp)),
+            "mount /: warning: no disk has the boot partition 52454C41-5900-4000-8000-000000000002; using 00:14.0 port 15, the first disk with one ESP and one Linux partition"
+        );
+        assert_eq!(
+            choice_text("00:14.0 port 15", true, None),
+            "mount /: warning: the loader did not name the boot partition; using 00:14.0 port 15, the first disk with one ESP and one Linux partition"
+        );
     }
 
     #[test]

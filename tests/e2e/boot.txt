@@ -20,6 +20,9 @@ expect usb: 00:02\.0 port 2: 46f4:0001 SuperSpeed, disk QEMU QEMU HARDDISK, 256 
 expect usb: 00:02\.0 port 5: 0627:0001 high-speed, keyboard
 expect \[ ok \] usb: 1 controller, 2 devices
 expect \[ ok \] keyboard: 1 keyboard
+# The root was found by the ESP's partition GUID from the loader (the
+# image's fixed GUID, xtask/src/config.rs), not by the fallback.
+expect storage: root on 00:02\.0 port 2, the disk with the boot partition 52454C41-5900-4000-8000-000000000002
 expect \[ ok \] mount /: ext2 on 00:02\.0 port 2 partition 2, 190 MiB
 expect \nWelcome to Relay OS\.\n
 expect root@relay:~# $
