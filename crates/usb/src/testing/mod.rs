@@ -1,14 +1,19 @@
 //! Test support: a fake `Hal` with virtual time and checked DMA memory,
-//! and the fake xHCI controller behind its registers.
+//! the fake xHCI controller behind its registers, and the fake devices on
+//! its ports.
 // Helpers serve tests across the crate; not every build uses all of them.
 #![allow(dead_code)]
 
+mod bus;
 mod device;
 mod hal;
+mod storage;
 mod xhci;
 
+pub use bus::TamperBus;
 pub use device::FakeUsbDevice;
 pub use hal::{FAKE_BAR, FAKE_BAR_LEN, FakeHal};
+pub use storage::{Event, FakeStorage, configured, op};
 pub use xhci::{ExtCap, FakeCap, FakeConfig};
 
 use crate::xhci::Xhci;
