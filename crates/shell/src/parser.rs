@@ -1,10 +1,12 @@
 //! The command-line parser (spec §7.3).
 //!
 //! Words are split on spaces and tabs. `'…'` is literal; `"…"` is literal
-//! except that `\"` and `\\` stand for `"` and `\`; outside quotes `\`
-//! makes the next character literal. `> file` and `>> file` redirect
-//! standard output (at most one per command). An unquoted `~` alone or
-//! before `/` at the start of a word means `/root`, as in Linux. Every other
+//! except that `\"`, `\\`, `\$` and `` \` `` stand for the second
+//! character, and a bare `$` or `` ` `` in it is refused as outside quotes
+//! (bash would expand it); outside quotes `\` makes the next character
+//! literal. `> file` and `>> file` redirect standard output (at most one
+//! per command). An unquoted `~` alone or before `/` at the start of a word
+//! means `/root`, as in Linux. Every other
 //! shell feature is refused: an unquoted `|`, `;`, `&`, `$`, `*`, `?`, `<`,
 //! `` ` ``, `(` or `)` is an error naming the character, instead of being
 //! passed on as if it were plain text; so is `2>` (another stream).
@@ -141,9 +143,10 @@ pub fn parse(line: &str) -> Result<Command, ParseError> {
                 loop {
                     match chars.next() {
                         Some('"') => break,
-                        Some('\\') if matches!(chars.peek(), Some('"' | '\\')) => {
+                        Some('\\') if matches!(chars.peek(), Some('"' | '\\' | '$' | '`')) => {
                             word.text.push(chars.next().expect("peeked"));
                         }
+                        Some(c @ ('$' | '`')) => return Err(ParseError::Unsupported(c.into())),
                         Some(c) => word.text.push(c),
                         None => return Err(ParseError::UnterminatedQuote),
                     }
@@ -205,12 +208,34 @@ mod tests {
     }
 
     #[test]
-    fn double_quotes_take_two_escapes() {
+    fn double_quotes_take_four_escapes() {
         assert_eq!(
-            words(r#"echo "say \"hi\"" "a\\b" "c\d" "x'y""#),
-            ["echo", r#"say "hi""#, r"a\b", r"c\d", "x'y"]
+            words(r#"echo "say \"hi\"" "a\\b" "c\d" "x'y" "* ?""#),
+            ["echo", r#"say "hi""#, r"a\b", r"c\d", "x'y", "* ?"]
         );
-        assert_eq!(words(r#"echo "$ * ?""#), ["echo", "$ * ?"]);
+        assert_eq!(
+            words(r#"echo "\$HOME costs \`1\`""#),
+            ["echo", "$HOME costs `1`"]
+        );
+    }
+
+    #[test]
+    fn dollar_and_backquote_inside_double_quotes_are_unsupported() {
+        // Bash expands them there too; passing them on as text would
+        // print something bash never prints.
+        assert_eq!(
+            parse(r#"echo "$HOME""#),
+            Err(ParseError::Unsupported("$".into()))
+        );
+        assert_eq!(
+            parse(r#"echo "a $ b""#),
+            Err(ParseError::Unsupported("$".into()))
+        );
+        assert_eq!(
+            parse(r#"echo "`date`""#),
+            Err(ParseError::Unsupported("`".into()))
+        );
+        assert_eq!(words(r"echo '$HOME `x`'"), ["echo", "$HOME `x`"]);
     }
 
     #[test]
