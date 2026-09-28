@@ -6,6 +6,31 @@ stores files on the stick's ext2 root filesystem.
 
 Design: `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`
 
+## Quick start
+
+In QEMU, on any Linux machine with the tools below:
+
+```sh
+cargo xtask test      # unit tests, then every QEMU scenario (a few minutes)
+cargo xtask qemu      # boot it in a window; type `help` at the prompt
+```
+
+On the Intel NUC 12 Pro with the Kingston test stick (`docs/hardware-test.md`
+has the whole checklist):
+
+1. Once: `cargo xtask setup-udev`, run the three `sudo` commands it prints,
+   and replug the stick.
+2. `cargo xtask flash --full` and type `ERASE` (this erases the stick).
+3. Reboot, press F10 and choose the UEFI entry for the Kingston stick. Every
+   startup line says `[ ok ]` and the prompt `root@relay:~# ` follows.
+4. Type `sh checks/check3-a.sh`, then `reboot`, boot the stick again, type
+   `sh checks/check3-b.sh`, then `poweroff`.
+5. Back in Linux Mint: `cargo xtask verify-usb` checks the filesystem and
+   the output of both scripts.
+
+After a code change, `cargo xtask flash --kernel` replaces only the loader
+and the kernel and keeps the files on the stick.
+
 ## Requirements (host)
 
 Linux with `rustup`, `qemu-system-x86_64`, OVMF (`/usr/share/OVMF`),
@@ -25,7 +50,7 @@ toolchain and targets are installed automatically from `rust-toolchain.toml`.
 | `cargo xtask host-shell <img>` | Run the shell on this machine over the image's ext2 partition (changes it in place; `poweroff` leaves) |
 | `cargo xtask flash --full` | Erase and write the Kingston test stick |
 | `cargo xtask flash --kernel` | Update loader and kernel on the stick, keep files |
-| `cargo xtask verify-usb` | `e2fsck` the stick and list its files |
+| `cargo xtask verify-usb` | `e2fsck` the stick, list its files and check the transcripts of the check scripts |
 
 Set `RELAY_QEMU_ACCEL=tcg` to run QEMU without KVM.
 
@@ -48,10 +73,10 @@ the `e2e-logs` artefact. Hardware checks on the NUC stay manual
 | `crates/term` | Framebuffer text terminal |
 | `crates/vfs` | Error numbers, block-device and filesystem traits, paths, mount table, in-memory filesystem |
 | `crates/ext2` | ext2 driver with its block cache |
-| `crates/shell` | Line editor, parser and built-in commands |
+| `crates/shell` | Line editor, parser, built-in commands and scripts (`sh FILE`) |
 | `crates/usb` | xHCI host controller driver, HID boot keyboard and USB mass storage (BOT, SCSI), over a `Hal` trait |
 | `xtask/` | Build, image, QEMU, test and flash tool |
-| `rootfs/` | Files copied into `/` |
+| `rootfs/` | Files copied into `/`, among them the NUC check scripts in `root/checks/` |
 | `tests/e2e/` | QEMU end-to-end scenarios |
 | `docs/hardware-test.md` | Manual checklist for the NUC |
 | `.github/` | CI workflow and pull-request template |
