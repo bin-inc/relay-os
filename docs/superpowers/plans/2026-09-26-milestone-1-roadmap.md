@@ -53,10 +53,21 @@ Plan 3 has no dependency on plans 1–2 beyond the workspace. It can be executed
   - `check=timer` after a timer failure blames the RTC.
   - A 64-bit BAR in the last BAR slot is reported as `mem32`.
   - Plan 2's text for `timer::sleep` is stale: a review fix (`e27389a`) made it busy-wait on the TSC; the code is the reference.
-- **Deferred findings from plan 3's final review (plan 6).** Shell and ext2 minors, none of which plan 4's empty `/` can reach:
+- **Deferred findings from plan 3's final review (plan 6).** Shell and ext2 minors. Plan 4's empty `/` could reach none of them; plan 5's real `/` can, but its scenarios do not depend on them:
   - big directories are quadratic in `ls` and `rm -r` (20,000 files: `ls` 2.9 s, `rm -r` 5.8 s), and `read_dir` holds a whole directory in memory;
   - `rm -r` of a relative path that contains the current directory stops partway (GNU removes everything);
   - `cat` keeps reading its inputs after its output file is full (GNU stops at the first write error);
   - `cp` empties the destination before finding that a non-regular source cannot be read;
   - the parser passes an unquoted `#` (there are no comments) and a `$` inside double quotes through literally instead of refusing them.
+- **Deferred findings from plan 4's final review (plan 6).** USB and console minors (plan 4's M4, a failed device setup never tried again, is fixed in plan 5):
+  - M1: a full 4 KiB input queue drops a Ctrl-C and can cut an escape sequence in two;
+  - M5: a controller whose run times out is freed without confirming it halted (bus mastering stays on);
+  - M6: the first port scan logs empty ports as "disconnected";
+  - M7: the attach "debounce" is a fixed 100 ms sleep, not a stable-for-100-ms check.
+- **What plan 5 leaves for plan 6.** NUC check 3 is the first time the kernel writes the Kingston stick; its results decide these:
+  - A stick that reports a wrong residue on good reads and writes (Linux's `US_FL_IGNORE_RESIDUE`) would fail every request after three tries, because plan 5 treats a residue as an error.
+  - Bulk transfers time out after 5 s (spec §6.2); Linux allows 30 s, and slow flash may need longer for a big write or `SYNCHRONIZE CACHE`.
+  - `/` is not mounted again after the stick is unplugged or its link glitches (spec §15 item 11): it answers `EIO` until the next boot.
+  - Disks over 2^32 blocks are refused (no READ(16)/WRITE(16)).
+  - The fakes model no packet-level behaviour (zero-length packets, short packets that are an exact multiple of the packet size, data before a stall).
 - **Heap free-list links as `Option<NonNull<…>>` (plan 6).** CodeQL's `rust/access-invalid-pointer` reports ten alerts in `kernel/src/mm/heap.rs` (code-scanning alerts 1–10). They are false positives: the only invalid pointers are the `ptr::null_mut()` list-end markers, and every dereference sits behind an `is_null()` check (a loop condition or a branch) that CodeQL does not model. Plan 6 changes the free-list links (`Heap::classes`, `Heap::large`, `FreeBlock::next` and the `prev` pointers of the list walks) to `Option<NonNull<…>>`, so the compiler enforces those checks and the alerts close for a real reason. The heap's randomized host test and every QEMU scenario must stay green. The alerts stay open until then.

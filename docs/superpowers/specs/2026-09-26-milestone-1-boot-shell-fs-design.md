@@ -1052,3 +1052,114 @@ Each step ends with something that can be tested.
      port 10; the Unifying receiver's EP0 is 8 bytes. So 64-byte contexts
      and fixing EP0's packet size with Evaluate Context are covered only by
      host tests.
+11. **Decisions made while planning plan 5** (USB storage and `/`):
+   - **Bulk transfers are waited for** (refines §6.2 and plan 4's `Bus`).
+     `Bus::bulk_in` and `bulk_out` block like `control`, for 5 s at most; a
+     storage request blocks by nature. Every bulk endpoint has a 64 KiB
+     buffer aligned to 64 KiB, so one Normal TRB covers any transfer without
+     crossing a 64 KiB boundary (xHCI 6.4.1.1). A transfer on a halted
+     endpoint fails with `Stall` at once, since the controller ignores its
+     doorbell. A transfer that times out is aborted (Stop Endpoint, Set TR
+     Dequeue Pointer) before the call returns; if the abort fails, the
+     endpoint takes no transfer until `clear_halt` has repositioned its
+     ring, and its buffer is freed only with its slot. A bulk transfer on a
+     port that no longer shows a connection is `Disconnected`. `clear_halt`
+     on an endpoint that is not halted drops and re-adds it with a Configure
+     Endpoint, so the controller resets its data toggle or sequence number
+     as the device does on `CLEAR_FEATURE(ENDPOINT_HALT)` (xHCI 4.6.8; Reset
+     Endpoint only applies to a halted endpoint). EP0, like a bulk endpoint,
+     is not used again after its abort failed until repositioning it
+     succeeds. `Bus` also gains `sleep`.
+   - **Mass storage details** (§6.4). `GET_MAX_LUN` that stalls or fails
+     means one LUN; only LUN 0 is used. INQUIRY must report a direct-access
+     device. TEST UNIT READY is tried every 100 ms for up to 5 s, with
+     REQUEST SENSE after each failure; no medium fails at once. Block sizes
+     of 512 to 4096 bytes are accepted; a disk of more than 2^32 blocks is
+     refused, because READ(10) and WRITE(10) cannot reach further (READ
+     CAPACITY(16) is used to learn the size). A command is tried three times
+     at most; ILLEGAL REQUEST is not retried, and a device or controller
+     that is gone ends the request at once. For READ and WRITE a short data
+     phase or a residue is an error. A stick that refuses SYNCHRONIZE CACHE
+     with ILLEGAL REQUEST has no cache to flush: `flush` succeeds and the
+     command is not sent again. A disk whose command gets no answer in its
+     three tries is given up: every later request fails at once until the
+     stick is plugged in again, so a hung stick cannot stall every shell
+     command for minutes (the block cache writes each dirty block again on
+     every sync). A disk that fails to start does not make its device's
+     setup fail; the boot line says `disk not started: <reason>`.
+   - **Disks come and go with their device.** Each disk has an id that is
+     never reused, so a request for a stick that was unplugged fails with
+     `EIO` instead of reaching another device, even one plugged into the
+     same port. `/` is not mounted again in milestone 1: after the stick is
+     unplugged, `/` answers `EIO` until the next boot. The boot line names
+     the disk: `port 15: 0951:1666 SuperSpeed, disk Kingston DataTraveler
+     3.0, 14.4 GiB` (sizes in whole MiB under 1 GiB, in GiB with one decimal
+     above, rounded down), or `disk not started: <reason>`.
+   - **A failed device setup is tried again** (plan 4's deferred finding
+     M4): up to three times in all, each try resetting the port afresh,
+     unless the device is gone or the controller stopped working. Each
+     failed try is logged; the boot line shows the outcome.
+   - **GPT details** (§6.5, UEFI 2.10 §5.3). A header is accepted only with
+     its signature, a size of 92 bytes up to a block, its CRC32, its own
+     LBA, the usable range and entry array inside the disk, entries of at
+     least 128 bytes in multiples of 8, an entry array of at most 1 MiB and
+     the array's CRC32. When the primary header is bad the backup is read
+     from the disk's last block; when only the primary's entry array is bad,
+     from the primary's alternate LBA. Unused entries and entries outside
+     the usable range are skipped. "Exactly one ESP and one Linux partition"
+     in the fallback means one partition of each of those types; other types
+     do not count. A boot disk without a Linux partition is an error, not a
+     reason to fall back; a zero boot GUID counts as none; of two disks with
+     the boot partition the first wins.
+   - **The `mount /` line and the read-only retry** (§4.4 step 9, §10). `[
+     ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 14.3 GiB`. If the
+     read-write mount fails with `EIO` the root is mounted read-only and the
+     line is `[FAIL] mount /: Input/output error; mounted read-only, ext2 on
+     …`: the files can be read, and the photo shows something is wrong. Only
+     if that fails too, or there is no root, is it `[FAIL] mount /:
+     <reason>` with the empty read-only `/`. A damaged primary GPT and the
+     root fallback each get a warning line on the screen; otherwise the log
+     says `storage: root on <disk>, the disk with the boot partition
+     <GUID>`.
+   - **Reboot and power-off details** (§7.4). The FADT reset register is
+     used only when it is in I/O or memory space (a memory register aligned
+     to its width), whole bytes from bit 0; each way of restarting or
+     switching off gets half a second before the next, and `reboot` prints
+     `relay: restarting through <method>` before each. PM1 control is read
+     and its sleep type and enable bits replaced: the sleep types go into
+     PM1a and PM1b first, then the same values with `SLP_EN`, as Linux does.
+     Test mode's exit writes 0x10 to `isa-debug-exit`, so QEMU exits with
+     status 33. `poweroff` prints `relay: powering off` first; when
+     switching off fails the reason is printed above the safe-to-power-off
+     message.
+   - **A long command needs no extra polling for Ctrl-C.** The shell already
+     calls `Console::interrupted` between the 64 KiB pieces of `cp`, `cat`
+     and the like, and that polls the keyboards; while a disk request runs,
+     the xHCI driver keeps recording key reports.
+   - **The e2e runner** (§9.3). `reboot [<regex>]` waits for QEMU to exit as
+     after a reset (`-no-reboot`, status 0), after printing `<regex>` if
+     given, and starts it again on the same disk, continuing the serial log;
+     `poweroff` waits for test mode's exit (status 33). After both,
+     `dumpe2fs -h` must say the root is `clean`. `e2fsck -fn` runs on the
+     disk every scenario leaves, after QEMU is stopped; a filesystem only
+     marked not clean passes, as e2fsck 1.47 treats it. New: the directives
+     `disk small` (an image whose ext2 root is 32 MiB, for `diskfull`) and
+     `break-root` (the root's ext2 magic zeroed while the scenario runs,
+     then restored for `e2fsck`), the step `file-lines <path> <bytes>
+     <line>` (read with `debugfs dump` once the machine is off), and the
+     scenarios `power` and `mount_fail` (spec §10's empty read-only `/`).
+     Scenarios build big files by doubling, because COM1 input passes
+     through the 4 KiB input queue.
+   - **What QEMU 8.2's `usb-storage` really answers** (checked by booting
+     it): INQUIRY `QEMU` / `QEMU HARDDISK` / `2.5+`, 524,288 blocks of 512
+     bytes for the 256 MiB image, bulk endpoints of 1024 bytes with bursts
+     of 16, and no unit attention at start. The Kingston DataTraveler 3.0
+     answers INQUIRY `Kingston` / `DataTraveler 3.0` / `PMAP` (removable,
+     SPC-4) and has 30,277,632 blocks of 512 bytes, as Linux reports it; its
+     bulk endpoints are 1024 bytes with bursts of 4.
+   - **Deferred review findings.** Plan 4's final-review minors M1, M5, M6
+     and M7 (a full input queue drops a Ctrl-C; a controller whose run times
+     out is freed without confirming it halted; the first port scan logs
+     empty ports as disconnected; the fixed 100 ms debounce) go to the
+     roadmap for plan 6; M4 is decision 4. Plan 3's shell and ext2 minors
+     stay with plan 6: the new scenarios do not depend on them.
