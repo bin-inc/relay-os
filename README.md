@@ -49,6 +49,7 @@ the `e2e-logs` artefact. Hardware checks on the NUC stay manual
 | `crates/vfs` | Error numbers, block-device and filesystem traits, paths, mount table, in-memory filesystem |
 | `crates/ext2` | ext2 driver with its block cache |
 | `crates/shell` | Line editor, parser and built-in commands |
+| `crates/usb` | xHCI host controller driver and HID boot keyboard, over a `Hal` trait |
 | `xtask/` | Build, image, QEMU, test and flash tool |
 | `rootfs/` | Files copied into `/` |
 | `tests/e2e/` | QEMU end-to-end scenarios |

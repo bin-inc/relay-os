@@ -8,6 +8,7 @@ mod flash;
 mod font;
 mod host_shell;
 mod image;
+mod keys;
 mod qemu;
 mod qmp;
 mod util;

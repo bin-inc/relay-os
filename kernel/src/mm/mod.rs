@@ -178,6 +178,38 @@ fn heap_self_test() {
     assert!(v.iter().enumerate().all(|(i, &x)| x == i as u32));
 }
 
+/// Frames and frame alignment for a DMA buffer of `size` bytes aligned to
+/// `align` bytes: whole frames, and at least frame-aligned.
+pub fn dma_frames(size: usize, align: usize) -> (usize, usize) {
+    let frame = FRAME_SIZE as usize;
+    (size.max(1).div_ceil(frame), align.div_ceil(frame).max(1))
+}
+
+/// Zeroed, physically contiguous memory for device DMA (the USB stack's
+/// rings, contexts and buffers): whole frames, aligned to `align` bytes or
+/// a frame. Frames are RAM, so the linear map covers them, write-back
+/// (x86 DMA is cache-coherent). Returns the virtual and physical address.
+pub fn alloc_dma(size: usize, align: usize) -> Option<(core::ptr::NonNull<u8>, u64)> {
+    let (count, align) = dma_frames(size, align);
+    if !align.is_power_of_two() {
+        return None;
+    }
+    let phys = MEMORY.lock().as_mut()?.frames.alloc(count, align)?;
+    let virt = (PHYS_OFFSET + phys) as *mut u8;
+    // SAFETY: fresh frames, mapped through the linear map, owned by the
+    // caller from now on.
+    unsafe { core::ptr::write_bytes(virt, 0, count * FRAME_SIZE as usize) };
+    Some((core::ptr::NonNull::new(virt)?, phys))
+}
+
+/// Gives back memory from `alloc_dma` of the same `size`.
+pub fn free_dma(phys: u64, size: usize) {
+    let (count, _) = dma_frames(size, 1);
+    if let Some(m) = MEMORY.lock().as_mut() {
+        m.frames.free(phys, count);
+    }
+}
+
 /// Maps device memory (or firmware tables) at `PHYS_OFFSET + phys` with the
 /// given cache type and returns a pointer to `phys`. Mapping a range again
 /// the same way is fine; mapping it with a different cache type is an error.
@@ -194,4 +226,18 @@ pub fn map_mmio(phys: u64, len: u64, cache: Cache) -> Result<*mut u8, MapError> 
         .map(&mut mem, PHYS_OFFSET + start, start, end - start, cache)?;
     x86_64::instructions::tlb::flush_all();
     Ok((PHYS_OFFSET + phys) as *mut u8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dma_buffers_take_whole_aligned_frames() {
+        assert_eq!(dma_frames(1, 64), (1, 1));
+        assert_eq!(dma_frames(4096, 4096), (1, 1));
+        assert_eq!(dma_frames(4097, 16), (2, 1));
+        assert_eq!(dma_frames(0, 0), (1, 1));
+        assert_eq!(dma_frames(8192, 65536), (2, 16));
+    }
 }

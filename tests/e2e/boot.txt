@@ -15,6 +15,11 @@ expect \[ ok \] rtc: 20\d\d-\d\d-\d\d \d\d:\d\d:\d\d UTC
 expect pci: 00:00\.0 8086:29c0 060000 host bridge
 expect pci: 00:02\.0 1b36:000d 0c0330 USB xHCI, bar0 mem64 0x[0-9a-f]+ 16K
 expect \[ ok \] pci: \d+ devices on bus 00, xHCI at 00:02\.0
+expect usb: 00:02\.0 xHCI 1\.00, 8 ports \(4 USB 2, 4 USB 3\), 32-byte contexts, 0 scratchpads
+expect usb: 00:02\.0 port 2: 46f4:0001 SuperSpeed, not claimed
+expect usb: 00:02\.0 port 5: 0627:0001 high-speed, keyboard
+expect \[ ok \] usb: 1 controller, 2 devices
+expect \[ ok \] keyboard: 1 keyboard
 expect \[FAIL\] mount /: no storage driver yet
 expect root@relay:/# $
 screenshot-nonblank

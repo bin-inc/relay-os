@@ -242,6 +242,20 @@ pub fn tsc_hz() -> u64 {
     TSC_HZ.load(Ordering::Relaxed)
 }
 
+/// The time `cycles` TSC cycles take at `tsc_hz`.
+pub fn cycles_to_duration(cycles: u64, tsc_hz: u64) -> Duration {
+    Duration::from_nanos((cycles as u128 * 1_000_000_000 / tsc_hz as u128) as u64)
+}
+
+/// Time since the CPU started, from the TSC, with sub-microsecond
+/// resolution; `None` until `init` has found the TSC's frequency. Unlike
+/// `uptime` it does not depend on the timer interrupt, so timeouts still
+/// expire if the LAPIC timer could not be started.
+pub fn tsc_time() -> Option<Duration> {
+    let hz = tsc_hz();
+    (hz != 0).then(|| cycles_to_duration(rdtsc(), hz))
+}
+
 /// TSC cycles in `d`, rounded up.
 pub fn sleep_cycles(d: Duration, tsc_hz: u64) -> u64 {
     (d.as_nanos() * tsc_hz as u128).div_ceil(1_000_000_000) as u64
@@ -295,6 +309,24 @@ pub fn count_ticks_over(seconds: u64, mut clock: impl FnMut() -> u8) -> Option<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tsc_cycles_become_time() {
+        assert_eq!(
+            cycles_to_duration(2_496_000_000, 2_496_000_000),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            cycles_to_duration(2_496, 2_496_000_000),
+            Duration::from_micros(1)
+        );
+        // Ten years of cycles at 5 GHz do not overflow.
+        let ten_years = 10 * 365 * 86_400;
+        assert_eq!(
+            cycles_to_duration(ten_years * 5_000_000_000, 5_000_000_000),
+            Duration::from_secs(ten_years)
+        );
+    }
 
     #[test]
     fn nuc_cpuid_gives_2496_mhz() {

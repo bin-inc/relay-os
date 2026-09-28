@@ -23,6 +23,9 @@ pub struct Cmdline {
     pub tsc_hpet: bool,
     /// `check=timer`: count timer ticks over three RTC seconds at boot.
     pub check_timer: bool,
+    /// `debug=usb`: the USB stack's log also goes to the screen, for a
+    /// machine whose keyboard does not work (no serial port, no `dmesg`).
+    pub debug_usb: bool,
 }
 
 impl Cmdline {
@@ -33,6 +36,7 @@ impl Cmdline {
                 Some(("test", "1")) => c.test_mode = true,
                 Some(("tsc", "hpet")) => c.tsc_hpet = true,
                 Some(("check", "timer")) => c.check_timer = true,
+                Some(("debug", "usb")) => c.debug_usb = true,
                 Some(("panic", v)) => {
                     c.panic_test = match v {
                         "early" => Some(PanicTest::Early),
@@ -92,8 +96,14 @@ mod tests {
     }
 
     #[test]
+    fn usb_debugging() {
+        assert!(Cmdline::parse("video=1920x1080 debug=usb").debug_usb);
+        assert!(!Cmdline::parse("debug=all").debug_usb);
+    }
+
+    #[test]
     fn unknown_values_are_ignored() {
-        let c = Cmdline::parse("test=0 panic=bogus foo tsc=bogus");
+        let c = Cmdline::parse("test=0 panic=bogus foo tsc=bogus debug=bogus");
         assert_eq!(c, Cmdline::default());
     }
 }

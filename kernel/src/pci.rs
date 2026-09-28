@@ -76,6 +76,12 @@ const MEMORY_SPACE: u32 = 1 << 1;
 const BUS_MASTER: u32 = 1 << 2;
 const BAR0: u16 = 0x10;
 const HEADER_MULTI_FUNCTION: u8 = 0x80;
+/// Status register bit 4 (the upper half of dword 1): a capability list.
+const STATUS_CAPABILITIES: u32 = 1 << 20;
+const CAPABILITIES_POINTER: u16 = 0x34;
+const CAP_POWER_MANAGEMENT: u8 = 0x01;
+/// PMCSR bit 3: the function keeps its configuration from D3hot to D0.
+const NO_SOFT_RESET: u32 = 1 << 3;
 
 /// Reads one function's header and sizes its BARs. `None` if nothing
 /// answers at `a`.
@@ -211,6 +217,64 @@ pub fn enumerate(cfg: &mut impl ConfigSpace, start_bus: u8, end_bus: u8) -> Vec<
 pub fn enable_memory_and_bus_master(cfg: &mut impl ConfigSpace, a: PciAddress) {
     let command = cfg.read32(a, COMMAND) & 0xFFFF;
     cfg.write32(a, COMMAND, command | MEMORY_SPACE | BUS_MASTER);
+}
+
+/// What `wake_to_d0` did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Wake {
+    /// The power state the function was in (0 is D0, 3 is D3hot).
+    pub from: u8,
+    /// Leaving D3hot reset the function (PMCSR's No_Soft_Reset was 0, PCI
+    /// PM 1.2 §5.4.1): its BARs and command register are cleared.
+    pub reset: bool,
+}
+
+/// Puts the function into power state D0 through its PCI Power Management
+/// capability (firmware may leave an unused controller in D3hot, where its
+/// registers read as all ones). `None` without the capability. After a
+/// change from D3hot the device needs 10 ms before it is used (PCI PM 1.2
+/// §5.6.1), and if it was reset, its BARs back (`restore_bars`).
+pub fn wake_to_d0(cfg: &mut impl ConfigSpace, a: PciAddress) -> Option<Wake> {
+    if cfg.read32(a, COMMAND) & STATUS_CAPABILITIES == 0 {
+        return None;
+    }
+    let mut ptr = (cfg.read32(a, CAPABILITIES_POINTER) & 0xFC) as u16;
+    // Capabilities live in 0x40..0x100; a list longer than fits there
+    // loops, so the walk is bounded.
+    for _ in 0..48 {
+        if ptr < 0x40 {
+            return None;
+        }
+        let header = cfg.read32(a, ptr);
+        if header as u8 == CAP_POWER_MANAGEMENT {
+            let pmcsr = cfg.read32(a, ptr + 4);
+            let from = (pmcsr & 0x3) as u8;
+            if from != 0 {
+                // Power state 0; bit 15 (PME status) is write-one-to-clear
+                // and the upper half is read-only, so both are written as 0.
+                cfg.write32(a, ptr + 4, pmcsr & 0x7FFC);
+            }
+            return Some(Wake {
+                from,
+                reset: from == 3 && pmcsr & NO_SOFT_RESET == 0,
+            });
+        }
+        ptr = ((header >> 8) & 0xFC) as u16;
+    }
+    None
+}
+
+/// Writes the BAR addresses enumeration found back, after a wake that
+/// reset the function. Only the address bits are writable, so the type
+/// bits come back by themselves.
+pub fn restore_bars(cfg: &mut impl ConfigSpace, a: PciAddress, bars: &[Bar]) {
+    for b in bars {
+        let off = BAR0 + 4 * b.index as u16;
+        cfg.write32(a, off, b.address as u32);
+        if b.kind == BarKind::Memory64 {
+            cfg.write32(a, off + 4, (b.address >> 32) as u32);
+        }
+    }
 }
 
 /// A short name for common classes.
@@ -357,6 +421,8 @@ impl fmt::Display for PciError {
 }
 
 static DEVICES: spin::Once<Vec<PciDevice>> = spin::Once::new();
+/// The ECAM windows `init` mapped: (physical base of bus 0, first bus, last bus).
+static WINDOWS: spin::Once<Vec<(u64, u8, u8)>> = spin::Once::new();
 
 /// The devices found by `init` (empty before it, or if it failed).
 pub fn devices() -> &'static [PciDevice] {
@@ -368,6 +434,7 @@ pub fn devices() -> &'static [PciDevice] {
 pub fn init(ecam: &[crate::acpi::tables::EcamRegion]) -> Result<&'static [PciDevice], PciError> {
     use crate::mm::{self, paging::Cache};
     let mut found = Vec::new();
+    let mut mapped = Vec::new();
     // A window whose bus range is backwards is firmware garbage.
     let mut windows = ecam
         .iter()
@@ -384,11 +451,39 @@ pub fn init(ecam: &[crate::acpi::tables::EcamRegion]) -> Result<&'static [PciDev
             base: boot_info::PHYS_OFFSET + r.base,
         };
         found.extend(enumerate(&mut cfg, r.start_bus, r.end_bus));
+        mapped.push((r.base, r.start_bus, r.end_bus));
     }
+    WINDOWS.call_once(|| mapped);
     if found.is_empty() {
         return Err(PciError::NoDevices);
     }
     Ok(DEVICES.call_once(|| found))
+}
+
+/// Readies `d` for its driver: power state D0 (waiting 10 ms if it had to
+/// change, and restoring its BARs if that reset it), then memory decoding
+/// and bus mastering. Returns what the wake did, if the function has power
+/// management.
+pub fn enable_device(d: &PciDevice) -> Option<Wake> {
+    let a = d.address;
+    let (base, _, _) = *WINDOWS
+        .get()?
+        .iter()
+        .find(|&&(_, start, end)| (start..=end).contains(&a.bus))?;
+    let mut cfg = Ecam {
+        base: boot_info::PHYS_OFFSET + base,
+    };
+    let wake = wake_to_d0(&mut cfg, a);
+    if let Some(w) = wake
+        && w.from != 0
+    {
+        crate::timer::sleep(core::time::Duration::from_millis(10));
+        if w.reset {
+            restore_bars(&mut cfg, a, &d.bars);
+        }
+    }
+    enable_memory_and_bus_master(&mut cfg, a);
+    wake
 }
 
 #[cfg(test)]
@@ -474,6 +569,21 @@ mod tests {
                     (value & mask) | (f.regs[i] & flags & !mask)
                 };
             } else {
+                // Power management control at 0x84 (see
+                // `with_power_management`): leaving D3hot without
+                // No_Soft_Reset resets the function, clearing its BARs'
+                // address bits and its command register.
+                if offset == 0x84
+                    && f.regs[i] & 0x3 == 3
+                    && value & 0x3 == 0
+                    && f.regs[i] & NO_SOFT_RESET == 0
+                {
+                    for b in 0..6 {
+                        let mask = f.bar_masks[b];
+                        f.regs[4 + b] &= !mask;
+                    }
+                    f.regs[1] &= 0xFFFF_0000;
+                }
                 f.regs[i] = value;
             }
         }
@@ -676,6 +786,89 @@ mod tests {
             c.funcs[&a].regs[1], 0x0290_0006,
             "status bits are not cleared"
         );
+    }
+
+    /// Gives the function at `a` a capability list: an MSI capability,
+    /// then power management in `state`.
+    fn with_power_management(c: &mut FakeConfig, a: PciAddress, state: u32) {
+        let f = c.funcs.get_mut(&a).unwrap();
+        f.regs[0x34 / 4] = 0x70;
+        f.regs[0x70 / 4] = 0x0080_8005; // MSI, next at 0x80
+        f.regs[0x80 / 4] = 0xC803_0001; // power management, last
+        f.regs[0x84 / 4] = 0x0000_8100 | state; // PME status and enable set
+    }
+
+    #[test]
+    fn a_function_in_d3_is_woken_to_d0() {
+        let mut c = nuc();
+        let a = addr(0, 0x0d, 0);
+        with_power_management(&mut c, a, 3);
+        assert_eq!(
+            wake_to_d0(&mut c, a),
+            Some(Wake {
+                from: 3,
+                reset: true
+            })
+        );
+        assert_eq!(
+            c.funcs[&a].regs[0x84 / 4],
+            0x0000_0100,
+            "D0, PME enable kept, PME status left alone"
+        );
+        assert_eq!(
+            wake_to_d0(&mut c, a),
+            Some(Wake {
+                from: 0,
+                reset: false
+            })
+        );
+        assert_eq!(c.writes.iter().filter(|w| w.1 == 0x84).count(), 1);
+    }
+
+    #[test]
+    fn a_function_reset_by_its_wake_gets_its_bars_back() {
+        let mut c = nuc();
+        let a = addr(0, 0x0d, 0);
+        let bars = enumerate(&mut c, 0, 0)
+            .into_iter()
+            .find(|d| d.address == a)
+            .unwrap()
+            .bars;
+        let before = (c.funcs[&a].regs[4], c.funcs[&a].regs[5]);
+        with_power_management(&mut c, a, 3);
+        assert!(wake_to_d0(&mut c, a).unwrap().reset);
+        assert_eq!(c.funcs[&a].regs[4] & !0xF, 0, "the wake cleared BAR0");
+        restore_bars(&mut c, a, &bars);
+        assert_eq!((c.funcs[&a].regs[4], c.funcs[&a].regs[5]), before);
+        // With No_Soft_Reset the function keeps its configuration.
+        let mut c = nuc();
+        with_power_management(&mut c, a, 3 | NO_SOFT_RESET);
+        assert_eq!(
+            wake_to_d0(&mut c, a),
+            Some(Wake {
+                from: 3,
+                reset: false
+            })
+        );
+        assert_eq!((c.funcs[&a].regs[4], c.funcs[&a].regs[5]), before);
+    }
+
+    #[test]
+    fn functions_without_power_management_are_left_alone() {
+        let mut c = nuc();
+        let a = addr(0, 0x14, 0);
+        assert_eq!(wake_to_d0(&mut c, a), None);
+        // A capability list that loops ends too.
+        let f = c.funcs.get_mut(&a).unwrap();
+        f.regs[0x34 / 4] = 0x40;
+        f.regs[0x40 / 4] = 0x0000_4005;
+        assert_eq!(wake_to_d0(&mut c, a), None);
+        // No capability list at all.
+        c.funcs.get_mut(&a).unwrap().regs[1] = 0x0280_0007;
+        with_power_management(&mut c, a, 3);
+        c.funcs.get_mut(&a).unwrap().regs[1] = 0x0280_0007;
+        assert_eq!(wake_to_d0(&mut c, a), None);
+        assert!(c.writes.is_empty());
     }
 
     #[test]

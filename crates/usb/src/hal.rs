@@ -18,6 +18,11 @@ pub struct DmaBuf {
     size: usize,
 }
 
+// SAFETY: a `DmaBuf` owns its memory exclusively, as a `Box` does; it
+// can move to another context (the kernel keeps its controllers in a
+// static) without anything else keeping a pointer into it.
+unsafe impl Send for DmaBuf {}
+
 impl DmaBuf {
     /// # Safety
     /// `virt` must point to `size` bytes of memory that stay valid, and that
@@ -169,6 +174,12 @@ mod tests {
         assert_eq!(b.read32(60), 0);
         assert_eq!(b.phys_at(16), 0x1010);
         unsafe { dealloc(b.virt().as_ptr(), layout) };
+    }
+
+    #[test]
+    fn buffers_can_move_to_a_static() {
+        fn send<T: Send>() {}
+        send::<DmaBuf>();
     }
 
     #[test]

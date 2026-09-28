@@ -18,6 +18,7 @@ pub mod rtc;
 pub mod serial;
 pub mod session;
 pub mod timer;
+pub mod usb;
 
 use boot_info::{BootInfo, MemoryKind, PHYS_OFFSET};
 use cmdline::{Cmdline, PanicTest};
@@ -129,6 +130,7 @@ pub fn kernel_main(info: &'static BootInfo) -> ! {
     if let Some(t) = cmdline.panic_test {
         trigger(t);
     }
+    usb::init(cmdline.debug_usb);
     // There is no storage driver yet, so the shell starts on an empty,
     // read-only `/` (spec §10).
     console::fail("mount /", format_args!("no storage driver yet"));
