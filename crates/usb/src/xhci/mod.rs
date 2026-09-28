@@ -153,6 +153,10 @@ struct Slot {
     /// EP0's max packet size as its context has it.
     max_packet0: u16,
     control: Option<Control>,
+    /// A request failed and aborting it failed too: the controller may
+    /// still own its TD and the data buffer, so EP0 takes no request until
+    /// the abort has been done again.
+    ep0_lost: bool,
     /// What `configure` set up.
     endpoints: Vec<Endpoint>,
 }
@@ -174,6 +178,7 @@ impl Slot {
                 data,
                 max_packet0: speed.default_max_packet0(),
                 control: None,
+                ep0_lost: false,
                 endpoints: Vec::new(),
             }),
             (output, input, ep0, data) => {

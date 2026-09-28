@@ -53,7 +53,9 @@ impl<H: Hal> Xhci<H> {
     /// A control transfer on EP0 of `slot` (the `Bus::control` contract):
     /// at most 4096 bytes, 1 s at most. After a STALL, an error or a
     /// timeout EP0 is reset or stopped and repositioned, so the next
-    /// request works.
+    /// request works. If that fails, the controller may still own the old
+    /// TD: the next request does it again first, and is refused (nothing
+    /// queued) if it fails again.
     pub(super) fn control_transfer(
         &mut self,
         slot: u8,
@@ -70,9 +72,31 @@ impl<H: Hal> Xhci<H> {
         if len > DATA_BUFFER_SIZE {
             return Err(UsbError::Unsupported("request over 4096 bytes"));
         }
+        if self
+            .slots
+            .get(slot as usize)
+            .and_then(Option::as_ref)
+            .is_some_and(|s| s.ep0_lost)
+        {
+            if let Err(e) = self.reposition(slot as usize, EP0) {
+                xlog!(
+                    &self.hal,
+                    &self.name,
+                    "slot {slot}: EP0 recovery failed again: {e}"
+                );
+                // An abort that never ends gives the controller up.
+                return Err(if self.dead {
+                    UsbError::ControllerDead
+                } else {
+                    UsbError::Unsupported("EP0 lost after a failed abort")
+                });
+            }
+            xlog!(&self.hal, &self.name, "slot {slot}: EP0 recovered");
+        }
         let Some(s) = self.slots.get_mut(slot as usize).and_then(Option::as_mut) else {
             return Err(UsbError::Disconnected);
         };
+        s.ep0_lost = false;
         if s.control.is_some() {
             return Err(UsbError::Unsupported("control request in flight"));
         }
@@ -129,8 +153,11 @@ impl<H: Hal> Xhci<H> {
             xlog!(
                 &self.hal,
                 &self.name,
-                "slot {slot}: EP0 recovery failed: {e}"
+                "slot {slot}: EP0 recovery failed: {e}; EP0 not used until it succeeds"
             );
+            if let Some(s) = self.slots.get_mut(slot as usize).and_then(Option::as_mut) {
+                s.ep0_lost = true;
+            }
         }
         Err(failure)
     }
@@ -595,6 +622,54 @@ mod tests {
                 "running"
             );
         }
+    }
+
+    #[test]
+    fn ep0_is_not_used_again_until_its_abort_succeeded() {
+        for (config, port, dev) in both() {
+            let (hal, mut xhci, d) = attached(config, port, &dev);
+            // The request is never answered and its abort hangs: the
+            // controller may still own the TD and the data buffer.
+            dev.borrow_mut().ignore_requests(1);
+            hal.fake().config_mut().hang_command = Some(15); // Stop Endpoint
+            assert_eq!(get_device(&mut xhci, d.slot, 18), Err(UsbError::Timeout));
+            assert!(hal.log_text().contains("slot 1: EP0 recovery failed"));
+            // The next request tries the abort again, which fails again:
+            // it is refused, and nothing is queued for the device.
+            let seen = dev.borrow().requests().len();
+            let rung = hal.fake().requests().len();
+            assert_eq!(
+                get_device(&mut xhci, d.slot, 18),
+                Err(UsbError::Unsupported("EP0 lost after a failed abort"))
+            );
+            assert_eq!(dev.borrow().requests().len(), seen);
+            assert_eq!(hal.fake().requests().len(), rung);
+            // Once the controller stops the endpoint, EP0 works again.
+            hal.fake().config_mut().hang_command = None;
+            let n = hal.fake().executed().len();
+            assert_eq!(get_device(&mut xhci, d.slot, 18), Ok(18));
+            assert_eq!(commands_since(&hal, n), [15, 16], "the abort done again");
+            assert!(hal.log_text().contains("slot 1: EP0 recovered"));
+            let n = hal.fake().executed().len();
+            assert_eq!(get_device(&mut xhci, d.slot, 18), Ok(18));
+            assert!(commands_since(&hal, n).is_empty(), "and not again");
+        }
+    }
+
+    #[test]
+    fn a_controller_that_dies_while_ep0_is_recovered_is_reported_dead() {
+        let k120 = FakeUsbDevice::k120();
+        let (hal, mut xhci, d) = attached(FakeConfig::basic(), 1, &k120);
+        k120.borrow_mut().ignore_requests(1);
+        hal.fake().config_mut().hang_command = Some(15); // Stop Endpoint
+        assert_eq!(get_device(&mut xhci, d.slot, 18), Err(UsbError::Timeout));
+        // The abort done again hangs, and so does aborting that command:
+        // the controller is given up.
+        hal.fake().config_mut().abort_never_completes = true;
+        assert_eq!(
+            get_device(&mut xhci, d.slot, 18),
+            Err(UsbError::ControllerDead)
+        );
     }
 
     #[test]
