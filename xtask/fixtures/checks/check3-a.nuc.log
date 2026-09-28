@@ -1,0 +1,123 @@
++ rm -rf /root/notes
++ uname -a
+Relay relay 0.1.0 x86_64
++ date
+Mon Sep 28 14:09:17 UTC 2026
++ dmesg
+Relay OS 0.1.0
+[ ok ] console 1920x1200 (120x33 cells)
+[ ok ] cpu tables
+[ ok ] boot info: 15948 MiB usable in 32 regions, cmdline ''
+[ ok ] memory: 15915 MiB free of 15948 MiB, heap 32 MiB
+acpi: tables FACP ...
+[ ok ] acpi: 30 tables, ECAM 0xc0000000 buses 0-255, HPET 0xfed00000, S5 7/0
+[ ok ] timer: TSC 2496.000 MHz (CPUID 0x15), 1000 Hz tick (xAPIC)
+[ ok ] rtc: 2026-09-28 14:09:17 UTC
+pci: 00:0d.0 8086:461e 0c0330 USB xHCI, bar0 mem64 0x603d190000 64K
+[ ok ] pci: 24 devices on buses 00 01 72, xHCI at 00:0d.0 00:14.0
+xhci 00:0d.0: running
+usb: 00:0d.0 xHCI 1.20, 4 ports (1 USB 2, 3 USB 3), 32-byte contexts, 34 scratchpads
+xhci 00:14.0: running
+usb: 00:14.0 xHCI 1.20, 16 ports (12 USB 2, 4 USB 3), 32-byte contexts, 34 scratchpads
+xhci 00:14.0: port 15: connection stable after 100 ms
+storage: slot 4: vendor "Kingston", product "DataTraveler 3.0", revision "PMAP", removable
+storage: slot 4: 30277632 blocks of 512 bytes
+xhci 00:14.0: port 10: connection stable after 100 ms
+usb: 00:14.0 port 1: 046d:c534 full-speed, keyboard
+usb: 00:14.0 port 3: 046d:c31c low-speed, keyboard
+usb: 00:14.0 port 10: 8087:0033 full-speed, not claimed
+usb: 00:14.0 port 15: 0951:1666 SuperSpeed, disk Kingston DataTraveler 3.0, 14.4 GiB
+[ ok ] usb: 2 controllers, 4 devices
+[ ok ] keyboard: 2 keyboards
+storage: 00:14.0 port 15: GPT with 2 partitions
+storage: root on 00:14.0 port 15, the disk with the boot partition 4EBD57DE-8DBB-4D34-B3B5-D18607581E70
+[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 14.3 GiB
++ mkdir -p /root/notes/old
++ echo remember me > /root/notes/a
++ echo and me >> /root/notes/a
++ cat /root/notes/a
+remember me
+and me
++ ls -l /root/notes
+total 8
+-rw-r--r-- 1 root root   19 Sep 28 14:09 a
+drwxr-xr-x 2 root root 4096 Sep 28 14:09 old
++ cp /root/notes/a /root/notes/b
++ mv /root/notes/b /root/notes/old/c
++ ls /root/notes /root/notes/old
+/root/notes:
+a  old
+
+/root/notes/old:
+c
++ rmdir /root/notes/old
+rmdir: failed to remove '/root/notes/old': Directory not empty
++ rm -r /root/notes/old
++ ls /root/notes
+a
++ touch /root/notes/t
++ stat /root/notes/t
+  File: /root/notes/t
+  Size: 0         	Blocks: 0          IO Block: 4096   regular empty file
+Inode: 24322       Links: 1
+Access: (0644/-rw-r--r--)  Uid: (    0/    root)   Gid: (    0/    root)
+Access: 2026-09-28 14:09:17.000000000 +0000
+Modify: 2026-09-28 14:09:17.000000000 +0000
+Change: 2026-09-28 14:09:17.000000000 +0000
+ Birth: -
++ head -n 1 /root/notes/a
+remember me
++ tail -n 1 /root/notes/a
+and me
++ wc /root/notes/a
+ 2  4 19 /root/notes/a
++ cat /root/nope
+cat: /root/nope: No such file or directory
++ rm -r /
+rm: it is dangerous to operate recursively on '/'
++ echo 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde > /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ wc /root/notes/big
+ 131072  131072 8388608 /root/notes/big
++ cp /root/notes/big /root/notes/copy
++ wc /root/notes/copy
+ 131072  131072 8388608 /root/notes/copy
++ rm /root/notes/tmp /root/notes/copy
++ ls /root/notes
+a  big  t
++ df
+Filesystem     1K-blocks Used Available Use% Mounted on
+/dev/root       14877000 8300  14100000   1% /

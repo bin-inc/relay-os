@@ -5,7 +5,8 @@
 #
 # Under a command: `#> regex` is one whole line of its output, in order;
 # `#> ...` any number of lines; `#nuc>` and `#qemu>` apply only on that
-# machine; `#!> regex` must match no line. A command with no `#>` line
+# machine, so a line whose text differs is written twice, `#qemu>` then
+# `#nuc>`; `#!> regex` must match no line. A command with no `#>` line
 # must print nothing.
 
 # Start afresh, so the check can be run again.
@@ -19,20 +20,20 @@ date
 # Every startup line is [ ok ]; on the NUC, the values of checks 1-3.
 dmesg
 #> ...
-#> \[ ok \] console \d+x\d+ \(\d+x\d+ cells\)
+#qemu> \[ ok \] console \d+x\d+ \(\d+x\d+ cells\)
 #nuc> \[ ok \] console 1920x1200 \(120x33 cells\)
 #> \[ ok \] cpu tables
-#> \[ ok \] boot info: \d+ MiB usable in \d+ regions, cmdline '.*'
+#qemu> \[ ok \] boot info: \d+ MiB usable in \d+ regions, cmdline '.*'
 #nuc> \[ ok \] boot info: 159\d\d MiB usable in \d+ regions, cmdline ''
 #> \[ ok \] memory: \d+ MiB free of \d+ MiB, heap 32 MiB
 #> ...
-#> \[ ok \] acpi: .*
+#qemu> \[ ok \] acpi: .*
 #nuc> \[ ok \] acpi: 30 tables, ECAM 0xc0000000 buses 0-255, HPET 0xfed00000, S5 7/0
-#> \[ ok \] timer: .*
+#qemu> \[ ok \] timer: .*
 #nuc> \[ ok \] timer: TSC 2496\.000 MHz \(CPUID 0x15\), 1000 Hz tick \(xAPIC\)
 #> \[ ok \] rtc: 20\d\d-\d\d-\d\d \d\d:\d\d:\d\d UTC
 #> ...
-#> \[ ok \] pci: .*
+#qemu> \[ ok \] pci: .*
 #nuc> \[ ok \] pci: 24 devices on buses 00 01 72, xHCI at 00:0d\.0 00:14\.0
 #> ...
 #nuc> usb: 00:14\.0 xHCI 1\.20, 16 ports \(12 USB 2, 4 USB 3\), 32-byte contexts, 34 scratchpads
@@ -44,13 +45,13 @@ dmesg
 #nuc> usb: 00:14\.0 port 3: 046d:c31c low-speed, keyboard
 #nuc> usb: 00:14\.0 port 10: 8087:0033 full-speed, not claimed
 #nuc> usb: 00:14\.0 port 15: 0951:1666 SuperSpeed, disk Kingston DataTraveler 3\.0, 14\.4 GiB
-#> \[ ok \] usb: .*
+#qemu> \[ ok \] usb: .*
 #nuc> \[ ok \] usb: 2 controllers, 4 devices
-#> \[ ok \] keyboard: .*
+#qemu> \[ ok \] keyboard: .*
 #nuc> \[ ok \] keyboard: 2 keyboards
 #> ...
 #nuc> storage: root on 00:14\.0 port 15, the disk with the boot partition [0-9A-F-]{36}
-#> \[ ok \] mount /: ext2 on .*
+#qemu> \[ ok \] mount /: ext2 on .*
 #nuc> \[ ok \] mount /: ext2 on 00:14\.0 port 15 partition 2, 14\.3 GiB
 #> ...
 #!> \[FAIL\].*
@@ -142,5 +143,5 @@ ls /root/notes
 #> a  big  t
 df
 #> Filesystem +1K-blocks +Used +Available +Use% Mounted on
-#> /dev/root +\d+ +\d+ +\d+ +\d+% /
+#qemu> /dev/root +\d+ +\d+ +\d+ +\d+% /
 #nuc> /dev/root +1[45]\d{6} +\d+ +\d+ +\d+% /

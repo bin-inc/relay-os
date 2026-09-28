@@ -16,7 +16,7 @@ tail -n 1 /root/notes/big
 # The machine started again as before.
 dmesg
 #> ...
-#> \[ ok \] mount /: ext2 on .*
+#qemu> \[ ok \] mount /: ext2 on .*
 #nuc> \[ ok \] mount /: ext2 on 00:14\.0 port 15 partition 2, 14\.3 GiB
 #> ...
 #!> \[FAIL\].*

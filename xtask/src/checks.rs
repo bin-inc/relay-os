@@ -410,6 +410,37 @@ bin  etc
         );
     }
 
+    /// The real check scripts against a transcript of each machine: QEMU's
+    /// from the `checks` scenario, the NUC's with its startup lines as
+    /// checks 1–3 recorded them (`docs/hardware-test.md`), in the kernel's
+    /// order. A `#nuc>` line must not need a line of its own next to the
+    /// `#>` line for the same output, which QEMU alone cannot show.
+    #[test]
+    fn the_check_scripts_pass_on_both_machines() {
+        let parts = [
+            (
+                include_str!("../../rootfs/root/checks/check3-a.sh"),
+                include_str!("../fixtures/checks/check3-a.qemu.log"),
+                include_str!("../fixtures/checks/check3-a.nuc.log"),
+            ),
+            (
+                include_str!("../../rootfs/root/checks/check3-b.sh"),
+                include_str!("../fixtures/checks/check3-b.qemu.log"),
+                include_str!("../fixtures/checks/check3-b.nuc.log"),
+            ),
+        ];
+        for (i, (script, qemu, nuc)) in parts.iter().enumerate() {
+            for (machine, log) in [(Machine::Qemu, qemu), (Machine::Nuc, nuc)] {
+                let r = check(&parse(script, machine).unwrap(), log);
+                assert!(r.ok(), "part {i} on {machine:?}: {:?}", r.failures);
+            }
+            // The NUC's own lines are checked there: QEMU's transcript is
+            // not the NUC's.
+            let r = check(&parse(script, Machine::Nuc).unwrap(), qemu);
+            assert!(!r.ok(), "part {i}");
+        }
+    }
+
     #[test]
     fn many_wildcards_stay_fast() {
         let script = format!("dmesg\n{}#> never\n", "#> ...\n".repeat(40));
