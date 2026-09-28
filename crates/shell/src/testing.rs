@@ -127,6 +127,8 @@ pub struct SpyState {
     /// Every write reports 0 bytes written (a broken filesystem).
     pub zero_writes: Cell<bool>,
     pub fail_unlink: Cell<Option<Errno>>,
+    /// `read_at` calls.
+    pub reads: Cell<u32>,
 }
 
 /// A `MemFs` that counts syncs and shutdowns and can make them fail.
@@ -152,6 +154,7 @@ impl FileSystem for Spy {
         self.fs.read_link(ino)
     }
     fn read_at(&mut self, ino: Ino, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+        self.state.reads.set(self.state.reads.get() + 1);
         self.fs.read_at(ino, offset, buf)
     }
     fn write_at(&mut self, ino: Ino, offset: u64, buf: &[u8]) -> Result<usize, Errno> {
