@@ -38,9 +38,10 @@ pub enum Reg {
 
 impl Reg {
     /// The register a Generic Address Structure names, if this kernel can
-    /// reach it: I/O or memory space, a whole number of bytes starting at
-    /// bit 0, 1, 2, 4 or 8 bytes wide (the access size field wins over the
-    /// bit width when it is set, ACPI 6.5 §5.2.3.2).
+    /// reach it: I/O or memory space (a memory register aligned to its
+    /// width), a whole number of bytes starting at bit 0, 1, 2, 4 or 8
+    /// bytes wide (the access size field wins over the bit width when it is
+    /// set, ACPI 6.5 §5.2.3.2).
     pub fn from_gas(g: &GenericAddress) -> Option<Reg> {
         let bytes = match g.access_size {
             0 if g.bit_width.is_multiple_of(8) => g.bit_width / 8,
@@ -56,7 +57,8 @@ impl Reg {
                 port: u16::try_from(g.address).ok()?,
                 bytes,
             }),
-            AddressSpace::Memory => Some(Reg::Memory {
+            // A misaligned volatile access could fault.
+            AddressSpace::Memory if g.address.is_multiple_of(bytes as u64) => Some(Reg::Memory {
                 phys: g.address,
                 bytes,
             }),
@@ -297,6 +299,42 @@ mod tests {
         let mut g = gas(AddressSpace::Io, 8, 1, 0xCF9);
         g.bit_offset = 1;
         assert_eq!(Reg::from_gas(&g), None);
+    }
+
+    #[test]
+    fn a_memory_register_off_its_alignment_is_refused() {
+        // A volatile access to it would fault (and fails Rust's alignment
+        // check): firmware values must never do that.
+        assert_eq!(
+            Reg::from_gas(&gas(AddressSpace::Memory, 32, 3, 0xFED0_0001)),
+            None
+        );
+        assert_eq!(
+            Reg::from_gas(&gas(AddressSpace::Memory, 16, 2, 0xFED0_0003)),
+            None
+        );
+        assert_eq!(
+            Reg::from_gas(&gas(AddressSpace::Memory, 16, 2, 0xFED0_0002)),
+            Some(Reg::Memory {
+                phys: 0xFED0_0002,
+                bytes: 2
+            })
+        );
+        assert_eq!(
+            Reg::from_gas(&gas(AddressSpace::Memory, 8, 1, 0xFED0_0003)),
+            Some(Reg::Memory {
+                phys: 0xFED0_0003,
+                bytes: 1
+            })
+        );
+        // I/O ports have no alignment rule.
+        assert_eq!(
+            Reg::from_gas(&gas(AddressSpace::Io, 16, 2, 0x605)),
+            Some(Reg::Io {
+                port: 0x605,
+                bytes: 2
+            })
+        );
     }
 
     #[test]
