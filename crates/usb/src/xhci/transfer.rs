@@ -308,6 +308,29 @@ impl<H: Hal> Xhci<H> {
         self.set_dequeue(slot, dci)
     }
 
+    /// Puts an endpoint back to its start, as CLEAR_FEATURE(ENDPOINT_HALT)
+    /// puts the device's (USB 2.0 9.4.5): the ring after what was queued,
+    /// and the data toggle (sequence number) 0. Reset Endpoint does that for
+    /// a Halted endpoint; one that is not halted is stopped if it runs and
+    /// then dropped and added again (xHCI 4.6.8's note; Linux does the same
+    /// in `xhci_endpoint_reset`). Otherwise the host would go on with its
+    /// old toggle and the device drop the next packet as a repeat.
+    fn restart(&mut self, slot: u8, dci: usize) -> Result<(), UsbError> {
+        match self.endpoint_state(slot as usize, dci)? {
+            EP_HALTED => {
+                self.command(Trb::reset_endpoint(slot, dci))?;
+                self.set_dequeue(slot as usize, dci)
+            }
+            EP_RUNNING => {
+                self.command(Trb::stop_endpoint(slot, dci))?;
+                self.add_again(slot, dci)
+            }
+            EP_STOPPED | EP_ERROR => self.add_again(slot, dci),
+            EP_DISABLED => Err(UsbError::Disconnected),
+            _ => Err(UsbError::Unsupported("reserved endpoint state")),
+        }
+    }
+
     fn set_dequeue(&mut self, slot: usize, dci: usize) -> Result<(), UsbError> {
         let s = self.slots[slot].as_mut().ok_or(UsbError::Disconnected)?;
         let dequeue = if dci == EP0 {
@@ -422,10 +445,12 @@ impl<H: Hal> Bus for Xhci<H> {
         self.bulk_transfer(slot, endpoint, data.len(), Some(data))
     }
 
-    /// Reset Endpoint if the context says Halted (Stop Endpoint if it still
-    /// runs), Set TR Dequeue Pointer to the enqueue position, dropping
-    /// anything outstanding, then CLEAR_FEATURE(ENDPOINT_HALT). An endpoint
-    /// lost after a failed abort is usable again once this succeeds.
+    /// Restarts the endpoint on the controller (Reset Endpoint and Set TR
+    /// Dequeue Pointer if it is Halted, else Stop Endpoint if it runs and a
+    /// Configure Endpoint that drops and adds it), dropping anything
+    /// outstanding and resetting the data toggle, then
+    /// CLEAR_FEATURE(ENDPOINT_HALT). An endpoint lost after a failed abort
+    /// is usable again once this succeeds.
     fn clear_halt(&mut self, slot: u8, endpoint: u8) -> Result<(), UsbError> {
         if self.dead {
             return Err(UsbError::ControllerDead);
@@ -435,7 +460,7 @@ impl<H: Hal> Bus for Xhci<H> {
             .endpoint_mut(slot, endpoint)
             .ok_or(UsbError::Disconnected)?;
         ep.transfer = Transfer::Idle;
-        self.reposition(slot as usize, dci)?;
+        self.restart(slot, dci)?;
         if let Some(ep) = self.endpoint_mut(slot, endpoint) {
             ep.lost = false;
         }
@@ -740,8 +765,9 @@ mod tests {
         hal.sleep(Duration::from_millis(1));
         let n = hal.fake().executed().len();
         xhci.clear_halt(d.slot, 0x81).unwrap();
-        // Not halted: Stop Endpoint instead of Reset Endpoint.
-        assert_eq!(commands_since(&hal, n), [15, 16]);
+        // Not halted: Stop Endpoint, then Configure Endpoint dropping and
+        // adding it (the data toggle starts over, as on the device).
+        assert_eq!(commands_since(&hal, n), [15, 12]);
         let mut buf = [0; 8];
         assert_eq!(take_after(&hal, &mut xhci, d.slot, 1, &mut buf), None);
         xhci.queue_in(d.slot, 0x81, 8).unwrap();
@@ -928,6 +954,81 @@ mod tests {
         let (_hal, xhci, d, _k120) = keyboard(FakeConfig::basic(), 1);
         let s = xhci.slots[d.slot as usize].as_ref().unwrap();
         assert_eq!(s.endpoints[0].buffer.as_ref().unwrap().size(), 4096);
+    }
+
+    #[test]
+    fn clearing_the_halt_of_an_endpoint_that_is_not_halted_resets_the_toggle_too() {
+        for (hal, mut xhci, d, dev) in sticks() {
+            // One packet each way: both sides' toggles are 1 now.
+            assert_eq!(xhci.bulk_out(d.slot, 0x02, &[1; 31]), Ok(31));
+            dev.borrow_mut().push_in(0x81, &[2; 13]);
+            let mut buf = vec![0; 512];
+            assert_eq!(xhci.bulk_in(d.slot, 0x81, &mut buf), Ok(13));
+            // A running endpoint: Stop Endpoint, then Configure Endpoint
+            // dropping and adding it, which resets the host's toggle as
+            // CLEAR_FEATURE resets the device's (xHCI 4.6.8).
+            let n = hal.fake().executed().len();
+            xhci.clear_halt(d.slot, 0x02).unwrap();
+            assert_eq!(commands_since(&hal, n), [15, 12]);
+            assert_eq!(xhci.bulk_out(d.slot, 0x02, &[3; 31]), Ok(31));
+            // A stopped one (after a timeout): Configure Endpoint only.
+            assert_eq!(xhci.bulk_in(d.slot, 0x81, &mut buf), Err(UsbError::Timeout));
+            let n = hal.fake().executed().len();
+            xhci.clear_halt(d.slot, 0x81).unwrap();
+            assert_eq!(commands_since(&hal, n), [12]);
+            dev.borrow_mut().push_in(0x81, &[4; 13]);
+            assert_eq!(xhci.bulk_in(d.slot, 0x81, &mut buf), Ok(13));
+            // A halted one: Reset Endpoint and Set TR Dequeue Pointer.
+            dev.borrow_mut().stall_endpoint(0x81);
+            assert_eq!(xhci.bulk_in(d.slot, 0x81, &mut buf), Err(UsbError::Stall));
+            let n = hal.fake().executed().len();
+            xhci.clear_halt(d.slot, 0x81).unwrap();
+            assert_eq!(commands_since(&hal, n), [14, 16]);
+            dev.borrow_mut().push_in(0x81, &[5; 13]);
+            assert_eq!(xhci.bulk_in(d.slot, 0x81, &mut buf), Ok(13));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "fake xhci: data toggle mismatch on slot 1 DCI 4: host 1, device 0")]
+    fn the_fake_drops_a_transfer_whose_data_toggle_the_device_does_not_expect() {
+        let (_hal, mut xhci, d, _dev) = stick(FakeConfig::intel(), 13);
+        assert_eq!(xhci.bulk_out(d.slot, 0x02, &[1; 31]), Ok(31));
+        // CLEAR_FEATURE alone: the device's toggle starts over, the host's
+        // does not.
+        xhci.control(d.slot, Setup::clear_halt(0x02), &mut [])
+            .unwrap();
+        let _ = xhci.bulk_out(d.slot, 0x02, &[1; 31]);
+    }
+
+    #[test]
+    fn toggles_count_packets_and_a_zero_length_transfer_is_one() {
+        // SuperSpeed: sequence numbers modulo 32, packets of 1024 bytes.
+        let (hal, mut xhci, d, dev) = stick(FakeConfig::intel(), 13);
+        let s = d.slot as usize;
+        dev.borrow_mut().push_in(0x81, &[7; 1025]);
+        dev.borrow_mut().push_in(0x81, &[]);
+        let mut buf = vec![0; 2048];
+        assert_eq!(xhci.bulk_in(d.slot, 0x81, &mut buf), Ok(1025));
+        assert_eq!(hal.fake().endpoint(s, 3).unwrap().toggle, 2);
+        assert_eq!(xhci.bulk_in(d.slot, 0x81, &mut buf), Ok(0));
+        assert_eq!(hal.fake().endpoint(s, 3).unwrap().toggle, 3);
+        // High-speed: a data toggle, packets of 512 bytes.
+        let (hal, mut xhci, d, _dev) = stick(FakeConfig::basic(), 3);
+        assert_eq!(xhci.bulk_out(d.slot, 0x02, &[1; 1024]), Ok(1024));
+        assert_eq!(hal.fake().endpoint(d.slot as usize, 4).unwrap().toggle, 0);
+        assert_eq!(xhci.bulk_out(d.slot, 0x02, &[1; 1025]), Ok(1025));
+        assert_eq!(hal.fake().endpoint(d.slot as usize, 4).unwrap().toggle, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "fake xhci: data toggle mismatch on slot 1 DCI 4: host 1, device 0")]
+    fn set_configuration_starts_the_device_toggles_over() {
+        let (_hal, mut xhci, d, _dev) = stick(FakeConfig::intel(), 13);
+        assert_eq!(xhci.bulk_out(d.slot, 0x02, &[1; 31]), Ok(31));
+        xhci.control(d.slot, Setup::set_configuration(1), &mut [])
+            .unwrap();
+        let _ = xhci.bulk_out(d.slot, 0x02, &[1; 31]);
     }
 
     #[test]

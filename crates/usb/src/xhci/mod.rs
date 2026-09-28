@@ -125,6 +125,8 @@ struct Endpoint {
     /// still own it and write into the buffer, so no transfer uses the
     /// endpoint until `clear_halt` has repositioned its ring.
     lost: bool,
+    /// The context `configure` gave it, to add it again (`clear_halt`).
+    context: context::EndpointContext,
 }
 
 impl Endpoint {

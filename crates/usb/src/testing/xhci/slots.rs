@@ -58,6 +58,9 @@ pub struct FakeEndpoint {
     pub max_esit_payload: u32,
     /// A TD is in progress, waiting for the device.
     pub busy: bool,
+    /// The host side's data toggle (USB 2) or sequence number (USB 3):
+    /// 0 when the endpoint is added and after Reset Endpoint (xHCI 4.6.8).
+    pub toggle: u32,
 }
 
 /// The default EP0 packet size of a speed (USB 2.0 5.5.3, USB 3.2 9.6.1).
@@ -119,6 +122,7 @@ impl FakeXhci {
             average_trb_length: d[2] & 0xFFFF,
             max_esit_payload: (d[0] >> 24) << 16 | d[2] >> 16,
             busy: false,
+            toggle: 0,
         }
     }
 
@@ -241,6 +245,8 @@ impl FakeXhci {
         (s.state, s.port, s.output, s.context_entries) = (new_state, port, output, d0 >> 27);
         s.addressed_at = self.now;
         s.endpoints.insert(1, ep0);
+        // A new device: its endpoints start over.
+        self.device_toggles.retain(|&(sl, _), _| sl != slot);
         self.set_ep_state(slot, 1, RUNNING, dma);
         SUCCESS
     }
@@ -293,6 +299,12 @@ impl FakeXhci {
         match self.command_endpoint(trb) {
             Ok((slot, dci, HALTED)) => {
                 self.set_ep_state(slot, dci, STOPPED_STATE, dma);
+                if let Some(ep) = self.slots[slot]
+                    .as_mut()
+                    .and_then(|s| s.endpoints.get_mut(&dci))
+                {
+                    ep.toggle = 0;
+                }
                 SUCCESS
             }
             Ok(_) => CONTEXT_STATE_ERROR,
@@ -370,6 +382,28 @@ impl FakeXhci {
         let highest = 31 - add.leading_zeros();
         if entries < highest {
             panic!("fake xhci: context entries {entries} below DCI {highest}");
+        }
+        let configured = &self.slots[slot]
+            .as_ref()
+            .expect("slot checked above")
+            .endpoints;
+        for dci in 2..32usize {
+            let (dropped, added) = (drop & 1 << dci != 0, add & 1 << dci != 0);
+            match configured.get(&dci) {
+                // xHCI 4.6.6: a Drop flag names an enabled endpoint, which
+                // the driver stops first (a TD in flight would be lost).
+                None if dropped => {
+                    panic!("fake xhci: Configure Endpoint drops DCI {dci}, which is not configured")
+                }
+                Some(ep) if dropped && (ep.state == RUNNING || ep.busy) => {
+                    panic!("fake xhci: Configure Endpoint drops DCI {dci} while it runs")
+                }
+                // Adding an enabled endpoint again needs its Drop flag.
+                Some(_) if added && !dropped => {
+                    panic!("fake xhci: Configure Endpoint adds DCI {dci} again without dropping it")
+                }
+                _ => {}
+            }
         }
         let mut added = Vec::new();
         for dci in 2..32usize {

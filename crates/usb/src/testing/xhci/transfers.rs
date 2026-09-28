@@ -214,6 +214,9 @@ impl FakeXhci {
         let state = self.slots[slot].as_ref().map_or(0, |s| s.state);
         self.requests.push((slot, setup, state));
         let answer = dev.borrow_mut().control(setup, &out);
+        if matches!(answer, Some(Ok(_))) {
+            self.device_request_done(slot, &setup);
+        }
         let mut stage = after_setup;
         match answer {
             None => {
@@ -332,6 +335,8 @@ impl FakeXhci {
                 Td::Done
             }
             Some(Ok(n)) => {
+                let speed = dev.borrow().speed();
+                self.toggle(slot, dci, n, speed);
                 let residual = (len - n) as u32;
                 if residual > 0 && trb[3] & ISP != 0 {
                     self.post_transfer(slot, dci, at, SHORT_PACKET, residual, dma);
@@ -345,6 +350,43 @@ impl FakeXhci {
                 Td::Done
             }
         }
+    }
+
+    /// A standard request the device took resets its toggles: CLEAR_FEATURE
+    /// (ENDPOINT_HALT) that endpoint's, SET_CONFIGURATION all of them (USB
+    /// 2.0 9.4.5, 9.1.1.5).
+    fn device_request_done(&mut self, slot: usize, setup: &Setup) {
+        match (setup.request_type, setup.request, setup.value) {
+            (0x02, 1, 0) => {
+                let address = setup.index as u8;
+                let dci = (address & 0x0F) as usize * 2 + (address >> 7) as usize;
+                self.device_toggles.insert((slot, dci), 0);
+            }
+            (0x00, 9, _) => self.device_toggles.retain(|&(s, _), _| s != slot),
+            _ => {}
+        }
+    }
+
+    /// A TD that moved `bytes` on (slot, DCI): host and device must agree
+    /// on the data toggle (USB 2.0 8.6) or sequence number (USB 3.2 8.12.1)
+    /// before it, or the device drops the data; both then advance by the
+    /// packets moved (a zero-length transfer is one packet).
+    fn toggle(&mut self, slot: usize, dci: usize, bytes: usize, speed: crate::Speed) {
+        let modulus = if speed.is_superspeed() { 32 } else { 2 };
+        let device = self.device_toggles.get(&(slot, dci)).copied().unwrap_or(0);
+        let Some(ep) = self.ring(slot, dci) else {
+            return;
+        };
+        let host = ep.toggle;
+        if host != device {
+            panic!(
+                "fake xhci: data toggle mismatch on slot {slot} DCI {dci}: host {host}, device {device}"
+            );
+        }
+        let packets = bytes.div_ceil(ep.max_packet.max(1) as usize).max(1) as u32;
+        ep.toggle = (host + packets) % modulus;
+        self.device_toggles
+            .insert((slot, dci), (device + packets) % modulus);
     }
 
     /// The device on `port` went away: every TD in progress of its slot
