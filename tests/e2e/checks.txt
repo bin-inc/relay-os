@@ -1,0 +1,18 @@
+# NUC check 3's scripts (rootfs/root/checks/, spec §15 item 12) run in
+# QEMU as they do on the NUC: part 1, a reboot, part 2. Afterwards their
+# transcripts on the disk must show what the scripts expect.
+timeout 30
+expect root@relay:~# $
+send sh checks/check3-a.sh
+expect \n\+ rm -rf /root/notes\n
+timeout 120
+expect \n\+ df\n
+expect root@relay:~# $
+reboot
+expect root@relay:~# $
+send sh checks/check3-b.sh
+expect \n\+ dmesg\n
+expect root@relay:~# $
+poweroff
+check-script /root/checks/check3-a.sh
+check-script /root/checks/check3-b.sh

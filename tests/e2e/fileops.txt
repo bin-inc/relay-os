@@ -34,7 +34,7 @@ expect \n 2  2 12 /root/a/f\n
 send rm /root/a/f /root/t
 send rmdir /root/a
 send ls
-expect \nREADME\n
+expect \nREADME  checks\n
 # Error messages follow GNU coreutils.
 send cat /root/nope
 expect \ncat: /root/nope: No such file or directory\n
