@@ -160,7 +160,6 @@ impl<'a> Shell<'a> {
         self.in_script = true;
         let mut status = 0;
         for line in script.lines() {
-            let line = line.trim();
             if matches!(parser::parse(line), Ok(c) if c.words.is_empty() && c.redirect.is_none()) {
                 continue;
             }
@@ -169,7 +168,9 @@ impl<'a> Shell<'a> {
                 status = CANCELLED;
                 break;
             }
-            self.console.write(format!("+ {line}\n").as_bytes());
+            // The line runs as written; only its trace is trimmed.
+            self.console
+                .write(format!("+ {}\n", line.trim()).as_bytes());
             status = self.execute(line);
             if status == CANCELLED || self.stopped {
                 break;

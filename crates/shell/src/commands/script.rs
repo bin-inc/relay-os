@@ -110,6 +110,17 @@ mod tests {
     }
 
     #[test]
+    fn a_line_runs_exactly_as_typed() {
+        // Only the trace is trimmed; `\ ` at the end of a line is a space.
+        let mut h = Harness::new();
+        h.put("/tmp/s.sh", b"  echo a\\ \n\techo 'b '  \n");
+        assert_eq!(
+            h.run("sh /tmp/s.sh"),
+            (0, "+ echo a\\\na \n+ echo 'b '\nb \n".into())
+        );
+    }
+
+    #[test]
     fn a_line_that_does_not_parse_does_not_stop_the_script() {
         let mut h = Harness::new();
         h.put("/tmp/s.sh", b"echo 'open\nls | wc\necho after\n");
