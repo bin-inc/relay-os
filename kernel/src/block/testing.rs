@@ -21,6 +21,9 @@ pub struct MemDisk {
     block_size: usize,
     /// Reads that touch one of these blocks fail with `IoError::Device`.
     pub bad: Range<u64>,
+    /// Reads and writes that reached the disk.
+    pub requests: u32,
+    pub flushes: u32,
 }
 
 impl MemDisk {
@@ -30,6 +33,8 @@ impl MemDisk {
             data,
             block_size,
             bad: 0..0,
+            requests: 0,
+            flushes: 0,
         }
     }
 
@@ -54,15 +59,18 @@ impl BlockDevice for MemDisk {
         if lba < self.bad.end && self.bad.start < end {
             return Err(IoError::Device);
         }
+        self.requests += 1;
         buf.copy_from_slice(&self.data[span]);
         Ok(())
     }
     fn write(&mut self, lba: u64, buf: &[u8]) -> Result<(), IoError> {
         let span = self.span(lba, buf.len())?;
+        self.requests += 1;
         self.data[span].copy_from_slice(buf);
         Ok(())
     }
     fn flush(&mut self) -> Result<(), IoError> {
+        self.flushes += 1;
         Ok(())
     }
 }
