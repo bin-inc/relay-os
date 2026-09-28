@@ -378,6 +378,19 @@ impl<H: Hal> Xhci<H> {
         s.endpoints.iter_mut().find(|e| e.address == address)
     }
 
+    /// `e` for a transfer to `slot`, or `Disconnected` if the slot's port
+    /// no longer shows a connection: a transfer to a device that was
+    /// unplugged fails (USB Transaction Error) or times out, and the class
+    /// driver must not take that for a fault to recover from.
+    fn gone_or(&self, slot: u8, e: UsbError) -> UsbError {
+        match self.slots.get(slot as usize).and_then(Option::as_ref) {
+            Some(s) if e != UsbError::ControllerDead && !self.connected(s.port) => {
+                UsbError::Disconnected
+            }
+            _ => e,
+        }
+    }
+
     /// The endpoint's state as the controller last wrote it.
     fn endpoint_state(&self, slot: usize, dci: usize) -> Result<u8, UsbError> {
         let s = self.slots[slot].as_ref().ok_or(UsbError::Disconnected)?;
@@ -454,7 +467,9 @@ impl<H: Hal> Bus for Xhci<H> {
         if endpoint & 0x80 == 0 {
             return Err(UsbError::Unsupported("bulk IN on an OUT endpoint"));
         }
-        let n = self.bulk_transfer(slot, endpoint, buf.len(), None)?;
+        let n = self
+            .bulk_transfer(slot, endpoint, buf.len(), None)
+            .map_err(|e| self.gone_or(slot, e))?;
         let n = n.min(buf.len());
         if let Some(buffer) = self
             .endpoint_mut(slot, endpoint)
@@ -470,6 +485,7 @@ impl<H: Hal> Bus for Xhci<H> {
             return Err(UsbError::Unsupported("bulk OUT on an IN endpoint"));
         }
         self.bulk_transfer(slot, endpoint, data.len(), Some(data))
+            .map_err(|e| self.gone_or(slot, e))
     }
 
     /// Restarts the endpoint on the controller (Reset Endpoint and Set TR
@@ -1182,11 +1198,46 @@ mod tests {
             .after(Duration::from_millis(5), |x, _| x.unplug(13));
         let before = hal.clock();
         let mut buf = vec![0; 512];
+        // A USB Transaction Error on a port without a connection: the
+        // device is gone, which the class driver must know (it does not
+        // retry then).
         assert_eq!(
             xhci.bulk_in(d.slot, 0x81, &mut buf),
-            Err(UsbError::Transfer(4))
+            Err(UsbError::Disconnected)
         );
         assert!(hal.clock() - before < Duration::from_millis(10));
+        assert_eq!(
+            xhci.bulk_out(d.slot, 0x02, &[0; 31]),
+            Err(UsbError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn a_dead_controller_is_reported_as_dead_even_after_an_unplug() {
+        let (hal, mut xhci, d, _dev) = stick(FakeConfig::intel(), 13);
+        hal.fake().unplug(13);
+        hal.fake().host_system_error();
+        xhci.poll();
+        let mut buf = vec![0; 512];
+        assert_eq!(
+            xhci.bulk_in(d.slot, 0x81, &mut buf),
+            Err(UsbError::ControllerDead)
+        );
+    }
+
+    #[test]
+    fn a_bulk_transfer_that_times_out_after_an_unplug_is_disconnected_too() {
+        // A controller that does not fail transfers on unplug.
+        let mut config = FakeConfig::intel();
+        config.fail_transfers_on_unplug = false;
+        let (hal, mut xhci, d, _dev) = stick(config, 13);
+        hal.fake()
+            .after(Duration::from_millis(5), |x, _| x.unplug(13));
+        let mut buf = vec![0; 512];
+        assert_eq!(
+            xhci.bulk_in(d.slot, 0x81, &mut buf),
+            Err(UsbError::Disconnected)
+        );
     }
 
     #[test]

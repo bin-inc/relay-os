@@ -68,9 +68,9 @@ impl FakeStorage {
         self.command(tag, length, flags & 0x80 != 0, cdb);
     }
 
-    /// Enters the data phase of a command that ends with `status`. A
-    /// command that did not pass stalls its data phase or pads it
-    /// (zeros in, data out discarded), as `failed_data` says.
+    /// Enters the data phase of a command that ends with `status`: a
+    /// command that did not pass stalls its data phase if `stall`, or pads
+    /// it (zeros in, data out discarded).
     pub(super) fn begin(
         &mut self,
         tag: u32,
@@ -78,8 +78,8 @@ impl FakeStorage {
         dir_in: bool,
         answer: Answer,
         status: u8,
+        stall: bool,
     ) {
-        let stall = status == FAILED && self.failed_data == FailedData::Stall;
         self.phase = if length == 0 {
             Phase::Csw {
                 tag,
@@ -93,6 +93,10 @@ impl FakeStorage {
                 _ => vec![0; length as usize],
             };
             data.truncate(length as usize);
+            if status == PASSED {
+                let short = std::mem::take(&mut self.short_data_in) as usize;
+                data.truncate(data.len().saturating_sub(short));
+            }
             Phase::DataIn {
                 tag,
                 data,
@@ -167,6 +171,9 @@ impl FakeDevice for FakeStorage {
         if endpoint != BULK_IN {
             panic!("fake storage: IN transfer on endpoint {endpoint:#04x}");
         }
+        if self.nak {
+            return None;
+        }
         if self.usb.is_halted(BULK_IN) {
             return Some(Err(Stall));
         }
@@ -218,10 +225,26 @@ impl FakeDevice for FakeStorage {
                 if max_len < CSW_LEN {
                     panic!("fake storage: CSW read of {max_len} bytes");
                 }
-                let mut b = CSW_SIGNATURE.to_le_bytes().to_vec();
+                if self.stall_csw > 0 {
+                    self.stall_csw -= 1;
+                    self.usb.stall_endpoint(BULK_IN);
+                    return Some(Err(Stall));
+                }
+                let residue = self.residue.take().unwrap_or(*residue);
+                let (mut tag, mut signature) = (*tag, CSW_SIGNATURE);
+                let bad = self.bad_csw.take();
+                match bad {
+                    Some(BadCsw::Signature) => signature = CBW_SIGNATURE,
+                    Some(BadCsw::Tag) => tag = tag.wrapping_add(1),
+                    _ => {}
+                }
+                let mut b = signature.to_le_bytes().to_vec();
                 b.extend_from_slice(&tag.to_le_bytes());
                 b.extend_from_slice(&residue.to_le_bytes());
                 b.push(*status);
+                if bad == Some(BadCsw::Short) {
+                    b.truncate(CSW_LEN - 1);
+                }
                 self.phase = Phase::Cbw;
                 Some(Ok(b))
             }
@@ -231,6 +254,9 @@ impl FakeDevice for FakeStorage {
     fn data_out(&mut self, endpoint: u8, data: &[u8]) -> Option<Result<(), Stall>> {
         if endpoint != BULK_OUT {
             panic!("fake storage: OUT transfer on endpoint {endpoint:#04x}");
+        }
+        if self.nak {
+            return None;
         }
         if self.usb.is_halted(BULK_OUT) {
             return Some(Err(Stall));

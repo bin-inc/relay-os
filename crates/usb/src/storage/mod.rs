@@ -15,6 +15,7 @@ macro_rules! slog {
 
 pub mod bot;
 mod disk;
+mod io;
 pub mod scsi;
 mod transport;
 

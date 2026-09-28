@@ -5,7 +5,7 @@
 //! §5.16).
 
 use super::scsi::{self, Capacity, Inquiry, NOT_READY};
-use super::transport::{Data, Transport, is_fatal};
+use super::transport::{Data, Need, Transport, is_fatal};
 use crate::UsbError;
 use crate::bus::{Bus, DIR_IN, RECIPIENT_INTERFACE, Setup, TYPE_CLASS};
 use crate::descriptor::{EndpointKind, Interface};
@@ -41,11 +41,13 @@ pub fn is_mass_storage(iface: &Interface) -> bool {
 
 /// One disk behind a mass-storage interface (LUN 0).
 pub struct MassStorage {
-    transport: Transport,
-    block_size: usize,
-    block_count: u64,
+    pub(super) transport: Transport,
+    pub(super) block_size: usize,
+    pub(super) block_count: u64,
     vendor: String,
     product: String,
+    /// SYNCHRONIZE CACHE was refused: there is no cache to flush.
+    pub(super) no_cache: bool,
 }
 
 impl MassStorage {
@@ -73,6 +75,7 @@ impl MassStorage {
             block_count,
             vendor: inquiry.vendor,
             product: inquiry.product,
+            no_cache: false,
         })
     }
 
@@ -122,14 +125,15 @@ fn max_lun(bus: &mut dyn Bus, slot: u8, interface: u8) -> Result<(), UsbError> {
     Ok(())
 }
 
-/// Runs a command that reads into `buf` and returns what came.
+/// Runs a command that reads into `buf` (tried three times; each failure is
+/// logged) and returns what came.
 fn read_data<'a>(
     bus: &mut dyn Bus,
     t: &mut Transport,
     cdb: &[u8],
     buf: &'a mut [u8],
 ) -> Result<&'a [u8], UsbError> {
-    let n = t.execute(bus, cdb, Data::In(buf))?;
+    let n = t.command(bus, cdb, Data::In(buf), Need::UpTo)?;
     Ok(&buf[..n.min(buf.len())])
 }
 
@@ -138,8 +142,8 @@ fn inquiry(bus: &mut dyn Bus, t: &mut Transport) -> Result<Inquiry, UsbError> {
     let slot = t.slot();
     let mut buf = [0u8; scsi::INQUIRY_LEN];
     let cdb = scsi::inquiry(scsi::INQUIRY_LEN as u16);
-    let parsed = read_data(bus, t, &cdb, &mut buf).and_then(Inquiry::parse);
-    let i = parsed.inspect_err(|e| slog!(bus, slot, "INQUIRY: {e}"))?;
+    let data = read_data(bus, t, &cdb, &mut buf)?;
+    let i = Inquiry::parse(data).inspect_err(|e| slog!(bus, slot, "INQUIRY: {e}"))?;
     slog!(
         bus,
         slot,
@@ -172,7 +176,7 @@ fn wait_until_ready(bus: &mut dyn Bus, t: &mut Transport) -> Result<(), UsbError
     let mut tries = 0u32;
     loop {
         tries = tries.saturating_add(1);
-        let e = match t.execute(bus, &scsi::test_unit_ready(), Data::None) {
+        let e = match t.execute(bus, &scsi::test_unit_ready(), Data::None, Need::UpTo) {
             Ok(_) => {
                 if tries > 1 {
                     slog!(bus, slot, "ready after {tries} tries");
@@ -206,11 +210,12 @@ fn capacity(bus: &mut dyn Bus, t: &mut Transport) -> Result<(usize, u64), UsbErr
     let slot = t.slot();
     let mut buf = [0u8; scsi::CAPACITY_16_LEN];
     let cdb = scsi::read_capacity_10();
-    let r = read_data(bus, t, &cdb, &mut buf[..scsi::CAPACITY_10_LEN]).and_then(Capacity::parse_10);
+    let data = read_data(bus, t, &cdb, &mut buf[..scsi::CAPACITY_10_LEN])?;
+    let r = Capacity::parse_10(data);
     let mut cap = r.inspect_err(|e| slog!(bus, slot, "READ CAPACITY(10): {e}"))?;
     if cap.last_lba == 0xFFFF_FFFF {
         let cdb = scsi::read_capacity_16(scsi::CAPACITY_16_LEN as u32);
-        let r = read_data(bus, t, &cdb, &mut buf).and_then(Capacity::parse_16);
+        let r = Capacity::parse_16(read_data(bus, t, &cdb, &mut buf)?);
         cap = r.inspect_err(|e| slog!(bus, slot, "READ CAPACITY(16): {e}"))?;
     }
     if !matches!(cap.block_size, 512 | 1024 | 2048 | 4096) {
@@ -511,17 +516,33 @@ mod tests {
     }
 
     #[test]
-    fn a_transport_failure_during_setup_is_followed_by_a_reset_recovery() {
+    fn a_setup_command_that_fails_is_tried_again() {
         let (hal, stick, r) = kingston_with(|s| s.phase_error_next());
-        assert_eq!(r.err(), Some(UsbError::Protocol("phase error")));
+        assert!(r.is_ok());
         assert!(
             hal.log_text()
                 .contains("storage: slot 1: INQUIRY: protocol error: phase error; reset recovery")
         );
         assert_eq!(
             trace(&stick),
-            ["GET_MAX_LUN", "12", "reset", "clear 81", "clear 02"]
+            [
+                "GET_MAX_LUN",
+                "12",
+                "reset",
+                "clear 81",
+                "clear 02",
+                "12",
+                "00",
+                "25"
+            ]
         );
+        // READ CAPACITY too.
+        let (_hal, stick, r) = kingston_with(|s| {
+            s.stall_csw_reads(2);
+            s.set_capacity(1000, 512);
+        });
+        assert_eq!(r.map(|d| d.block_count()), Ok(1000));
+        assert_eq!(stick.borrow().resets(), 1);
     }
 
     fn storage_interface(endpoints: Vec<Endpoint>) -> Interface {

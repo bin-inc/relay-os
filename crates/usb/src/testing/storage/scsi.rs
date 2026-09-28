@@ -24,6 +24,10 @@ pub(super) const NO_SENSE: Sense = (0, 0, 0);
 const BECOMING_READY: Sense = (0x02, 0x04, 0x01);
 const MEDIUM_NOT_PRESENT: Sense = (0x02, 0x3A, 0x00);
 const POWER_ON_RESET: Sense = (0x06, 0x29, 0x00);
+const ABORTED: Sense = (0x0B, 0x00, 0x00);
+const UNRECOVERED_READ_ERROR: Sense = (0x03, 0x11, 0x00);
+const WRITE_PROTECTED: Sense = (0x07, 0x27, 0x00);
+const INVALID_OPCODE: Sense = (0x05, 0x20, 0x00);
 
 /// The Kingston DataTraveler 3.0's INQUIRY data, as Linux read it from the
 /// NUC's stick (`/sys/block/sda/device/inquiry`).
@@ -125,18 +129,28 @@ impl FakeStorage {
             blocks,
         }));
         if std::mem::take(&mut self.phase_error) {
-            return self.begin(tag, length, dir_in, Answer::None, PHASE_ERROR);
+            return self.begin(tag, length, dir_in, Answer::None, PHASE_ERROR, false);
+        }
+        let stall_knob = match (length, dir_in) {
+            (0, _) => false,
+            (_, true) => std::mem::take(&mut self.stall_data_in),
+            (_, false) => std::mem::take(&mut self.stall_data_out),
+        };
+        if stall_knob {
+            self.sense = ABORTED;
+            return self.begin(tag, length, dir_in, Answer::None, FAILED, true);
         }
         match self.answer(opcode, lba, blocks) {
             Ok(answer) => {
                 if opcode != REQUEST_SENSE {
                     self.sense = NO_SENSE;
                 }
-                self.begin(tag, length, dir_in, answer, PASSED);
+                self.begin(tag, length, dir_in, answer, PASSED, false);
             }
             Err(sense) => {
                 self.sense = sense;
-                self.begin(tag, length, dir_in, Answer::None, FAILED);
+                let stall = self.failed_data == FailedData::Stall;
+                self.begin(tag, length, dir_in, Answer::None, FAILED, stall);
             }
         }
     }
@@ -184,8 +198,18 @@ impl FakeStorage {
                 b.resize(32, 0);
                 Answer::In(b)
             }
-            READ_10 => Answer::In(self.read_blocks(lba, blocks as u64)),
+            READ_10 => {
+                if self
+                    .medium_error
+                    .is_some_and(|bad| (lba..lba + blocks as u64).contains(&bad))
+                {
+                    return Err(UNRECOVERED_READ_ERROR);
+                }
+                Answer::In(self.read_blocks(lba, blocks as u64))
+            }
+            WRITE_10 if self.write_protected => return Err(WRITE_PROTECTED),
             WRITE_10 => Answer::Out(lba),
+            SYNCHRONIZE_CACHE_10 if self.no_cache_sync => return Err(INVALID_OPCODE),
             _ => Answer::None,
         })
     }

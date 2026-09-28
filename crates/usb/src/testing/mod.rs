@@ -13,7 +13,7 @@ mod xhci;
 pub use bus::TamperBus;
 pub use device::FakeUsbDevice;
 pub use hal::{FAKE_BAR, FAKE_BAR_LEN, FakeHal};
-pub use storage::{Event, FakeStorage, configured, op};
+pub use storage::{BadCsw, Event, FakeStorage, configured, op};
 pub use xhci::{ExtCap, FakeCap, FakeConfig};
 
 use crate::xhci::Xhci;

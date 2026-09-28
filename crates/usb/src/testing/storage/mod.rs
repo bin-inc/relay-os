@@ -107,6 +107,37 @@ pub struct FakeStorage {
     no_medium: bool,
     /// Knob: the next command ends with a phase error.
     phase_error: bool,
+    /// Knob: the next data-IN or data-OUT phase stalls (the command then
+    /// fails with ABORTED COMMAND).
+    stall_data_in: bool,
+    stall_data_out: bool,
+    /// Knob: this many CSW reads stall.
+    stall_csw: usize,
+    /// Knob: what is wrong with the next CSW.
+    bad_csw: Option<BadCsw>,
+    /// Knob: the next data-IN phase keeps back this many bytes (its CSW
+    /// reports them as the residue).
+    short_data_in: u32,
+    /// Knob: the residue the next CSW reports, whatever moved.
+    residue: Option<u32>,
+    /// Knob: every bulk transfer is NAKed: the device does not answer.
+    nak: bool,
+    /// Knob: reading this block fails with MEDIUM ERROR.
+    medium_error: Option<u64>,
+    /// Knob: writes fail with DATA PROTECT.
+    write_protected: bool,
+    /// Knob: SYNCHRONIZE CACHE fails with ILLEGAL REQUEST.
+    no_cache_sync: bool,
+}
+
+/// A CSW that breaks BOT 6.3.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BadCsw {
+    Signature,
+    /// The tag of another CBW.
+    Tag,
+    /// 12 bytes.
+    Short,
 }
 
 impl FakeStorage {
@@ -138,6 +169,16 @@ impl FakeStorage {
             never_ready: false,
             no_medium: false,
             phase_error: false,
+            stall_data_in: false,
+            stall_data_out: false,
+            stall_csw: 0,
+            bad_csw: None,
+            short_data_in: 0,
+            residue: None,
+            nak: false,
+            medium_error: None,
+            write_protected: false,
+            no_cache_sync: false,
         }))
     }
 
@@ -217,6 +258,62 @@ impl FakeStorage {
     /// its data phase.
     pub fn phase_error_next(&mut self) {
         self.phase_error = true;
+    }
+
+    /// Knob: the next data-IN phase stalls; once the host has cleared the
+    /// halt, the CSW says the command failed (ABORTED COMMAND).
+    pub fn stall_next_data_in(&mut self) {
+        self.stall_data_in = true;
+    }
+
+    /// Knob: the next data-OUT phase stalls, as `stall_next_data_in`.
+    pub fn stall_next_data_out(&mut self) {
+        self.stall_data_out = true;
+    }
+
+    /// Knob: the next `n` CSW reads stall (the CSW stays pending).
+    pub fn stall_csw_reads(&mut self, n: usize) {
+        self.stall_csw = n;
+    }
+
+    /// Knob: the next CSW is broken this way.
+    pub fn bad_csw_next(&mut self, bad: BadCsw) {
+        self.bad_csw = Some(bad);
+    }
+
+    /// Knob: the next data-IN phase is `bytes` shorter than asked, and its
+    /// CSW reports them as the residue.
+    pub fn short_next_data_in(&mut self, bytes: u32) {
+        self.short_data_in = bytes;
+    }
+
+    /// Knob: the next CSW reports a residue of `bytes`, whatever moved
+    /// (Linux knows devices whose residue is wrong: US_FL_IGNORE_RESIDUE).
+    pub fn residue_next(&mut self, bytes: u32) {
+        self.residue = Some(bytes);
+    }
+
+    /// Knob: every bulk transfer is NAKed while `on`: transfers time out.
+    pub fn nak(&mut self, on: bool) {
+        self.nak = on;
+    }
+
+    /// Knob: reading block `lba` fails with MEDIUM ERROR, unrecovered read
+    /// error (0x03/0x11/0x00).
+    pub fn medium_error_at(&mut self, lba: u64) {
+        self.medium_error = Some(lba);
+    }
+
+    /// Knob: writes fail with DATA PROTECT, write protected
+    /// (0x07/0x27/0x00).
+    pub fn write_protect(&mut self) {
+        self.write_protected = true;
+    }
+
+    /// Knob: SYNCHRONIZE CACHE fails with ILLEGAL REQUEST, invalid command
+    /// operation code (0x05/0x20/0x00), as many cheap sticks answer.
+    pub fn no_synchronize_cache(&mut self) {
+        self.no_cache_sync = true;
     }
 
     /// Everything the device saw.
