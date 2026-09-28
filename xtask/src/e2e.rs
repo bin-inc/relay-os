@@ -44,6 +44,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_CMDLINE: &str = "test=1";
@@ -310,6 +311,9 @@ struct Running {
     child: Child,
     stdin: ChildStdin,
     serial: Arc<Mutex<Vec<u8>>>,
+    /// Copies QEMU's serial output into `serial` and the log file until
+    /// QEMU exits, then returns the log file.
+    reader: Option<JoinHandle<fs::File>>,
     qmp: Qmp,
     /// Offset in the stripped serial text up to which output was consumed.
     consumed: usize,
@@ -327,6 +331,9 @@ impl Drop for Running {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
     }
 }
 
@@ -346,7 +353,7 @@ fn start(image: &Path, layout: &Layout, scenario: &Scenario, run_dir: &Path) -> 
 }
 
 /// Starts QEMU on the prepared disk; its serial output goes to `log` too.
-fn launch(q: Qemu, root: Partition, run_dir: &Path, mut log: fs::File) -> Result<Running> {
+fn launch(q: Qemu, root: Partition, run_dir: &Path, log: fs::File) -> Result<Running> {
     let socket = q.qmp.clone().context("QMP socket")?;
     // A socket left by an earlier run would refuse QEMU's bind.
     let _ = fs::remove_file(&socket);
@@ -358,19 +365,9 @@ fn launch(q: Qemu, root: Partition, run_dir: &Path, mut log: fs::File) -> Result
         .spawn()
         .context("starting qemu-system-x86_64")?;
     let stdin = child.stdin.take().unwrap();
-    let mut stdout = child.stdout.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
     let serial = Arc::new(Mutex::new(Vec::new()));
-    let sink = serial.clone();
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        while let Ok(n) = stdout.read(&mut buf) {
-            if n == 0 {
-                break;
-            }
-            sink.lock().unwrap().extend_from_slice(&buf[..n]);
-            let _ = log.write_all(&buf[..n]);
-        }
-    });
+    let reader = read_serial(stdout, serial.clone(), log);
     let qmp = wait_for_qmp(
         &mut child,
         &socket,
@@ -384,22 +381,51 @@ fn launch(q: Qemu, root: Partition, run_dir: &Path, mut log: fs::File) -> Result
         child,
         stdin,
         serial,
+        reader: Some(reader),
         qmp,
         consumed: 0,
         off: false,
     })
 }
 
+/// Copies `stdout` into `serial` and `log` until it ends (QEMU exited),
+/// then hands the log file back.
+fn read_serial(
+    mut stdout: impl Read + Send + 'static,
+    serial: Arc<Mutex<Vec<u8>>>,
+    mut log: fs::File,
+) -> JoinHandle<fs::File> {
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = stdout.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            serial.lock().unwrap().extend_from_slice(&buf[..n]);
+            let _ = log.write_all(&buf[..n]);
+        }
+        log
+    })
+}
+
 /// Types `command` and waits (up to `timeout`) for QEMU to exit with
 /// `status`; the shell shut the filesystem down first, so it must be marked
-/// clean.
-fn exit_with(r: &mut Running, command: &str, status: i32, timeout: Duration) -> Result<()> {
+/// clean. Returns the serial log once everything QEMU printed is in it.
+fn exit_with(r: &mut Running, command: &str, status: i32, timeout: Duration) -> Result<fs::File> {
     r.stdin.write_all(command.as_bytes())?;
     r.stdin.write_all(b"\r")?;
     r.stdin.flush()?;
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(s) = r.child.try_wait()? {
+            // The pipe ends with QEMU, so this waits only for the last
+            // bytes to be copied.
+            let log = r
+                .reader
+                .take()
+                .context("serial reader already joined")?
+                .join()
+                .map_err(|_| anyhow::anyhow!("the serial reader panicked"))?;
             if s.code() != Some(status) {
                 bail!("QEMU exited with {s} after `{command}`, expected exit status {status}");
             }
@@ -407,7 +433,7 @@ fn exit_with(r: &mut Running, command: &str, status: i32, timeout: Duration) -> 
             if state != "clean" {
                 bail!("after `{command}` the root filesystem is `{state}`, not `clean`");
             }
-            return Ok(());
+            return Ok(log);
         }
         if Instant::now() > deadline {
             bail!("QEMU still runs {timeout:?} after `{command}`");
@@ -420,16 +446,13 @@ fn exit_with(r: &mut Running, command: &str, status: i32, timeout: Duration) -> 
 /// printing `last` if given; then the same disk boots again, with the serial
 /// log continued.
 fn reboot(r: &mut Running, last: Option<&str>, timeout: Duration) -> Result<()> {
-    exit_with(r, "reboot", EXIT_RESET, timeout)?;
+    let mut log = exit_with(r, "reboot", EXIT_RESET, timeout)?;
     if let Some(pattern) = last {
         let text = r.text();
         if !Regex::new(pattern)?.is_match(&text[r.consumed.min(text.len())..]) {
             bail!("the machine restarted without printing /{pattern}/");
         }
     }
-    let mut log = fs::OpenOptions::new()
-        .append(true)
-        .open(r.run_dir.join("serial.log"))?;
     log.write_all(b"\n--- e2e: reboot ---\n")?;
     let q = Qemu {
         disk: r.qemu.disk.clone(),
@@ -899,6 +922,35 @@ mod tests {
         assert!(msg.contains("exited"), "{msg}");
         assert!(msg.contains("could not load firmware"), "{msg}");
         assert!(started.elapsed() < Duration::from_secs(5), "gave up early");
+    }
+
+    /// A reboot matches what the machine printed before it went down, then
+    /// continues the log: both need every byte QEMU wrote before it exited.
+    #[test]
+    fn the_serial_reader_hands_over_everything_printed() {
+        let dir = out_dir().join("e2e-selftest");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("reader.log");
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "head -c 1000000 /dev/zero | tr '\\0' x; printf END"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let serial = Arc::new(Mutex::new(Vec::new()));
+        let reader = read_serial(
+            child.stdout.take().unwrap(),
+            serial.clone(),
+            fs::File::create(&path).unwrap(),
+        );
+        child.wait().unwrap();
+        let mut log = reader.join().unwrap();
+        assert_eq!(serial.lock().unwrap().len(), 1_000_003);
+        assert!(serial.lock().unwrap().ends_with(b"xEND"));
+        log.write_all(b"MARK").unwrap();
+        drop(log);
+        let text = fs::read(&path).unwrap();
+        assert_eq!(text.len(), 1_000_007);
+        assert!(text.ends_with(b"xENDMARK"));
     }
 
     #[test]
