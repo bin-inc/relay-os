@@ -1,19 +1,26 @@
-//! Transfers (xHCI 4.11): control transfers on EP0, matching transfer
+//! Transfers (xHCI 4.11): control transfers on EP0, IN transfers that
+//! complete later, bulk transfers that are waited for, matching transfer
 //! events to what is in flight, and putting an endpoint back in order
 //! after a STALL or a timeout.
 
 use super::context::{EP_DISABLED, EP_ERROR, EP_HALTED, EP_RUNNING, EP_STOPPED, Output, dci};
-use super::trb::{SHORT_PACKET, STALL, SUCCESS, Trb, completion_name};
+use super::trb::{
+    SHORT_PACKET, STALL, STOPPED, STOPPED_LENGTH_INVALID, SUCCESS, Trb, completion_name,
+};
 use super::{Control, Transfer, Xhci};
-use crate::{Bus, Hal, Setup, UsbError};
+use crate::{Bus, Hal, MAX_BULK, Setup, UsbError};
 use core::fmt;
 use core::sync::atomic::{Ordering, fence};
 use core::time::Duration;
 
 /// How long a control transfer may take (spec §6.2).
 pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
-/// The largest transfer: one page of DMA buffer.
+/// How long a bulk transfer may take (spec §6.2).
+pub const BULK_TIMEOUT: Duration = Duration::from_secs(5);
+/// The largest control or interrupt transfer: one page of DMA buffer.
 pub const DATA_BUFFER_SIZE: usize = 4096;
+/// A bulk endpoint's buffer: the largest bulk transfer.
+pub const BULK_BUFFER_SIZE: usize = MAX_BULK;
 /// How often a transfer wait polls.
 const TRANSFER_POLL: Duration = Duration::from_micros(10);
 /// EP0's Device Context Index.
@@ -182,7 +189,11 @@ impl<H: Hal> Xhci<H> {
             STALL => Err(UsbError::Stall),
             code => Err(UsbError::Transfer(code)),
         });
-        if !matches!(code, SUCCESS | SHORT_PACKET) {
+        // Stopped is the driver's own doing (an abort), not a failure.
+        if !matches!(
+            code,
+            SUCCESS | SHORT_PACKET | STOPPED | STOPPED_LENGTH_INVALID
+        ) {
             xlog!(
                 &self.hal,
                 &self.name,
@@ -192,6 +203,91 @@ impl<H: Hal> Xhci<H> {
                 completion_name(code)
             );
         }
+    }
+
+    /// A bulk transfer of `len` bytes on `endpoint` (the `Bus::bulk_in`
+    /// and `bulk_out` contract): `out` is the data to send for an OUT
+    /// endpoint. One Normal TRB into the endpoint's 64 KiB buffer; after
+    /// 5 s the endpoint is stopped and its ring moved past the TRB.
+    fn bulk_transfer(
+        &mut self,
+        slot: u8,
+        endpoint: u8,
+        len: usize,
+        out: Option<&[u8]>,
+    ) -> Result<usize, UsbError> {
+        if self.dead {
+            return Err(UsbError::ControllerDead);
+        }
+        let ep = self
+            .endpoint_mut(slot, endpoint)
+            .ok_or(UsbError::Disconnected)?;
+        if ep.lost {
+            return Err(UsbError::Unsupported("endpoint lost after a failed abort"));
+        }
+        let Some(buffer) = ep.buffer.as_ref().filter(|b| b.size() == BULK_BUFFER_SIZE) else {
+            return Err(UsbError::Unsupported("not a bulk endpoint"));
+        };
+        if len > buffer.size() {
+            return Err(UsbError::Unsupported("bulk transfer over 64 KiB"));
+        }
+        if !matches!(ep.transfer, Transfer::Idle) {
+            return Err(UsbError::Unsupported("transfer already queued"));
+        }
+        let dci = ep.dci;
+        // A halted endpoint ignores its doorbell (xHCI 4.8.3): the
+        // transfer would only time out.
+        if self.endpoint_state(slot as usize, dci)? == EP_HALTED {
+            return Err(UsbError::Stall);
+        }
+        let ep = self
+            .endpoint_mut(slot, endpoint)
+            .ok_or(UsbError::Disconnected)?;
+        let buffer = ep.buffer.as_ref().ok_or(UsbError::Disconnected)?;
+        if let Some(data) = out {
+            buffer.write_bytes(0, data);
+        }
+        let trb = ep.ring.push(Trb::normal(buffer.phys(), len as u32));
+        ep.transfer = Transfer::Queued { trb, len };
+        fence(Ordering::SeqCst);
+        self.regs.ring_doorbell(&self.hal, slot, dci as u32);
+        let start = self.hal.now();
+        loop {
+            self.poll();
+            if self.dead {
+                return Err(UsbError::ControllerDead);
+            }
+            let ep = self
+                .endpoint_mut(slot, endpoint)
+                .ok_or(UsbError::Disconnected)?;
+            match core::mem::replace(&mut ep.transfer, Transfer::Idle) {
+                Transfer::Done(result) => return result,
+                other => ep.transfer = other,
+            }
+            if self.hal.now() - start >= BULK_TIMEOUT {
+                break;
+            }
+            self.hal.sleep(TRANSFER_POLL);
+        }
+        xlog!(
+            &self.hal,
+            &self.name,
+            "slot {slot} endpoint {endpoint:#04x}: bulk transfer of {len} bytes timed out"
+        );
+        let aborted = self.reposition(slot as usize, dci);
+        if let Some(ep) = self.endpoint_mut(slot, endpoint) {
+            ep.transfer = Transfer::Idle;
+            if let Err(e) = aborted {
+                // The controller may still own the TRB and its buffer.
+                ep.lost = true;
+                xlog!(
+                    &self.hal,
+                    &self.name,
+                    "slot {slot} endpoint {endpoint:#04x}: abort failed: {e}; endpoint not used until reset"
+                );
+            }
+        }
+        Err(UsbError::Timeout)
     }
 
     /// Makes an endpoint usable after a halt or a timeout: Reset Endpoint
@@ -251,15 +347,18 @@ impl<H: Hal> Bus for Xhci<H> {
         if self.dead {
             return Err(UsbError::ControllerDead);
         }
-        if len > DATA_BUFFER_SIZE {
-            return Err(UsbError::Unsupported("transfer over 4096 bytes"));
-        }
         let ep = self
             .endpoint_mut(slot, endpoint)
             .ok_or(UsbError::Disconnected)?;
-        let Some(buffer) = &ep.buffer else {
+        if ep.lost {
+            return Err(UsbError::Unsupported("endpoint lost after a failed abort"));
+        }
+        let Some(buffer) = ep.buffer.as_ref().filter(|_| endpoint & 0x80 != 0) else {
             return Err(UsbError::Unsupported("not an IN endpoint"));
         };
+        if len > buffer.size() {
+            return Err(UsbError::Unsupported("transfer larger than the buffer"));
+        }
         if !matches!(ep.transfer, Transfer::Idle) {
             return Err(UsbError::Unsupported("transfer already queued"));
         }
@@ -301,9 +400,32 @@ impl<H: Hal> Bus for Xhci<H> {
         }))
     }
 
+    fn bulk_in(&mut self, slot: u8, endpoint: u8, buf: &mut [u8]) -> Result<usize, UsbError> {
+        if endpoint & 0x80 == 0 {
+            return Err(UsbError::Unsupported("bulk IN on an OUT endpoint"));
+        }
+        let n = self.bulk_transfer(slot, endpoint, buf.len(), None)?;
+        let n = n.min(buf.len());
+        if let Some(buffer) = self
+            .endpoint_mut(slot, endpoint)
+            .and_then(|e| e.buffer.as_ref())
+        {
+            buffer.read_bytes(0, &mut buf[..n]);
+        }
+        Ok(n)
+    }
+
+    fn bulk_out(&mut self, slot: u8, endpoint: u8, data: &[u8]) -> Result<usize, UsbError> {
+        if endpoint & 0x80 != 0 {
+            return Err(UsbError::Unsupported("bulk OUT on an IN endpoint"));
+        }
+        self.bulk_transfer(slot, endpoint, data.len(), Some(data))
+    }
+
     /// Reset Endpoint if the context says Halted (Stop Endpoint if it still
     /// runs), Set TR Dequeue Pointer to the enqueue position, dropping
-    /// anything outstanding, then CLEAR_FEATURE(ENDPOINT_HALT).
+    /// anything outstanding, then CLEAR_FEATURE(ENDPOINT_HALT). An endpoint
+    /// lost after a failed abort is usable again once this succeeds.
     fn clear_halt(&mut self, slot: u8, endpoint: u8) -> Result<(), UsbError> {
         if self.dead {
             return Err(UsbError::ControllerDead);
@@ -314,12 +436,19 @@ impl<H: Hal> Bus for Xhci<H> {
             .ok_or(UsbError::Disconnected)?;
         ep.transfer = Transfer::Idle;
         self.reposition(slot as usize, dci)?;
+        if let Some(ep) = self.endpoint_mut(slot, endpoint) {
+            ep.lost = false;
+        }
         self.control_transfer(slot, Setup::clear_halt(endpoint), &mut [])?;
         Ok(())
     }
 
     fn now(&self) -> Duration {
         self.hal.now()
+    }
+
+    fn sleep(&self, d: Duration) {
+        self.hal.sleep(d);
     }
 
     fn log(&self, args: fmt::Arguments) {
@@ -706,7 +835,7 @@ mod tests {
         assert_eq!(xhci.queue_in(9, 0x81, 8), Err(UsbError::Disconnected));
         assert_eq!(
             xhci.queue_in(d.slot, 0x81, 5000),
-            Err(UsbError::Unsupported("transfer over 4096 bytes"))
+            Err(UsbError::Unsupported("transfer larger than the buffer"))
         );
         xhci.queue_in(d.slot, 0x81, 8).unwrap();
         assert_eq!(
@@ -726,8 +855,195 @@ mod tests {
         let (hal, xhci, _d, _k120) = keyboard(FakeConfig::basic(), 1);
         let before = hal.clock();
         assert!(Bus::now(&xhci) > before);
+        Bus::sleep(&xhci, Duration::from_millis(3));
+        assert!(hal.clock() >= before + Duration::from_millis(3));
         Bus::log(&xhci, format_args!("hid: hello"));
         assert!(hal.log_text().ends_with("hid: hello"));
+    }
+
+    fn stick(config: FakeConfig, port: u8) -> (FakeHal, Xhci<FakeHal>, Device, Dev) {
+        let stick = if config.ports > 8 {
+            FakeUsbDevice::kingston_stick()
+        } else {
+            FakeUsbDevice::usb2_stick()
+        };
+        let (hal, mut xhci, d) = attached(config, port, &stick);
+        xhci.configure(&d, &[0]).unwrap();
+        (hal, xhci, d, stick)
+    }
+
+    fn sticks() -> [(FakeHal, Xhci<FakeHal>, Device, Dev); 2] {
+        [
+            stick(FakeConfig::intel(), 13),
+            stick(FakeConfig::basic(), 3),
+        ]
+    }
+
+    fn pattern(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i * 7 + i / 256) as u8).collect()
+    }
+
+    #[test]
+    fn bulk_transfers_move_up_to_64_kib_each_way() {
+        for (_hal, mut xhci, d, dev) in sticks() {
+            let data = pattern(MAX_BULK);
+            assert_eq!(xhci.bulk_out(d.slot, 0x02, &data), Ok(MAX_BULK));
+            assert_eq!(xhci.bulk_out(d.slot, 0x02, &data[..31]), Ok(31));
+            let got = dev.borrow().data_out_received();
+            assert_eq!(got, [(0x02, data.clone()), (0x02, data[..31].to_vec())]);
+            dev.borrow_mut().push_in(0x81, &data);
+            let mut buf = vec![0; MAX_BULK];
+            assert_eq!(xhci.bulk_in(d.slot, 0x81, &mut buf), Ok(MAX_BULK));
+            assert_eq!(buf, data);
+        }
+    }
+
+    #[test]
+    fn a_short_bulk_in_returns_what_came() {
+        for (_hal, mut xhci, d, dev) in sticks() {
+            dev.borrow_mut().push_in(0x81, &[0x55; 13]);
+            let mut buf = vec![0; 512];
+            assert_eq!(xhci.bulk_in(d.slot, 0x81, &mut buf), Ok(13));
+            assert_eq!(buf[..13], [0x55; 13]);
+            assert!(buf[13..].iter().all(|&b| b == 0));
+        }
+    }
+
+    #[test]
+    fn bulk_buffers_are_64_kib_aligned_so_no_transfer_crosses_a_boundary() {
+        for (_hal, xhci, d, _dev) in sticks() {
+            let s = xhci.slots[d.slot as usize].as_ref().unwrap();
+            for ep in &s.endpoints {
+                let buf = ep.buffer.as_ref().expect("bulk endpoints have a buffer");
+                assert_eq!(buf.size(), MAX_BULK);
+                assert_eq!(
+                    buf.phys() % MAX_BULK as u64,
+                    0,
+                    "endpoint {:#x}",
+                    ep.address
+                );
+            }
+        }
+        // Interrupt endpoints keep their page.
+        let (_hal, xhci, d, _k120) = keyboard(FakeConfig::basic(), 1);
+        let s = xhci.slots[d.slot as usize].as_ref().unwrap();
+        assert_eq!(s.endpoints[0].buffer.as_ref().unwrap().size(), 4096);
+    }
+
+    #[test]
+    fn a_stalled_bulk_endpoint_stays_halted_until_its_halt_is_cleared() {
+        for (hal, mut xhci, d, dev) in sticks() {
+            dev.borrow_mut().stall_endpoint(0x02);
+            assert_eq!(xhci.bulk_out(d.slot, 0x02, &[1; 31]), Err(UsbError::Stall));
+            // Halted: refused at once instead of waiting for a doorbell the
+            // controller ignores.
+            let before = hal.clock();
+            assert_eq!(xhci.bulk_out(d.slot, 0x02, &[1; 31]), Err(UsbError::Stall));
+            assert!(hal.clock() - before < Duration::from_millis(1));
+            xhci.clear_halt(d.slot, 0x02).unwrap();
+            assert_eq!(xhci.bulk_out(d.slot, 0x02, &[2; 31]), Ok(31));
+            assert_eq!(dev.borrow().data_out_received(), [(0x02, vec![2; 31])]);
+        }
+    }
+
+    #[test]
+    fn a_bulk_transfer_that_times_out_is_aborted_and_the_endpoint_works_again() {
+        for (hal, mut xhci, d, dev) in sticks() {
+            let (n, before) = (hal.fake().executed().len(), hal.clock());
+            let mut buf = vec![0; 512];
+            // Nothing to send: the device NAKs.
+            assert_eq!(xhci.bulk_in(d.slot, 0x81, &mut buf), Err(UsbError::Timeout));
+            let waited = hal.clock() - before;
+            assert!(waited >= BULK_TIMEOUT && waited < BULK_TIMEOUT + Duration::from_secs(1));
+            // Stop Endpoint, then Set TR Dequeue Pointer past the TRB.
+            assert_eq!(commands_since(&hal, n), [15, 16]);
+            assert!(
+                hal.log_text()
+                    .contains("slot 1 endpoint 0x81: bulk transfer of 512 bytes timed out")
+            );
+            assert!(
+                !hal.log_text().contains("transfer failed"),
+                "a stop is no failure"
+            );
+            dev.borrow_mut().push_in(0x81, &[9; 13]);
+            assert_eq!(xhci.bulk_in(d.slot, 0x81, &mut buf), Ok(13));
+        }
+    }
+
+    #[test]
+    fn an_endpoint_whose_abort_failed_is_not_used_until_its_halt_is_cleared() {
+        let (hal, mut xhci, d, dev) = stick(FakeConfig::intel(), 13);
+        hal.fake().config_mut().hang_command = Some(15); // Stop Endpoint
+        let mut buf = vec![0; 512];
+        assert_eq!(xhci.bulk_in(d.slot, 0x81, &mut buf), Err(UsbError::Timeout));
+        assert!(hal.log_text().contains("abort failed"));
+        let (n, before) = (hal.fake().executed().len(), hal.outstanding_dma());
+        assert_eq!(
+            xhci.bulk_in(d.slot, 0x81, &mut buf),
+            Err(UsbError::Unsupported("endpoint lost after a failed abort"))
+        );
+        assert_eq!(
+            xhci.queue_in(d.slot, 0x81, 13),
+            Err(UsbError::Unsupported("endpoint lost after a failed abort"))
+        );
+        assert_eq!(hal.fake().executed().len(), n, "nothing sent");
+        // The controller still owns the TRB: the device's data lands in
+        // the buffer, which is still allocated (the fake panics otherwise).
+        dev.borrow_mut().push_in(0x81, &[7; 13]);
+        hal.sleep(Duration::from_millis(5));
+        assert_eq!(hal.outstanding_dma(), before);
+        hal.fake().config_mut().hang_command = None;
+        xhci.clear_halt(d.slot, 0x81).unwrap();
+        dev.borrow_mut().push_in(0x81, &[8; 13]);
+        assert_eq!(xhci.bulk_in(d.slot, 0x81, &mut buf), Ok(13));
+        assert_eq!(buf[..13], [8; 13]);
+    }
+
+    #[test]
+    fn unplugging_during_a_bulk_transfer_fails_it_at_once() {
+        let (hal, mut xhci, d, _dev) = stick(FakeConfig::intel(), 13);
+        hal.fake()
+            .after(Duration::from_millis(5), |x, _| x.unplug(13));
+        let before = hal.clock();
+        let mut buf = vec![0; 512];
+        assert_eq!(
+            xhci.bulk_in(d.slot, 0x81, &mut buf),
+            Err(UsbError::Transfer(4))
+        );
+        assert!(hal.clock() - before < Duration::from_millis(10));
+    }
+
+    #[test]
+    fn bulk_transfers_the_driver_cannot_do_are_refused() {
+        let (hal, mut xhci, d, _dev) = stick(FakeConfig::intel(), 13);
+        let mut big = vec![0; MAX_BULK + 1];
+        assert_eq!(
+            xhci.bulk_in(d.slot, 0x81, &mut big),
+            Err(UsbError::Unsupported("bulk transfer over 64 KiB"))
+        );
+        assert_eq!(
+            xhci.bulk_out(d.slot, 0x81, &[0; 4]),
+            Err(UsbError::Unsupported("bulk OUT on an IN endpoint"))
+        );
+        assert_eq!(
+            xhci.bulk_in(d.slot, 0x02, &mut [0; 4]),
+            Err(UsbError::Unsupported("bulk IN on an OUT endpoint"))
+        );
+        assert_eq!(
+            xhci.bulk_in(9, 0x81, &mut [0; 4]),
+            Err(UsbError::Disconnected)
+        );
+        hal.fake().host_system_error();
+        xhci.poll();
+        assert_eq!(
+            xhci.bulk_out(d.slot, 0x02, &[0; 4]),
+            Err(UsbError::ControllerDead)
+        );
+        let (_hal, mut xhci, d, _k120) = keyboard(FakeConfig::basic(), 1);
+        assert_eq!(
+            xhci.bulk_in(d.slot, 0x81, &mut [0; 8]),
+            Err(UsbError::Unsupported("not a bulk endpoint"))
+        );
     }
 
     #[test]

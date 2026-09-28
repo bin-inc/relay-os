@@ -1,10 +1,15 @@
 //! What class drivers see of a host controller: control requests, IN
-//! transfers that complete later, and halt recovery. The xHCI driver
-//! implements [`Bus`]; the class drivers' tests use a fake.
+//! transfers that complete later, bulk transfers that are waited for, and
+//! halt recovery. The xHCI driver implements [`Bus`]; the class drivers'
+//! tests use a fake.
 
 use crate::UsbError;
 use core::fmt;
 use core::time::Duration;
+
+/// The largest bulk transfer (spec §6.4: storage commands move at most
+/// 64 KiB).
+pub const MAX_BULK: usize = 64 * 1024;
 
 /// A device's connection speed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,11 +144,24 @@ pub trait Bus {
         endpoint: u8,
         buf: &mut [u8],
     ) -> Option<Result<usize, UsbError>>;
+    /// A bulk IN transfer on `endpoint` of up to `buf.len()` bytes
+    /// ([`MAX_BULK`] at most): waits for it (5 s at most) and returns the
+    /// number of bytes received into `buf`. A STALL is `UsbError::Stall`,
+    /// and the endpoint stays halted until [`Bus::clear_halt`]. A transfer
+    /// that times out is aborted before this returns; if the abort fails,
+    /// the endpoint takes no transfer until `clear_halt` succeeds.
+    fn bulk_in(&mut self, slot: u8, endpoint: u8, buf: &mut [u8]) -> Result<usize, UsbError>;
+    /// A bulk OUT transfer of `data` on `endpoint`, as [`Bus::bulk_in`]:
+    /// returns the number of bytes sent.
+    fn bulk_out(&mut self, slot: u8, endpoint: u8, data: &[u8]) -> Result<usize, UsbError>;
     /// Makes a halted `endpoint` usable again: resets it on the controller
     /// and sends `CLEAR_FEATURE(ENDPOINT_HALT)` to the device.
     fn clear_halt(&mut self, slot: u8, endpoint: u8) -> Result<(), UsbError>;
     /// Monotonic time since boot.
     fn now(&self) -> Duration;
+    /// Waits at least `d` (a device that asks for time, such as a disk
+    /// spinning up).
+    fn sleep(&self, d: Duration);
     /// Adds one line to the kernel log.
     fn log(&self, args: fmt::Arguments);
 }

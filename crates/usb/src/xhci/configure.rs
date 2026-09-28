@@ -7,7 +7,7 @@ use super::context::{
 };
 use super::device::{A0, kind_name};
 use super::ring::ProducerRing;
-use super::transfer::DATA_BUFFER_SIZE;
+use super::transfer::{BULK_BUFFER_SIZE, DATA_BUFFER_SIZE};
 use super::trb::Trb;
 use super::{Device, Endpoint, Transfer, Xhci};
 use crate::descriptor::{self, EndpointKind};
@@ -45,17 +45,26 @@ fn endpoint_context(e: &descriptor::Endpoint, speed: Speed, dequeue: u64) -> End
     }
 }
 
-/// A transfer ring, and for IN endpoints a buffer, for endpoint `e`.
+/// A transfer ring, and a buffer, for endpoint `e`: bulk endpoints get
+/// 64 KiB aligned to 64 KiB, so one Normal TRB covers any transfer without
+/// crossing a 64 KiB boundary (xHCI 6.4.1.1); interrupt IN endpoints get
+/// 4 KiB; interrupt OUT endpoints none.
 fn new_endpoint<H: Hal>(hal: &H, e: &descriptor::Endpoint) -> Result<Endpoint, UsbError> {
     let ring = ProducerRing::new(hal)?;
-    let buffer = if e.is_in() {
-        let Some(buf) = hal.alloc_dma(DATA_BUFFER_SIZE, 64) else {
-            ring.free(hal);
-            return Err(UsbError::NoMemory);
-        };
-        Some(buf)
-    } else {
-        None
+    let size = match e.kind {
+        EndpointKind::Bulk => Some(BULK_BUFFER_SIZE),
+        _ if e.is_in() => Some(DATA_BUFFER_SIZE),
+        _ => None,
+    };
+    let buffer = match size {
+        Some(size) => {
+            let Some(buf) = hal.alloc_dma(size, size) else {
+                ring.free(hal);
+                return Err(UsbError::NoMemory);
+            };
+            Some(buf)
+        }
+        None => None,
     };
     Ok(Endpoint {
         address: e.address,
@@ -63,6 +72,7 @@ fn new_endpoint<H: Hal>(hal: &H, e: &descriptor::Endpoint) -> Result<Endpoint, U
         ring,
         buffer,
         transfer: Transfer::Idle,
+        lost: false,
     })
 }
 

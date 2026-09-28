@@ -18,6 +18,7 @@ const BABBLE: u32 = 3;
 const STALL: u32 = 6;
 const SHORT_PACKET: u32 = 13;
 const ISP: u32 = 1 << 2;
+const CHAIN: u32 = 1 << 4;
 const IOC: u32 = 1 << 5;
 const IDT: u32 = 1 << 6;
 const DIR_IN: u32 = 1 << 16;
@@ -283,6 +284,20 @@ impl FakeXhci {
         };
         c.advance();
         let (buffer, len) = (pointer(&trb), (trb[2] & 0x1_FFFF) as usize);
+        // xHCI 6.4.1.1: at most 64 KiB, and the buffer must not cross a
+        // 64 KiB boundary; this fake plays one-TRB TDs only.
+        if len > 0x1_0000 {
+            panic!("fake xhci: Normal TRB of {len} bytes (at most 64 KiB)");
+        }
+        if (buffer & 0xFFFF) + len as u64 > 0x1_0000 {
+            panic!("fake xhci: Normal TRB buffer {buffer:#x}+{len} crosses a 64 KiB boundary");
+        }
+        if trb[3] & (CHAIN | IDT) != 0 {
+            panic!("fake xhci: chained or immediate-data Normal TRBs are not modelled");
+        }
+        if !dma.contains(buffer, len) {
+            panic!("fake xhci: Normal TRB buffer {buffer:#x}+{len} is not allocated");
+        }
         let address = (dci / 2) as u8 | if dci % 2 == 1 { 0x80 } else { 0 };
         let port = self.slots[slot].as_ref().map_or(0, |s| s.port);
         let Some(dev) = self.devices.get(port as usize - 1).cloned().flatten() else {

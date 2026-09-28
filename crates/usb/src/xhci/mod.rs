@@ -117,9 +117,14 @@ struct Endpoint {
     address: u8,
     dci: usize,
     ring: ProducerRing,
-    /// IN endpoints: the 4 KiB buffer their transfers land in.
+    /// Where transfers land or come from: 4 KiB for interrupt IN
+    /// endpoints, 64 KiB (aligned to 64 KiB) for bulk endpoints.
     buffer: Option<DmaBuf>,
     transfer: Transfer,
+    /// A transfer timed out and aborting it failed: the controller may
+    /// still own it and write into the buffer, so no transfer uses the
+    /// endpoint until `clear_halt` has repositioned its ring.
+    lost: bool,
 }
 
 impl Endpoint {
