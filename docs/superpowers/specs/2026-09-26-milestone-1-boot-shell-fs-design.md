@@ -532,7 +532,7 @@ reboot and power-off, kernel log).
 | `mv` | `mv src dst` and `mv src… dir` (rename within the one filesystem) |
 | `clear` | |
 | `help` | lists commands with a one-line description |
-| `uname` | `uname [-a]` → `Relay relay 0.1.0 x86_64` |
+| `uname` | `uname [-a]` → `Relay relay 0.2.0 x86_64` (the version from `Cargo.toml`) |
 | `date` | wall clock from the RTC, printed in UTC |
 | `df` | size, used and available space of `/` |
 | `free` | total, used and free frames and heap |

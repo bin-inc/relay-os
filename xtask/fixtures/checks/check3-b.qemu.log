@@ -8,7 +8,7 @@ a  big  t
 + tail -n 1 /root/notes/big
 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde
 + dmesg
-Relay OS 0.1.0
+Relay OS 0.2.0
 [ ok ] console 1920x1080 (120x33 cells)
 [ ok ] cpu tables
 [ ok ] boot info: 1008 MiB usable in 25 regions, cmdline 'test=1'
