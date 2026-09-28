@@ -190,23 +190,7 @@ fn mismatch(expect: &[Expect], output: &[&str]) -> Option<String> {
     if lines.is_empty() && expect.iter().any(|e| matches!(e, Expect::Never(_))) {
         lines.push(&Expect::Any);
     }
-    if matches_lines(&lines, output) {
-        return None;
-    }
-    let wanted: Vec<String> = lines
-        .iter()
-        .map(|e| match e {
-            Expect::Line(re) => format!("/{}/", show(re)),
-            _ => String::from("..."),
-        })
-        .collect();
-    let got: Vec<&str> = output.iter().take(12).copied().collect();
-    Some(format!(
-        "expected [{}], printed [{}]{}",
-        wanted.join(", "),
-        got.join(" | "),
-        if output.len() > got.len() { " …" } else { "" }
-    ))
+    line_mismatch(&lines, output)
 }
 
 /// The pattern as written in the script.
@@ -216,9 +200,10 @@ fn show(re: &Regex) -> &str {
 }
 
 /// Whether the patterns match all of `output`, line by line, `...`
-/// matching any number of lines. Dynamic programming over (pattern, line),
-/// so many `...` cost no more than one.
-fn matches_lines(patterns: &[&Expect], output: &[&str]) -> bool {
+/// matching any number of lines; if not, the first pattern that cannot
+/// match and where. Dynamic programming over (pattern, line), so many
+/// `...` cost no more than one.
+fn line_mismatch(patterns: &[&Expect], output: &[&str]) -> Option<String> {
     // ok[j]: the patterns so far match output[..j].
     let mut ok = vec![false; output.len() + 1];
     ok[0] = true;
@@ -239,9 +224,38 @@ fn matches_lines(patterns: &[&Expect], output: &[&str]) -> bool {
             }
             Expect::Never(_) => next = ok.clone(),
         }
+        if let Expect::Line(re) = p
+            && !next.contains(&true)
+        {
+            // The lines where this pattern could have matched.
+            let from: Vec<usize> = (0..=output.len()).filter(|&j| ok[j]).collect();
+            return Some(match from[..] {
+                [j] if j == output.len() => {
+                    format!("expected /{}/, but nothing more was printed", show(re))
+                }
+                [j] => format!(
+                    "expected /{}/, printed `{}` (line {})",
+                    show(re),
+                    output[j],
+                    j + 1
+                ),
+                _ => format!(
+                    "expected /{}/ on a line from line {} on, but none matches",
+                    show(re),
+                    from[0] + 1
+                ),
+            });
+        }
         ok = next;
     }
-    ok[output.len()]
+    let last = (0..=output.len()).rev().find(|&j| ok[j])?;
+    (last < output.len()).then(|| {
+        format!(
+            "expected nothing more, printed `{}` (line {})",
+            output[last],
+            last + 1
+        )
+    })
 }
 
 #[cfg(test)]
@@ -293,12 +307,10 @@ bin  etc
         let r = run(Machine::Nuc, QEMU_LOG);
         assert_eq!(r.passed, 3);
         assert_eq!(r.failures.len(), 1);
-        assert!(
-            r.failures[0].starts_with(
-                "line 6: `dmesg`: expected [..., /usb: 00:14\\.0 port 15: .*Kingston.*/, ...]"
-            ),
-            "{}",
-            r.failures[0]
+        assert_eq!(
+            r.failures[0],
+            "line 6: `dmesg`: expected /usb: 00:14\\.0 port 15: .*Kingston.*/ \
+             on a line from line 1 on, but none matches"
         );
     }
 
@@ -314,7 +326,8 @@ bin  etc
         assert_eq!(
             r.failures,
             [
-                "line 2: `mkdir -p /root/n`: expected [], printed [mkdir: cannot create directory '/root/n': Read-only file system]"
+                "line 2: `mkdir -p /root/n`: expected nothing more, printed \
+                 `mkdir: cannot create directory '/root/n': Read-only file system` (line 1)"
             ]
         );
         // Lines are whole lines, in order, and none may be left over.
@@ -365,6 +378,35 @@ bin  etc
         assert_eq!(
             run(Machine::Qemu, "+ mkdir /root/n\n").failures,
             ["line 2: expected `+ mkdir -p /root/n` in the transcript, found `+ mkdir /root/n`"]
+        );
+    }
+
+    #[test]
+    fn a_failure_names_the_expectation_and_the_line() {
+        // A long output (dmesg) that is wrong at its 30th line.
+        let script: String = core::iter::once("dmesg\n".to_string())
+            .chain((1..=40).map(|i| format!("#> l{i}\n")))
+            .collect();
+        let mut log: Vec<String> = (1..=40).map(|i| format!("l{i}")).collect();
+        log[29] = "oops".into();
+        let c = parse(&script, Machine::Qemu).unwrap();
+        let r = check(&c, &format!("+ dmesg\n{}\n", log.join("\n")));
+        assert_eq!(
+            r.failures,
+            ["line 1: `dmesg`: expected /l30/, printed `oops` (line 30)"]
+        );
+        // After `...`, the line may be anywhere further on.
+        let c = parse("dmesg\n#> l1\n#> ...\n#> l99\n", Machine::Qemu).unwrap();
+        let r = check(&c, &format!("+ dmesg\n{}\n", log.join("\n")));
+        assert_eq!(
+            r.failures,
+            ["line 1: `dmesg`: expected /l99/ on a line from line 2 on, but none matches"]
+        );
+        // Output that ends too soon.
+        let c = parse("ls\n#> a\n#> b\n", Machine::Qemu).unwrap();
+        assert_eq!(
+            check(&c, "+ ls\na\n").failures,
+            ["line 1: `ls`: expected /b/, but nothing more was printed"]
         );
     }
 
