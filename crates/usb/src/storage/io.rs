@@ -2,6 +2,13 @@
 //! READ(10) and WRITE(10) of at most [`MAX_BULK`] bytes each, and
 //! SYNCHRONIZE CACHE(10) for `flush`. A request must be whole blocks inside
 //! the disk, or nothing is sent.
+//!
+//! A disk whose command times out on every try (its firmware hangs: it
+//! stays connected and NAKs everything) is given up: each later request
+//! would cost three 5 s timeouts, and the block cache writes every dirty
+//! block again on each sync, so one shell command would take minutes. From
+//! then on every request fails at once with `Timeout`, until the stick is
+//! plugged in again (a new `MassStorage`).
 
 use super::disk::MassStorage;
 use super::scsi::{self, ILLEGAL_REQUEST};
@@ -18,7 +25,8 @@ enum Request<'a> {
 impl MassStorage {
     /// Reads `buf.len() / block_size` blocks from `lba`: READ(10) commands
     /// of at most MAX_BULK bytes each. `buf` must be whole blocks inside
-    /// the disk (`Unsupported` otherwise, nothing sent).
+    /// the disk (`Unsupported` otherwise, nothing sent). A disk given up as
+    /// not answering fails at once with `Timeout`.
     pub fn read(&mut self, bus: &mut dyn Bus, lba: u64, buf: &mut [u8]) -> Result<(), UsbError> {
         self.request(bus, lba, Request::Read(buf))
     }
@@ -31,13 +39,17 @@ impl MassStorage {
 
     /// SYNCHRONIZE CACHE(10) over the whole disk. A device that does not
     /// support it (ILLEGAL REQUEST) has no cache to flush: that is
-    /// success, logged once.
+    /// success, logged once. A disk given up as not answering fails at
+    /// once with `Timeout`.
     pub fn flush(&mut self, bus: &mut dyn Bus) -> Result<(), UsbError> {
+        if self.not_answering {
+            return Err(UsbError::Timeout);
+        }
         if self.no_cache {
             return Ok(());
         }
         let cdb = scsi::synchronize_cache_10();
-        match self.transport.command(bus, &cdb, Data::None, Need::UpTo) {
+        match self.command(bus, &cdb, Data::None, Need::UpTo) {
             Err(UsbError::Sense(s)) if s.key == ILLEGAL_REQUEST => {
                 slog!(
                     bus,
@@ -51,6 +63,27 @@ impl MassStorage {
         }
     }
 
+    /// One command with its tries; a device that did not answer any of
+    /// them is given up (logged once).
+    fn command(
+        &mut self,
+        bus: &mut dyn Bus,
+        cdb: &[u8],
+        data: Data,
+        need: Need,
+    ) -> Result<usize, UsbError> {
+        let r = self.transport.command(bus, cdb, data, need);
+        if r == Err(UsbError::Timeout) {
+            slog!(
+                bus,
+                self.slot(),
+                "not answering; given up until it is plugged in again"
+            );
+            self.not_answering = true;
+        }
+        r
+    }
+
     /// Checks the request, then sends one command per MAX_BULK bytes (a
     /// multiple of every block size the disk may have).
     fn request(&mut self, bus: &mut dyn Bus, lba: u64, req: Request) -> Result<(), UsbError> {
@@ -58,6 +91,9 @@ impl MassStorage {
             Request::Read(b) => b.len(),
             Request::Write(b) => b.len(),
         };
+        if self.not_answering {
+            return Err(UsbError::Timeout);
+        }
         let size = self.block_size;
         if !len.is_multiple_of(size) {
             return Err(UsbError::Unsupported("not whole blocks"));
@@ -79,16 +115,14 @@ impl MassStorage {
                 for (i, part) in buf.chunks_mut(MAX_BULK).enumerate() {
                     let (at, blocks) = command(i, part.len());
                     let cdb = scsi::read_10(at, blocks);
-                    self.transport
-                        .command(bus, &cdb, Data::In(part), Need::All)?;
+                    self.command(bus, &cdb, Data::In(part), Need::All)?;
                 }
             }
             Request::Write(buf) => {
                 for (i, part) in buf.chunks(MAX_BULK).enumerate() {
                     let (at, blocks) = command(i, part.len());
                     let cdb = scsi::write_10(at, blocks);
-                    self.transport
-                        .command(bus, &cdb, Data::Out(part), Need::All)?;
+                    self.command(bus, &cdb, Data::Out(part), Need::All)?;
                 }
             }
         }
@@ -100,10 +134,11 @@ impl MassStorage {
 mod tests {
     use super::*;
     use crate::storage::Sense;
-    use crate::testing::{FakeConfig, FakeHal, FakeStorage, configured, op};
+    use crate::testing::{FakeConfig, FakeHal, FakeStorage, TamperBus, configured, op};
     use crate::xhci::Xhci;
     use alloc::vec;
     use alloc::vec::Vec;
+    use core::time::Duration;
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -344,5 +379,74 @@ mod tests {
             Err(UsbError::Disconnected)
         );
         assert_eq!(disk.flush(&mut xhci), Err(UsbError::Disconnected));
+    }
+
+    #[test]
+    fn a_disk_that_stops_answering_is_given_up() {
+        let (hal, mut xhci, mut disk, stick) = kingston();
+        stick.borrow_mut().nak(true);
+        let mut buf = vec![0u8; 512];
+        let before = hal.clock();
+        assert_eq!(disk.read(&mut xhci, 5, &mut buf), Err(UsbError::Timeout));
+        let took = hal.clock() - before;
+        assert!(
+            took >= Duration::from_secs(15) && took < Duration::from_secs(17),
+            "{took:?}"
+        );
+        let log = hal.log_text();
+        assert!(
+            log.contains("storage: slot 1: not answering; given up until it is plugged in again")
+        );
+        // From now on nothing is sent, even once the device would answer.
+        stick.borrow_mut().nak(false);
+        let requests = hal.fake().requests().len();
+        let seen = stick.borrow().events().len();
+        let mut bus = TamperBus::new(&mut xhci);
+        for _ in 0..2 {
+            let before = hal.clock();
+            assert_eq!(disk.read(&mut bus, 5, &mut buf), Err(UsbError::Timeout));
+            assert_eq!(disk.write(&mut bus, 5, &buf), Err(UsbError::Timeout));
+            assert_eq!(disk.flush(&mut bus), Err(UsbError::Timeout));
+            assert!(hal.clock() - before < Duration::from_millis(1));
+        }
+        assert_eq!(bus.bulk, 0, "no bulk transfer");
+        assert_eq!(hal.fake().requests().len(), requests, "no control request");
+        assert_eq!(
+            stick.borrow().events().len(),
+            seen,
+            "the device saw nothing"
+        );
+        assert_eq!(hal.log_text().matches("given up").count(), 1, "logged once");
+    }
+
+    #[test]
+    fn a_disk_that_answers_with_an_error_is_not_given_up() {
+        let (_hal, mut xhci, mut disk, stick) = kingston();
+        stick.borrow_mut().medium_error_at(5);
+        stick.borrow_mut().write_protect();
+        let mut buf = vec![0u8; 512];
+        assert!(matches!(
+            disk.read(&mut xhci, 5, &mut buf),
+            Err(UsbError::Sense(_))
+        ));
+        assert!(matches!(
+            disk.write(&mut xhci, 6, &buf),
+            Err(UsbError::Sense(_))
+        ));
+        assert_eq!(disk.read(&mut xhci, 6, &mut buf), Ok(()));
+        assert_eq!(disk.flush(&mut xhci), Ok(()));
+    }
+
+    #[test]
+    fn a_gone_device_is_not_given_up_as_not_answering() {
+        let (hal, mut xhci, mut disk, _stick) = kingston();
+        let mut bus = TamperBus::new(&mut xhci);
+        bus.fail_bulk = Some((0, UsbError::Disconnected));
+        let mut buf = vec![0u8; 512];
+        assert_eq!(
+            disk.read(&mut bus, 5, &mut buf),
+            Err(UsbError::Disconnected)
+        );
+        assert!(!hal.log_text().contains("given up"));
     }
 }

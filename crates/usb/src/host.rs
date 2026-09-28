@@ -427,6 +427,32 @@ mod tests {
     }
 
     #[test]
+    fn a_disk_given_up_as_not_answering_works_again_when_plugged_in_again() {
+        let (hal, mut host) = host(FakeConfig::qemu());
+        let stick = FakeStorage::qemu(QEMU_BLOCKS);
+        hal.fake().plug(2, stick.clone());
+        hal.sleep(Duration::from_millis(60));
+        host.service();
+        let old = host.disks()[0].id;
+        stick.borrow_mut().nak(true);
+        let mut buf = vec![0u8; 512];
+        assert_eq!(host.read(old, 0, &mut buf), Err(UsbError::Timeout));
+        let before = hal.clock();
+        assert_eq!(host.read(old, 0, &mut buf), Err(UsbError::Timeout));
+        assert!(hal.clock() - before < Duration::from_millis(1));
+        // The firmware came back after a replug: a new disk.
+        hal.fake().unplug(2);
+        host.service();
+        stick.borrow_mut().nak(false);
+        hal.fake().plug(2, stick);
+        hal.sleep(Duration::from_millis(60));
+        host.service();
+        let new = host.disks()[0].id;
+        assert_ne!(new, old);
+        assert_eq!(host.read(new, 0, &mut buf), Ok(()));
+    }
+
+    #[test]
     fn a_disk_that_cannot_be_started_says_why_and_is_not_set_up_again() {
         let (hal, mut host) = host(FakeConfig::intel());
         let stick = FakeStorage::usb2(1 << 20);

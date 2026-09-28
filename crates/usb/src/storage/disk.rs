@@ -48,6 +48,9 @@ pub struct MassStorage {
     product: String,
     /// SYNCHRONIZE CACHE was refused: there is no cache to flush.
     pub(super) no_cache: bool,
+    /// A command timed out on its last try: the device does not answer
+    /// at all, and nothing more is sent to it.
+    pub(super) not_answering: bool,
 }
 
 impl MassStorage {
@@ -76,6 +79,7 @@ impl MassStorage {
             vendor: inquiry.vendor,
             product: inquiry.product,
             no_cache: false,
+            not_answering: false,
         })
     }
 
