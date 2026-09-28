@@ -1,5 +1,5 @@
-//! The Relay USB stack (spec §6): an xHCI host controller driver and the
-//! HID boot-keyboard class driver.
+//! The Relay USB stack (spec §6): an xHCI host controller driver, the HID
+//! boot-keyboard class driver and the mass-storage class driver.
 //!
 //! The crate reaches hardware only through [`Hal`], which the kernel
 //! implements over its page tables, frame allocator and timer, and the tests
@@ -16,6 +16,7 @@ mod error;
 mod hal;
 pub mod hid;
 pub mod host;
+pub mod storage;
 #[cfg(test)]
 mod testing;
 pub mod xhci;

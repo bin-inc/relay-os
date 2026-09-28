@@ -41,6 +41,8 @@ pub struct FakeSlot {
     pub endpoints: BTreeMap<usize, FakeEndpoint>,
     /// When the device got its SET_ADDRESS.
     pub addressed_at: Duration,
+    /// The USB address its device was given (0 with BSR set).
+    pub address: u8,
 }
 
 /// An endpoint as its context describes it, and its transfer ring.
@@ -244,6 +246,11 @@ impl FakeXhci {
         let s = self.slots[slot].as_mut().expect("slot checked above");
         (s.state, s.port, s.output, s.context_entries) = (new_state, port, output, d0 >> 27);
         s.addressed_at = self.now;
+        s.address = if new_state == ADDRESSED {
+            slot as u8
+        } else {
+            0
+        };
         s.endpoints.insert(1, ep0);
         // A new device: its endpoints start over.
         self.device_toggles.retain(|&(sl, _), _| sl != slot);

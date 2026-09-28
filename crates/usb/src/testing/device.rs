@@ -27,6 +27,11 @@ pub trait FakeDevice {
     fn data_in(&mut self, endpoint: u8, max_len: usize) -> Option<Result<Vec<u8>, Stall>>;
     /// `data` for OUT `endpoint`; `None` is a NAK.
     fn data_out(&mut self, endpoint: u8, data: &[u8]) -> Option<Result<(), Stall>>;
+    /// The USB address it answers to: 0 until SET_ADDRESS.
+    fn usb_address(&self) -> u8;
+    /// A bus reset (plugged in, or its port reset): back to the Default
+    /// state at address 0, unconfigured (USB 2.0 9.1.1.3).
+    fn bus_reset(&mut self);
 }
 
 /// A control request as the device got it.
@@ -196,6 +201,25 @@ impl FakeUsbDevice {
         )
     }
 
+    /// QEMU 8.2's usb-storage on a USB 3 port: SuperSpeed, `46f4:0001`, USB
+    /// 3.00, EP0 512 bytes (bMaxPacketSize0 9), mass storage (8/6/0x50),
+    /// bulk IN 0x81 and OUT 0x02 of 1024 bytes with a burst of 16
+    /// (companion bMaxBurst 15).
+    pub fn qemu_stick() -> Rc<RefCell<FakeUsbDevice>> {
+        let body = [
+            9, 4, 0, 0, 2, 8, 6, 0x50, 0, //
+            7, 5, 0x81, 2, 0, 4, 0, //
+            6, 0x30, 15, 0, 0, 0, //
+            7, 5, 0x02, 2, 0, 4, 0, //
+            6, 0x30, 15, 0, 0, 0,
+        ];
+        FakeUsbDevice::new(
+            Speed::Super,
+            device_descriptor(0x0300, 9, 0x46F4, 0x0001),
+            configuration(1, &body),
+        )
+    }
+
     /// A USB 2 stick: high-speed mass storage with bulk endpoints of 512.
     pub fn usb2_stick() -> Rc<RefCell<FakeUsbDevice>> {
         let body = [
@@ -265,6 +289,11 @@ impl FakeUsbDevice {
     /// Makes `endpoint` answer with STALL until the host clears the halt.
     pub fn stall_endpoint(&mut self, endpoint: u8) {
         self.halted.insert(endpoint);
+    }
+
+    /// Whether `endpoint` answers with STALL (until its halt is cleared).
+    pub fn is_halted(&self, endpoint: u8) -> bool {
+        self.halted.contains(&endpoint)
     }
 
     /// What OUT transfers brought: endpoint and data.
@@ -341,6 +370,15 @@ impl FakeDevice for FakeUsbDevice {
         })
     }
 
+    fn usb_address(&self) -> u8 {
+        self.address
+    }
+
+    fn bus_reset(&mut self) {
+        self.address = 0;
+        self.configuration_value = 0;
+    }
+
     fn data_in(&mut self, endpoint: u8, max_len: usize) -> Option<Result<Vec<u8>, Stall>> {
         if self.halted.contains(&endpoint) {
             return Some(Err(Stall));
@@ -372,6 +410,7 @@ mod tests {
             (FakeUsbDevice::qemu_keyboard(), 0x0627, 0x0001, 1),
             (FakeUsbDevice::kingston_stick(), 0x0951, 0x1666, 1),
             (FakeUsbDevice::usb2_stick(), 0x0951, 0x1665, 1),
+            (FakeUsbDevice::qemu_stick(), 0x46F4, 0x0001, 1),
         ] {
             let d = dev.borrow();
             let desc = DeviceDescriptor::parse(d.device_descriptor()).unwrap();
@@ -383,6 +422,19 @@ mod tests {
         let c = parse_configuration(stick.borrow().configuration_descriptor()).unwrap();
         assert_eq!(c.interfaces[0].endpoints[0].max_burst, 3);
         assert_eq!(stick.borrow().max_packet0(), 512);
+        let qemu = FakeUsbDevice::qemu_stick();
+        let q = qemu.borrow();
+        let desc = DeviceDescriptor::parse(q.device_descriptor()).unwrap();
+        assert_eq!((desc.usb_version, q.max_packet0()), (0x0300, 512));
+        let c = parse_configuration(q.configuration_descriptor()).unwrap();
+        let i = &c.interfaces[0];
+        assert_eq!((i.class, i.subclass, i.protocol), (8, 6, 0x50));
+        let eps: Vec<_> = i
+            .endpoints
+            .iter()
+            .map(|e| (e.address, e.packet_size(), e.max_burst))
+            .collect();
+        assert_eq!(eps, [(0x81, 1024, 15), (0x02, 1024, 15)]);
         assert_eq!(
             FakeUsbDevice::unifying_receiver().borrow().max_packet0(),
             64
@@ -429,8 +481,10 @@ mod tests {
         assert_eq!(d.data_in(0x81, 8), Some(Ok(vec![1, 2, 3])));
         assert_eq!(d.data_in(0x81, 8), Some(Ok(vec![4; 8])));
         d.stall_endpoint(0x81);
+        assert!(d.is_halted(0x81) && !d.is_halted(0x02));
         assert_eq!(d.data_in(0x81, 8), Some(Err(Stall)));
         d.control(Setup::clear_halt(0x81), &[]);
+        assert!(!d.is_halted(0x81));
         assert_eq!(d.data_in(0x81, 8), None);
     }
 }

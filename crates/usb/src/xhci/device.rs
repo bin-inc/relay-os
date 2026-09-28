@@ -80,7 +80,7 @@ impl<H: Hal> Xhci<H> {
             .map(|slot| slot as u8)
     }
 
-    fn connected(&self, port: u8) -> bool {
+    pub(super) fn connected(&self, port: u8) -> bool {
         self.regs.portsc(&self.hal, port) & CCS != 0
     }
 
