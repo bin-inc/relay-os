@@ -1,5 +1,6 @@
 //! USB errors. Device errors are values, not panics (spec §10).
 
+use crate::storage::scsi::Sense;
 use core::fmt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +27,11 @@ pub enum UsbError {
     /// The controller stopped working (a command timed out or it reported a
     /// host system error); nothing more is sent to it.
     ControllerDead,
+    /// The device broke the rules of its transport (a bad CSW, a phase
+    /// error, data that is too short); this says which.
+    Protocol(&'static str),
+    /// A SCSI command failed; the sense data says why.
+    Sense(Sense),
 }
 
 impl fmt::Display for UsbError {
@@ -41,6 +47,8 @@ impl fmt::Display for UsbError {
             UsbError::BadDescriptor(what) => write!(f, "bad descriptor: {what}"),
             UsbError::Disconnected => write!(f, "device disconnected"),
             UsbError::ControllerDead => write!(f, "controller stopped working"),
+            UsbError::Protocol(what) => write!(f, "protocol error: {what}"),
+            UsbError::Sense(sense) => write!(f, "{sense}"),
         }
     }
 }
@@ -64,6 +72,19 @@ mod tests {
         assert_eq!(
             UsbError::BadDescriptor("zero length").to_string(),
             "bad descriptor: zero length"
+        );
+        assert_eq!(
+            UsbError::Protocol("bad CSW signature").to_string(),
+            "protocol error: bad CSW signature"
+        );
+        let not_ready = Sense {
+            key: 2,
+            asc: 0x3A,
+            ascq: 0,
+        };
+        assert_eq!(
+            UsbError::Sense(not_ready).to_string(),
+            "NOT READY (asc 0x3a, ascq 0x00)"
         );
     }
 }
