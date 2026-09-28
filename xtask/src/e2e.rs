@@ -15,12 +15,18 @@
 //! screenshot-nonblank              (QMP screendump; top rows not one colour)
 //! alive 12                         (fails if QEMU exits within 12 seconds)
 //! screenshot-pixel 2540 20 #000000 (QMP screendump; that pixel has that colour)
+//! reboot [<regex>]                 (types `reboot`; QEMU must exit as after a
+//!                                   reset, having printed <regex> first, then
+//!                                   starts again on the same disk)
+//! poweroff                         (types `poweroff`; QEMU must exit through
+//!                                   isa-debug-exit, test mode's power-off)
 //! ```
 //!
-//! QEMU is killed at the end of every scenario.
+//! QEMU is killed at the end of every scenario, and `e2fsck -fn` must find
+//! the ext2 root on the disk it leaves clean (spec §9.3).
 
 use crate::build;
-use crate::image::{self, Layout, esp_write, set_cmdline};
+use crate::image::{self, Layout, Partition, esp_write, set_cmdline};
 use crate::keys;
 use crate::qemu::{self, Qemu};
 use crate::qmp::Qmp;
@@ -41,6 +47,11 @@ pub const DEFAULT_CMDLINE: &str = "test=1";
 const KEY_HOLD_MS: u64 = 30;
 /// Time for the guest to see the last release after QEMU has played it.
 const KEY_SETTLE_MS: u64 = 100;
+/// QEMU's exit status after a guest reset under `-no-reboot`.
+pub const EXIT_RESET: i32 = 0;
+/// QEMU's exit status after test mode's `poweroff` wrote 0x10 to
+/// `isa-debug-exit`: (0x10 << 1) | 1.
+pub const EXIT_POWEROFF: i32 = 33;
 
 /// How long QEMU takes to play `presses` presses: it queues them and holds
 /// each for `KEY_HOLD_MS`. The `key` step waits that long, so its Enter
@@ -66,6 +77,11 @@ pub enum Step {
         y: usize,
         rgb: [u8; 3],
     },
+    /// Restart the machine and boot again on the same disk; the pattern
+    /// must appear in what the machine printed before it went down.
+    Reboot(Option<String>),
+    /// Switch the machine off; no later step talks to it.
+    Poweroff,
 }
 
 #[derive(Debug, PartialEq)]
@@ -124,6 +140,12 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
                 parse_pixel_step(rest).with_context(|| format!("{name}:{line_no}"))?
             }
             "alive" => Step::Alive(rest.parse().with_context(|| format!("{name}:{line_no}"))?),
+            "reboot" if rest.is_empty() => Step::Reboot(None),
+            "reboot" => {
+                Regex::new(rest).with_context(|| format!("{name}:{line_no}: bad regex"))?;
+                Step::Reboot(Some(rest.to_string()))
+            }
+            "poweroff" => Step::Poweroff,
             other => bail!("{name}:{line_no}: unknown step '{other}'"),
         };
         steps.push((line_no, step));
@@ -209,12 +231,19 @@ pub fn ppm_pixel(ppm: &[u8], x: usize, y: usize) -> Result<[u8; 3]> {
 }
 
 struct Running {
+    /// The machine, kept to start it again after a reboot.
+    qemu: Qemu,
+    /// Where the ext2 root is on the disk.
+    root: Partition,
+    run_dir: PathBuf,
     child: Child,
     stdin: ChildStdin,
     serial: Arc<Mutex<Vec<u8>>>,
     qmp: Qmp,
     /// Offset in the stripped serial text up to which output was consumed.
     consumed: usize,
+    /// The machine switched itself off.
+    off: bool,
 }
 
 impl Running {
@@ -236,9 +265,15 @@ fn start(image: &Path, layout: &Layout, scenario: &Scenario, run_dir: &Path) -> 
     for (path, contents) in &scenario.esp_writes {
         esp_write(&q.disk, layout.esp, path, contents.as_bytes(), run_dir)?;
     }
-    let qmp_name = qemu::qmp_name(&scenario.name);
     q.headless = true;
-    q.qmp_name = Some(qmp_name.clone());
+    q.qmp_name = Some(qemu::qmp_name(&scenario.name));
+    let log = fs::File::create(run_dir.join("serial.log"))?;
+    launch(q, layout.root, run_dir, log)
+}
+
+/// Starts QEMU on the prepared disk; its serial output goes to `log` too.
+fn launch(q: Qemu, root: Partition, run_dir: &Path, mut log: fs::File) -> Result<Running> {
+    let qmp_name = q.qmp_name.clone().context("QMP socket name")?;
     let mut child = q
         .command()
         .stdin(Stdio::piped())
@@ -250,7 +285,6 @@ fn start(image: &Path, layout: &Layout, scenario: &Scenario, run_dir: &Path) -> 
     let mut stdout = child.stdout.take().unwrap();
     let serial = Arc::new(Mutex::new(Vec::new()));
     let sink = serial.clone();
-    let mut log = fs::File::create(run_dir.join("serial.log"))?;
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         while let Ok(n) = stdout.read(&mut buf) {
@@ -268,12 +302,68 @@ fn start(image: &Path, layout: &Layout, scenario: &Scenario, run_dir: &Path) -> 
         &run_dir.join("qemu.stderr"),
     )?;
     Ok(Running {
+        qemu: q,
+        root,
+        run_dir: run_dir.to_path_buf(),
         child,
         stdin,
         serial,
         qmp,
         consumed: 0,
+        off: false,
     })
+}
+
+/// Types `command` and waits (up to `timeout`) for QEMU to exit with
+/// `status`; the shell shut the filesystem down first, so it must be marked
+/// clean.
+fn exit_with(r: &mut Running, command: &str, status: i32, timeout: Duration) -> Result<()> {
+    r.stdin.write_all(command.as_bytes())?;
+    r.stdin.write_all(b"\r")?;
+    r.stdin.flush()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(s) = r.child.try_wait()? {
+            if s.code() != Some(status) {
+                bail!("QEMU exited with {s} after `{command}`, expected exit status {status}");
+            }
+            let state = image::ext2_state(&r.qemu.disk, r.root)?;
+            if state != "clean" {
+                bail!("after `{command}` the root filesystem is `{state}`, not `clean`");
+            }
+            return Ok(());
+        }
+        if Instant::now() > deadline {
+            bail!("QEMU still runs {timeout:?} after `{command}`");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// `reboot`: the machine resets, and QEMU (`-no-reboot`) exits, after
+/// printing `last` if given; then the same disk boots again, with the serial
+/// log continued.
+fn reboot(r: &mut Running, last: Option<&str>, timeout: Duration) -> Result<()> {
+    exit_with(r, "reboot", EXIT_RESET, timeout)?;
+    if let Some(pattern) = last {
+        let text = r.text();
+        if !Regex::new(pattern)?.is_match(&text[r.consumed.min(text.len())..]) {
+            bail!("the machine restarted without printing /{pattern}/");
+        }
+    }
+    let mut log = fs::OpenOptions::new()
+        .append(true)
+        .open(r.run_dir.join("serial.log"))?;
+    log.write_all(b"\n--- e2e: reboot ---\n")?;
+    let q = Qemu {
+        disk: r.qemu.disk.clone(),
+        vars: r.qemu.vars.clone(),
+        headless: true,
+        qmp_name: r.qemu.qmp_name.clone(),
+    };
+    let fresh = launch(q, r.root, &r.run_dir.clone(), log)?;
+    *r = fresh;
+    Ok(())
 }
 
 /// Connects to QEMU's QMP socket, giving up early if QEMU exits first (a bad
@@ -299,6 +389,9 @@ fn wait_for_qmp(child: &mut Child, name: &str, timeout: Duration, stderr: &Path)
 }
 
 fn run_step(r: &mut Running, step: &Step, timeout: &mut Duration, run_dir: &Path) -> Result<()> {
+    if r.off && !matches!(step, Step::Timeout(_)) {
+        bail!("the machine was switched off by an earlier step");
+    }
     match step {
         Step::Timeout(s) => *timeout = Duration::from_secs(*s),
         Step::Expect(pattern) => {
@@ -367,6 +460,11 @@ fn run_step(r: &mut Running, step: &Step, timeout: &mut Duration, run_dir: &Path
                 );
             }
         }
+        Step::Reboot(last) => reboot(r, last.as_deref(), *timeout)?,
+        Step::Poweroff => {
+            exit_with(r, "poweroff", EXIT_POWEROFF, *timeout)?;
+            r.off = true;
+        }
         Step::ScreenshotNonblank => {
             let file = run_dir.join("screen.ppm");
             r.qmp
@@ -399,7 +497,14 @@ pub fn run_scenario(image: &Path, layout: &Layout, scenario: &Scenario) -> Resul
             );
         }
     }
-    Ok(())
+    let disk = r.qemu.disk.clone();
+    drop(r);
+    image::fsck(&disk, layout.root).with_context(|| {
+        format!(
+            "scenario '{}': e2fsck -fn on the disk it left",
+            scenario.name
+        )
+    })
 }
 
 pub fn load_scenarios(only: Option<&str>) -> Result<Vec<Scenario>> {
@@ -483,6 +588,54 @@ mod tests {
     fn a_key_step_waits_until_qemu_has_played_it() {
         // "ls" and Enter: three presses of 30 ms, then the settling time.
         assert_eq!(typing_time(3), Duration::from_millis(190));
+    }
+
+    #[test]
+    fn parses_reboot_and_poweroff_steps() {
+        let s = parse_scenario("x", "reboot\nreboot relay: restarting\npoweroff").unwrap();
+        assert_eq!(
+            s.steps,
+            vec![
+                (1, Step::Reboot(None)),
+                (2, Step::Reboot(Some("relay: restarting".into()))),
+                (3, Step::Poweroff)
+            ]
+        );
+        assert!(parse_scenario("x", "reboot (").is_err());
+    }
+
+    #[test]
+    fn the_clean_flag_is_read_from_the_superblock() {
+        let dir = out_dir().join("e2e-selftest").join("clean-flag");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("fs.img");
+        crate::util::run(
+            std::process::Command::new("mke2fs")
+                .args(["-q", "-F", "-t", "ext2"])
+                .arg(&img)
+                .arg("1M"),
+        )
+        .unwrap();
+        let whole = Partition {
+            start_lba: 0,
+            sectors: 2048,
+        };
+        assert_eq!(image::ext2_state(&img, whole).unwrap(), "clean");
+        // As a machine killed with / mounted read-write leaves it.
+        crate::util::run(
+            std::process::Command::new("debugfs")
+                .args(["-w", "-R", "ssv state 0"])
+                .arg(&img),
+        )
+        .unwrap();
+        assert_eq!(image::ext2_state(&img, whole).unwrap(), "not clean");
+    }
+
+    #[test]
+    fn exit_statuses_match_the_kernel() {
+        // relay_kernel::power::TEST_EXIT_CODE is 0x10.
+        assert_eq!(EXIT_POWEROFF, (0x10 << 1) | 1);
     }
 
     #[test]

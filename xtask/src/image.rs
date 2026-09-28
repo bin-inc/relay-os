@@ -271,6 +271,21 @@ pub fn make_ext2(target: &Path, part: Partition, staging: &Path) -> Result<()> {
         .arg(e2fs_target(target, part)))
 }
 
+/// The ext2 filesystem state in `part`'s superblock, as `dumpe2fs -h` names
+/// it: `clean` after a clean shutdown, `not clean` while mounted
+/// read-write (or after a machine stopped with it mounted).
+pub fn ext2_state(target: &Path, part: Partition) -> Result<String> {
+    let out = run_stdout(
+        Command::new("dumpe2fs")
+            .arg("-h")
+            .arg(e2fs_target(target, part)),
+    )?;
+    out.lines()
+        .find_map(|l| l.strip_prefix("Filesystem state:"))
+        .map(|s| s.trim().to_string())
+        .context("dumpe2fs printed no filesystem state")
+}
+
 /// `e2fsck -fn`: read-only full check. Returns the checker output on failure.
 pub fn fsck(target: &Path, part: Partition) -> Result<()> {
     run(Command::new("e2fsck")
