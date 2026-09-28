@@ -24,8 +24,16 @@ impl InputQueue {
         }
     }
 
-    /// Adds input; what does not fit is dropped.
+    /// Adds input; what does not fit is dropped. A Ctrl-C always fits:
+    /// it drops what was typed before it, as `take_interrupt` would.
     pub fn push(&mut self, bytes: &[u8]) {
+        let bytes = match bytes.iter().rposition(|&b| b == INTERRUPT) {
+            Some(i) => {
+                self.bytes.clear();
+                &bytes[i..]
+            }
+            None => bytes,
+        };
         let room = QUEUE_MAX - self.bytes.len();
         self.bytes.extend(&bytes[..bytes.len().min(room)]);
     }
@@ -98,7 +106,10 @@ impl InputQueue {
             return;
         }
         if let Some(seq) = sequence(e.key) {
-            self.push(seq);
+            // Half a sequence would reach the shell as other keys.
+            if self.bytes.len() + seq.len() <= QUEUE_MAX {
+                self.push(seq);
+            }
         } else if let Some(b) = byte(e) {
             self.push(&[b]);
         }
@@ -200,6 +211,32 @@ mod tests {
             q.push_key(&press(key, false));
         }
         assert!(q.is_empty());
+    }
+
+    #[test]
+    fn a_ctrl_c_gets_in_when_the_queue_is_full() {
+        // A key held down during a long command fills the queue; Ctrl-C
+        // must still stop the command.
+        let mut q = InputQueue::new();
+        q.push(&[b'a'; QUEUE_MAX]);
+        q.push_key(&press(Key::Char(b'c'), true));
+        assert!(q.take_interrupt());
+        assert!(q.is_empty());
+        q.push(&[b'a'; QUEUE_MAX]);
+        q.push(b"x\x03y");
+        assert!(q.take_interrupt());
+        assert_eq!(drain(&mut q), b"y");
+    }
+
+    #[test]
+    fn a_key_sequence_goes_in_whole_or_not_at_all() {
+        let mut q = InputQueue::new();
+        q.push(&[b'a'; QUEUE_MAX - 2]);
+        q.push_key(&press(Key::Up, false));
+        assert_eq!(drain(&mut q), [b'a'; QUEUE_MAX - 2]);
+        q.push(&[b'a'; QUEUE_MAX - 3]);
+        q.push_key(&press(Key::Up, false));
+        assert!(drain(&mut q).ends_with(b"a\x1b[A"));
     }
 
     #[test]
