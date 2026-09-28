@@ -263,8 +263,9 @@ pub const CHECKS_DIR: &str = "/root/checks";
 
 /// Checks the transcript of every script in `CHECKS_DIR` on the ext2 root
 /// `root` of `target` as written on `machine` (spec §15 item 12). Returns
-/// the lines to print and whether every transcript there passed; a script
-/// without a transcript was not run, which is reported but not a failure.
+/// the lines to print and whether every script ran and its transcript
+/// passed. Each line gives the time the transcript was last written, since
+/// `flash --kernel` leaves the transcripts of an earlier run on the stick.
 pub fn check_transcripts(
     target: &Path,
     root: Partition,
@@ -287,14 +288,17 @@ pub fn check_transcripts(
         };
         let script = read(&path)?.with_context(|| format!("{path}: cannot read it"))?;
         let Some(transcript) = read(&log)? else {
-            out.push(format!("{path}: not run (no {log})"));
+            out.push(format!("{path}: FAILED, not run (no {log})"));
+            ok = false;
             continue;
         };
         let report = checks::check(&checks::parse(&script, machine)?, &transcript);
         let verdict = if report.ok() { "ok" } else { "FAILED" };
         out.push(format!(
-            "{path}: {verdict}, {} of {} commands as expected",
-            report.passed, report.commands
+            "{path}: {verdict}, {} of {} commands as expected (run {})",
+            report.passed,
+            report.commands,
+            modified(target, root, &log)?
         ));
         out.extend(report.failures.iter().map(|f| format!("  {f}")));
         ok &= report.ok();
@@ -303,6 +307,23 @@ pub fn check_transcripts(
         out.push(format!("no check scripts in {CHECKS_DIR}"));
     }
     Ok((out, ok))
+}
+
+/// When the file at `path` was last changed, in UTC, as debugfs shows it:
+/// `Mon Sep 28 14:09:17 2026 UTC`.
+fn modified(target: &Path, root: Partition, path: &str) -> Result<String> {
+    let text = run_stdout(
+        Command::new("debugfs")
+            .env("TZ", "UTC")
+            .arg("-R")
+            .arg(format!("stat \"{path}\""))
+            .arg(e2fs_target(target, root)),
+    )?;
+    text.lines()
+        .find_map(|l| l.trim_start().strip_prefix("mtime: "))
+        .and_then(|l| l.split_once(" -- "))
+        .map(|(_, when)| format!("{when} UTC"))
+        .with_context(|| format!("{path}: debugfs shows no mtime"))
 }
 
 /// `verify-usb`: e2fsck the stick's root, print its file tree, and check
@@ -366,7 +387,11 @@ mod tests {
         for (path, text) in files {
             let p = dir.join("staging").join(path.trim_start_matches('/'));
             fs::create_dir_all(p.parent().unwrap()).unwrap();
-            fs::write(p, text).unwrap();
+            fs::write(&p, text).unwrap();
+            run(Command::new("touch")
+                .args(["-d", "2026-09-28 14:09:17 UTC"])
+                .arg(&p))
+            .unwrap();
         }
         fs::create_dir_all(dir.join("staging")).unwrap();
         let img = dir.join("fs.img");
@@ -408,10 +433,10 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "/root/checks/a.sh: ok, 2 of 2 commands as expected",
-                "/root/checks/b.sh: FAILED, 0 of 1 commands as expected",
+                "/root/checks/a.sh: ok, 2 of 2 commands as expected (run Mon Sep 28 14:09:17 2026 UTC)",
+                "/root/checks/b.sh: FAILED, 0 of 1 commands as expected (run Mon Sep 28 14:09:17 2026 UTC)",
                 "  line 1: `cat /root/notes/a`: expected /remember me/, printed `forgotten` (line 1)",
-                "/root/checks/c.sh: not run (no /root/checks/c.log)",
+                "/root/checks/c.sh: FAILED, not run (no /root/checks/c.log)",
             ]
         );
         let (lines, ok) = check_transcripts(&img, root, Machine::Qemu, &dir).unwrap();
@@ -419,6 +444,29 @@ mod tests {
         assert!(
             lines[0].starts_with("/root/checks/a.sh: FAILED, 1 of 2"),
             "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_script_that_was_not_run_fails_the_check() {
+        // Part 2 forgotten after the restart, or `sh` refused to start it.
+        let dir = out_dir().join("verify-usb-selftest-not-run");
+        let (img, root) = ext2_with(
+            &dir,
+            &[
+                ("/root/checks/a.sh", "uname\n#> Relay\n"),
+                ("/root/checks/a.log", "+ uname\nRelay\n"),
+                ("/root/checks/b.sh", "ls\n"),
+            ],
+        );
+        let (lines, ok) = check_transcripts(&img, root, Machine::Nuc, &dir).unwrap();
+        assert!(!ok);
+        assert_eq!(
+            lines,
+            [
+                "/root/checks/a.sh: ok, 1 of 1 commands as expected (run Mon Sep 28 14:09:17 2026 UTC)",
+                "/root/checks/b.sh: FAILED, not run (no /root/checks/b.log)",
+            ]
         );
     }
 
