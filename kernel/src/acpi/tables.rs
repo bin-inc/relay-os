@@ -23,6 +23,8 @@ pub enum AcpiError {
     Unreadable(u64),
     /// A table's header says it is shorter than the header itself.
     TooShort([u8; 4]),
+    /// A table's header says it is longer than `MAX_TABLE`.
+    TooLong([u8; 4], usize),
     BadChecksum([u8; 4]),
     /// Expected one signature, found another.
     WrongTable {
@@ -43,6 +45,7 @@ impl fmt::Display for AcpiError {
             AcpiError::NoXsdt => write!(f, "no XSDT (ACPI 1.0 firmware)"),
             AcpiError::Unreadable(p) => write!(f, "cannot read table at {p:#x}"),
             AcpiError::TooShort(s) => write!(f, "{} is too short", sig(s)),
+            AcpiError::TooLong(s, len) => write!(f, "{} claims {len} bytes", sig(s)),
             AcpiError::BadChecksum(s) => write!(f, "{} checksum is wrong", sig(s)),
             AcpiError::WrongTable { expected, found } => {
                 write!(f, "expected {}, found {}", sig(expected), sig(found))
@@ -67,6 +70,10 @@ pub fn checksum_ok(b: &[u8]) -> bool {
     b.iter().fold(0u8, |s, &x| s.wrapping_add(x)) == 0
 }
 
+/// The longest table read: 16 MiB, far above any real one (the NUC's
+/// DSDT is 469,477 bytes), so a corrupt length is never mapped or summed.
+pub const MAX_TABLE: usize = 16 << 20;
+
 /// Reads the table at `phys` and checks its length and checksum.
 pub fn read_table(mem: &mut impl PhysRead, phys: u64) -> Result<&[u8], AcpiError> {
     let header = mem
@@ -76,6 +83,9 @@ pub fn read_table(mem: &mut impl PhysRead, phys: u64) -> Result<&[u8], AcpiError
     let len = u32_at(header, 4) as usize;
     if len < HEADER_LEN {
         return Err(AcpiError::TooShort(signature));
+    }
+    if len > MAX_TABLE {
+        return Err(AcpiError::TooLong(signature, len));
     }
     let table = mem.read(phys, len).ok_or(AcpiError::Unreadable(phys))?;
     if !checksum_ok(table) {
@@ -264,7 +274,7 @@ pub fn parse_fadt(t: &[u8]) -> Fadt {
     let len = t.len();
     let dsdt = match len >= 148 && u64_at(t, 140) != 0 {
         true => u64_at(t, 140),
-        false => u32_at(t, 40) as u64,
+        false => t.get(40..44).map_or(0, |_| u32_at(t, 40) as u64),
     };
     let cnt_len = if len > 89 { t[89] } else { 2 };
     let pm1 = |x_off: usize, old_off: usize| {
@@ -531,6 +541,41 @@ mod tests {
         t[89] = 0xFF; // PM1_CNT_LEN
         let fadt = parse_fadt(&with_checksum(t, 9));
         assert_eq!(fadt.pm1a_cnt.map(|g| g.bit_width), Some(255));
+    }
+
+    #[test]
+    fn a_table_longer_than_any_real_one_is_not_read() {
+        // A length of 4 GiB would be mapped and summed byte by byte.
+        let mut m = FakeMem::default();
+        let mut t = vec![0u8; 36];
+        t[..4].copy_from_slice(b"DSDT");
+        t[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        m.put(0x1000, &t);
+        assert_eq!(
+            read_table(&mut m, 0x1000),
+            Err(AcpiError::TooLong(*b"DSDT", u32::MAX as usize))
+        );
+        assert_eq!(
+            AcpiError::TooLong(*b"DSDT", u32::MAX as usize).to_string(),
+            "DSDT claims 4294967295 bytes"
+        );
+        // The NUC's DSDT, the biggest table seen, is 469,477 bytes.
+        t[4..8].copy_from_slice(&(MAX_TABLE as u32).to_le_bytes());
+        m.put(0x1000, &t);
+        assert_eq!(
+            read_table(&mut m, 0x1000),
+            Err(AcpiError::Unreadable(0x1000))
+        );
+    }
+
+    #[test]
+    fn a_fadt_too_short_for_its_dsdt_field_has_none() {
+        // A valid 36-byte table: header only.
+        let mut t = fixture!("qemu", "FACP")[..36].to_vec();
+        t[4..8].copy_from_slice(&36u32.to_le_bytes());
+        let fadt = parse_fadt(&with_checksum(t, 9));
+        assert_eq!(fadt.dsdt, 0);
+        assert_eq!((fadt.pm1a_cnt, fadt.reset, fadt.century), (None, None, 0));
     }
 
     #[test]
