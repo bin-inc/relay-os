@@ -117,9 +117,16 @@ struct Endpoint {
     address: u8,
     dci: usize,
     ring: ProducerRing,
-    /// IN endpoints: the 4 KiB buffer their transfers land in.
+    /// Where transfers land or come from: 4 KiB for interrupt IN
+    /// endpoints, 64 KiB (aligned to 64 KiB) for bulk endpoints.
     buffer: Option<DmaBuf>,
     transfer: Transfer,
+    /// A transfer timed out and aborting it failed: the controller may
+    /// still own it and write into the buffer, so no transfer uses the
+    /// endpoint until `clear_halt` has repositioned its ring.
+    lost: bool,
+    /// The context `configure` gave it, to add it again (`clear_halt`).
+    context: context::EndpointContext,
 }
 
 impl Endpoint {
@@ -146,6 +153,10 @@ struct Slot {
     /// EP0's max packet size as its context has it.
     max_packet0: u16,
     control: Option<Control>,
+    /// A request failed and aborting it failed too: the controller may
+    /// still own its TD and the data buffer, so EP0 takes no request until
+    /// the abort has been done again.
+    ep0_lost: bool,
     /// What `configure` set up.
     endpoints: Vec<Endpoint>,
 }
@@ -167,6 +178,7 @@ impl Slot {
                 data,
                 max_packet0: speed.default_max_packet0(),
                 control: None,
+                ep0_lost: false,
                 endpoints: Vec::new(),
             }),
             (output, input, ep0, data) => {

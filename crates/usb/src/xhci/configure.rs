@@ -7,7 +7,7 @@ use super::context::{
 };
 use super::device::{A0, kind_name};
 use super::ring::ProducerRing;
-use super::transfer::DATA_BUFFER_SIZE;
+use super::transfer::{BULK_BUFFER_SIZE, DATA_BUFFER_SIZE};
 use super::trb::Trb;
 use super::{Device, Endpoint, Transfer, Xhci};
 use crate::descriptor::{self, EndpointKind};
@@ -45,17 +45,26 @@ fn endpoint_context(e: &descriptor::Endpoint, speed: Speed, dequeue: u64) -> End
     }
 }
 
-/// A transfer ring, and for IN endpoints a buffer, for endpoint `e`.
+/// A transfer ring, and a buffer, for endpoint `e`: bulk endpoints get
+/// 64 KiB aligned to 64 KiB, so one Normal TRB covers any transfer without
+/// crossing a 64 KiB boundary (xHCI 6.4.1.1); interrupt IN endpoints get
+/// 4 KiB; interrupt OUT endpoints none.
 fn new_endpoint<H: Hal>(hal: &H, e: &descriptor::Endpoint) -> Result<Endpoint, UsbError> {
     let ring = ProducerRing::new(hal)?;
-    let buffer = if e.is_in() {
-        let Some(buf) = hal.alloc_dma(DATA_BUFFER_SIZE, 64) else {
-            ring.free(hal);
-            return Err(UsbError::NoMemory);
-        };
-        Some(buf)
-    } else {
-        None
+    let size = match e.kind {
+        EndpointKind::Bulk => Some(BULK_BUFFER_SIZE),
+        _ if e.is_in() => Some(DATA_BUFFER_SIZE),
+        _ => None,
+    };
+    let buffer = match size {
+        Some(size) => {
+            let Some(buf) = hal.alloc_dma(size, size) else {
+                ring.free(hal);
+                return Err(UsbError::NoMemory);
+            };
+            Some(buf)
+        }
+        None => None,
     };
     Ok(Endpoint {
         address: e.address,
@@ -63,6 +72,8 @@ fn new_endpoint<H: Hal>(hal: &H, e: &descriptor::Endpoint) -> Result<Endpoint, U
         ring,
         buffer,
         transfer: Transfer::Idle,
+        lost: false,
+        context: EndpointContext::default(),
     })
 }
 
@@ -124,10 +135,9 @@ impl<H: Hal> Xhci<H> {
                     return Err(err);
                 }
             };
-            input.set_endpoint(
-                dci,
-                &endpoint_context(e, s.speed, ep.ring.enqueue_pointer()),
-            );
+            let mut ep = ep;
+            ep.context = endpoint_context(e, s.speed, ep.ring.enqueue_pointer());
+            input.set_endpoint(dci, &ep.context);
             add |= 1 << dci;
             endpoints.push(ep);
         }
@@ -186,9 +196,50 @@ impl<H: Hal> Xhci<H> {
     }
 }
 
+impl<H: Hal> Xhci<H> {
+    /// Drops endpoint `dci` of `slot` and adds it again with one Configure
+    /// Endpoint: its context as `configure` made it, the ring going on from
+    /// where the next TRB will go (whatever was queued is dropped). The
+    /// controller starts it over, with its data toggle or sequence number
+    /// 0 (xHCI 4.6.6, and 4.6.8's note on endpoints that are not Halted).
+    /// The endpoint must be stopped.
+    pub(super) fn add_again(&mut self, slot: u8, dci: usize) -> Result<(), UsbError> {
+        let stride = self.info.context_size;
+        let s = self
+            .slots
+            .get(slot as usize)
+            .and_then(Option::as_ref)
+            .ok_or(UsbError::Disconnected)?;
+        let ep = s
+            .endpoints
+            .iter()
+            .find(|e| e.dci == dci)
+            .ok_or(UsbError::Disconnected)?;
+        let highest = s.endpoints.iter().map(|e| e.dci).max().unwrap_or(dci);
+        let input = Input::new(&s.input, stride);
+        input.clear();
+        input.set_flags(1 << dci, A0 | 1 << dci);
+        input.set_slot(&SlotContext {
+            speed: speed_id(s.speed),
+            context_entries: highest as u8,
+            root_port: s.port,
+            ..SlotContext::default()
+        });
+        let context = EndpointContext {
+            dequeue: ep.ring.enqueue_pointer(),
+            ..ep.context
+        };
+        input.set_endpoint(dci, &context);
+        let trb = Trb::configure_endpoint(s.input.phys(), slot, false);
+        self.command(trb)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Bus;
     use crate::testing::{FakeConfig, FakeHal, FakeUsbDevice, start};
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -340,5 +391,63 @@ mod tests {
             );
             assert_eq!(hal.outstanding_dma(), before, "allocation {n}");
         }
+    }
+
+    #[test]
+    fn adding_an_endpoint_again_keeps_its_context_with_the_ring_going_on() {
+        let stick = FakeUsbDevice::kingston_stick();
+        let (hal, mut xhci, d) = configured(FakeConfig::intel(), 13, &stick, &[0]);
+        let before = hal.fake().endpoint(d.slot as usize, 4).unwrap();
+        assert_eq!(xhci.bulk_out(d.slot, 0x02, &[0; 31]), Ok(31));
+        xhci.command(Trb::stop_endpoint(d.slot, 4)).unwrap();
+        xhci.add_again(d.slot, 4).unwrap();
+        let after = hal.fake().endpoint(d.slot as usize, 4).unwrap();
+        assert_eq!(
+            (
+                after.ep_type,
+                after.max_packet,
+                after.max_burst,
+                after.toggle
+            ),
+            (before.ep_type, before.max_packet, before.max_burst, 0)
+        );
+        // The ring goes on after the TRB used: its dequeue moved one TRB.
+        assert_eq!(after.ring.dequeue, before.ring.dequeue + 16);
+        // With the device's toggle reset too, the next transfer works.
+        let clear = Setup::clear_halt(0x02);
+        xhci.control_transfer(d.slot, clear, &mut []).unwrap();
+        assert_eq!(xhci.bulk_out(d.slot, 0x02, &[0; 31]), Ok(31));
+    }
+
+    #[test]
+    #[should_panic(expected = "fake xhci: Configure Endpoint drops DCI 4 while it runs")]
+    fn the_fake_refuses_to_drop_a_running_endpoint() {
+        let stick = FakeUsbDevice::kingston_stick();
+        let (_hal, mut xhci, d) = configured(FakeConfig::intel(), 13, &stick, &[0]);
+        let _ = xhci.add_again(d.slot, 4);
+    }
+
+    #[test]
+    #[should_panic(expected = "fake xhci: Configure Endpoint drops DCI 5, which is not configured")]
+    fn the_fake_refuses_to_drop_an_endpoint_that_is_not_there() {
+        let stick = FakeUsbDevice::kingston_stick();
+        let (_hal, mut xhci, d) = configured(FakeConfig::intel(), 13, &stick, &[0]);
+        // As if the driver had lost track of which endpoint it set up.
+        let s = xhci.slots[d.slot as usize].as_mut().unwrap();
+        s.endpoints[1].dci = 5;
+        let _ = xhci.add_again(d.slot, 5);
+    }
+
+    #[test]
+    #[should_panic(expected = "fake xhci: Configure Endpoint adds DCI 3 again without dropping it")]
+    fn the_fake_refuses_to_add_an_endpoint_twice() {
+        let k120 = FakeUsbDevice::k120();
+        let (hal, mut xhci, d) = configured(FakeConfig::basic(), 1, &k120, &[0]);
+        // As if the driver had forgotten it configured the device.
+        let s = xhci.slots[d.slot as usize].as_mut().unwrap();
+        for ep in core::mem::take(&mut s.endpoints) {
+            ep.free(&hal);
+        }
+        let _ = xhci.configure(&d, &[0]);
     }
 }

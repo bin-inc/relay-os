@@ -397,6 +397,14 @@ mod tests {
             }))
         }
 
+        fn bulk_in(&mut self, _: u8, _: u8, _: &mut [u8]) -> Result<usize, UsbError> {
+            panic!("keyboards have no bulk endpoints");
+        }
+
+        fn bulk_out(&mut self, _: u8, _: u8, _: &[u8]) -> Result<usize, UsbError> {
+            panic!("keyboards have no bulk endpoints");
+        }
+
         fn clear_halt(&mut self, _slot: u8, _endpoint: u8) -> Result<(), UsbError> {
             self.clear_halts += 1;
             if self.failing_clear_halts > 0 {
@@ -409,6 +417,10 @@ mod tests {
 
         fn now(&self) -> Duration {
             self.now.get()
+        }
+
+        fn sleep(&self, d: Duration) {
+            self.now.set(self.now.get() + d);
         }
 
         fn log(&self, args: fmt::Arguments) {

@@ -20,6 +20,6 @@ pub mod host;
 mod testing;
 pub mod xhci;
 
-pub use bus::{Bus, Setup, Speed};
+pub use bus::{Bus, MAX_BULK, Setup, Speed};
 pub use error::UsbError;
 pub use hal::{DmaBuf, Hal};

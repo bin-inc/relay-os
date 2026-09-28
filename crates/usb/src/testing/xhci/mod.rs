@@ -370,6 +370,10 @@ pub struct FakeXhci {
     active: std::collections::BTreeSet<(usize, usize)>,
     /// Every control request relayed: slot, request, the slot's state.
     requests: Vec<(usize, crate::Setup, u32)>,
+    /// The device side's data toggle (USB 2) or sequence number (USB 3)
+    /// of each endpoint (slot, DCI) but EP0; the host side's is in its
+    /// `FakeEndpoint`.
+    device_toggles: std::collections::BTreeMap<(usize, usize), u32>,
 }
 
 impl FakeXhci {
@@ -418,6 +422,7 @@ impl FakeXhci {
             abort_requested: false,
             active: Default::default(),
             requests: Vec::new(),
+            device_toggles: Default::default(),
         };
         x.legacy = [
             if x.config.bios_owned {
