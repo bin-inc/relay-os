@@ -228,6 +228,10 @@ mod tests {
         let mut shell = Shell::new(&mut h.vfs, &mut h.console, &mut h.system);
         shell.execute("nope");
         assert_eq!(shell.execute("   "), 127);
+        // So does a comment, and neither is followed by a sync.
+        assert_eq!(shell.execute("# echo hi"), 127);
+        assert_eq!(h.spy.syncs.get(), 1);
+        assert_eq!(h.console.text(), "relay-sh: nope: command not found\n");
     }
 
     #[test]
