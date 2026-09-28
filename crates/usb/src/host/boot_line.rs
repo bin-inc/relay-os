@@ -64,18 +64,20 @@ impl Parts<'_, '_> {
     }
 }
 
-/// A disk's size: whole MiB under 1 GiB, else GiB with one decimal, both
-/// rounded down.
-struct Size(u64);
+/// A size in bytes as the boot line and the `mount /` line give it (spec
+/// §15 item 11): whole MiB under 1 GiB, else GiB with one decimal, both
+/// rounded down. Right for every `u64`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Size(pub u64);
 
 impl fmt::Display for Size {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         const MIB: u64 = 1 << 20;
-        const GIB: u64 = 1 << 30;
-        if self.0 < GIB {
+        const GIB: u128 = 1 << 30;
+        if (self.0 as u128) < GIB {
             write!(f, "{} MiB", self.0 / MIB)
         } else {
-            let tenths = self.0.saturating_mul(10) / GIB;
+            let tenths = self.0 as u128 * 10 / GIB;
             write!(f, "{}.{} GiB", tenths / 10, tenths % 10)
         }
     }
@@ -253,5 +255,12 @@ mod tests {
         assert_eq!(size(512, 419_430_399), "199.9 GiB");
         // The largest disk: 2^32 blocks of 4096 bytes, 16 TiB.
         assert_eq!(size(4096, 1 << 32), "16384.0 GiB");
+        // Byte by byte: around 1 GiB, the Kingston stick's root partition,
+        // and the most a u64 holds, without saturating.
+        assert_eq!(size(1, (1 << 30) - 1), "1023 MiB");
+        assert_eq!(size(1, 1 << 30), "1.0 GiB");
+        assert_eq!(size(1, 3 << 29), "1.5 GiB");
+        assert_eq!(size(1, 15_501_000_000), "14.4 GiB");
+        assert_eq!(size(1, u64::MAX), "17179869183.9 GiB");
     }
 }

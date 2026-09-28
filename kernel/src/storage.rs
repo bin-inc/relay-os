@@ -11,6 +11,7 @@ use crate::block::root::{self, RootChoice};
 use crate::session::KernelEnv;
 use crate::usb::{self, UsbDisk};
 use crate::{console, klogln, kprintln};
+use ::usb::host::Size;
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
@@ -38,21 +39,10 @@ pub fn mount_ext2<D: BlockDevice>(
     }
 }
 
-/// `256 MiB`, or `14.4 GiB` from 1 GiB on (rounded down).
-pub fn size_text(bytes: u64) -> String {
-    const GIB: u64 = 1 << 30;
-    if bytes < GIB {
-        format!("{} MiB", bytes >> 20)
-    } else {
-        let tenths = (bytes as u128 * 10 / GIB as u128) as u64;
-        format!("{}.{} GiB", tenths / 10, tenths % 10)
-    }
-}
-
 /// What the `mount /` status line says about the root: `ext2 on 00:02.0
-/// port 2 partition 2, 190 MiB`.
+/// port 2 partition 2, 190 MiB`, the size as on the disk's boot line.
 pub fn root_text(disk: &str, number: u32, bytes: u64) -> String {
-    format!("ext2 on {disk} partition {number}, {}", size_text(bytes))
+    format!("ext2 on {disk} partition {number}, {}", Size(bytes))
 }
 
 /// How the root disk was chosen (spec §6.5): a log line when it has the
@@ -250,17 +240,6 @@ mod tests {
     }
 
     #[test]
-    fn sizes_read_as_mib_then_gib() {
-        assert_eq!(size_text(256 << 20), "256 MiB");
-        assert_eq!(size_text((1 << 30) - 1), "1023 MiB");
-        assert_eq!(size_text(1 << 30), "1.0 GiB");
-        // The Kingston stick's root partition, and the whole stick.
-        assert_eq!(size_text(15_501_000_000), "14.4 GiB");
-        assert_eq!(size_text(30_277_632 * 512), "14.4 GiB");
-        assert_eq!(size_text(u64::MAX), "17179869183.9 GiB");
-    }
-
-    #[test]
     fn how_the_root_was_chosen_is_said() {
         let esp = crate::block::gpt::Guid::from_fields(
             0x5245_4C41,
@@ -287,6 +266,11 @@ mod tests {
         assert_eq!(
             root_text("00:02.0 port 2", 2, 190 << 20),
             "ext2 on 00:02.0 port 2 partition 2, 190 MiB"
+        );
+        // The size is the boot line's (`usb::host::Size`, tested there).
+        assert_eq!(
+            root_text("00:14.0 port 15", 2, u64::MAX),
+            "ext2 on 00:14.0 port 15 partition 2, 17179869183.9 GiB"
         );
     }
 }
