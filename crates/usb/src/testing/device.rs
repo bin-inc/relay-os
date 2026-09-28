@@ -27,6 +27,11 @@ pub trait FakeDevice {
     fn data_in(&mut self, endpoint: u8, max_len: usize) -> Option<Result<Vec<u8>, Stall>>;
     /// `data` for OUT `endpoint`; `None` is a NAK.
     fn data_out(&mut self, endpoint: u8, data: &[u8]) -> Option<Result<(), Stall>>;
+    /// The USB address it answers to: 0 until SET_ADDRESS.
+    fn usb_address(&self) -> u8;
+    /// A bus reset (plugged in, or its port reset): back to the Default
+    /// state at address 0, unconfigured (USB 2.0 9.1.1.3).
+    fn bus_reset(&mut self);
 }
 
 /// A control request as the device got it.
@@ -363,6 +368,15 @@ impl FakeDevice for FakeUsbDevice {
             _ if setup.is_in() => Ok(vec![0; setup.length as usize]),
             _ => Ok(Vec::new()),
         })
+    }
+
+    fn usb_address(&self) -> u8 {
+        self.address
+    }
+
+    fn bus_reset(&mut self) {
+        self.address = 0;
+        self.configuration_value = 0;
     }
 
     fn data_in(&mut self, endpoint: u8, max_len: usize) -> Option<Result<Vec<u8>, Stall>> {

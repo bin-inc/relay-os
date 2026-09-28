@@ -67,6 +67,7 @@ impl FakeXhci {
             panic!("fake xhci: a {speed} device cannot be on port {port}");
         }
         assert!(self.devices[i].is_none(), "fake: port {port} is taken");
+        device.borrow_mut().bus_reset();
         self.devices[i] = Some(device);
         if self.portsc[i] & PP != 0 {
             self.connect(i, false);
@@ -232,6 +233,9 @@ impl FakeXhci {
             return;
         }
         self.portsc[i] = self.portsc[i] & !PED | PR;
+        if let Some(dev) = &self.devices[i] {
+            dev.borrow_mut().bus_reset();
+        }
         let Some(delay) = self.config.port_reset_time else {
             return;
         };
@@ -272,6 +276,23 @@ mod tests {
         x.plug(2, FakeUsbDevice::k120());
         x.unplug(2);
         assert_eq!(x.pending_events.len(), 2, "CSC was already set: one event");
+    }
+
+    #[test]
+    fn plugging_in_and_resetting_put_a_device_back_at_address_0() {
+        let dma = Dma::default();
+        let mut x = basic();
+        let k120 = FakeUsbDevice::k120();
+        let set_address = crate::Setup {
+            request: 5,
+            ..crate::Setup::set_configuration(7)
+        };
+        k120.borrow_mut().control(set_address, &[]);
+        x.plug(1, k120.clone());
+        assert_eq!(k120.borrow().usb_address(), 0, "plugged in");
+        k120.borrow_mut().control(set_address, &[]);
+        x.write_portsc(0, PP | PR, &dma);
+        assert_eq!(k120.borrow().usb_address(), 0, "reset");
     }
 
     #[test]

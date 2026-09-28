@@ -389,6 +389,44 @@ mod tests {
     }
 
     #[test]
+    fn a_request_for_an_unplugged_disk_never_reaches_the_stick_plugged_in_after_it() {
+        // Another stick, or the same one again: either is a new device.
+        for same in [false, true] {
+            let (hal, mut host) = host(FakeConfig::qemu());
+            let a = FakeStorage::qemu(QEMU_BLOCKS);
+            hal.fake().plug(2, a.clone());
+            hal.sleep(Duration::from_millis(60));
+            host.service();
+            let old = host.disks()[0].id;
+            // Stick A out and B in before the console looks again.
+            hal.fake().unplug(2);
+            let b = if same {
+                a.clone()
+            } else {
+                FakeStorage::qemu(QEMU_BLOCKS)
+            };
+            let seen = b.borrow().events().len();
+            hal.fake().plug(2, b.clone());
+            hal.sleep(Duration::from_millis(60));
+            let data = vec![0xAB; 512];
+            // B has no address yet: A's slot reaches nothing.
+            assert!(host.write(old, 100, &data).is_err());
+            assert!(host.flush(old).is_err());
+            assert_eq!(b.borrow().events().len(), seen, "B saw A's requests");
+            assert_eq!(b.borrow().read_blocks(100, 1), [0; 512]);
+            // The next look replaces A with B, under a new id.
+            assert_eq!(host.service().len(), 1);
+            let disks = host.disks();
+            assert_eq!(disks.len(), 1);
+            let new = disks[0].id;
+            assert_ne!(new, old);
+            assert_eq!(host.write(new, 100, &data), Ok(()));
+            assert_eq!(b.borrow().read_blocks(100, 1), data);
+            assert_eq!(host.write(old, 100, &data), Err(UsbError::Disconnected));
+        }
+    }
+
+    #[test]
     fn a_disk_that_cannot_be_started_says_why_and_is_not_set_up_again() {
         let (hal, mut host) = host(FakeConfig::intel());
         let stick = FakeStorage::usb2(1 << 20);

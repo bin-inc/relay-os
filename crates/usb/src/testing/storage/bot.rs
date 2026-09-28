@@ -135,6 +135,17 @@ impl FakeDevice for FakeStorage {
         self.usb.max_packet0()
     }
 
+    fn usb_address(&self) -> u8 {
+        self.usb.usb_address()
+    }
+
+    /// A bus reset also ends whatever command was going on.
+    fn bus_reset(&mut self) {
+        self.usb.bus_reset();
+        self.phase = Phase::Cbw;
+        self.uncleared.clear();
+    }
+
     /// The standard requests go to the `FakeUsbDevice` (with its knobs);
     /// the class requests are GET_MAX_LUN and the Bulk-Only Mass Storage
     /// Reset (BOT 3.1, 3.2), both for interface 0 only.
