@@ -3,18 +3,39 @@
 //! conditions: a script is a list of commands. Each command is shown as
 //! `+ <line>` before its output, as `set -x` does, so a photo of the
 //! screen shows which command printed what. A failing command does not
-//! stop the script; Ctrl-C does.
+//! stop the script; Ctrl-C does. Everything the script shows on the screen,
+//! errors included, also goes into a transcript next to it (`x.sh` →
+//! `x.log`), written as each line ends, so it can be checked afterwards
+//! (`cargo xtask verify-usb`).
 
 use crate::ctx::{Ctx, getopt, quote, quote_if_needed};
+use alloc::format;
 use alloc::string::String;
-use vfs::{Errno, FileType};
+use vfs::{Errno, FileType, Node, path};
 
 /// The largest script, in bytes: far more than a check needs, and read
 /// whole onto the heap.
 pub const SCRIPT_MAX: u64 = 64 * 1024;
 
-/// `sh FILE`: checks and reads the file; the shell then runs its lines
-/// (`Shell::execute`).
+/// A script `sh` has read, for the shell to run.
+pub(crate) struct Script {
+    pub text: String,
+    /// The transcript file, emptied, and its name as `sh` was given it.
+    pub transcript: Node,
+    pub transcript_name: String,
+}
+
+/// The transcript of `script`: `.sh` becomes `.log`; other names get
+/// `.log` added.
+pub fn transcript_name(script: &str) -> String {
+    match script.strip_suffix(".sh") {
+        Some(stem) => format!("{stem}.log"),
+        None => format!("{script}.log"),
+    }
+}
+
+/// `sh FILE`: checks and reads the file and empties its transcript; the
+/// shell then runs its lines (`Shell::execute`).
 pub fn sh(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     let opts = match getopt(args, "", "") {
         Ok(o) => o,
@@ -32,13 +53,45 @@ pub fn sh(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
         return ctx.fail("sh", format_args!("a script's output cannot be redirected"));
     }
     let name = quote_if_needed(file);
-    match read(ctx, file) {
-        Ok(text) => {
-            ctx.script = Some(text);
+    let text = match read(ctx, file) {
+        Ok(text) => text,
+        Err(Error::Errno(e)) => return ctx.fail("sh", format_args!("{name}: {e}")),
+        Err(Error::NotText) => return ctx.fail("sh", format_args!("{name}: not a text file")),
+    };
+    let log = transcript_name(file);
+    match empty_file(ctx, &log) {
+        Ok(transcript) => {
+            ctx.script = Some(Script {
+                text,
+                transcript,
+                transcript_name: log,
+            });
             0
         }
-        Err(Error::Errno(e)) => ctx.fail("sh", format_args!("{name}: {e}")),
-        Err(Error::NotText) => ctx.fail("sh", format_args!("{name}: not a text file")),
+        Err(e) => ctx.fail(
+            "sh",
+            format_args!(
+                "cannot write the transcript {}: {e}",
+                quote_if_needed(&path::display(log.as_bytes()))
+            ),
+        ),
+    }
+}
+
+/// Creates the file at `name`, or empties it.
+fn empty_file(ctx: &mut Ctx<'_>, name: &str) -> Result<Node, Errno> {
+    match ctx.vfs.lookup(name.as_bytes()) {
+        Ok(node) => {
+            match ctx.vfs.stat(node)?.kind {
+                FileType::Regular => {}
+                FileType::Directory => return Err(Errno::EISDIR),
+                _ => return Err(Errno::EINVAL),
+            }
+            ctx.vfs.truncate(node, 0)?;
+            Ok(node)
+        }
+        Err(Errno::ENOENT) => ctx.vfs.create(name.as_bytes()),
+        Err(e) => Err(e),
     }
 }
 
@@ -167,6 +220,7 @@ mod tests {
         // Asked once before each line: the second time Ctrl-C was pressed.
         h.console.interrupt_after = Some(1);
         assert_eq!(h.run("sh /tmp/s.sh"), (130, "+ echo a\na\n^C\n".into()));
+        assert_eq!(h.get("/tmp/s.log"), b"+ echo a\na\n^C\n");
         // A command that Ctrl-C stopped stops the script too.
         h.put("/tmp/big", &alloc::vec![b'x'; 200_000]);
         h.put("/tmp/s.sh", b"cat /tmp/big > /tmp/copy\necho after\n");
@@ -184,6 +238,8 @@ mod tests {
         h.put("/tmp/s.sh", b"reboot\necho after\n");
         assert_eq!(h.run("sh /tmp/s.sh"), (0, "+ reboot\n".into()));
         assert_eq!(h.system.reboots, 1);
+        // The transcript names the command that restarted the machine.
+        assert_eq!(h.get("/tmp/s.log"), b"+ reboot\n");
     }
 
     #[test]
@@ -209,6 +265,90 @@ mod tests {
         assert_eq!(
             h.run("sh /tmp/s.sh"),
             (0, "+ echo one\none\n+ echo two\ntwo\n".into())
+        );
+    }
+
+    #[test]
+    fn the_transcript_holds_what_the_screen_showed() {
+        let mut h = Harness::new();
+        h.put(
+            "/tmp/s.sh",
+            b"echo one\n# not shown\necho two > /tmp/o\ncat /tmp/nope\nnope\ncat /tmp/o\n",
+        );
+        let (status, screen) = h.run("sh /tmp/s.sh");
+        assert_eq!(status, 0);
+        assert_eq!(
+            screen,
+            "+ echo one\none\n+ echo two > /tmp/o\n+ cat /tmp/nope\n\
+             cat: /tmp/nope: No such file or directory\n+ nope\n\
+             relay-sh: nope: command not found\n+ cat /tmp/o\ntwo\n"
+        );
+        // Errors too, which never go into a redirection file.
+        assert_eq!(String::from_utf8(h.get("/tmp/s.log")).unwrap(), screen);
+        // Running a script again starts a new transcript.
+        h.put("/tmp/s.sh", b"echo again\n");
+        h.run("sh /tmp/s.sh");
+        assert_eq!(h.get("/tmp/s.log"), b"+ echo again\nagain\n");
+    }
+
+    #[test]
+    fn the_transcript_is_written_as_each_line_starts_and_ends() {
+        // A machine that hangs in a command leaves the lines before it and
+        // the command's own name.
+        let mut h = Harness::new();
+        h.put("/tmp/s.sh", b"echo one\ncat /tmp/s.log\n");
+        assert_eq!(
+            h.run("sh /tmp/s.sh").1,
+            "+ echo one\none\n+ cat /tmp/s.log\n+ echo one\none\n+ cat /tmp/s.log\n"
+        );
+    }
+
+    #[test]
+    fn transcript_names() {
+        let mut h = Harness::new();
+        h.dir("/tmp/d.sh");
+        for (script, log) in [
+            ("/tmp/a.sh", "/tmp/a.log"),
+            ("/tmp/b", "/tmp/b.log"),
+            ("/tmp/d.sh/c.txt", "/tmp/d.sh/c.txt.log"),
+            ("/tmp/d.sh/.sh", "/tmp/d.sh/.log"),
+        ] {
+            h.put(script, b"echo x\n");
+            h.run(&alloc::format!("sh {script}"));
+            assert_eq!(h.get(log), b"+ echo x\nx\n", "{script}");
+        }
+        // A relative name is taken from where `sh` ran, whatever the
+        // script's `cd` does.
+        h.put("/tmp/r.sh", b"cd /\necho y\n");
+        h.run("cd /tmp");
+        h.run("sh r.sh");
+        assert_eq!(h.get("/tmp/r.log"), b"+ cd /\n+ echo y\ny\n");
+    }
+
+    #[test]
+    fn a_transcript_that_cannot_be_written() {
+        let mut h = Harness::new();
+        h.put("/tmp/s.sh", b"echo a > /tmp/a\n");
+        h.dir("/tmp/s.log");
+        assert_eq!(
+            h.run("sh /tmp/s.sh"),
+            (
+                1,
+                "sh: cannot write the transcript /tmp/s.log: Is a directory\n".into()
+            )
+        );
+        assert!(!h.exists("/tmp/a"), "nothing ran");
+        // A disk that fills up ends the transcript, not the script.
+        let mut h = Harness::with_capacity(3 * 4096);
+        h.put("/tmp/s.sh", b"echo a\necho b\n");
+        assert_eq!(
+            h.run("sh /tmp/s.sh"),
+            (
+                0,
+                "+ echo a\nsh: /tmp/s.log: No space left on device; the transcript ends here\n\
+                 a\n+ echo b\nb\n"
+                    .into()
+            )
         );
     }
 

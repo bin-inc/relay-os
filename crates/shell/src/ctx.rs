@@ -23,7 +23,7 @@ pub struct Ctx<'a> {
     /// Ctrl-C stopped the command.
     pub(crate) cancelled: bool,
     /// Set by `sh`: the script the shell runs next.
-    pub(crate) script: Option<String>,
+    pub(crate) script: Option<crate::commands::Script>,
     /// The command is a line of a script.
     pub(crate) in_script: bool,
 }

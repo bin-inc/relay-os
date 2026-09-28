@@ -9,6 +9,8 @@ mod change;
 mod ls;
 mod script;
 mod stat;
+
+pub(crate) use script::Script;
 mod system;
 mod text;
 

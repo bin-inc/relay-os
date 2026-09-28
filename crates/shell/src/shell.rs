@@ -1,7 +1,7 @@
 //! The shell itself: prompt, line editing, parsing, redirection, running a
 //! built-in command and syncing the filesystems after it (spec §7.3, §8.3).
 
-use crate::commands;
+use crate::commands::{self, Script};
 use crate::ctx::Ctx;
 use crate::editor::{Feed, LineEditor};
 use crate::io::{Console, System};
@@ -31,6 +31,41 @@ pub struct Shell<'a> {
     stopped: bool,
     /// A script's lines are running (`sh`).
     in_script: bool,
+    /// Where a running script's screen output is copied.
+    transcript: Option<Transcript>,
+}
+
+/// A running script's transcript: what the screen showed since the last
+/// line ended waits in `pending`.
+struct Transcript {
+    node: Node,
+    offset: u64,
+    pending: Vec<u8>,
+    name: String,
+}
+
+/// The screen, and a copy of what is written to it for the transcript.
+struct Tee<'c> {
+    console: &'c mut dyn Console,
+    copy: Option<&'c mut Vec<u8>>,
+}
+
+impl Console for Tee<'_> {
+    fn read_byte(&mut self) -> Option<u8> {
+        self.console.read_byte()
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        self.console.write(bytes);
+        if let Some(copy) = &mut self.copy {
+            copy.extend_from_slice(bytes);
+        }
+    }
+    fn columns(&self) -> usize {
+        self.console.columns()
+    }
+    fn interrupted(&mut self) -> bool {
+        self.console.interrupted()
+    }
 }
 
 impl<'a> Shell<'a> {
@@ -47,6 +82,7 @@ impl<'a> Shell<'a> {
             status: 0,
             stopped: false,
             in_script: false,
+            transcript: None,
         }
     }
 
@@ -133,7 +169,11 @@ impl<'a> Shell<'a> {
         let Some(builtin) = commands::find(name) else {
             return self.finish(NOT_FOUND, format!("{NAME}: {name}: command not found\n"));
         };
-        let mut ctx = Ctx::new(&mut *self.vfs, &mut *self.system, &mut *self.console, file);
+        let mut screen = Tee {
+            console: &mut *self.console,
+            copy: self.transcript.as_mut().map(|t| &mut t.pending),
+        };
+        let mut ctx = Ctx::new(&mut *self.vfs, &mut *self.system, &mut screen, file);
         ctx.in_script = self.in_script;
         let mut status = (builtin.run)(&mut ctx, &cmd.words[1..]);
         let mut message = String::new();
@@ -147,35 +187,82 @@ impl<'a> Shell<'a> {
         }
         self.stopped = ctx.exit;
         if let Some(script) = ctx.script.take() {
-            status = self.run_script(&script);
+            status = self.run_script(script);
         }
         self.finish(status, message)
+    }
+
+    /// Writes to the screen and, while a script runs, its transcript.
+    fn say(&mut self, bytes: &[u8]) {
+        self.console.write(bytes);
+        if let Some(t) = &mut self.transcript {
+            t.pending.extend_from_slice(bytes);
+        }
+    }
+
+    /// Adds what the screen showed to the transcript. If that fails the
+    /// transcript ends there, with a message; the script goes on.
+    fn write_transcript(&mut self) {
+        let Some(t) = &mut self.transcript else {
+            return;
+        };
+        let mut done = 0;
+        while done < t.pending.len() {
+            let result = match self.vfs.write_at(t.node, t.offset, &t.pending[done..]) {
+                Ok(0) => Err(Errno::ENOSPC),
+                other => other,
+            };
+            match result {
+                Ok(n) => {
+                    done += n;
+                    t.offset += n as u64;
+                }
+                Err(e) => {
+                    let name = path::display(t.name.as_bytes());
+                    self.transcript = None;
+                    self.console
+                        .write(format!("sh: {name}: {e}; the transcript ends here\n").as_bytes());
+                    return;
+                }
+            }
+        }
+        t.pending.clear();
     }
 
     /// Runs a script's lines (spec §15 item 12): each command is shown as
     /// `+ <line>`, then runs and is synced as if typed. Blank and comment
     /// lines are skipped. Ctrl-C, or `reboot`/`poweroff` returning, ends
     /// the script; failing commands do not. Returns the last status.
-    fn run_script(&mut self, script: &str) -> i32 {
+    fn run_script(&mut self, script: Script) -> i32 {
         self.in_script = true;
+        self.transcript = Some(Transcript {
+            node: script.transcript,
+            offset: 0,
+            pending: Vec::new(),
+            name: script.transcript_name,
+        });
         let mut status = 0;
-        for line in script.lines() {
+        for line in script.text.lines() {
             if matches!(parser::parse(line), Ok(c) if c.words.is_empty() && c.redirect.is_none()) {
                 continue;
             }
             if self.console.interrupted() {
-                self.console.write(b"^C\n");
+                self.say(b"^C\n");
                 status = CANCELLED;
                 break;
             }
             // The line runs as written; only its trace is trimmed.
-            self.console
-                .write(format!("+ {}\n", line.trim()).as_bytes());
+            self.say(format!("+ {}\n", line.trim()).as_bytes());
+            // Before the command runs: `reboot` shuts the disk down, and a
+            // command that hangs leaves at least its name.
+            self.write_transcript();
             status = self.execute(line);
             if status == CANCELLED || self.stopped {
                 break;
             }
         }
+        self.write_transcript();
+        self.transcript = None;
         self.in_script = false;
         status
     }
@@ -205,12 +292,13 @@ impl<'a> Shell<'a> {
         Ok((node, offset))
     }
 
-    /// Prints `message`, syncs, and records `status`.
+    /// Prints `message`, adds the line's output to a running script's
+    /// transcript, syncs, and records `status`.
     fn finish(&mut self, status: i32, message: String) -> i32 {
-        self.console.write(message.as_bytes());
+        self.say(message.as_bytes());
+        self.write_transcript();
         if let Err(e) = self.vfs.sync() {
-            self.console
-                .write(format!("{NAME}: sync failed: {e}\n").as_bytes());
+            self.say(format!("{NAME}: sync failed: {e}\n").as_bytes());
         }
         self.status = status;
         status
