@@ -15,6 +15,7 @@ pub mod klog;
 pub mod mm;
 pub mod panic_screen;
 pub mod pci;
+pub mod power;
 pub mod rtc;
 pub mod serial;
 pub mod session;
@@ -135,7 +136,7 @@ pub fn kernel_main(info: &'static BootInfo) -> ! {
     // There is no storage driver yet, so the shell starts on an empty,
     // read-only `/` (spec §10).
     console::fail("mount /", format_args!("no storage driver yet"));
-    session::run_shell()
+    session::run_shell(cmdline.test_mode)
 }
 
 /// `check=timer`: the 1 kHz tick measured against the RTC's seconds.

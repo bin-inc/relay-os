@@ -5,7 +5,7 @@
 
 use crate::input::InputQueue;
 use crate::mm::{self, MemStats, frame::FRAME_SIZE};
-use crate::{arch, console, klog, klogln, rtc, serial, usb};
+use crate::{arch, console, klog, klogln, power, rtc, serial, usb};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use shell::{Console, MemInfo, Shell, System};
@@ -83,7 +83,10 @@ pub fn mem_info(s: MemStats) -> MemInfo {
     }
 }
 
-pub struct KernelSystem;
+pub struct KernelSystem {
+    /// `test=1`: `poweroff` makes QEMU exit (spec §7.4).
+    pub test_mode: bool,
+}
 
 impl System for KernelSystem {
     fn now(&self) -> u64 {
@@ -98,21 +101,14 @@ impl System for KernelSystem {
         klog::KLOG.lock().to_vec()
     }
 
-    // Restarting and switching off through ACPI come with the storage
-    // driver, which the shell must shut down cleanly first; until then both
-    // stop the machine.
+    // The shell has shut the filesystems down before these.
     fn reboot(&mut self) {
-        halt()
+        power::reboot()
     }
 
     fn poweroff(&mut self) {
-        halt()
+        power::poweroff(self.test_mode)
     }
-}
-
-fn halt() -> ! {
-    console::write_output(b"System halted. It is now safe to power off.\n");
-    arch::halt_forever()
 }
 
 /// The RTC and the kernel log, for filesystems.
@@ -129,11 +125,11 @@ impl Env for KernelEnv {
 }
 
 /// Runs the shell on an empty read-only `/` (spec §10). Never returns.
-pub fn run_shell() -> ! {
+pub fn run_shell(test_mode: bool) -> ! {
     let root = MemFs::new(Box::new(KernelEnv)).read_only();
     let mut vfs = MountTable::new(Box::new(root));
     let mut console = KernelConsole::new();
-    let mut system = KernelSystem;
+    let mut system = KernelSystem { test_mode };
     Shell::new(&mut vfs, &mut console, &mut system).run();
     // `run` returns only if `reboot` or `poweroff` do, which they do not.
     arch::halt_forever()
