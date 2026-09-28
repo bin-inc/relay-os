@@ -19,7 +19,8 @@
 //! ```
 //!
 //! A command whose only expectations are `#!>` lines may print anything
-//! else. Other `#` lines are comments.
+//! else. Any other `#word>` is an error (a typo must not drop an
+//! expectation); other `#` lines are comments.
 
 use crate::e2e::strip_ansi;
 use anyhow::{Context, Result, bail};
@@ -78,6 +79,11 @@ pub fn parse(script: &str, machine: Machine) -> Result<Vec<Command>> {
             "!" => (true, true),
             "nuc" => (machine == Machine::Nuc, false),
             "qemu" => (machine == Machine::Qemu, false),
+            // `#word>` looks like an expectation: a typo must not turn one
+            // into a comment, or a wrong transcript could pass.
+            t if t.chars().all(|c| c.is_ascii_alphabetic() || c == '!') => {
+                bail!("line {n}: `#{t}>` is not an expectation (`#>`, `#!>`, `#nuc>`, `#qemu>`)")
+            }
             _ => continue,
         };
         let command = commands
@@ -461,8 +467,20 @@ bin  etc
         assert!(parse("ls\n#> (\n", Machine::Qemu).is_err());
         assert!(parse("# only a comment\n", Machine::Qemu).is_err());
         // Comments, including ones with `>`, are not expectations.
-        let c = parse("ls\n# see > there\n#other> x\n", Machine::Qemu).unwrap();
+        let c = parse("ls\n# see > there\n# a `#> regex` line\n", Machine::Qemu).unwrap();
         assert_eq!(c.len(), 1);
         assert!(c[0].expect.is_empty());
+    }
+
+    #[test]
+    fn a_mistyped_expectation_tag_is_an_error_not_a_comment() {
+        // A dropped `#!>` or `#nuc>` line would let a wrong transcript pass.
+        for tag in ["Nuc", "NUC", "quemu", "other", "!!", "nuc!"] {
+            let err = parse(&format!("ls\n#{tag}> x\n"), Machine::Nuc).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!("line 2: `#{tag}>` is not an expectation (`#>`, `#!>`, `#nuc>`, `#qemu>`)")
+            );
+        }
     }
 }
