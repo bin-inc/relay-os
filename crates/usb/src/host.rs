@@ -1,12 +1,15 @@
 //! One host controller with its class drivers (spec §6): devices are set up
 //! when they appear on a root port (at start and when plugged in later),
-//! boot-keyboard interfaces go to the keyboard driver, and a device's
-//! drivers are dropped when it goes away. The kernel keeps one `Host` per
-//! xHCI controller and polls it from the console.
+//! boot-keyboard interfaces go to the keyboard driver and mass-storage
+//! interfaces to the storage driver, and a device's drivers are dropped when
+//! it goes away. A setup that fails is tried again, three times in all. The
+//! kernel keeps one `Host` per xHCI controller and polls it from the
+//! console; disks are named by a [`DiskId`] that is never reused.
 
 use crate::hid::{BootKeyboard, KeyEvent, is_boot_keyboard};
+use crate::storage::{MassStorage, is_mass_storage};
 use crate::xhci::{Device, Xhci};
-use crate::{Hal, Speed, UsbError};
+use crate::{Hal, UsbError};
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::fmt;
@@ -14,49 +17,27 @@ use core::fmt;
 /// Key events kept for the console at most; beyond this new ones are
 /// dropped (nobody is reading).
 pub const MAX_EVENTS: usize = 256;
+/// Setups of one device: the first and two more (plan 4's finding M4).
+pub const ATTACH_TRIES: u32 = 3;
 
-/// What happened when a device was set up, for the startup screen.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Attached {
-    pub port: u8,
-    pub outcome: Result<Found, UsbError>,
-}
+mod boot_line;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Found {
-    pub vendor: u16,
-    pub product: u16,
-    pub speed: Speed,
-    /// Boot-keyboard interfaces now in use.
-    pub keyboards: usize,
-    /// Why a boot-keyboard interface could not be started, if one could
-    /// not: the screen must say so, because `dmesg` needs a keyboard.
-    pub not_started: Option<UsbError>,
-}
+pub use boot_line::{Attached, DiskId, DiskInfo, Found};
 
-impl fmt::Display for Attached {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "port {}: ", self.port)?;
-        match &self.outcome {
-            Err(e) => write!(f, "setup failed: {e}"),
-            Ok(d) => {
-                write!(f, "{:04x}:{:04x} {}, ", d.vendor, d.product, d.speed)?;
-                match (d.keyboards, d.not_started) {
-                    (0, None) => write!(f, "not claimed"),
-                    (0, Some(e)) => write!(f, "keyboard not started: {e}"),
-                    (1, None) => write!(f, "keyboard"),
-                    (n, None) => write!(f, "{n} keyboards"),
-                    (n, Some(e)) => write!(f, "{n} keyboards, another not started: {e}"),
-                }
-            }
-        }
-    }
+/// A disk in use: its id, the port of its device and the driver.
+struct Disk {
+    id: DiskId,
+    port: u8,
+    storage: MassStorage,
 }
 
 pub struct Host<H: Hal> {
     xhci: Xhci<H>,
     keyboards: Vec<BootKeyboard>,
     events: VecDeque<KeyEvent>,
+    disks: Vec<Disk>,
+    /// The id the next disk gets.
+    next_disk: u32,
 }
 
 impl<H: Hal> Host<H> {
@@ -65,6 +46,8 @@ impl<H: Hal> Host<H> {
             xhci,
             keyboards: Vec::new(),
             events: VecDeque::new(),
+            disks: Vec::new(),
+            next_disk: 0,
         }
     }
 
@@ -109,27 +92,66 @@ impl<H: Hal> Host<H> {
         self.events.truncate(MAX_EVENTS);
     }
 
+    /// The disks in use, in the order they were set up.
+    pub fn disks(&self) -> Vec<DiskInfo> {
+        self.disks.iter().map(Disk::info).collect()
+    }
+
+    /// Reads whole blocks of disk `disk` from `lba` (as
+    /// `MassStorage::read`). `Err(UsbError::Disconnected)` for a disk that
+    /// is gone.
+    pub fn read(&mut self, disk: DiskId, lba: u64, buf: &mut [u8]) -> Result<(), UsbError> {
+        storage(&mut self.disks, disk)?.read(&mut self.xhci, lba, buf)
+    }
+
+    /// Writes whole blocks to disk `disk` from `lba`, as `read`.
+    pub fn write(&mut self, disk: DiskId, lba: u64, buf: &[u8]) -> Result<(), UsbError> {
+        storage(&mut self.disks, disk)?.write(&mut self.xhci, lba, buf)
+    }
+
+    /// Flushes disk `disk`'s cache, as `MassStorage::flush`.
+    pub fn flush(&mut self, disk: DiskId) -> Result<(), UsbError> {
+        storage(&mut self.disks, disk)?.flush(&mut self.xhci)
+    }
+
     /// The oldest key event not yet taken.
     pub fn next_key(&mut self) -> Option<KeyEvent> {
         self.events.pop_front()
     }
 
+    /// Sets up the device on `port`, [`ATTACH_TRIES`] times at most (each
+    /// try resets the port afresh), unless it is gone or the controller
+    /// died. Only the final outcome is reported.
     fn attach(&mut self, port: u8) -> Attached {
-        let outcome = self.xhci.attach(port).and_then(|d| self.claim(d));
+        let mut tries = 1;
+        let outcome = loop {
+            match self.xhci.attach(port).and_then(|d| self.claim(d)) {
+                Err(e)
+                    if tries < ATTACH_TRIES
+                        && !matches!(e, UsbError::Disconnected | UsbError::ControllerDead) =>
+                {
+                    self.log(format_args!("port {port}: setup failed: {e}, trying again"));
+                    tries += 1;
+                }
+                outcome => break outcome,
+            }
+        };
         if let Err(e) = &outcome {
             self.log(format_args!("port {port}: setup failed: {e}"));
         }
         Attached { port, outcome }
     }
 
-    /// Configures the device for the interfaces a driver wants and starts
-    /// the drivers. A device nothing claims stays addressed but unused.
+    /// Configures the device for the interfaces a driver wants (all in one
+    /// Configure Endpoint) and starts the drivers. A device nothing claims
+    /// stays addressed but unused. A driver that does not start is shown on
+    /// the boot line; it does not fail the device's setup.
     fn claim(&mut self, d: Device) -> Result<Found, UsbError> {
         let interfaces: Vec<u8> = d
             .configuration
             .interfaces
             .iter()
-            .filter(|i| is_boot_keyboard(i))
+            .filter(|i| is_boot_keyboard(i) || is_mass_storage(i))
             .map(|i| i.number)
             .collect();
         let mut found = Found {
@@ -138,6 +160,9 @@ impl<H: Hal> Host<H> {
             speed: d.speed,
             keyboards: 0,
             not_started: None,
+            disks: 0,
+            disk_info: Vec::new(),
+            disk_not_started: None,
         };
         if interfaces.is_empty() {
             self.log(format_args!("slot {}: no driver for this device", d.slot));
@@ -153,6 +178,29 @@ impl<H: Hal> Host<H> {
             .iter()
             .filter(|i| interfaces.contains(&i.number))
         {
+            if is_mass_storage(iface) {
+                match MassStorage::start(&mut self.xhci, d.slot, iface) {
+                    Ok(storage) => {
+                        let disk = Disk {
+                            id: DiskId(self.next_disk),
+                            port: d.port,
+                            storage,
+                        };
+                        self.next_disk = self.next_disk.wrapping_add(1);
+                        found.disk_info.push(disk.info());
+                        found.disks += 1;
+                        self.disks.push(disk);
+                    }
+                    Err(e) => {
+                        self.log(format_args!(
+                            "slot {} interface {}: disk not started: {e}",
+                            d.slot, iface.number
+                        ));
+                        found.disk_not_started = Some(e);
+                    }
+                }
+                continue;
+            }
             match BootKeyboard::start(&mut self.xhci, d.slot, iface) {
                 Ok(k) => {
                     self.keyboards.push(k);
@@ -177,10 +225,31 @@ impl<H: Hal> Host<H> {
     }
 
     /// The device in `slot` is gone: its keyboards stop (a held key stops
-    /// repeating with them) and the controller forgets it.
+    /// repeating with them), its disks go (their ids fail from now on) and
+    /// the controller forgets it.
     fn drop_device(&mut self, slot: u8) {
         self.keyboards.retain(|k| k.slot() != slot);
+        self.disks.retain(|d| d.storage.slot() != slot);
         self.xhci.detach(slot);
+    }
+}
+
+/// The driver of disk `id`, if its device is still there.
+fn storage(disks: &mut [Disk], id: DiskId) -> Result<&mut MassStorage, UsbError> {
+    let disk = disks.iter_mut().find(|d| d.id == id);
+    disk.map(|d| &mut d.storage).ok_or(UsbError::Disconnected)
+}
+
+impl Disk {
+    fn info(&self) -> DiskInfo {
+        DiskInfo {
+            id: self.id,
+            port: self.port,
+            vendor: self.storage.vendor().into(),
+            product: self.storage.product().into(),
+            block_size: self.storage.block_size(),
+            block_count: self.storage.block_count(),
+        }
     }
 }
 
@@ -188,8 +257,9 @@ impl<H: Hal> Host<H> {
 mod tests {
     use super::*;
     use crate::hid::Key;
-    use crate::testing::{FakeConfig, FakeHal, FakeUsbDevice, start};
+    use crate::testing::{FakeConfig, FakeHal, FakeStorage, FakeUsbDevice, op, start};
     use alloc::string::{String, ToString};
+    use alloc::vec;
     use core::time::Duration;
 
     fn host(config: FakeConfig) -> (FakeHal, Host<FakeHal>) {
@@ -217,11 +287,14 @@ mod tests {
         [0, 0, usage, 0, 0, 0, 0, 0]
     }
 
+    /// QEMU's e2e disk: 256 MiB.
+    const QEMU_BLOCKS: u64 = 524_288;
+
     #[test]
     fn devices_present_at_start_are_set_up_and_reported() {
         // Laid out as QEMU's e2e machine: USB 3 ports first.
         let (hal, mut host) = host(FakeConfig::qemu());
-        hal.fake().plug(2, FakeUsbDevice::kingston_stick());
+        hal.fake().plug(2, FakeStorage::qemu(QEMU_BLOCKS));
         hal.fake().plug(5, FakeUsbDevice::qemu_keyboard());
         // The stick's USB 3 link trains before its port shows a connection.
         hal.sleep(Duration::from_millis(60));
@@ -229,13 +302,219 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "port 2: 0951:1666 SuperSpeed, not claimed",
+                "port 2: 46f4:0001 SuperSpeed, disk QEMU QEMU HARDDISK, 256 MiB",
                 "port 5: 0627:0001 high-speed, keyboard",
             ]
         );
         assert_eq!(host.keyboards(), 1);
+        assert_eq!(
+            host.disks(),
+            [DiskInfo {
+                id: DiskId(0),
+                port: 2,
+                vendor: "QEMU".into(),
+                product: "QEMU HARDDISK".into(),
+                block_size: 512,
+                block_count: QEMU_BLOCKS,
+            }]
+        );
         // Nothing changed since: nothing more to do.
         assert!(host.service().is_empty());
+    }
+
+    #[test]
+    fn the_nuc_stick_is_a_disk_of_14_4_gib() {
+        let (hal, mut host) = host(FakeConfig::intel());
+        hal.fake().plug(15, FakeStorage::kingston());
+        hal.sleep(Duration::from_millis(60));
+        let attached = host.service();
+        assert_eq!(
+            attached[0].to_string(),
+            "port 15: 0951:1666 SuperSpeed, disk Kingston DataTraveler 3.0, 14.4 GiB"
+        );
+        assert_eq!(attached[0].outcome.as_ref().map(|f| f.disks), Ok(1));
+    }
+
+    #[test]
+    fn reads_and_writes_reach_the_disk() {
+        let (hal, mut host) = host(FakeConfig::qemu());
+        let stick = FakeStorage::qemu(QEMU_BLOCKS);
+        hal.fake().plug(2, stick.clone());
+        hal.sleep(Duration::from_millis(60));
+        host.service();
+        let id = host.disks()[0].id;
+        let data: Vec<u8> = (0..4096).map(|i| (i % 253) as u8).collect();
+        host.write(id, 2048, &data).unwrap();
+        assert_eq!(stick.borrow().read_blocks(2048, 8), data);
+        let mut buf = vec![0u8; 4096];
+        host.read(id, 2048, &mut buf).unwrap();
+        assert_eq!(buf, data);
+        host.flush(id).unwrap();
+        assert_eq!(
+            stick.borrow().opcodes().last(),
+            Some(&op::SYNCHRONIZE_CACHE_10)
+        );
+        assert_eq!(
+            host.read(DiskId(7), 0, &mut buf),
+            Err(UsbError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn an_unplugged_disk_is_gone_for_good_and_a_replug_gets_a_new_id() {
+        let (hal, mut host) = host(FakeConfig::qemu());
+        hal.sleep(Duration::from_millis(60));
+        assert!(host.service().is_empty());
+        let before = hal.outstanding_dma();
+        hal.fake().plug(2, FakeStorage::qemu(QEMU_BLOCKS));
+        hal.sleep(Duration::from_millis(60));
+        host.service();
+        let old = host.disks()[0].id;
+        hal.fake().unplug(2);
+        assert!(host.service().is_empty());
+        assert!(host.disks().is_empty());
+        assert_eq!(hal.outstanding_dma(), before, "the stick's memory is freed");
+        let mut buf = vec![0u8; 512];
+        assert_eq!(host.read(old, 0, &mut buf), Err(UsbError::Disconnected));
+        assert_eq!(host.write(old, 0, &buf), Err(UsbError::Disconnected));
+        assert_eq!(host.flush(old), Err(UsbError::Disconnected));
+        // Plugged in again: another id, which works; the old one does not.
+        hal.fake().plug(2, FakeStorage::qemu(QEMU_BLOCKS));
+        hal.sleep(Duration::from_millis(60));
+        host.service();
+        let new = host.disks()[0].id;
+        assert!(new > old);
+        assert_eq!(host.read(new, 0, &mut buf), Ok(()));
+        assert_eq!(host.read(old, 0, &mut buf), Err(UsbError::Disconnected));
+    }
+
+    #[test]
+    fn a_disk_that_cannot_be_started_says_why_and_is_not_set_up_again() {
+        let (hal, mut host) = host(FakeConfig::intel());
+        let stick = FakeStorage::usb2(1 << 20);
+        stick.borrow_mut().no_medium();
+        hal.fake().plug(3, stick.clone());
+        let attached = host.service();
+        assert_eq!(
+            attached[0].to_string(),
+            "port 3: 0951:1665 high-speed, disk not started: NOT READY (asc 0x3a, ascq 0x00)"
+        );
+        assert!(host.disks().is_empty());
+        let inquiries = stick
+            .borrow()
+            .opcodes()
+            .iter()
+            .filter(|&&o| o == op::INQUIRY)
+            .count();
+        assert_eq!(inquiries, 1);
+        assert!(
+            hal.log_text()
+                .contains("xhci 00:14.0: slot 1 interface 0: disk not started: NOT READY")
+        );
+        assert!(!hal.log_text().contains("trying again"));
+    }
+
+    #[test]
+    fn a_device_with_a_keyboard_and_a_disk_has_both() {
+        let (hal, mut host) = host(FakeConfig::intel());
+        let stick = FakeStorage::kingston();
+        stick.borrow_mut().add_boot_keyboard();
+        hal.fake().plug(13, stick.clone());
+        hal.sleep(Duration::from_millis(60));
+        let attached = host.service();
+        assert_eq!(
+            attached[0].to_string(),
+            "port 13: 0951:1666 SuperSpeed, keyboard, disk Kingston DataTraveler 3.0, 14.4 GiB"
+        );
+        assert_eq!((host.keyboards(), host.disks().len()), (1, 1));
+        // One Configure Endpoint for both interfaces.
+        let configures = hal
+            .fake()
+            .executed()
+            .iter()
+            .filter(|e| e.kind == 12)
+            .count();
+        assert_eq!(configures, 1);
+        let slot = host.xhci().slot_of_port(13).unwrap() as usize;
+        for dci in [3, 4, 7] {
+            assert!(hal.fake().endpoint(slot, dci).is_some(), "DCI {dci}");
+        }
+        stick.borrow_mut().usb().push_in(0x83, &key_report(0x0B));
+        stick.borrow_mut().usb().push_in(0x83, &key_report(0));
+        assert_eq!(typed(&hal, &mut host, 100), "h");
+    }
+
+    #[test]
+    fn a_device_whose_first_setup_fails_is_set_up_again() {
+        let (hal, mut host) = host(FakeConfig::intel());
+        let k120 = FakeUsbDevice::k120();
+        // The first GET_DESCRIPTOR is never answered.
+        k120.borrow_mut().ignore_requests(1);
+        hal.fake().plug(3, k120);
+        let attached = host.service();
+        assert_eq!(attached.len(), 1);
+        assert_eq!(
+            attached[0].to_string(),
+            "port 3: 046d:c31c low-speed, keyboard"
+        );
+        assert!(
+            hal.log_text()
+                .contains("xhci 00:14.0: port 3: setup failed: timed out, trying again")
+        );
+        assert_eq!(host.keyboards(), 1);
+    }
+
+    #[test]
+    fn a_device_that_always_fails_is_tried_three_times_and_reported_once() {
+        let (hal, mut host) = host(FakeConfig::intel());
+        let k120 = FakeUsbDevice::k120();
+        k120.borrow_mut().stall_request(0x06, 0x0100);
+        hal.fake().plug(3, k120.clone());
+        let attached = host.service();
+        assert_eq!(attached.len(), 1);
+        assert_eq!(attached[0].to_string(), "port 3: setup failed: stalled");
+        let log = hal.log_text();
+        assert_eq!(
+            log.matches("port 3: setup failed: stalled, trying again")
+                .count(),
+            2
+        );
+        let device_descriptors = k120
+            .borrow()
+            .requests()
+            .iter()
+            .filter(|r| r.setup.request == 0x06 && r.setup.value == 0x0100)
+            .count();
+        assert_eq!(device_descriptors, 3);
+    }
+
+    #[test]
+    fn a_setup_that_kills_the_controller_is_not_tried_again() {
+        let mut config = FakeConfig::intel();
+        // Configure Endpoint hangs and so does its abort: the controller is
+        // given up.
+        config.hang_command = Some(12);
+        config.abort_never_completes = true;
+        let (hal, mut host) = host(config);
+        hal.fake().plug(3, FakeUsbDevice::k120());
+        let attached = host.service();
+        assert_eq!(attached[0].outcome, Err(UsbError::ControllerDead));
+        let log = hal.log_text();
+        assert_eq!(log.matches("trying again").count(), 1, "{log}");
+        assert!(log.contains("port 3: setup failed: timed out, trying again"));
+    }
+
+    #[test]
+    fn a_device_that_is_unplugged_during_setup_is_not_tried_again() {
+        let (hal, mut host) = host(FakeConfig::intel());
+        hal.fake().plug(3, FakeUsbDevice::k120());
+        // After the debounce, during the port reset.
+        hal.fake()
+            .after(Duration::from_millis(105), |x, _| x.unplug(3));
+        let attached = host.service();
+        assert_eq!(attached.len(), 1);
+        assert_eq!(attached[0].outcome, Err(UsbError::Disconnected));
+        assert!(!hal.log_text().contains("trying again"));
     }
 
     #[test]

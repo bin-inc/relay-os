@@ -9,6 +9,10 @@ use crate::Speed;
 use crate::bus::{CLEAR_FEATURE, ENDPOINT_HALT, RECIPIENT_ENDPOINT};
 use crate::testing::device::Stall;
 
+/// `add_boot_keyboard`'s interface and endpoint.
+const KEYBOARD_INTERFACE: u16 = 1;
+const KEYBOARD_IN: u8 = 0x83;
+
 pub(super) enum Phase {
     /// Waiting for a CBW on bulk OUT.
     Cbw,
@@ -140,6 +144,9 @@ impl FakeDevice for FakeStorage {
             return Some(answer);
         }
         if setup.request_type & 0x60 == 0x20 {
+            if self.keyboard && setup.index == KEYBOARD_INTERFACE {
+                return Some(answer);
+            }
             if setup.request_type & 0x1F != 1 || setup.index != INTERFACE || setup.value != 0 {
                 panic!("fake storage: class request {setup:?} not for interface 0");
             }
@@ -168,6 +175,9 @@ impl FakeDevice for FakeStorage {
     }
 
     fn data_in(&mut self, endpoint: u8, max_len: usize) -> Option<Result<Vec<u8>, Stall>> {
+        if self.keyboard && endpoint == KEYBOARD_IN {
+            return self.usb.data_in(endpoint, max_len);
+        }
         if endpoint != BULK_IN {
             panic!("fake storage: IN transfer on endpoint {endpoint:#04x}");
         }

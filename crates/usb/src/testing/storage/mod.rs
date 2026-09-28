@@ -128,6 +128,9 @@ pub struct FakeStorage {
     write_protected: bool,
     /// Knob: SYNCHRONIZE CACHE fails with ILLEGAL REQUEST.
     no_cache_sync: bool,
+    /// Knob: interface 1 is a boot keyboard, whose requests and reports
+    /// the `FakeUsbDevice` handles.
+    keyboard: bool,
 }
 
 /// A CSW that breaks BOT 6.3.
@@ -179,6 +182,7 @@ impl FakeStorage {
             medium_error: None,
             write_protected: false,
             no_cache_sync: false,
+            keyboard: false,
         }))
     }
 
@@ -206,6 +210,37 @@ impl FakeStorage {
             blocks,
             FailedData::Pad,
         )
+    }
+
+    /// A USB 2 stick (`FakeUsbDevice::usb2_stick`: high-speed, `0951:1665`)
+    /// with the Kingston's answers, named DataTraveler 2.0, and `blocks`
+    /// blocks of 512 bytes. A failed command stalls its data phase.
+    pub fn usb2(blocks: u64) -> Rc<RefCell<FakeStorage>> {
+        let mut inquiry = KINGSTON_INQUIRY.to_vec();
+        inquiry[16..32].copy_from_slice(b"DataTraveler 2.0");
+        FakeStorage::new(
+            FakeUsbDevice::usb2_stick(),
+            inquiry,
+            blocks,
+            FailedData::Stall,
+        )
+    }
+
+    /// Knob: the device also has a boot keyboard, interface 1 with an
+    /// interrupt IN endpoint 0x83 of 8 bytes (a composite device). Reports
+    /// for it are pushed with `usb().push_in(0x83, …)`.
+    pub fn add_boot_keyboard(&mut self) {
+        let mut config = self.usb.configuration_descriptor().to_vec();
+        config.extend_from_slice(&[
+            9, 4, 1, 0, 1, 3, 1, 1, 0, // interface 1: HID boot keyboard
+            9, 0x21, 0x11, 1, 0, 1, 0x22, 63, 0, // HID descriptor
+            7, 5, 0x83, 3, 8, 0, 7, // interrupt IN 0x83, 8 bytes
+        ]);
+        let total = (config.len() as u16).to_le_bytes();
+        (config[2], config[3], config[4]) = (total[0], total[1], 2);
+        let device = self.usb.device_descriptor().to_vec();
+        self.usb.set_descriptors(device, config);
+        self.keyboard = true;
     }
 
     /// The descriptors and standard requests, with their knobs.
