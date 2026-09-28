@@ -4,6 +4,7 @@
 //! messages.
 
 use crate::io::{Console, System};
+use crate::transcript::Transcript;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -26,6 +27,8 @@ pub struct Ctx<'a> {
     pub(crate) script: Option<crate::commands::Script>,
     /// The command is a line of a script.
     pub(crate) in_script: bool,
+    /// A running script's transcript, which gets what the screen gets.
+    pub(crate) transcript: Option<Transcript>,
 }
 
 enum Output {
@@ -65,13 +68,14 @@ impl<'a> Ctx<'a> {
             cancelled: false,
             script: None,
             in_script: false,
+            transcript: None,
         }
     }
 
     /// Standard output.
     pub fn out(&mut self, bytes: &[u8]) {
         match &mut self.out {
-            Output::Console => self.console.write(bytes),
+            Output::Console => self.screen(bytes),
             Output::File { buf, .. } => {
                 buf.extend_from_slice(bytes);
                 if buf.len() >= FILE_BUFFER {
@@ -83,7 +87,18 @@ impl<'a> Ctx<'a> {
 
     /// Errors always go to the screen, never into a redirection file.
     pub fn err(&mut self, bytes: &[u8]) {
+        self.screen(bytes);
+    }
+
+    /// Writes to the screen and a running script's transcript.
+    fn screen(&mut self, bytes: &[u8]) {
         self.console.write(bytes);
+        if let Some(t) = &mut self.transcript
+            && let Err(e) = t.add(&mut *self.vfs, bytes)
+        {
+            self.console.write(t.ended(e).as_bytes());
+            self.transcript = None;
+        }
     }
 
     /// Whether Ctrl-C has stopped the command. Long loops (reading a file,

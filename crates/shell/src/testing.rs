@@ -138,6 +138,8 @@ pub struct SpyState {
     pub fail_unlink: Cell<Option<Errno>>,
     /// `read_at` calls.
     pub reads: Cell<u32>,
+    /// The most bytes one `write_at` was given.
+    pub largest_write: Cell<usize>,
 }
 
 /// A `MemFs` that counts syncs and shutdowns and can make them fail.
@@ -167,6 +169,8 @@ impl FileSystem for Spy {
         self.fs.read_at(ino, offset, buf)
     }
     fn write_at(&mut self, ino: Ino, offset: u64, buf: &[u8]) -> Result<usize, Errno> {
+        let largest = self.state.largest_write.get().max(buf.len());
+        self.state.largest_write.set(largest);
         if self.state.zero_writes.get() {
             return Ok(0);
         }

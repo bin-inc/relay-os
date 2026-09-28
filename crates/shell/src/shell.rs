@@ -6,6 +6,7 @@ use crate::ctx::Ctx;
 use crate::editor::{Feed, LineEditor};
 use crate::io::{Console, System};
 use crate::parser::{self, HOME, Redirect};
+use crate::transcript::Transcript;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -33,39 +34,6 @@ pub struct Shell<'a> {
     in_script: bool,
     /// Where a running script's screen output is copied.
     transcript: Option<Transcript>,
-}
-
-/// A running script's transcript: what the screen showed since the last
-/// line ended waits in `pending`.
-struct Transcript {
-    node: Node,
-    offset: u64,
-    pending: Vec<u8>,
-    name: String,
-}
-
-/// The screen, and a copy of what is written to it for the transcript.
-struct Tee<'c> {
-    console: &'c mut dyn Console,
-    copy: Option<&'c mut Vec<u8>>,
-}
-
-impl Console for Tee<'_> {
-    fn read_byte(&mut self) -> Option<u8> {
-        self.console.read_byte()
-    }
-    fn write(&mut self, bytes: &[u8]) {
-        self.console.write(bytes);
-        if let Some(copy) = &mut self.copy {
-            copy.extend_from_slice(bytes);
-        }
-    }
-    fn columns(&self) -> usize {
-        self.console.columns()
-    }
-    fn interrupted(&mut self) -> bool {
-        self.console.interrupted()
-    }
 }
 
 impl<'a> Shell<'a> {
@@ -169,12 +137,9 @@ impl<'a> Shell<'a> {
         let Some(builtin) = commands::find(name) else {
             return self.finish(NOT_FOUND, format!("{NAME}: {name}: command not found\n"));
         };
-        let mut screen = Tee {
-            console: &mut *self.console,
-            copy: self.transcript.as_mut().map(|t| &mut t.pending),
-        };
-        let mut ctx = Ctx::new(&mut *self.vfs, &mut *self.system, &mut screen, file);
+        let mut ctx = Ctx::new(&mut *self.vfs, &mut *self.system, &mut *self.console, file);
         ctx.in_script = self.in_script;
+        ctx.transcript = self.transcript.take();
         let mut status = (builtin.run)(&mut ctx, &cmd.words[1..]);
         let mut message = String::new();
         if let Err(e) = ctx.finish() {
@@ -185,6 +150,7 @@ impl<'a> Shell<'a> {
             message = String::from("^C\n");
             status = CANCELLED;
         }
+        self.transcript = ctx.transcript.take();
         self.stopped = ctx.exit;
         if let Some(script) = ctx.script.take() {
             status = self.run_script(script);
@@ -195,38 +161,27 @@ impl<'a> Shell<'a> {
     /// Writes to the screen and, while a script runs, its transcript.
     fn say(&mut self, bytes: &[u8]) {
         self.console.write(bytes);
-        if let Some(t) = &mut self.transcript {
-            t.pending.extend_from_slice(bytes);
+        if let Some(t) = &mut self.transcript
+            && let Err(e) = t.add(&mut *self.vfs, bytes)
+        {
+            self.end_transcript(e);
         }
     }
 
-    /// Adds what the screen showed to the transcript. If that fails the
+    /// Writes what the screen showed to the transcript. If that fails the
     /// transcript ends there, with a message; the script goes on.
     fn write_transcript(&mut self) {
-        let Some(t) = &mut self.transcript else {
-            return;
-        };
-        let mut done = 0;
-        while done < t.pending.len() {
-            let result = match self.vfs.write_at(t.node, t.offset, &t.pending[done..]) {
-                Ok(0) => Err(Errno::ENOSPC),
-                other => other,
-            };
-            match result {
-                Ok(n) => {
-                    done += n;
-                    t.offset += n as u64;
-                }
-                Err(e) => {
-                    let name = path::display(t.name.as_bytes());
-                    self.transcript = None;
-                    self.console
-                        .write(format!("sh: {name}: {e}; the transcript ends here\n").as_bytes());
-                    return;
-                }
-            }
+        if let Some(t) = &mut self.transcript
+            && let Err(e) = t.write(&mut *self.vfs)
+        {
+            self.end_transcript(e);
         }
-        t.pending.clear();
+    }
+
+    fn end_transcript(&mut self, e: Errno) {
+        if let Some(t) = self.transcript.take() {
+            self.console.write(t.ended(e).as_bytes());
+        }
     }
 
     /// Runs a script's lines (spec §15 item 12): each command is shown as
@@ -235,12 +190,7 @@ impl<'a> Shell<'a> {
     /// the script; failing commands do not. Returns the last status.
     fn run_script(&mut self, script: Script) -> i32 {
         self.in_script = true;
-        self.transcript = Some(Transcript {
-            node: script.transcript,
-            offset: 0,
-            pending: Vec::new(),
-            name: script.transcript_name,
-        });
+        self.transcript = Some(Transcript::new(script.transcript, script.transcript_name));
         let mut status = 0;
         for line in script.text.lines() {
             if matches!(parser::parse(line), Ok(c) if c.words.is_empty() && c.redirect.is_none()) {
