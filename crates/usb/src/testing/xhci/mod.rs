@@ -85,6 +85,11 @@ pub struct FakeConfig {
     pub cnr_time: Option<Duration>,
     /// How long HCH takes to clear after R/S = 1; `None`: it never runs.
     pub run_time: Option<Duration>,
+    /// Knob: a controller that starts late. R/S = 1 does not clear HCH
+    /// however long the driver waits; the controller starts as R/S is
+    /// cleared again (HCH reads 0), and halts only `halt_time` later
+    /// (`None`: never).
+    pub starts_late: bool,
     /// Knob: commands of this TRB type never complete.
     pub hang_command: Option<u32>,
     /// Knob: CRCR.CA never stops the command ring (CRR stays 1).
@@ -178,6 +183,7 @@ impl FakeConfig {
             reset_time: Some(Duration::ZERO),
             cnr_time: Some(Duration::ZERO),
             run_time: Some(Duration::ZERO),
+            starts_late: false,
             hang_command: None,
             abort_never_completes: false,
             abort_keeps_dequeue: false,
@@ -278,6 +284,7 @@ impl FakeConfig {
             reset_time: Some(Duration::from_millis(2)),
             cnr_time: Some(Duration::from_millis(10)),
             run_time: Some(Duration::from_micros(500)),
+            starts_late: false,
             hang_command: None,
             abort_never_completes: false,
             abort_keeps_dequeue: false,
