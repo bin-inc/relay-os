@@ -23,6 +23,8 @@
 //!                                   starts again on the same disk)
 //! poweroff                         (types `poweroff`; QEMU must exit through
 //!                                   isa-debug-exit, test mode's power-off)
+//! unplug                           (pulls the USB stick out: QMP device_del,
+//!                                   then QEMU's DEVICE_DELETED event)
 //! file-lines /root/big 8388608 abc (after poweroff: the file, read with
 //!                                   debugfs, is "abc\n" repeated to 8388608
 //!                                   bytes)
@@ -34,7 +36,7 @@
 use crate::build;
 use crate::image::{self, Layout, Partition, esp_write, set_cmdline};
 use crate::keys;
-use crate::qemu::Qemu;
+use crate::qemu::{self, Qemu};
 use crate::qmp::Qmp;
 use crate::util::{out_dir, root};
 use anyhow::{Context, Result, bail};
@@ -89,6 +91,9 @@ pub enum Step {
     Reboot(Option<String>),
     /// Switch the machine off; no later step talks to it.
     Poweroff,
+    /// Pull the USB stick out (QMP `device_del`), waiting until QEMU has
+    /// removed it.
+    Unplug,
     /// The file at `path` on the ext2 root is `line` and a newline, again
     /// and again, `bytes` in all. Checked on the disk once the machine is
     /// off.
@@ -182,6 +187,7 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
                 Step::Reboot(Some(rest.to_string()))
             }
             "poweroff" => Step::Poweroff,
+            "unplug" if rest.is_empty() => Step::Unplug,
             "file-lines" => parse_file_lines(rest).with_context(|| format!("{name}:{line_no}"))?,
             other => bail!("{name}:{line_no}: unknown step '{other}'"),
         };
@@ -575,6 +581,17 @@ fn run_step(r: &mut Running, step: &Step, timeout: &mut Duration, run_dir: &Path
             exit_with(r, "poweroff", EXIT_POWEROFF, *timeout)?;
             r.off = true;
         }
+        Step::Unplug => {
+            r.qmp.execute(
+                "device_del",
+                serde_json::json!({ "id": qemu::STICK_DEVICE }),
+            )?;
+            r.qmp.wait_event(
+                "DEVICE_DELETED",
+                |d| d["device"] == qemu::STICK_DEVICE,
+                *timeout,
+            )?;
+        }
         Step::ScreenshotNonblank => {
             let file = run_dir.join("screen.ppm");
             r.qmp
@@ -705,6 +722,13 @@ mod tests {
         );
         assert!(parse_scenario("x", "esp-write relative x").is_err());
         assert!(parse_scenario("x", "expect a\nesp-write /x y").is_err());
+    }
+
+    #[test]
+    fn parses_the_unplug_step() {
+        let s = parse_scenario("x", "unplug\nsend ls").unwrap();
+        assert_eq!(s.steps[0], (1, Step::Unplug));
+        assert!(parse_scenario("x", "unplug now").is_err());
     }
 
     #[test]

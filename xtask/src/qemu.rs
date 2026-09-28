@@ -7,6 +7,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// The QEMU id of the USB stick, for QMP `device_del`.
+pub const STICK_DEVICE: &str = "stick-usb";
+
 pub struct Qemu {
     pub disk: PathBuf,
     pub vars: PathBuf,
@@ -57,7 +60,10 @@ impl Qemu {
                 "if=none,id=stick,format=raw,file={}",
                 self.disk.display()
             ))
-            .args(["-device", "usb-storage,bus=xhci.0,drive=stick"])
+            .arg("-device")
+            .arg(format!(
+                "usb-storage,bus=xhci.0,drive=stick,id={STICK_DEVICE}"
+            ))
             .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
             .args(["-serial", "stdio", "-monitor", "none"]);
         if self.headless {
@@ -139,6 +145,7 @@ mod tests {
                 .any(|w| w == ["-mon", "chardev=qmp,mode=control"])
         );
         assert!(!args.iter().any(|a| a == "-qmp" || a.contains("abstract")));
+        assert!(args.contains(&"usb-storage,bus=xhci.0,drive=stick,id=stick-usb".into()));
     }
 
     #[test]
