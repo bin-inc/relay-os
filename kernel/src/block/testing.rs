@@ -21,6 +21,9 @@ pub struct MemDisk {
     block_size: usize,
     /// Reads that touch one of these blocks fail with `IoError::Device`.
     pub bad: Range<u64>,
+    /// Every write fails with `IoError::Device` (a stick worn out into
+    /// read-only mode).
+    pub read_only: bool,
     /// Reads and writes that reached the disk.
     pub requests: u32,
     pub flushes: u32,
@@ -33,6 +36,7 @@ impl MemDisk {
             data,
             block_size,
             bad: 0..0,
+            read_only: false,
             requests: 0,
             flushes: 0,
         }
@@ -65,6 +69,9 @@ impl BlockDevice for MemDisk {
     }
     fn write(&mut self, lba: u64, buf: &[u8]) -> Result<(), IoError> {
         let span = self.span(lba, buf.len())?;
+        if self.read_only {
+            return Err(IoError::Device);
+        }
         self.requests += 1;
         self.data[span].copy_from_slice(buf);
         Ok(())
@@ -139,6 +146,18 @@ fn take(path: &Path) -> Vec<u8> {
     let data = fs::read(path).unwrap();
     fs::remove_file(path).unwrap();
     data
+}
+
+/// An empty ext2 filesystem of `bytes` as `mke2fs` makes the root (4 KiB
+/// blocks, the image's features).
+pub fn mke2fs_image(bytes: u64) -> Vec<u8> {
+    let path = image_file("ext2.img", bytes);
+    let mut cmd = tool("mke2fs");
+    cmd.args(["-q", "-F", "-t", "ext2", "-b", "4096", "-I", "256"])
+        .args(["-O", "^dir_index,^resize_inode,^ext_attr"])
+        .arg(&path);
+    run(cmd, "");
+    take(&path)
 }
 
 /// A disk of `bytes` partitioned by `sfdisk` from `script` (512-byte sectors).

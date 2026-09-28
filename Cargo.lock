@@ -265,6 +265,7 @@ name = "relay-kernel"
 version = "0.1.0"
 dependencies = [
  "boot-info",
+ "ext2",
  "shell",
  "spin",
  "term",

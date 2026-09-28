@@ -12,12 +12,13 @@ use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 use spin::Mutex;
-use usb::host::Host;
+use usb::host::{DiskId, Host};
 use usb::xhci::Xhci;
 use usb::{DmaBuf, Hal, UsbError};
+use vfs::{BlockDevice, IoError, check_request};
 
-/// Every running controller with its drivers. The console polls them; the
-/// storage driver will share them.
+/// Every running controller with its drivers. The console polls them, and
+/// every disk request locks them.
 static HOSTS: Mutex<Vec<Host<KernelHal>>> = Mutex::new(Vec::new());
 
 /// `debug=usb`: the USB log goes to the screen as well.
@@ -165,6 +166,78 @@ pub fn poll(input: &mut InputQueue) {
         while let Some(e) = host.next_key() {
             input.push_key(&e);
         }
+    }
+}
+
+/// A USB disk as a block device (spec §6.5). It names the disk by its host
+/// and `DiskId`, and locks the hosts for each request, so the console's
+/// polling and the filesystem share them. A disk that went away fails every
+/// request; a stick plugged in again is another disk.
+#[derive(Clone, Debug)]
+pub struct UsbDisk {
+    host: usize,
+    id: DiskId,
+    /// `00:14.0 port 15`, for status lines and the log.
+    pub name: String,
+    block_size: usize,
+    blocks: u64,
+}
+
+/// Every disk on every controller, in controller and port order.
+pub fn disks() -> Vec<UsbDisk> {
+    let hosts = HOSTS.lock();
+    let mut out = Vec::new();
+    for (i, host) in hosts.iter().enumerate() {
+        for d in host.disks() {
+            out.push(UsbDisk {
+                host: i,
+                id: d.id,
+                name: alloc::format!("{} port {}", host.xhci().name(), d.port),
+                block_size: d.block_size,
+                blocks: d.block_count,
+            });
+        }
+    }
+    out
+}
+
+impl UsbDisk {
+    fn request(
+        &self,
+        what: &str,
+        lba: u64,
+        f: impl FnOnce(&mut Host<KernelHal>) -> Result<(), UsbError>,
+    ) -> Result<(), IoError> {
+        let mut hosts = HOSTS.lock();
+        let host = hosts.get_mut(self.host).ok_or(IoError::Device)?;
+        f(host).map_err(|e| {
+            klogln!("usb: {}: {what} at block {lba}: {e}", self.name);
+            IoError::Device
+        })
+    }
+}
+
+impl BlockDevice for UsbDisk {
+    fn block_size(&self) -> usize {
+        self.block_size
+    }
+
+    fn block_count(&self) -> u64 {
+        self.blocks
+    }
+
+    fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), IoError> {
+        check_request(self.block_size, self.blocks, lba, buf.len())?;
+        self.request("read", lba, |h| h.read(self.id, lba, buf))
+    }
+
+    fn write(&mut self, lba: u64, buf: &[u8]) -> Result<(), IoError> {
+        check_request(self.block_size, self.blocks, lba, buf.len())?;
+        self.request("write", lba, |h| h.write(self.id, lba, buf))
+    }
+
+    fn flush(&mut self) -> Result<(), IoError> {
+        self.request("flush", 0, |h| h.flush(self.id))
     }
 }
 

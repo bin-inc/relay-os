@@ -1,6 +1,6 @@
 # The loader hands off, the kernel draws on the framebuffer, every startup
-# step reports ok, and the shell starts on an empty read-only / (there is
-# no storage driver yet).
+# step reports ok, / is the stick's ext2 partition, and the shell shows the
+# motd and starts in /root (spec §9.3 #1).
 timeout 30
 expect Relay OS \d+\.\d+\.\d+
 expect \[ ok \] console \d+x\d+ \(\d+x\d+ cells\)
@@ -20,6 +20,7 @@ expect usb: 00:02\.0 port 2: 46f4:0001 SuperSpeed, disk QEMU QEMU HARDDISK, 256 
 expect usb: 00:02\.0 port 5: 0627:0001 high-speed, keyboard
 expect \[ ok \] usb: 1 controller, 2 devices
 expect \[ ok \] keyboard: 1 keyboard
-expect \[FAIL\] mount /: no storage driver yet
-expect root@relay:/# $
+expect \[ ok \] mount /: ext2 on 00:02\.0 port 2 partition 2, 190 MiB
+expect \nWelcome to Relay OS\.\n
+expect root@relay:~# $
 screenshot-nonblank

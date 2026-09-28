@@ -2,12 +2,12 @@
 # reset register (QEMU's is port 0xcf9 <- 0xf) and boots again on the same
 # disk, then test mode's poweroff makes QEMU exit through isa-debug-exit.
 timeout 30
-expect root@relay:/# $
+expect root@relay:~# $
 send echo before
 expect \nbefore\n
 reboot relay: restarting through the FADT reset register
 expect Relay OS \d+\.\d+\.\d+
-expect root@relay:/# $
+expect root@relay:~# $
 send echo after
 expect \nafter\n
 poweroff

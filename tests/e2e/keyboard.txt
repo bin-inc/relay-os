@@ -2,7 +2,7 @@
 # qemu-xhci and the HID boot keyboard driver to the shell.
 timeout 30
 expect \[ ok \] keyboard: 1 keyboard
-expect root@relay:/# $
+expect root@relay:~# $
 key echo hello
 expect \nhello\n
 # Shift for capitals and symbols.
