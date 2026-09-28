@@ -1,8 +1,11 @@
 # Relay OS — Milestone 1 Design: USB boot, HDMI terminal, persistent file I/O
 
 - **Date:** 2026-09-26
-- **Status:** Approved 2026-09-26; revised during planning (see §15)
-- **Branch:** `milestone-1`
+- **Status:** Approved 2026-09-26; revised during planning (see §15);
+  implemented by plans 1–6 (`docs/superpowers/plans/`), which end milestone 1
+  at version 0.2.0
+- **Branch:** `main`, one pull request at a time (see the roadmap,
+  `docs/superpowers/plans/2026-09-26-milestone-1-roadmap.md`)
 
 ## 1. Intent
 
@@ -96,7 +99,7 @@ relay-os/
 ├─ xtask/                  host tool: build, image, qemu, test, flash, verify-usb
 └─ docs/
    ├─ hardware-test.md
-   └─ superpowers/specs/
+   └─ superpowers/{specs,plans}/
 ```
 
 ### 3.1 Principles
@@ -167,7 +170,8 @@ GPT with two partitions:
 5. **Build page tables.**
    - Kernel segments at `0xFFFF_FFFF_8000_0000`, with permissions taken from
      the ELF flags (NX on data).
-   - All RAM in the memory map, plus the framebuffer, mapped linearly at
+   - The RAM-type regions of the memory map (usable, loader, kernel, ACPI;
+     §15 item 5), plus the framebuffer, mapped linearly at
      `PHYS_OFFSET = 0xFFFF_8000_0000_0000` using 2 MiB pages.
    - A 64 KiB kernel stack with an unmapped guard page below it.
    - An identity mapping of the trampoline page.
@@ -186,7 +190,7 @@ both and halts with a message if they don't match.
 | Field | Contents |
 |---|---|
 | `framebuffer` | Physical address, byte size, width, height, stride (in pixels), pixel format (RGB or BGR). |
-| `memory_map` | Pointer and length of `MemoryRegion { start, len, kind }`, where `kind` is `Usable`, `Bootloader`, `AcpiReclaimable`, `AcpiNvs`, `Reserved`, `Mmio` or `Kernel`. UEFI boot-services code and data become `Usable`. Loader data becomes `Bootloader`. |
+| `memory_map` | Pointer and length of `MemoryRegion { start, len, kind }`, where `kind` is `Usable`, `Bootloader`, `AcpiReclaimable`, `AcpiNvs`, `Reserved`, `Mmio` or `Kernel`. UEFI boot-services code and data become `Usable`. Loader data becomes `Bootloader`, and so do the kernel's pages, which the loader allocates as loader data: `Kernel` is not produced (§15 item 7). |
 | `rsdp_addr` | Physical address of the RSDP. |
 | `phys_offset` | Virtual base of the linear physical-memory map. |
 | `kernel_phys` | Start and length of the kernel image in physical memory. |
@@ -203,7 +207,9 @@ because the NUC has no serial port.
    (0x3F8) when a UART is detected by probing its scratch register (so it
    works in QEMU and is harmless on the NUC).
 2. **CPU tables:** GDT with TSS (an IST stack for double faults), then an IDT
-   whose exception handlers draw the panic screen (§10).
+   whose exception handlers draw the panic screen (§10). They are
+   loaded before the console starts, so an early fault still reaches the
+   panic screen; the status lines keep this order (§15 item 8).
 3. **Memory:** frame allocator (§5.1), kernel heap (§5.2), then kernel-owned
    page tables that replace the loader's (§5.3). Set up PAT so the framebuffer
    is mapped write-combining.
@@ -231,6 +237,7 @@ taken from the first sufficiently large `Usable` region.
   the xHCI scratchpad need this.
 - `Bootloader`, `AcpiReclaimable` and `Kernel` regions stay reserved for all
   of milestone 1.
+- Frames below 1 MiB are never allocated (§15 item 8).
 
 ### 5.2 Kernel heap
 
@@ -276,8 +283,9 @@ devices, and decode 32-bit and 64-bit BARs (sizing them by writing all ones
 and reading back).
 
 The result is a device list that `dmesg` prints and the xHCI driver uses to
-find its controller (class `0x0C`, subclass `0x03`, prog-if `0x30`). Enable
-memory-space decoding and bus mastering on that controller.
+find its controllers (class `0x0C`, subclass `0x03`, prog-if `0x30`). Every
+xHCI controller is put into power state D0 and gets memory-space decoding
+and bus mastering; the NUC has two (§15 items 8 and 10).
 
 ## 6. USB stack (`crates/usb`)
 
@@ -288,13 +296,19 @@ tests use a fake.
 
 ```rust
 pub trait Hal {
-    fn map_mmio(&self, phys: u64, len: usize) -> NonNull<u8>;
-    fn alloc_dma(&self, size: usize, align: usize) -> DmaBuf; // virt + phys, zeroed
+    fn map_mmio(&self, phys: u64, len: usize) -> Option<usize>;    // virtual address
+    unsafe fn read32(&self, addr: usize) -> u32;                    // device registers
+    unsafe fn write32(&self, addr: usize, value: u32);
+    fn alloc_dma(&self, size: usize, align: usize) -> Option<DmaBuf>; // zeroed, page-aligned
     fn free_dma(&self, buf: DmaBuf);
     fn now(&self) -> Duration;      // monotonic time since boot
     fn sleep(&self, d: Duration);   // busy-wait on the timer
+    fn log(&self, args: fmt::Arguments); // a line in dmesg
 }
 ```
+
+(Register access and the log went into the `Hal` during planning, so host
+tests can run the driver against a fake controller; §15 item 10.)
 
 ### 6.2 xHCI controller driver
 
@@ -308,10 +322,12 @@ against a fake register file:
 - **Reset:** clear Run/Stop, wait for HCHalted, set HCRST, then wait for both
   HCRST and CNR to clear. Each wait times out after 1 s.
 - **Scratchpad buffers:** read `Max Scratchpad Buffers` from HCSPARAMS2 and
-  allocate the scratchpad array and pages. Intel requires them; QEMU requires
-  none.
-- **Context size:** `HCCPARAMS1.CSZ` chooses 32-byte (QEMU) or 64-byte (Intel)
-  contexts. Every context accessor takes that stride as a parameter.
+  allocate the scratchpad array and pages. The NUC's controllers ask for 34;
+  QEMU's for none.
+- **Context size:** `HCCPARAMS1.CSZ` chooses 32-byte or 64-byte contexts.
+  QEMU and both of the NUC's controllers use 32-byte ones (§15 item 10), so
+  64-byte contexts are tested on the host only. Every context accessor takes
+  that stride as a parameter.
 - **Supported Protocol capabilities:** tell us which ports are USB 2 and which
   are USB 3, so the right reset sequence runs. USB 3 ports train on their own;
   USB 2 ports need a PORTSC reset followed by waiting for Port Enabled.
@@ -326,7 +342,8 @@ Rings hold 256 TRBs and use a Link TRB with toggle-cycle. Cycle-bit handling is
 covered by host unit tests.
 
 **Device setup sequence:**
-1. Detect the connection change on the port and reset the port.
+1. Detect the connection change on the port, wait until the connection has
+   been stable for 100 ms (§15 item 12), and reset the port.
 2. Enable Slot.
 3. Address Device, with a max packet size of 8, 64 or 512 depending on port
    speed.
@@ -458,7 +475,8 @@ exactly one ESP and one Linux partition, and log a warning.
   - In QEMU, bytes received on COM1 join the same stream, so tests can type
     quickly over serial.
 - **Kernel log:** a 64 KiB ring buffer holding every `[ ok ]` / `[FAIL]` line,
-  driver messages and warnings. `dmesg` prints it.
+  driver messages and warnings. `dmesg` prints it. The shell's output goes to
+  the screen and serial, not into the log (§15 item 10).
 
 ### 7.3 Shell (`crates/shell`)
 
@@ -476,14 +494,17 @@ reboot and power-off, kernel log).
   - Ctrl-C cancels the line (prints `^C`);
   - Ctrl-L clears the screen and redraws the current line.
 - **Parser:** words are split on whitespace. Supported syntax:
-  - `'…'` (literal) and `"…"` (supports `\"` and `\\` inside);
+  - `'…'` (literal) and `"…"` (supports `\"`, `\\`, `\$` and `` \` `` inside;
+    a bare `$` or `` ` `` in it is refused, §15 item 12);
   - `\` escapes outside quotes;
+  - `#` at the start of a word begins a comment (§15 item 12);
   - `> file` (truncate) and `>> file` (append) on any command's standard
     output;
   - error messages always go to the screen, never into a redirect file.
 
-  Anything else is an error: `|`, `;`, `&`, `$`, `*` and `?` (when not
-  quoted) print `relay-sh: unsupported syntax: <token>`.
+  Anything else is an error: `|`, `;`, `&`, `$`, `*`, `?`, `<`, `` ` ``,
+  `(`, `)` and `2>` (when not quoted) print
+  `relay-sh: unsupported syntax: <token>` (§15 item 9).
 - **Command results:** every command returns an exit status. Error messages
   follow the GNU coreutils format, for example
   `cat: foo: No such file or directory`. Unknown commands print
@@ -517,6 +538,7 @@ reboot and power-off, kernel log).
 | `free` | total, used and free frames and heap |
 | `dmesg` | prints the kernel log |
 | `sync` | flushes the block cache and the device |
+| `sh` | `sh file`: runs the file's commands one by one, each shown as `+ <line>`, into a transcript (§15 item 12) |
 | `reboot` / `poweroff` | see §7.4 |
 
 ### 7.4 Reboot and power-off
@@ -529,17 +551,19 @@ reboot and power-off, kernel log).
 - **`poweroff`:** write `SLP_TYPa | SLP_EN` to PM1a_CNT (and PM1b if present)
   using the decoded `\_S5` values. If it can't, print
   `System halted. It is now safe to power off.` and halt.
-- **Test mode** (`cmdline` contains `test=1`): `poweroff` writes the exit code
-  to the `isa-debug-exit` port `0xF4` before trying ACPI, so QEMU exits
-  straight away.
+- **Test mode** (`cmdline` contains `test=1`): `poweroff` writes 0x10 to the
+  `isa-debug-exit` port `0xF4` before trying ACPI, so QEMU exits straight
+  away, with status 33 (§15 item 11).
 
 ## 8. Filesystem (`crates/ext2`, `crates/vfs`)
 
 ### 8.1 VFS
 
-- **Traits:** `FileSystem` (root inode, statfs, sync) and `Inode` (stat,
-  lookup, read_at, write_at, truncate, create, mkdir, unlink, rmdir, rename,
-  readdir).
+- **Traits:** one `FileSystem` trait whose operations name inodes by number
+  (root, stat, lookup, read_at, write_at, truncate, create, mkdir, unlink,
+  rmdir, rename, read_dir, read_link, touch, statfs, sync, shutdown), and a
+  path-level `Vfs` trait, which the mount table implements, for the shell
+  (§15 item 9).
 - **Mount table:** one entry for now, ext2 at `/`. Path lookup already
   consults the table, so `/dev`, `/proc` or tmpfs mounts can be added later
   without changing callers.
@@ -605,7 +629,10 @@ reboot and power-off, kernel log).
 **Consistency:**
 - On a read-write mount, clear `EXT2_VALID_FS` in `s_state` (marking the
   filesystem not clean), increment `s_mnt_count` and write the superblock.
-- A clean unmount (from `reboot` or `poweroff`) sets `EXT2_VALID_FS` again.
+- A clean unmount (from `reboot` or `poweroff`) writes back the state the
+  filesystem had when it was mounted: one that was clean is marked clean
+  again, one that was not stays so until `e2fsck` has checked it (§15
+  item 9).
 - Every superblock write also updates the backup copies in groups that hold
   them (group 0, 1 and powers of 3, 5 and 7).
 
@@ -651,7 +678,7 @@ directories have `0755`.
 | `cargo xtask test` | `cargo test` for all host-testable crates, then `build` and `image`, then every QEMU scenario (§9.3). Exits non-zero on the first failure and prints the serial log and screenshot path. |
 | `cargo xtask flash --kernel` | Replaces `BOOTX64.EFI`, `kernel.elf` and `cmdline` on the stick's ESP using `mcopy -o`, addressing the ESP by its byte offset on the whole-disk device (§15). The stick's `cmdline` is empty by default; `test=1` goes only into QEMU test images. The ext2 root isn't touched, so files created on the NUC are kept. |
 | `cargo xtask flash --full` | After a typed confirmation: writes a new GPT, formats the ESP, runs `mke2fs` over the rest of the stick (same options as `image`), fills it, sets ownership, then writes the ESP files. |
-| `cargo xtask verify-usb` | Runs `e2fsck -fn` on the stick's ext2 partition and prints its file tree using `debugfs`. |
+| `cargo xtask verify-usb` | Runs `e2fsck -fn` on the stick's ext2 partition, prints its file tree using `debugfs`, and checks the transcripts of the check scripts in `/root/checks` (§15 item 12). |
 | `cargo xtask setup-udev` | Writes a udev rule that gives the invoking user read/write access to the disk and partitions **with this stick's serial only**, and prints the three `sudo` commands that install it (§15). |
 
 ### 9.2 Flash safety
@@ -675,16 +702,22 @@ directories have `0755`.
 
 **Machine setup:**
 ```
-qemu-system-x86_64 -machine q35 -accel kvm:tcg -m 1G -cpu max -smp 1 -no-reboot
+qemu-system-x86_64 -machine q35 -accel kvm -accel tcg -cpu max -smp 1 -m 1G
+  -no-reboot -nic none
   -drive if=pflash,format=raw,readonly=on,file=OVMF_CODE_4M.fd
   -drive if=pflash,format=raw,file=<per-run copy of OVMF_VARS_4M.fd>
   -device qemu-xhci,id=xhci
   -device usb-kbd,bus=xhci.0
   -drive if=none,id=stick,format=raw,file=<per-run copy of relay-os.img>
-  -device usb-storage,bus=xhci.0,drive=stick
+  -device usb-storage,bus=xhci.0,drive=stick,id=stick-usb
   -device isa-debug-exit,iobase=0xf4,iosize=0x04
-  -serial <pipe> -qmp unix:<sock>,server,nowait -display none
+  -serial stdio -monitor none -display none
+  -chardev socket,id=qmp,path=qmp.sock,server=on,wait=off
+  -mon chardev=qmp,mode=control
 ```
+
+QEMU runs in the scenario's run directory, which only its owner can
+enter, and binds the QMP socket there (§15 item 12).
 
 The ESP `cmdline` in the test image contains `test=1`.
 
@@ -693,11 +726,15 @@ The ESP `cmdline` in the test image contains `test=1`.
   - `send <text>`: typed over serial;
   - `key <text>`: typed with QMP `send-key`, which goes through xHCI → HID;
   - `expect <regex>`: waits for matching serial output, with a timeout;
-  - `screenshot`: saves a QMP `screendump` and checks it isn't a single
-    colour;
-  - `reboot`: sends `reboot`, waits for QEMU to exit (`-no-reboot`), then
-    starts it again on the same disk;
-  - `poweroff`.
+  - `screenshot-nonblank`: saves a QMP `screendump` and checks it isn't a
+    single colour;
+  - `reboot [<regex>]`: sends `reboot`, waits for QEMU to exit
+    (`-no-reboot`), then starts it again on the same disk;
+  - `poweroff`;
+  - and the steps added during planning (§15 items 4, 9, 11 and 12):
+    `cmdline`, `disk small`, `break-root`, `esp-write`, `timeout`, `alive`,
+    `screenshot-pixel`, `file-lines`, `unplug` and `check-script`, listed at
+    the top of `xtask/src/e2e.rs`.
 - After every scenario, `e2fsck -fn` must pass on the ext2 partition extracted
   from the disk image.
 
@@ -712,11 +749,21 @@ The ESP `cmdline` in the test image contains `test=1`.
 | 5 | `bigfile` | Build an 8 MiB file by repeated `>>` of a 4 KiB line file, then `cp` it (exercises double-indirect blocks). The host checks the file's size and content with `debugfs dump`. |
 | 6 | `display` | A screenshot shows non-uniform content in the rows where the prompt is expected. |
 | 7 | `diskfull` | Fill a small test image (32 MiB ext2) until `ENOSPC`. The shell reports `No space left on device` and `e2fsck` is still clean. |
+| 8 | `power` | `reboot` through the FADT reset register and `poweroff` through test mode's exit, each leaving the root clean (§15 item 11). |
+| 9 | `mount_fail` | A root that cannot be mounted leaves the empty read-only `/` (§10). |
+| 10 | `unplug` | After the stick is pulled out, commands fail at once with `EIO` and `poweroff` refuses to go on without a clean shutdown (§15 item 12). |
+| 11 | `checks` | NUC check 3's scripts run with a `reboot` between them, and their transcripts show what the scripts expect (§15 item 12). |
+
+Besides these, the earlier plans' scenarios check the loader and the kernel
+on their own: `boot_bigmode`, `keyboard`, `shell`, `timer`,
+`loader_bad_kernel` and the five `panic_*` scenarios.
 
 **Known gaps in QEMU** (covered by the hardware checklist instead):
-- 64-byte contexts, scratchpad buffers and BIOS handoff. QEMU's xHCI needs
-  none of them, so those code paths only get host unit tests.
-- SuperSpeed port reset. QEMU's `usb-storage` connects at high speed.
+- 64-byte contexts, scratchpad buffers, the BIOS handoff, port power
+  control, low- and full-speed devices and a USB 3 port that needs a warm
+  reset. QEMU's xHCI needs none of them, so those code paths only get host
+  unit tests (QEMU's `usb-storage` does connect at SuperSpeed; §15 item
+  10).
 - Real GOP modes on HDMI.
 - A slow-to-power-up flash device.
 
@@ -725,15 +772,17 @@ The ESP `cmdline` in the test image contains `test=1`.
 1. In Mint: `cargo xtask flash --full` (first time) or `flash --kernel`.
 2. Reboot the NUC, press F10, and choose the UEFI entry for the Kingston stick.
 3. Check the screen: native resolution, every startup line `[ ok ]`, the xHCI
-   log line shows 64-byte contexts and the scratchpad count.
-4. Run the scripted command list in the document (the same operations as the
-   `fileops` scenario), typed on the K120.
-5. `reboot`, choose the stick again with F10, and check the files are still
-   there.
+   log lines show the context size and the scratchpad count (32-byte
+   contexts and 34 scratchpads on the NUC).
+4. Type `sh checks/check3-a.sh` on the K120: the check script runs the
+   `fileops` scenario's operations and more, into a transcript (§15 item
+   12).
+5. `reboot`, choose the stick again with F10, and type
+   `sh checks/check3-b.sh`, which reads the files back.
 6. `poweroff`. The machine should turn off, or show the safe-to-power-off
    message.
-7. Boot into Mint and run `cargo xtask verify-usb`. It must be clean and list
-   the files from step 4.
+7. Boot into Mint and run `cargo xtask verify-usb`. It must be clean, list
+   the files from step 4, and find both transcripts as the scripts expect.
 
 ### 9.5 CI gate
 
@@ -803,7 +852,8 @@ Each step ends with something that can be tested.
   - CBW/CSW encoding and sense decoding;
   - GPT parsing including CRC checks and the backup-header fallback;
   - path resolution and the parser;
-  - each shell command against an in-memory `Vfs`;
+  - each shell command against an in-memory `Vfs`, and scripts (`sh`);
+  - the transcript checker of the check scripts;
   - terminal escape parsing and rendering.
 - **Filesystem tests against real tools:**
   - `mke2fs` creates a scratch image (1 KiB and 4 KiB block sizes);
@@ -833,7 +883,9 @@ Each step ends with something that can be tested.
 - User-mode processes, ELF program loading, system calls, multitasking, SMP.
 - Interrupt-driven I/O (MSI/MSI-X). Milestone 1 polls.
 - USB hubs, mice, other USB classes, USB 3 streams/UAS.
-- A text editor, pipes, environment variables, globbing, scripts.
+- A text editor, pipes, environment variables, globbing, and scripts beyond a
+  list of commands (`sh` has no variables, arguments, loops or conditions;
+  §15 item 12).
 - Symlink following, hard-link creation, permission enforcement, multiple
   users.
 - ext3/ext4 features (journal, extents, htree).
