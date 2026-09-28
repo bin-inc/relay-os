@@ -15,8 +15,9 @@
 //! screenshot-nonblank              (QMP screendump; top rows not one colour)
 //! alive 12                         (fails if QEMU exits within 12 seconds)
 //! screenshot-pixel 2540 20 #000000 (QMP screendump; that pixel has that colour)
-//! reboot                           (types `reboot`; QEMU must exit as after a
-//!                                   reset, then starts again on the same disk)
+//! reboot [<regex>]                 (types `reboot`; QEMU must exit as after a
+//!                                   reset, having printed <regex> first, then
+//!                                   starts again on the same disk)
 //! poweroff                         (types `poweroff`; QEMU must exit through
 //!                                   isa-debug-exit, test mode's power-off)
 //! ```
@@ -76,8 +77,9 @@ pub enum Step {
         y: usize,
         rgb: [u8; 3],
     },
-    /// Restart the machine and boot again on the same disk.
-    Reboot,
+    /// Restart the machine and boot again on the same disk; the pattern
+    /// must appear in what the machine printed before it went down.
+    Reboot(Option<String>),
     /// Switch the machine off; no later step talks to it.
     Poweroff,
 }
@@ -138,7 +140,11 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
                 parse_pixel_step(rest).with_context(|| format!("{name}:{line_no}"))?
             }
             "alive" => Step::Alive(rest.parse().with_context(|| format!("{name}:{line_no}"))?),
-            "reboot" => Step::Reboot,
+            "reboot" if rest.is_empty() => Step::Reboot(None),
+            "reboot" => {
+                Regex::new(rest).with_context(|| format!("{name}:{line_no}: bad regex"))?;
+                Step::Reboot(Some(rest.to_string()))
+            }
             "poweroff" => Step::Poweroff,
             other => bail!("{name}:{line_no}: unknown step '{other}'"),
         };
@@ -325,10 +331,17 @@ fn exit_with(r: &mut Running, command: &str, status: i32, timeout: Duration) -> 
     }
 }
 
-/// `reboot`: the machine resets, and QEMU (`-no-reboot`) exits; then the
-/// same disk boots again, with the serial log continued.
-fn reboot(r: &mut Running, timeout: Duration) -> Result<()> {
+/// `reboot`: the machine resets, and QEMU (`-no-reboot`) exits, after
+/// printing `last` if given; then the same disk boots again, with the serial
+/// log continued.
+fn reboot(r: &mut Running, last: Option<&str>, timeout: Duration) -> Result<()> {
     exit_with(r, "reboot", EXIT_RESET, timeout)?;
+    if let Some(pattern) = last {
+        let text = r.text();
+        if !Regex::new(pattern)?.is_match(&text[r.consumed.min(text.len())..]) {
+            bail!("the machine restarted without printing /{pattern}/");
+        }
+    }
     let mut log = fs::OpenOptions::new()
         .append(true)
         .open(r.run_dir.join("serial.log"))?;
@@ -438,7 +451,7 @@ fn run_step(r: &mut Running, step: &Step, timeout: &mut Duration, run_dir: &Path
                 );
             }
         }
-        Step::Reboot => reboot(r, *timeout)?,
+        Step::Reboot(last) => reboot(r, last.as_deref(), *timeout)?,
         Step::Poweroff => {
             exit_with(r, "poweroff", EXIT_POWEROFF, *timeout)?;
             r.off = true;
@@ -570,8 +583,16 @@ mod tests {
 
     #[test]
     fn parses_reboot_and_poweroff_steps() {
-        let s = parse_scenario("x", "reboot\npoweroff").unwrap();
-        assert_eq!(s.steps, vec![(1, Step::Reboot), (2, Step::Poweroff)]);
+        let s = parse_scenario("x", "reboot\nreboot relay: restarting\npoweroff").unwrap();
+        assert_eq!(
+            s.steps,
+            vec![
+                (1, Step::Reboot(None)),
+                (2, Step::Reboot(Some("relay: restarting".into()))),
+                (3, Step::Poweroff)
+            ]
+        );
+        assert!(parse_scenario("x", "reboot (").is_err());
     }
 
     #[test]

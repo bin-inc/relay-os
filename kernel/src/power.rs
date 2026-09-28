@@ -9,6 +9,7 @@ use crate::acpi::tables::{AddressSpace, Fadt, GenericAddress};
 use crate::mm::{self, paging::Cache};
 use crate::{acpi, arch, console, kprintln, timer};
 use alloc::vec::Vec;
+use core::fmt;
 use core::time::Duration;
 use x86_64::instructions::port::Port;
 
@@ -76,6 +77,18 @@ pub enum ResetMethod {
     ResetControl,
     /// An empty interrupt table and an exception: always resets.
     TripleFault,
+}
+
+/// How the screen names each way: the last line before a reset is the one
+/// that worked.
+impl fmt::Display for ResetMethod {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(match self {
+            ResetMethod::Register(..) => "the FADT reset register",
+            ResetMethod::ResetControl => "port 0xcf9",
+            ResetMethod::TripleFault => "a triple fault",
+        })
+    }
 }
 
 /// The ways to restart, in the order spec §7.4 tries them.
@@ -184,11 +197,12 @@ fn write(reg: Reg, value: u64) {
 }
 
 /// Restarts the machine (spec §7.4): the FADT reset register, then port
-/// 0xCF9, then a triple fault, each given half a second.
+/// 0xCF9, then a triple fault, each given half a second and named on the
+/// screen first.
 pub fn reboot() -> ! {
-    kprintln!("relay: restarting");
     x86_64::instructions::interrupts::disable();
     for method in reset_methods(acpi::get().and_then(|a| a.fadt.as_ref())) {
+        kprintln!("relay: restarting through {method}");
         match method {
             ResetMethod::Register(reg, value) => write(reg, value as u64),
             ResetMethod::ResetControl => {
@@ -381,6 +395,20 @@ mod tests {
                 [ResetMethod::ResetControl, ResetMethod::TripleFault]
             );
         }
+    }
+
+    #[test]
+    fn each_way_of_restarting_is_named_on_the_screen() {
+        let reg = Reg::Io {
+            port: 0xCF9,
+            bytes: 1,
+        };
+        assert_eq!(
+            ResetMethod::Register(reg, 0x0F).to_string(),
+            "the FADT reset register"
+        );
+        assert_eq!(ResetMethod::ResetControl.to_string(), "port 0xcf9");
+        assert_eq!(ResetMethod::TripleFault.to_string(), "a triple fault");
     }
 
     #[test]
