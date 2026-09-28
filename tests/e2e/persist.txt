@@ -1,0 +1,18 @@
+# Files survive a reboot (spec §9.3 #4): written, then read back after the
+# machine restarted and mounted the same disk again.
+timeout 30
+expect root@relay:~# $
+send mkdir /root/notes
+send echo remember me > /root/notes/a
+send echo and me >> /root/notes/a
+send touch /root/notes/b
+send ls /root/notes
+expect \na  b\n
+reboot
+expect \[ ok \] mount /
+expect root@relay:~# $
+send cat /root/notes/a
+expect \nremember me\nand me\n
+send ls /root/notes
+expect \na  b\n
+poweroff

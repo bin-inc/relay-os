@@ -8,4 +8,4 @@ pub mod partition;
 pub mod root;
 
 #[cfg(test)]
-mod testing;
+pub(crate) mod testing;

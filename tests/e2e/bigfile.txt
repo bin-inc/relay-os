@@ -1,0 +1,42 @@
+# Building an 8 MiB file on the ext2 root (spec §9.3 #5): a 4 KiB file of
+# 64-byte lines, doubled with >> until it is 8 MiB (double-indirect
+# blocks), then copied. The host reads both from the disk with debugfs.
+timeout 120
+expect root@relay:~# $
+send echo 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde > l
+send cat l l l l l l l l l l l l l l l l > m
+send cat m m m m > l
+send wc l
+expect \n\s*64\s+64\s+4096 l\n
+send cp l big
+send cat big > t
+send cat t >> big
+send cat big > t
+send cat t >> big
+send cat big > t
+send cat t >> big
+send cat big > t
+send cat t >> big
+send cat big > t
+send cat t >> big
+send cat big > t
+send cat t >> big
+send cat big > t
+send cat t >> big
+send cat big > t
+send cat t >> big
+send cat big > t
+send cat t >> big
+send cat big > t
+send cat t >> big
+send cat big > t
+send cat t >> big
+send wc big
+expect \n\s*131072\s+131072\s+8388608 big\n
+send cp big copy
+send rm t m
+send ls -l big copy
+expect \n-rw-r--r-- 1 root root 8388608 .* big\n-rw-r--r-- 1 root root 8388608 .* copy\n
+poweroff
+file-lines /root/big 8388608 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde
+file-lines /root/copy 8388608 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde

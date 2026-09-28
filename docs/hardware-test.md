@@ -120,7 +120,8 @@ Unifying receiver on port 1 and the stick on a USB 3 port.
      link is still training (`dmesg`: `ports settled after N ms`).
    - `[ ok ] usb: 2 controllers, 4 devices` (or 1 controller),
      `[ ok ] keyboard: 2 keyboards`, `[FAIL] mount /: no storage driver
-     yet`, and the prompt `root@relay:/# `.
+     yet`, and the prompt `root@relay:/# `. (Since plan 5 the stick is a
+     disk, `/` is mounted and the prompt is `root@relay:~# `; see check 3.)
 3. On the K120, type and check each result:
    - `echo hello`, Enter → `hello`.
    - `echo Hello, World!` with Shift → `Hello, World!`.
@@ -154,6 +155,65 @@ The NUC has no serial port, so a keyboard that does not work cannot run
 | `[FAIL] keyboard: no USB keyboard found` and no `port 3` line | The K120 connected after the boot's wait, or not at all | Type anyway: a late keyboard is set up when it appears. If nothing works, `debug=usb`: a `port 3: connected` line means it appeared late, none means the port never saw it; the `ports settled` line shows the wait |
 | Keys show up twice or not at all | Firmware still emulating a keyboard (handoff) | `debug=usb`: the `legacy support` line |
 
+## Check 3 — files on the stick (plan 5)
+
+The full checklist of spec §9.4. The K120 and the stick sit on the ports of
+check 2 (the stick on bus 4 port 3 in Mint's `lsusb -t`).
+
+1. In Mint: `cargo xtask flash --full` and type `ERASE` when asked (this
+   erases the files of earlier runs).
+2. Reboot, press F10 and choose the UEFI entry for the Kingston stick.
+3. The screen shows every startup line `[ ok ]`, at the monitor's native
+   resolution (`console 1920x1200` on the ASUS PA248QV). After check 2's
+   `usb:` lines, which now end:
+   - `usb: 00:14.0 port 15: 0951:1666 SuperSpeed, disk Kingston
+     DataTraveler 3.0, 14.4 GiB`
+   - `[ ok ] usb: 2 controllers, 4 devices`, `[ ok ] keyboard: 2 keyboards`
+   - `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 14.3 GiB`
+   - the motd (`Welcome to Relay OS.`) and the prompt `root@relay:~# `.
+4. On the K120, type these and check each result (the `fileops` scenario's
+   operations):
+   - `mkdir -p /root/notes/old`, `echo remember me > /root/notes/a`,
+     `echo and me >> /root/notes/a`, `cat /root/notes/a` → the two lines.
+   - `ls -l /root/notes` → `a` (19 bytes) and the directory `old`, owned
+     by `root root`, with today's date.
+   - `cp /root/notes/a /root/notes/b`, `mv /root/notes/b /root/notes/old/c`,
+     `ls /root/notes /root/notes/old` → `a  old`, then `c`.
+   - `rmdir /root/notes/old` → `rmdir: failed to remove '/root/notes/old':
+     Directory not empty`; `rm -r /root/notes/old`; `ls /root/notes` → `a`.
+   - `touch /root/notes/t`, `stat /root/notes/t` (size 0, mode 0644, the
+     current UTC time), `head -n 1 /root/notes/a`, `tail -n 1
+     /root/notes/a`, `wc /root/notes/a` → `2 4 19`.
+   - `cat /root/nope` → `cat: /root/nope: No such file or directory`;
+     `rm -r /` → `rm: it is dangerous to operate recursively on '/'`.
+   - `df` shows `/dev/root` of about 15 million 1K-blocks; `dmesg` shows the
+     `storage: slot N:` lines (`Kingston`, `DataTraveler 3.0`, `PMAP`,
+     `30277632 blocks of 512 bytes`).
+5. `reboot`: the NUC restarts (`relay: restarting`). Choose the stick again
+   with F10; `cat /root/notes/a` shows both lines and `ls /root/notes`
+   shows `a  t`.
+6. `poweroff`: the NUC switches itself off (`relay: powering off`). If the
+   screen says `System halted. It is now safe to power off.` instead, note
+   the `relay:` line above it and hold the power button.
+7. Boot Mint and run `cargo xtask verify-usb`: `e2fsck: clean`, and the
+   tree lists `/root/notes/a` and `/root/notes/t`.
+8. Photograph the screen after step 3 and after `dmesg`.
+
+### If it fails
+
+| What you see | Likely cause | Next step |
+|---|---|---|
+| `port 15: … disk not started: …` and `[FAIL] mount /: no USB disk` | The stick's setup failed (the reason says which command) | `debug=usb`: the `storage: slot N:` lines with the sense of each failure |
+| `port 15: setup failed: …` | Enumeration failed three times | Replug the stick into the same port and reboot; `debug=usb` shows each try |
+| `[FAIL] mount /: no disk with a GPT` | The stick was set up but its reads fail, or it has no GPT | `dmesg`: a `usb: 00:14.0 port 15: read at block N: …` line and the `storage: slot N:` lines with the sense mean the reads fail; `storage: 00:14.0 port 15: no valid GPT` means re-run `flash --full` |
+| `mount /: warning: no disk has the boot partition …; using …` above `[ ok ] mount /` | The loader's boot GUID matches no partition, and the one disk with an ESP and a Linux partition was used | Note the GUID in the warning and the `boot info` line; the files are usable |
+| `[FAIL] mount /: no disk with the boot partition` | No disk has the boot partition, and none has exactly one ESP and one Linux partition | `dmesg`: the `storage:` GPT lines list what each disk has |
+| `[FAIL] mount /: …; mounted read-only` | The stick refused a write (worn out or write-protected) | The files can be read; note the `usb: … write at block N:` line in `dmesg` |
+| `[FAIL] mount /: ext2 on 00:14.0 port 15 partition 2, 14.3 GiB: Invalid argument` | The ext2 root is not what `flash --full` writes | `dmesg` shows the `ext2:` reason; re-run `flash --full` |
+| A command prints `Input/output error` | A disk request failed after three tries | `dmesg`: the `storage:` and `usb:` lines name the command and block |
+| `reboot` leaves the screen as it is | No reset method worked (unlikely: the last is a triple fault) | Photograph the screen; hold the power button |
+| `verify-usb` reports errors | A write was lost or wrong | Do not flash again: keep the stick as it is and report the output |
+
 ## Results log
 
 | Date | Check | Commit | Result | Notes (W×H, N MiB, …) |
@@ -165,3 +225,4 @@ The NUC has no serial port, so a keyboard that does not work cannot run
 | 2026-09-26 | 1, `panic=pagefault` | `8b8f13e` | Pass | Red panic screen: `CPU exception 14: page fault (error code 0x0)`, `CR2=0x00007fffdead0000`, log tail shown, `System halted.` |
 | 2026-09-26 | 1b, `check=timer` | `ba9dedf` | Pass | `memory: 15915 MiB free of 15948 MiB, heap 32 MiB`; `acpi: 30 tables, ECAM 0xc0000000 buses 0-255, HPET 0xfed00000, S5 7/0`; `timer: TSC 2496.000 MHz (CPUID 0x15), 1000 Hz tick (xAPIC)`; `rtc: 2026-09-26 13:45:11 UTC`; `timer check: ok, 3000 ticks in 3 RTC seconds`; xHCI `00:0d.0` (bar0 `0x603d190000` 64K) and `00:14.0` (bar0 `0x603d180000` 64K); `pci: 24 devices on buses 00 01 72` (matches `lspci`). Every step `[ ok ]`. |
 | 2026-09-28 | 2 | `a3db39a` | Pass | `usb: 00:0d.0 xHCI 1.20, 4 ports (1 USB 2, 3 USB 3), 32-byte contexts, 34 scratchpads`; `usb: 00:14.0 xHCI 1.20, 16 ports (12 USB 2, 4 USB 3), 32-byte contexts, 34 scratchpads`; port 1 `046d:c534 full-speed, keyboard` (EP0 8 bytes), port 3 `046d:c31c low-speed, keyboard`, port 10 `8087:0033 full-speed, not claimed` (internal Bluetooth, isochronous endpoints), port 15 `0951:1666 SuperSpeed, not claimed` (hot reset done); `usb: 2 controllers, 4 devices`, `keyboard: 2 keyboards`, `[FAIL] mount /: no storage driver yet` (expected), prompt. Typing on the K120: Shift, Caps Lock with its light, Backspace, arrows, history, repeat after about half a second, Ctrl-C, `dmesg`; unplugging and replugging the K120, then `echo back` works. |
+| 2026-09-28 | 3 | `3ad0688` | Pass | `flash --full`, then F10: every startup line `[ ok ]`, `console 1920x1200 (120x33 cells)`; `usb: 00:14.0 port 15: 0951:1666 SuperSpeed, disk Kingston DataTraveler 3.0, 14.4 GiB` (`storage: slot 4: vendor "Kingston", product "DataTraveler 3.0", revision "PMAP", removable`, `30277632 blocks of 512 bytes`, ready at the first TEST UNIT READY); `storage: root on 00:14.0 port 15, the disk with the boot partition 4EBD57DE-8DBB-4D34-B3B5-D18607581E70`; `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 14.3 GiB`; motd and `root@relay:~#`. The step 4 commands on the K120 gave the listed output (`ls -l`: `a` 19 bytes, `old`; `rmdir` refused, `rm -r` worked; `stat`, `head`, `tail`, `wc`, `cat` of a missing file, `rm -r /`, `df`). `reboot`, F10 again: `cat /root/notes/a` shows both lines, `ls /root/notes` shows `a  t`. `poweroff`: `relay: powering off` and the NUC switched itself off. In Mint `verify-usb`: `e2fsck: clean`, `/root/notes/a` (19 bytes) and `/root/notes/t` listed. |

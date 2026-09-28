@@ -1,0 +1,7 @@
+# The display (spec §9.3 #6): after `clear` the prompt is drawn in the top
+# rows of the framebuffer, where the screenshot must not be one colour.
+timeout 30
+expect root@relay:~# $
+send clear
+expect root@relay:~# $
+screenshot-nonblank

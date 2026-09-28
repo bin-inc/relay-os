@@ -1,0 +1,46 @@
+# A full disk (spec §9.3 #7): the 32 MiB root is filled until writes fail
+# with ENOSPC; the shell says so, space comes back after rm, and e2fsck
+# finds the disk clean.
+disk small
+timeout 120
+expect root@relay:~# $
+send echo 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde > l
+send cat l l l l l l l l l l l l l l l l > m
+send cat m m m m > l
+send cp l big
+send cat big > t
+send cat t >> big
+send cat big > t
+send cat t >> big
+send cat big > t
+send cat t >> big
+send cat big > t
+send cat t >> big
+send cat big > t
+send cat t >> big
+send cat big > t
+send cat t >> big
+send cat big > t
+send cat t >> big
+send cat big > t
+send cat t >> big
+send cat big > t
+send cat t >> big
+send cat big > t
+send cat t >> big
+send cat big > t
+send cat t >> big
+send cat big > t
+send cat t >> big
+send cat big > t
+send cat t >> big
+expect \ncat: write error: No space left on device\n
+send df
+expect \n/dev/root\s+\d+\s+\d+\s+0 100% /\n
+send echo more > more
+expect \necho: write error: No space left on device\n
+send rm t
+send echo more > more
+send cat more
+expect \nmore\n
+poweroff

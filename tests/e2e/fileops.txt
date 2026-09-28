@@ -1,0 +1,53 @@
+# File operations on the ext2 root (spec §9.3 #3), typed over serial. The
+# shell syncs after every command, and e2fsck checks the disk afterwards.
+timeout 30
+expect root@relay:~# $
+send pwd
+expect \n/root\n
+send mkdir -p /root/a/b/c
+send echo hello > /root/a/f
+send echo world >> /root/a/f
+send cat /root/a/f
+expect \nhello\nworld\n
+send ls -l /root/a
+expect \ntotal 8\ndrwxr-xr-x 3 root root 4096 \w{3} [ \d]\d \d\d:\d\d b\n-rw-r--r-- 1 root root   12 \w{3} [ \d]\d \d\d:\d\d f\n
+send cp /root/a/f /root/a/g
+send mv /root/a/g /root/a/b/h
+send ls /root/a /root/a/b
+expect \n/root/a:\nb  f\n\n/root/a/b:\nc  h\n
+send cat /root/a/b/h
+expect \nhello\nworld\n
+send rmdir /root/a/b
+expect \nrmdir: failed to remove '/root/a/b': Directory not empty\n
+send rm -r /root/a/b
+send ls /root/a
+expect \nf\n
+send touch /root/t
+send stat /root/t
+expect \n  File: /root/t\n  Size: 0 .*regular empty file\n
+send head -n 1 /root/a/f
+expect \nhello\n
+send tail -n 1 /root/a/f
+expect \nworld\n
+send wc /root/a/f
+expect \n 2  2 12 /root/a/f\n
+send rm /root/a/f /root/t
+send rmdir /root/a
+send ls
+expect \nREADME\n
+# Error messages follow GNU coreutils.
+send cat /root/nope
+expect \ncat: /root/nope: No such file or directory\n
+send ls /nope
+expect \nls: cannot access '/nope': No such file or directory\n
+send cp /root/nope /root/x
+expect \ncp: cannot stat '/root/nope': No such file or directory\n
+send mkdir /root
+expect \nmkdir: cannot create directory '/root': File exists\n
+send rm -r /
+expect \nrm: it is dangerous to operate recursively on '/'\n
+send rm /
+expect \nrm: cannot remove '/': Is a directory\n
+send ls /
+expect \nbin  dev  etc  home  lost\+found  root  tmp  usr  var\n
+poweroff

@@ -19,6 +19,7 @@ boot-info.workspace = true
 term.workspace = true
 shell.workspace = true
 vfs.workspace = true
+ext2.workspace = true
 usb.workspace = true
 x86_64.workspace = true
 spin.workspace = true

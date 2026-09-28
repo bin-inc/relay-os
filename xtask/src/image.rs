@@ -271,6 +271,20 @@ pub fn make_ext2(target: &Path, part: Partition, staging: &Path) -> Result<()> {
         .arg(e2fs_target(target, part)))
 }
 
+/// Where the ext2 superblock's magic number is: 56 bytes into the
+/// superblock, which starts 1024 bytes into the partition.
+const EXT2_MAGIC_OFFSET: u64 = 1024 + 56;
+
+/// Writes the ext2 magic number (0xEF53) into `part`'s superblock, or
+/// zeroes it, so no ext2 driver recognises the filesystem.
+pub fn set_ext2_magic(target: &Path, part: Partition, present: bool) -> Result<()> {
+    use std::io::{Seek, SeekFrom};
+    let mut f = fs::OpenOptions::new().write(true).open(target)?;
+    f.seek(SeekFrom::Start(part.offset() + EXT2_MAGIC_OFFSET))?;
+    f.write_all(if present { &[0x53, 0xEF] } else { &[0, 0] })?;
+    Ok(())
+}
+
 /// The ext2 filesystem state in `part`'s superblock, as `dumpe2fs -h` names
 /// it: `clean` after a clean shutdown, `not clean` while mounted
 /// read-write (or after a machine stopped with it mounted).
@@ -286,6 +300,29 @@ pub fn ext2_state(target: &Path, part: Partition) -> Result<String> {
         .context("dumpe2fs printed no filesystem state")
 }
 
+/// The contents of the file at `path` in the ext2 filesystem of `part`,
+/// through `debugfs dump`; `None` if there is no such regular file.
+pub fn read_ext2_file(
+    target: &Path,
+    part: Partition,
+    path: &str,
+    scratch: &Path,
+) -> Result<Option<Vec<u8>>> {
+    fs::create_dir_all(scratch)?;
+    let out = scratch.join("dump.tmp");
+    let _ = fs::remove_file(&out);
+    // debugfs reports a missing file on stderr and still exits 0.
+    run(Command::new("debugfs")
+        .arg("-R")
+        .arg(format!("dump \"{path}\" {}", out.display()))
+        .arg(e2fs_target(target, part)))?;
+    match fs::read(&out) {
+        Ok(data) => Ok(Some(data)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// `e2fsck -fn`: read-only full check. Returns the checker output on failure.
 pub fn fsck(target: &Path, part: Partition) -> Result<()> {
     run(Command::new("e2fsck")
@@ -295,10 +332,16 @@ pub fn fsck(target: &Path, part: Partition) -> Result<()> {
 
 /// Builds `target/relay/relay-os.img` with the given kernel command line.
 pub fn build_image(art: &Artifacts, cmdline: &str) -> Result<PathBuf> {
-    let img = out_dir().join("relay-os.img");
+    build_image_as(art, cmdline, "relay-os.img", IMAGE_BYTES)
+}
+
+/// Builds `target/relay/<name>`, `bytes` long; the ext2 root takes what
+/// the ESP leaves.
+pub fn build_image_as(art: &Artifacts, cmdline: &str, name: &str, bytes: u64) -> Result<PathBuf> {
+    let img = out_dir().join(name);
     fs::create_dir_all(out_dir())?;
     let _ = fs::remove_file(&img);
-    fs::File::create(&img)?.set_len(IMAGE_BYTES)?;
+    fs::File::create(&img)?.set_len(bytes)?;
     partition(&img, true)?;
     let layout = read_layout(&img)?;
     write_esp(&img, layout.esp, art, cmdline, true)?;
