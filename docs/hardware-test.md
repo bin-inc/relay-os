@@ -120,7 +120,8 @@ Unifying receiver on port 1 and the stick on a USB 3 port.
      link is still training (`dmesg`: `ports settled after N ms`).
    - `[ ok ] usb: 2 controllers, 4 devices` (or 1 controller),
      `[ ok ] keyboard: 2 keyboards`, `[FAIL] mount /: no storage driver
-     yet`, and the prompt `root@relay:/# `.
+     yet`, and the prompt `root@relay:/# `. (Since plan 5 the stick is a
+     disk, `/` is mounted and the prompt is `root@relay:~# `; see check 3.)
 3. On the K120, type and check each result:
    - `echo hello`, Enter → `hello`.
    - `echo Hello, World!` with Shift → `Hello, World!`.
@@ -153,6 +154,63 @@ The NUC has no serial port, so a keyboard that does not work cannot run
 | `port 3: … keyboard not started: …` | The K120 refused the boot protocol | Note the reason; `debug=usb` shows the `hid:` lines |
 | `[FAIL] keyboard: no USB keyboard found` and no `port 3` line | The K120 connected after the boot's wait, or not at all | Type anyway: a late keyboard is set up when it appears. If nothing works, `debug=usb`: a `port 3: connected` line means it appeared late, none means the port never saw it; the `ports settled` line shows the wait |
 | Keys show up twice or not at all | Firmware still emulating a keyboard (handoff) | `debug=usb`: the `legacy support` line |
+
+## Check 3 — files on the stick (plan 5)
+
+The full checklist of spec §9.4. The K120 and the stick sit on the ports of
+check 2 (the stick on bus 4 port 3 in Mint's `lsusb -t`).
+
+1. In Mint: `cargo xtask flash --full` and type `ERASE` when asked (this
+   erases the files of earlier runs).
+2. Reboot, press F10 and choose the UEFI entry for the Kingston stick.
+3. The screen shows every startup line `[ ok ]`, at the monitor's native
+   resolution (`console 1920x1200` on the ASUS PA248QV). After check 2's
+   `usb:` lines, which now end:
+   - `usb: 00:14.0 port 15: 0951:1666 SuperSpeed, disk Kingston
+     DataTraveler 3.0, 14.4 GiB`
+   - `[ ok ] usb: 2 controllers, 4 devices`, `[ ok ] keyboard: 2 keyboards`
+   - `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 14.3 GiB`
+   - the motd (`Welcome to Relay OS.`) and the prompt `root@relay:~# `.
+4. On the K120, type these and check each result (the `fileops` scenario's
+   operations):
+   - `mkdir -p /root/notes/old`, `echo remember me > /root/notes/a`,
+     `echo and me >> /root/notes/a`, `cat /root/notes/a` → the two lines.
+   - `ls -l /root/notes` → `a` (19 bytes) and the directory `old`, owned
+     by `root root`, with today's date.
+   - `cp /root/notes/a /root/notes/b`, `mv /root/notes/b /root/notes/old/c`,
+     `ls /root/notes /root/notes/old` → `a  old`, then `c`.
+   - `rmdir /root/notes/old` → `rmdir: failed to remove '/root/notes/old':
+     Directory not empty`; `rm -r /root/notes/old`; `ls /root/notes` → `a`.
+   - `touch /root/notes/t`, `stat /root/notes/t` (size 0, mode 0644, the
+     current UTC time), `head -n 1 /root/notes/a`, `tail -n 1
+     /root/notes/a`, `wc /root/notes/a` → `2 4 19`.
+   - `cat /root/nope` → `cat: /root/nope: No such file or directory`;
+     `rm -r /` → `rm: it is dangerous to operate recursively on '/'`.
+   - `df` shows `/dev/root` of about 15 million 1K-blocks; `dmesg` shows the
+     `storage: slot N:` lines (`Kingston`, `DataTraveler 3.0`, `PMAP`,
+     `30277632 blocks of 512 bytes`).
+5. `reboot`: the NUC restarts (`relay: restarting`). Choose the stick again
+   with F10; `cat /root/notes/a` shows both lines and `ls /root/notes`
+   shows `a  t`.
+6. `poweroff`: the NUC switches itself off (`relay: powering off`). If the
+   screen says `System halted. It is now safe to power off.` instead, note
+   the `relay:` line above it and hold the power button.
+7. Boot Mint and run `cargo xtask verify-usb`: `e2fsck: clean`, and the
+   tree lists `/root/notes/a` and `/root/notes/t`.
+8. Photograph the screen after step 3 and after `dmesg`.
+
+### If it fails
+
+| What you see | Likely cause | Next step |
+|---|---|---|
+| `port 15: … disk not started: …` and `[FAIL] mount /: no USB disk` | The stick's setup failed (the reason says which command) | `debug=usb`: the `storage: slot N:` lines with the sense of each failure |
+| `port 15: setup failed: …` | Enumeration failed three times | Replug the stick into the same port and reboot; `debug=usb` shows each try |
+| `[FAIL] mount /: no disk with the boot partition` | The loader's boot GUID matches no partition | Note the `boot info` line; `dmesg` shows the `storage:` GPT line |
+| `[FAIL] mount /: …; mounted read-only` | The stick refused a write (worn out or write-protected) | The files can be read; note the `usb: … write at block N:` line in `dmesg` |
+| `[FAIL] mount /: … partition 2: Invalid argument` | The ext2 root is not what `flash --full` writes | `dmesg` shows the `ext2:` reason; re-run `flash --full` |
+| A command prints `Input/output error` | A disk request failed after three tries | `dmesg`: the `storage:` and `usb:` lines name the command and block |
+| `reboot` leaves the screen as it is | No reset method worked (unlikely: the last is a triple fault) | Photograph the screen; hold the power button |
+| `verify-usb` reports errors | A write was lost or wrong | Do not flash again: keep the stick as it is and report the output |
 
 ## Results log
 
