@@ -2,9 +2,11 @@
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
+use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
-use std::os::linux::net::SocketAddrExt;
-use std::os::unix::net::{SocketAddr, UnixStream};
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub struct Qmp {
@@ -13,13 +15,13 @@ pub struct Qmp {
 }
 
 impl Qmp {
-    /// Connects to the abstract socket `name` (retrying while QEMU starts)
-    /// and negotiates capabilities.
-    pub fn connect(name: &str, timeout: Duration) -> Result<Qmp> {
-        let addr = SocketAddr::from_abstract_name(name.as_bytes())?;
+    /// Connects to the socket at `socket` (retrying while QEMU starts) and
+    /// negotiates capabilities.
+    pub fn connect(socket: &Path, timeout: Duration) -> Result<Qmp> {
+        let (_dir, path) = reachable(socket)?;
         let deadline = Instant::now() + timeout;
         let stream = loop {
-            match UnixStream::connect_addr(&addr) {
+            match UnixStream::connect(&path) {
                 Ok(s) => break s,
                 Err(_) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(50))
@@ -62,20 +64,36 @@ impl Qmp {
     }
 }
 
+/// A path to `socket` short enough for a Unix socket address (108 bytes)
+/// however deep the checkout is: through the `/proc/self/fd` entry of its
+/// open directory. The path works while the returned `File` is open.
+pub fn reachable(socket: &Path) -> Result<(File, PathBuf)> {
+    let dir = socket.parent().context("socket path without a directory")?;
+    let name = socket.file_name().context("socket path without a name")?;
+    let dir = File::open(dir).with_context(|| format!("opening {}", dir.display()))?;
+    let path = PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd())).join(name);
+    Ok((dir, path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::out_dir;
     use std::io::{BufRead, BufReader, Write};
-    use std::os::linux::net::SocketAddrExt;
-    use std::os::unix::net::{SocketAddr, UnixListener};
+    use std::os::unix::net::UnixListener;
 
     /// A fake QEMU: greets, accepts `qmp_capabilities`, sends an event, then
-    /// answers one command.
+    /// answers one command. Its socket is deeper than a Unix socket address
+    /// can name.
     #[test]
-    fn talks_to_qemu_over_an_abstract_socket() {
-        let name = format!("relay-qmp-test-{}", std::process::id());
-        let addr = SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
-        let listener = UnixListener::bind_addr(&addr).unwrap();
+    fn talks_to_qemu_over_a_socket_in_a_deep_directory() {
+        let dir = out_dir().join("qmp-selftest").join("d".repeat(150));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("qmp.sock");
+        let _ = std::fs::remove_file(&socket);
+        assert!(socket.as_os_str().len() > 108);
+        let (_dir, path) = reachable(&socket).unwrap();
+        let listener = UnixListener::bind(&path).unwrap();
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let mut w = stream.try_clone().unwrap();
@@ -91,7 +109,7 @@ mod tests {
             writeln!(w, r#"{{"event": "RESUME"}}"#).unwrap();
             writeln!(w, r#"{{"return": {{"status": "running"}}}}"#).unwrap();
         });
-        let mut q = Qmp::connect(&name, Duration::from_secs(5)).unwrap();
+        let mut q = Qmp::connect(&socket, Duration::from_secs(5)).unwrap();
         let status = q.execute("query-status", serde_json::json!({})).unwrap();
         assert_eq!(status["status"], "running");
         server.join().unwrap();

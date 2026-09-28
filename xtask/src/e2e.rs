@@ -34,7 +34,7 @@
 use crate::build;
 use crate::image::{self, Layout, Partition, esp_write, set_cmdline};
 use crate::keys;
-use crate::qemu::{self, Qemu};
+use crate::qemu::Qemu;
 use crate::qmp::Qmp;
 use crate::util::{out_dir, root};
 use anyhow::{Context, Result, bail};
@@ -340,14 +340,16 @@ fn start(image: &Path, layout: &Layout, scenario: &Scenario, run_dir: &Path) -> 
         image::set_ext2_magic(&q.disk, layout.root, false)?;
     }
     q.headless = true;
-    q.qmp_name = Some(qemu::qmp_name(&scenario.name));
+    q.qmp = Some(run_dir.join("qmp.sock"));
     let log = fs::File::create(run_dir.join("serial.log"))?;
     launch(q, layout.root, run_dir, log)
 }
 
 /// Starts QEMU on the prepared disk; its serial output goes to `log` too.
 fn launch(q: Qemu, root: Partition, run_dir: &Path, mut log: fs::File) -> Result<Running> {
-    let qmp_name = q.qmp_name.clone().context("QMP socket name")?;
+    let socket = q.qmp.clone().context("QMP socket")?;
+    // A socket left by an earlier run would refuse QEMU's bind.
+    let _ = fs::remove_file(&socket);
     let mut child = q
         .command()
         .stdin(Stdio::piped())
@@ -371,7 +373,7 @@ fn launch(q: Qemu, root: Partition, run_dir: &Path, mut log: fs::File) -> Result
     });
     let qmp = wait_for_qmp(
         &mut child,
-        &qmp_name,
+        &socket,
         Duration::from_secs(10),
         &run_dir.join("qemu.stderr"),
     )?;
@@ -433,7 +435,7 @@ fn reboot(r: &mut Running, last: Option<&str>, timeout: Duration) -> Result<()> 
         disk: r.qemu.disk.clone(),
         vars: r.qemu.vars.clone(),
         headless: true,
-        qmp_name: r.qemu.qmp_name.clone(),
+        qmp: r.qemu.qmp.clone(),
     };
     let fresh = launch(q, r.root, &r.run_dir.clone(), log)?;
     *r = fresh;
@@ -443,7 +445,7 @@ fn reboot(r: &mut Running, last: Option<&str>, timeout: Duration) -> Result<()> 
 /// Connects to QEMU's QMP socket, giving up early if QEMU exits first (a bad
 /// option, a missing firmware file): then the error shows QEMU's stderr
 /// instead of a bare "Connection refused" after the full timeout.
-fn wait_for_qmp(child: &mut Child, name: &str, timeout: Duration, stderr: &Path) -> Result<Qmp> {
+fn wait_for_qmp(child: &mut Child, socket: &Path, timeout: Duration, stderr: &Path) -> Result<Qmp> {
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(status) = child.try_wait()? {
@@ -454,7 +456,7 @@ fn wait_for_qmp(child: &mut Child, name: &str, timeout: Duration, stderr: &Path)
                 text.trim_end()
             );
         }
-        match Qmp::connect(name, Duration::from_millis(200)) {
+        match Qmp::connect(socket, Duration::from_millis(200)) {
             Ok(q) => return Ok(q),
             Err(e) if Instant::now() > deadline => return Err(e),
             Err(_) => {}
@@ -887,7 +889,7 @@ mod tests {
         let started = Instant::now();
         let err = wait_for_qmp(
             &mut child,
-            "relay-qmp-selftest-nobody-listens",
+            &dir.join("nobody-listens.sock"),
             Duration::from_secs(10),
             &stderr,
         )
