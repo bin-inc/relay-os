@@ -31,7 +31,7 @@ impl KernelConsole {
         usb::poll(&mut self.input);
         for _ in 0..SERIAL_BURST {
             match serial::read_byte() {
-                Some(b) => self.input.push(&[b]),
+                Some(b) => self.input.push_serial(b),
                 None => break,
             }
         }
