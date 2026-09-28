@@ -126,6 +126,7 @@ pub struct SpyState {
     pub fail_shutdown: Cell<Option<Errno>>,
     /// Every write reports 0 bytes written (a broken filesystem).
     pub zero_writes: Cell<bool>,
+    pub fail_unlink: Cell<Option<Errno>>,
 }
 
 /// A `MemFs` that counts syncs and shutdowns and can make them fail.
@@ -172,7 +173,10 @@ impl FileSystem for Spy {
         self.fs.mkdir(dir, name)
     }
     fn unlink(&mut self, dir: Ino, name: &[u8]) -> Result<(), Errno> {
-        self.fs.unlink(dir, name)
+        match self.state.fail_unlink.get() {
+            Some(e) => Err(e),
+            None => self.fs.unlink(dir, name),
+        }
     }
     fn rmdir(&mut self, dir: Ino, name: &[u8]) -> Result<(), Errno> {
         self.fs.rmdir(dir, name)

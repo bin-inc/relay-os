@@ -170,32 +170,69 @@ pub fn rm(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     status
 }
 
-/// Removes a directory and everything below it, reporting each failure.
-/// Depth-first with an explicit stack: a deep tree must not use up the
-/// kernel's small stack. Returns whether everything went.
-fn remove_tree(ctx: &mut Ctx<'_>, top: &[u8]) -> bool {
+/// `p` as a path from `/`, with `.` and `..` taken by name as the mount
+/// table walks them. The tree `rm -r` removes may hold the current
+/// directory, and once that is gone a relative path leads nowhere.
+fn from_root(cwd: &[u8], p: &[u8]) -> Result<Vec<u8>, Errno> {
+    let p = path::parse(p)?;
+    let cwd = path::parse(cwd)?;
+    let start = if p.absolute {
+        &[][..]
+    } else {
+        &cwd.components[..]
+    };
+    let mut names: Vec<&[u8]> = Vec::new();
+    for c in start.iter().chain(&p.components) {
+        match c {
+            path::Component::Current => {}
+            path::Component::Parent => {
+                names.pop();
+            }
+            path::Component::Name(n) => names.push(n),
+        }
+    }
+    let mut out = b"/".to_vec();
+    out.extend_from_slice(&names.join(&b'/'));
+    Ok(out)
+}
+
+/// Removes a directory and everything below it, reporting each failure
+/// with the path as given. Depth-first with an explicit stack: a deep tree
+/// must not use up the kernel's small stack. Returns whether everything
+/// went.
+fn remove_tree(ctx: &mut Ctx<'_>, given: &[u8]) -> bool {
     let mut ok = true;
-    let above = ctx.vfs.lookup(&path::join(top, b".."));
-    let mut stack = match above.and_then(|parent| children(ctx, top, parent)) {
-        Ok((node, names)) => vec![(top.to_vec(), node, names)],
+    let top = match from_root(&ctx.vfs.cwd(), given) {
+        Ok(top) => top,
         Err(e) => {
             ctx.fail(
                 "rm",
-                format_args!("cannot remove {}: {e}", quote(&path::display(top))),
+                format_args!("cannot remove {}: {e}", quote(&path::display(given))),
             );
             return false;
         }
     };
-    while let Some((dir, node, pending)) = stack.last_mut() {
+    let above = ctx.vfs.lookup(&path::join(&top, b".."));
+    let mut stack = match above.and_then(|parent| children(ctx, &top, parent)) {
+        Ok((node, names)) => vec![(top, given.to_vec(), node, names)],
+        Err(e) => {
+            ctx.fail(
+                "rm",
+                format_args!("cannot remove {}: {e}", quote(&path::display(given))),
+            );
+            return false;
+        }
+    };
+    while let Some((dir, shown, node, pending)) = stack.last_mut() {
         if ctx.interrupted() {
             return false;
         }
         let Some(name) = pending.pop() else {
-            let (dir, _, _) = stack.pop().expect("not empty");
+            let (dir, shown, _, _) = stack.pop().expect("not empty");
             if let Err(e) = ctx.vfs.rmdir(&dir) {
                 ctx.fail(
                     "rm",
-                    format_args!("cannot remove {}: {e}", quote(&path::display(&dir))),
+                    format_args!("cannot remove {}: {e}", quote(&path::display(&shown))),
                 );
                 ok = false;
             }
@@ -203,6 +240,7 @@ fn remove_tree(ctx: &mut Ctx<'_>, top: &[u8]) -> bool {
         };
         let parent = *node;
         let child = path::join(dir, &name);
+        let child_shown = path::join(shown, &name);
         let is_dir = ctx
             .vfs
             .lookup(&child)
@@ -210,14 +248,14 @@ fn remove_tree(ctx: &mut Ctx<'_>, top: &[u8]) -> bool {
             .map(|st| st.kind == FileType::Directory);
         let result = match is_dir {
             Ok(true) => children(ctx, &child, parent)
-                .map(|(node, names)| stack.push((child.clone(), node, names))),
+                .map(|(node, names)| stack.push((child.clone(), child_shown.clone(), node, names))),
             Ok(false) => ctx.vfs.unlink(&child),
             Err(e) => Err(e),
         };
         if let Err(e) = result {
             ctx.fail(
                 "rm",
-                format_args!("cannot remove {}: {e}", quote(&path::display(&child))),
+                format_args!("cannot remove {}: {e}", quote(&path::display(&child_shown))),
             );
             ok = false;
         }
@@ -459,6 +497,7 @@ pub fn mv(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
 mod tests {
     use crate::testing::{Harness, memfs};
     use alloc::string::String;
+    use vfs::Errno;
 
     #[test]
     fn touch_creates_files_and_updates_times() {
@@ -572,6 +611,33 @@ mod tests {
         );
         assert_eq!(h.run("rm -r /tmp/t"), (0, "".into()));
         assert!(!h.exists("/tmp/t"));
+    }
+
+    #[test]
+    fn rm_r_removes_a_tree_holding_the_current_directory() {
+        // GNU removes it all; the current directory goes on the way, and a
+        // relative path must not depend on it afterwards.
+        let mut h = Harness::new();
+        h.run("mkdir -p /tmp/p/sub/deep");
+        h.put("/tmp/p/a", b"");
+        h.put("/tmp/p/z", b"");
+        h.run("cd /tmp/p/sub");
+        assert_eq!(h.run("rm -r ../../p"), (0, "".into()));
+        assert!(!h.exists("/tmp/p"));
+        // Messages still name the paths as given.
+        h.run("mkdir -p /tmp/q/sub");
+        h.put("/tmp/q/sub/f", b"");
+        h.run("cd /tmp/q");
+        h.spy.fail_unlink.set(Some(Errno::EIO));
+        assert_eq!(
+            h.run("rm -r sub"),
+            (
+                1,
+                "rm: cannot remove 'sub/f': Input/output error\n\
+                 rm: cannot remove 'sub': Directory not empty\n"
+                    .into()
+            )
+        );
     }
 
     #[test]
