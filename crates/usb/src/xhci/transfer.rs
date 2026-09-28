@@ -4,6 +4,7 @@
 //! after a STALL or a timeout.
 
 use super::context::{EP_DISABLED, EP_ERROR, EP_HALTED, EP_RUNNING, EP_STOPPED, Output, dci};
+use super::regs::{CCS, CSC};
 use super::trb::{
     SHORT_PACKET, STALL, STOPPED, STOPPED_LENGTH_INVALID, SUCCESS, Trb, completion_name,
 };
@@ -246,6 +247,9 @@ impl<H: Hal> Xhci<H> {
         if self.dead {
             return Err(UsbError::ControllerDead);
         }
+        if !self.still_attached(slot) {
+            return Err(UsbError::Disconnected);
+        }
         let ep = self
             .endpoint_mut(slot, endpoint)
             .ok_or(UsbError::Disconnected)?;
@@ -382,6 +386,22 @@ impl<H: Hal> Xhci<H> {
     /// no longer shows a connection: a transfer to a device that was
     /// unplugged fails (USB Transaction Error) or times out, and the class
     /// driver must not take that for a fault to recover from.
+    /// Whether the device of `slot` may still be on its port: the port
+    /// shows a connection and no connect change the driver has not looked
+    /// at yet (the port reset clears CSC; after that a set CSC means the
+    /// device went, and maybe another came). Some controllers (QEMU's)
+    /// never complete a TD for a device that is gone, so a transfer queued
+    /// for it would only time out.
+    fn still_attached(&self, slot: u8) -> bool {
+        self.slots
+            .get(slot as usize)
+            .and_then(Option::as_ref)
+            .is_some_and(|s| {
+                let sc = self.regs.portsc(&self.hal, s.port);
+                sc & CCS != 0 && sc & CSC == 0
+            })
+    }
+
     fn gone_or(&self, slot: u8, e: UsbError) -> UsbError {
         match self.slots.get(slot as usize).and_then(Option::as_ref) {
             Some(s) if e != UsbError::ControllerDead && !self.connected(s.port) => {

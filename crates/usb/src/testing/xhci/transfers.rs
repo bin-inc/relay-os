@@ -195,6 +195,9 @@ impl FakeXhci {
         c.advance();
         let port = self.slots[slot].as_ref().map_or(0, |s| s.port);
         let Some(dev) = self.device_of(slot, port) else {
+            if !self.config.fail_tds_of_gone_devices {
+                return self.no_answer(slot, 1);
+            }
             self.fail(slot, 1, ep.ring, USB_TRANSACTION_ERROR, dma);
             return Td::Done;
         };
@@ -304,6 +307,9 @@ impl FakeXhci {
         let address = (dci / 2) as u8 | if dci % 2 == 1 { 0x80 } else { 0 };
         let port = self.slots[slot].as_ref().map_or(0, |s| s.port);
         let Some(dev) = self.device_of(slot, port) else {
+            if !self.config.fail_tds_of_gone_devices {
+                return self.no_answer(slot, dci);
+            }
             self.fail(slot, dci, ep.ring, USB_TRANSACTION_ERROR, dma);
             return Td::Done;
         };
@@ -350,6 +356,15 @@ impl FakeXhci {
                 Td::Done
             }
         }
+    }
+
+    /// A TD nothing answers: it waits (tried again every tick) until the
+    /// driver stops the endpoint.
+    fn no_answer(&mut self, slot: usize, dci: usize) -> Td {
+        if let Some(ep) = self.ring(slot, dci) {
+            ep.busy = true;
+        }
+        Td::Waiting
     }
 
     /// The device a TD of `slot` reaches: the one on its port, if that one

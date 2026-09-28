@@ -427,6 +427,53 @@ mod tests {
     }
 
     #[test]
+    fn a_request_after_an_unplug_fails_at_once_where_the_controller_never_answers() {
+        // QEMU's qemu-xhci never completes a TD for a device that has gone:
+        // queued, each request would wait the whole bulk timeout, once for
+        // every dirty block of every sync.
+        let (hal, mut host) = host(FakeConfig::qemu());
+        let stick = FakeStorage::qemu(QEMU_BLOCKS);
+        hal.fake().plug(2, stick.clone());
+        hal.sleep(Duration::from_millis(60));
+        host.service();
+        let id = host.disks()[0].id;
+        hal.fake().unplug(2);
+        let before = hal.clock();
+        let mut buf = vec![0; 512];
+        assert_eq!(host.read(id, 0, &mut buf), Err(UsbError::Disconnected));
+        assert_eq!(host.write(id, 0, &buf), Err(UsbError::Disconnected));
+        assert_eq!(host.flush(id), Err(UsbError::Disconnected));
+        assert!(
+            hal.clock() - before < Duration::from_millis(10),
+            "took {:?}",
+            hal.clock() - before
+        );
+    }
+
+    #[test]
+    fn a_request_after_a_replug_between_looks_fails_at_once_and_sends_nothing() {
+        let (hal, mut host) = host(FakeConfig::qemu());
+        let a = FakeStorage::qemu(QEMU_BLOCKS);
+        hal.fake().plug(2, a.clone());
+        hal.sleep(Duration::from_millis(60));
+        host.service();
+        let old = host.disks()[0].id;
+        hal.fake().unplug(2);
+        let b = FakeStorage::qemu(QEMU_BLOCKS);
+        hal.fake().plug(2, b.clone());
+        hal.sleep(Duration::from_millis(60));
+        // The port shows a device again, but a connect change nobody has
+        // looked at yet: it may not be A.
+        let before = hal.clock();
+        assert_eq!(
+            host.write(old, 100, &[0xAB; 512]),
+            Err(UsbError::Disconnected)
+        );
+        assert!(hal.clock() - before < Duration::from_millis(10));
+        assert!(b.borrow().events().is_empty(), "B saw A's request");
+    }
+
+    #[test]
     fn a_disk_given_up_as_not_answering_works_again_when_plugged_in_again() {
         let (hal, mut host) = host(FakeConfig::qemu());
         let stick = FakeStorage::qemu(QEMU_BLOCKS);

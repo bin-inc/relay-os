@@ -105,6 +105,10 @@ pub struct FakeConfig {
     /// Knob: an unplug fails the device's transfers in progress with a USB
     /// Transaction Error, as Intel controllers do.
     pub fail_transfers_on_unplug: bool,
+    /// Knob: a TD for a slot whose device is gone (unplugged, or replaced
+    /// by one without its address) fails at once with a USB Transaction
+    /// Error. Off, it never completes, as on QEMU 8.2's qemu-xhci.
+    pub fail_tds_of_gone_devices: bool,
     /// How long a USB 2 device present when its port is reset or powered
     /// takes to signal its attach (at most 100 ms, USB 2.0 7.1.7.3).
     pub usb2_attach_delay: Duration,
@@ -183,6 +187,7 @@ impl FakeConfig {
             usb2_attach_delay: Duration::from_millis(30),
             short_as_success: false,
             fail_transfers_on_unplug: true,
+            fail_tds_of_gone_devices: true,
         }
     }
 
@@ -211,6 +216,8 @@ impl FakeConfig {
                     },
                 ),
             ]),
+            // A real run showed it: a TD for an unplugged device waits.
+            fail_tds_of_gone_devices: false,
             ..FakeConfig::basic()
         }
     }
@@ -280,6 +287,7 @@ impl FakeConfig {
             usb2_attach_delay: Duration::from_millis(30),
             short_as_success: false,
             fail_transfers_on_unplug: true,
+            fail_tds_of_gone_devices: true,
         }
     }
 }
