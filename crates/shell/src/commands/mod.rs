@@ -11,6 +11,7 @@ mod script;
 mod stat;
 
 pub(crate) use script::Script;
+pub use script::transcript_name;
 mod system;
 mod text;
 
