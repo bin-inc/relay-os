@@ -26,7 +26,7 @@
 //! the ext2 root on the disk it leaves clean (spec §9.3).
 
 use crate::build;
-use crate::image::{self, Layout, esp_write, set_cmdline};
+use crate::image::{self, Layout, Partition, esp_write, set_cmdline};
 use crate::keys;
 use crate::qemu::{self, Qemu};
 use crate::qmp::Qmp;
@@ -233,6 +233,8 @@ pub fn ppm_pixel(ppm: &[u8], x: usize, y: usize) -> Result<[u8; 3]> {
 struct Running {
     /// The machine, kept to start it again after a reboot.
     qemu: Qemu,
+    /// Where the ext2 root is on the disk.
+    root: Partition,
     run_dir: PathBuf,
     child: Child,
     stdin: ChildStdin,
@@ -265,11 +267,12 @@ fn start(image: &Path, layout: &Layout, scenario: &Scenario, run_dir: &Path) -> 
     }
     q.headless = true;
     q.qmp_name = Some(qemu::qmp_name(&scenario.name));
-    launch(q, run_dir, fs::File::create(run_dir.join("serial.log"))?)
+    let log = fs::File::create(run_dir.join("serial.log"))?;
+    launch(q, layout.root, run_dir, log)
 }
 
 /// Starts QEMU on the prepared disk; its serial output goes to `log` too.
-fn launch(q: Qemu, run_dir: &Path, mut log: fs::File) -> Result<Running> {
+fn launch(q: Qemu, root: Partition, run_dir: &Path, mut log: fs::File) -> Result<Running> {
     let qmp_name = q.qmp_name.clone().context("QMP socket name")?;
     let mut child = q
         .command()
@@ -300,6 +303,7 @@ fn launch(q: Qemu, run_dir: &Path, mut log: fs::File) -> Result<Running> {
     )?;
     Ok(Running {
         qemu: q,
+        root,
         run_dir: run_dir.to_path_buf(),
         child,
         stdin,
@@ -311,7 +315,8 @@ fn launch(q: Qemu, run_dir: &Path, mut log: fs::File) -> Result<Running> {
 }
 
 /// Types `command` and waits (up to `timeout`) for QEMU to exit with
-/// `status`.
+/// `status`; the shell shut the filesystem down first, so it must be marked
+/// clean.
 fn exit_with(r: &mut Running, command: &str, status: i32, timeout: Duration) -> Result<()> {
     r.stdin.write_all(command.as_bytes())?;
     r.stdin.write_all(b"\r")?;
@@ -321,6 +326,10 @@ fn exit_with(r: &mut Running, command: &str, status: i32, timeout: Duration) -> 
         if let Some(s) = r.child.try_wait()? {
             if s.code() != Some(status) {
                 bail!("QEMU exited with {s} after `{command}`, expected exit status {status}");
+            }
+            let state = image::ext2_state(&r.qemu.disk, r.root)?;
+            if state != "clean" {
+                bail!("after `{command}` the root filesystem is `{state}`, not `clean`");
             }
             return Ok(());
         }
@@ -352,7 +361,7 @@ fn reboot(r: &mut Running, last: Option<&str>, timeout: Duration) -> Result<()> 
         headless: true,
         qmp_name: r.qemu.qmp_name.clone(),
     };
-    let fresh = launch(q, &r.run_dir.clone(), log)?;
+    let fresh = launch(q, r.root, &r.run_dir.clone(), log)?;
     *r = fresh;
     Ok(())
 }
@@ -593,6 +602,34 @@ mod tests {
             ]
         );
         assert!(parse_scenario("x", "reboot (").is_err());
+    }
+
+    #[test]
+    fn the_clean_flag_is_read_from_the_superblock() {
+        let dir = out_dir().join("e2e-selftest").join("clean-flag");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("fs.img");
+        crate::util::run(
+            std::process::Command::new("mke2fs")
+                .args(["-q", "-F", "-t", "ext2"])
+                .arg(&img)
+                .arg("1M"),
+        )
+        .unwrap();
+        let whole = Partition {
+            start_lba: 0,
+            sectors: 2048,
+        };
+        assert_eq!(image::ext2_state(&img, whole).unwrap(), "clean");
+        // As a machine killed with / mounted read-write leaves it.
+        crate::util::run(
+            std::process::Command::new("debugfs")
+                .args(["-w", "-R", "ssv state 0"])
+                .arg(&img),
+        )
+        .unwrap();
+        assert_eq!(image::ext2_state(&img, whole).unwrap(), "not clean");
     }
 
     #[test]
