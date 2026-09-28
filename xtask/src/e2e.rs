@@ -6,6 +6,7 @@
 //! ```text
 //! # comment
 //! cmdline test=1 panic=pagefault   (before any other step; default "test=1")
+//! disk small                       (before any other step: the 32 MiB root)
 //! esp-write /EFI/RELAY/kernel.elf garbage   (before boot: replace an ESP file)
 //! timeout 20                       (seconds, for the following expects)
 //! expect <regex>                   (waits for serial output, ANSI stripped)
@@ -20,6 +21,9 @@
 //!                                   starts again on the same disk)
 //! poweroff                         (types `poweroff`; QEMU must exit through
 //!                                   isa-debug-exit, test mode's power-off)
+//! file-lines /root/big 8388608 abc (after poweroff: the file, read with
+//!                                   debugfs, is "abc\n" repeated to 8388608
+//!                                   bytes)
 //! ```
 //!
 //! QEMU is killed at the end of every scenario, and `e2fsck -fn` must find
@@ -82,12 +86,22 @@ pub enum Step {
     Reboot(Option<String>),
     /// Switch the machine off; no later step talks to it.
     Poweroff,
+    /// The file at `path` on the ext2 root is `line` and a newline, again
+    /// and again, `bytes` in all. Checked on the disk once the machine is
+    /// off.
+    FileLines {
+        path: String,
+        bytes: usize,
+        line: String,
+    },
 }
 
 #[derive(Debug, PartialEq)]
 pub struct Scenario {
     pub name: String,
     pub cmdline: String,
+    /// `disk small`: boot the image with the 32 MiB root.
+    pub small_disk: bool,
     /// ESP files to overwrite before booting: (path, contents).
     pub esp_writes: Vec<(String, String)>,
     /// (line number, step)
@@ -96,6 +110,7 @@ pub struct Scenario {
 
 pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
     let mut cmdline = DEFAULT_CMDLINE.to_string();
+    let mut small_disk = false;
     let mut esp_writes = Vec::new();
     let mut steps = Vec::new();
     for (i, raw) in text.lines().enumerate() {
@@ -112,6 +127,13 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
                     bail!("{name}:{line_no}: cmdline must come before other steps");
                 }
                 cmdline = rest.to_string();
+                continue;
+            }
+            "disk" => {
+                if !steps.is_empty() || rest != "small" {
+                    bail!("{name}:{line_no}: expected `disk small` before other steps");
+                }
+                small_disk = true;
                 continue;
             }
             "esp-write" => {
@@ -146,6 +168,7 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
                 Step::Reboot(Some(rest.to_string()))
             }
             "poweroff" => Step::Poweroff,
+            "file-lines" => parse_file_lines(rest).with_context(|| format!("{name}:{line_no}"))?,
             other => bail!("{name}:{line_no}: unknown step '{other}'"),
         };
         steps.push((line_no, step));
@@ -153,9 +176,43 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
     Ok(Scenario {
         name: name.to_string(),
         cmdline,
+        small_disk,
         esp_writes,
         steps,
     })
+}
+
+fn parse_file_lines(rest: &str) -> Result<Step> {
+    let mut parts = rest.splitn(3, ' ');
+    let (Some(path), Some(bytes), Some(line)) = (parts.next(), parts.next(), parts.next()) else {
+        bail!("expected: file-lines <path> <bytes> <line>");
+    };
+    let bytes: usize = bytes.parse().context("bytes")?;
+    if !path.starts_with('/') || line.is_empty() || !bytes.is_multiple_of(line.len() + 1) {
+        bail!("file-lines needs an absolute path, a line, and a size that is whole lines");
+    }
+    Ok(Step::FileLines {
+        path: path.to_string(),
+        bytes,
+        line: line.to_string(),
+    })
+}
+
+/// Why `data` is not `line` and a newline repeated to `bytes` bytes.
+pub fn lines_mismatch(data: &[u8], bytes: usize, line: &str) -> Option<String> {
+    if data.len() != bytes {
+        return Some(format!("is {} bytes, expected {bytes}", data.len()));
+    }
+    let unit = [line.as_bytes(), b"\n"].concat();
+    let bad = data.chunks(unit.len()).position(|c| c != unit)?;
+    Some(format!(
+        "line {} (byte {}) is {:?}",
+        bad + 1,
+        bad * unit.len(),
+        String::from_utf8_lossy(
+            &data[bad * unit.len()..][..unit.len().min(data.len() - bad * unit.len())]
+        )
+    ))
 }
 
 fn parse_pixel_step(rest: &str) -> Result<Step> {
@@ -389,7 +446,8 @@ fn wait_for_qmp(child: &mut Child, name: &str, timeout: Duration, stderr: &Path)
 }
 
 fn run_step(r: &mut Running, step: &Step, timeout: &mut Duration, run_dir: &Path) -> Result<()> {
-    if r.off && !matches!(step, Step::Timeout(_)) {
+    let offline = matches!(step, Step::Timeout(_) | Step::FileLines { .. });
+    if r.off && !offline {
         bail!("the machine was switched off by an earlier step");
     }
     match step {
@@ -461,6 +519,16 @@ fn run_step(r: &mut Running, step: &Step, timeout: &mut Duration, run_dir: &Path
             }
         }
         Step::Reboot(last) => reboot(r, last.as_deref(), *timeout)?,
+        Step::FileLines { path, bytes, line } => {
+            if !r.off {
+                bail!("file-lines reads the disk: switch the machine off first (poweroff)");
+            }
+            let data = image::read_ext2_file(&r.qemu.disk, r.root, path, run_dir)?
+                .with_context(|| format!("{path}: no such file on the disk"))?;
+            if let Some(why) = lines_mismatch(&data, *bytes, line) {
+                bail!("{path} {why}");
+            }
+        }
         Step::Poweroff => {
             exit_with(r, "poweroff", EXIT_POWEROFF, *timeout)?;
             r.off = true;
@@ -534,9 +602,24 @@ pub fn run_all(only: Option<&str>) -> Result<()> {
     let art = build::build()?;
     let img = image::build_image(&art, DEFAULT_CMDLINE)?;
     let layout = image::read_layout(&img)?;
+    let small = if scenarios.iter().any(|s| s.small_disk) {
+        let img = image::build_image_as(
+            &art,
+            DEFAULT_CMDLINE,
+            "relay-os-small.img",
+            crate::config::SMALL_IMAGE_BYTES,
+        )?;
+        let layout = image::read_layout(&img)?;
+        Some((img, layout))
+    } else {
+        None
+    };
     for s in &scenarios {
         println!("== e2e {}", s.name);
-        run_scenario(&img, &layout, s)?;
+        match (&small, s.small_disk) {
+            (Some((img, layout)), true) => run_scenario(img, layout, s)?,
+            _ => run_scenario(&img, &layout, s)?,
+        }
     }
     println!("all {} scenario(s) passed", scenarios.len());
     Ok(())
@@ -636,6 +719,70 @@ mod tests {
     fn exit_statuses_match_the_kernel() {
         // relay_kernel::power::TEST_EXIT_CODE is 0x10.
         assert_eq!(EXIT_POWEROFF, (0x10 << 1) | 1);
+    }
+
+    #[test]
+    fn parses_the_small_disk_and_file_lines() {
+        let s = parse_scenario("x", "disk small\nfile-lines /root/big 8 abc").unwrap();
+        assert!(s.small_disk);
+        assert_eq!(
+            s.steps,
+            vec![(
+                2,
+                Step::FileLines {
+                    path: "/root/big".into(),
+                    bytes: 8,
+                    line: "abc".into()
+                }
+            )]
+        );
+        assert!(!parse_scenario("x", "expect a").unwrap().small_disk);
+        assert!(parse_scenario("x", "disk large").is_err());
+        assert!(parse_scenario("x", "expect a\ndisk small").is_err());
+        assert!(
+            parse_scenario("x", "file-lines /f 7 abc").is_err(),
+            "not whole lines"
+        );
+        assert!(parse_scenario("x", "file-lines f 8 abc").is_err());
+        assert!(parse_scenario("x", "file-lines /f 8").is_err());
+    }
+
+    #[test]
+    fn file_lines_finds_the_first_wrong_line() {
+        assert_eq!(lines_mismatch(b"ab\nab\n", 6, "ab"), None);
+        assert_eq!(
+            lines_mismatch(b"ab\nab\n", 9, "ab"),
+            Some("is 6 bytes, expected 9".into())
+        );
+        assert_eq!(
+            lines_mismatch(b"ab\nax\nab\n", 9, "ab"),
+            Some("line 2 (byte 3) is \"ax\\n\"".into())
+        );
+    }
+
+    #[test]
+    fn file_lines_reads_the_file_from_an_ext2_image() {
+        let dir = out_dir().join("e2e-selftest").join("file-lines");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("staging/root")).unwrap();
+        fs::write(dir.join("staging/root/big"), "abc\n".repeat(1000)).unwrap();
+        let img = dir.join("fs.img");
+        crate::util::run(
+            std::process::Command::new("mke2fs")
+                .args(["-q", "-F", "-t", "ext2", "-d"])
+                .arg(dir.join("staging"))
+                .arg(&img)
+                .arg("1M"),
+        )
+        .unwrap();
+        let whole = Partition {
+            start_lba: 0,
+            sectors: 2048,
+        };
+        let data = image::read_ext2_file(&img, whole, "/root/big", &dir).unwrap();
+        assert_eq!(lines_mismatch(&data.unwrap(), 4000, "abc"), None);
+        let missing = image::read_ext2_file(&img, whole, "/root/nope", &dir).unwrap();
+        assert_eq!(missing, None);
     }
 
     #[test]

@@ -12,6 +12,9 @@ pub const OVMF_VARS: &str = "/usr/share/OVMF/OVMF_VARS_4M.fd";
 
 pub const SECTOR: u64 = 512;
 pub const IMAGE_BYTES: u64 = 256 << 20;
+/// The `diskfull` scenario's image (spec §9.3 #7): the same ESP and a
+/// 32 MiB ext2 root.
+pub const SMALL_IMAGE_BYTES: u64 = (ROOT_START_LBA * SECTOR) + (32 << 20) + (1 << 20);
 pub const ESP_START_LBA: u64 = 2048;
 pub const ESP_SECTORS: u64 = 131_072; // 64 MiB
 pub const ROOT_START_LBA: u64 = ESP_START_LBA + ESP_SECTORS;
