@@ -7,6 +7,7 @@ use alloc::string::String;
 mod basic;
 mod change;
 mod ls;
+mod script;
 mod stat;
 mod system;
 mod text;
@@ -117,6 +118,11 @@ pub const COMMANDS: &[Builtin] = &[
         name: "rmdir",
         help: "remove empty directories",
         run: change::rmdir,
+    },
+    Builtin {
+        name: "sh",
+        help: "run the commands in a file",
+        run: script::sh,
     },
     Builtin {
         name: "stat",

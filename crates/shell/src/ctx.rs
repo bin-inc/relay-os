@@ -22,6 +22,10 @@ pub struct Ctx<'a> {
     pub(crate) exit: bool,
     /// Ctrl-C stopped the command.
     pub(crate) cancelled: bool,
+    /// Set by `sh`: the script the shell runs next.
+    pub(crate) script: Option<String>,
+    /// The command is a line of a script.
+    pub(crate) in_script: bool,
 }
 
 enum Output {
@@ -59,6 +63,8 @@ impl<'a> Ctx<'a> {
             out,
             exit: false,
             cancelled: false,
+            script: None,
+            in_script: false,
         }
     }
 

@@ -21,6 +21,9 @@ pub struct TestConsole {
     pub columns: usize,
     /// Ctrl-C was pressed while a command runs.
     pub interrupt: bool,
+    /// Ctrl-C is pressed once `interrupted` has answered false this many
+    /// times.
+    pub interrupt_after: Option<usize>,
 }
 
 impl TestConsole {
@@ -30,6 +33,7 @@ impl TestConsole {
             output: Vec::new(),
             columns: 80,
             interrupt: false,
+            interrupt_after: None,
         }
     }
 
@@ -61,6 +65,11 @@ impl Console for TestConsole {
         self.columns
     }
     fn interrupted(&mut self) -> bool {
+        match &mut self.interrupt_after {
+            Some(0) => self.interrupt = true,
+            Some(n) => *n -= 1,
+            None => {}
+        }
         self.interrupt
     }
 }

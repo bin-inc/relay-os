@@ -29,6 +29,8 @@ pub struct Shell<'a> {
     editor: LineEditor,
     status: i32,
     stopped: bool,
+    /// A script's lines are running (`sh`).
+    in_script: bool,
 }
 
 impl<'a> Shell<'a> {
@@ -44,6 +46,7 @@ impl<'a> Shell<'a> {
             editor: LineEditor::new(),
             status: 0,
             stopped: false,
+            in_script: false,
         }
     }
 
@@ -131,6 +134,7 @@ impl<'a> Shell<'a> {
             return self.finish(NOT_FOUND, format!("{NAME}: {name}: command not found\n"));
         };
         let mut ctx = Ctx::new(&mut *self.vfs, &mut *self.system, &mut *self.console, file);
+        ctx.in_script = self.in_script;
         let mut status = (builtin.run)(&mut ctx, &cmd.words[1..]);
         let mut message = String::new();
         if let Err(e) = ctx.finish() {
@@ -142,7 +146,37 @@ impl<'a> Shell<'a> {
             status = CANCELLED;
         }
         self.stopped = ctx.exit;
+        if let Some(script) = ctx.script.take() {
+            status = self.run_script(&script);
+        }
         self.finish(status, message)
+    }
+
+    /// Runs a script's lines (spec §15 item 12): each command is shown as
+    /// `+ <line>`, then runs and is synced as if typed. Blank and comment
+    /// lines are skipped. Ctrl-C, or `reboot`/`poweroff` returning, ends
+    /// the script; failing commands do not. Returns the last status.
+    fn run_script(&mut self, script: &str) -> i32 {
+        self.in_script = true;
+        let mut status = 0;
+        for line in script.lines() {
+            let line = line.trim();
+            if matches!(parser::parse(line), Ok(c) if c.words.is_empty() && c.redirect.is_none()) {
+                continue;
+            }
+            if self.console.interrupted() {
+                self.console.write(b"^C\n");
+                status = CANCELLED;
+                break;
+            }
+            self.console.write(format!("+ {line}\n").as_bytes());
+            status = self.execute(line);
+            if status == CANCELLED || self.stopped {
+                break;
+            }
+        }
+        self.in_script = false;
+        status
     }
 
     /// Opens a redirection target: created if missing, emptied for `>`,
