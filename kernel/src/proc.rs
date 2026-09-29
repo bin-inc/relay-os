@@ -6,6 +6,8 @@
 //! timer only counts ticks. Plan 3 replaces this with the process table and
 //! the scheduler; `arch::user::{enter, leave}` becomes its context switch.
 
+pub mod table;
+
 use crate::exec::{self, Entry};
 use crate::mm::kstack::KernelStack;
 use crate::mm::paging::MapError;
