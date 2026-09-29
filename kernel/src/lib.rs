@@ -10,6 +10,7 @@ pub mod arch;
 pub mod block;
 pub mod cmdline;
 pub mod console;
+pub mod exec;
 pub mod input;
 pub mod klog;
 pub mod mm;

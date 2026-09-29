@@ -285,6 +285,7 @@ version = "0.2.0"
 dependencies = [
  "boot-info",
  "crc32",
+ "elf",
  "ext2",
  "heap",
  "relay-abi",
