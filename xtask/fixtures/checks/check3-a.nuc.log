@@ -2,18 +2,18 @@
 + uname -a
 Relay relay 0.2.0 x86_64
 + date
-Tue Sep 29 10:45:28 UTC 2026
+Tue Sep 29 14:28:47 UTC 2026
 + dmesg
 Relay OS 0.2.0
 [[32m ok [0m] console 1920x1200 (120x33 cells)
 [[32m ok [0m] cpu tables
-[[32m ok [0m] boot info: 15947 MiB usable in 32 regions, cmdline ''
-[[32m ok [0m] memory: 15914 MiB free of 15947 MiB, heap 32 MiB
+[[32m ok [0m] boot info: 15947 MiB usable in 34 regions, cmdline ''
+[[32m ok [0m] memory: 15913 MiB free of 15947 MiB, heap 32 MiB
 acpi: tables FACP FIDT SSDT SSDT SSDT SSDT SSDT HPET APIC MCFG SSDT SSDT UEFI NHLT LPIT WDAT SSDT SSDT DBGP DBG2 DMAR FPDT SSDT SSDT SSDT SSDT TPM2 BGRT PHAT WSMT
 acpi: FADT reset io 0xcf9 <- 0x6, PM1a_CNT io 0x1804, PM1b_CNT none, century register 0x32
 [[32m ok [0m] acpi: 30 tables, ECAM 0xc0000000 buses 0-255, HPET 0xfed00000, S5 7/0
 [[32m ok [0m] timer: TSC 2496.000 MHz (CPUID 0x15), 1000 Hz tick (xAPIC)
-[[32m ok [0m] rtc: 2026-09-29 10:45:02 UTC
+[[32m ok [0m] rtc: 2026-09-29 14:28:05 UTC
 pci: 00:00.0 8086:4621 060000 host bridge
 pci: 00:02.0 8086:46a6 030000 display, bar0 mem64 0x603c000000 16M, bar2 mem64 0x4000000000 256M pf, bar4 io 0x3000 64
 pci: 00:06.0 8086:464d 060400 PCI bridge
@@ -44,8 +44,8 @@ xhci 00:0d.0: legacy support at 0x846c: not BIOS owned; SMI enables 0x00000000 c
 xhci 00:0d.0: already halted
 xhci 00:0d.0: reset after 1 ms
 xhci 00:0d.0: USB 2.0 ports 1-1, USB 3.2 ports 2-4
-xhci 00:0d.0: 34 scratchpad buffers, array 0x1b3000
-xhci 00:0d.0: DCBAA 0x1d6000, command ring 0x1d7000, event ring 0x1d8000
+xhci 00:0d.0: 34 scratchpad buffers, array 0x2af000
+xhci 00:0d.0: DCBAA 0x2d2000, command ring 0x2d3000, event ring 0x2d4000
 xhci 00:0d.0: running
 xhci 00:0d.0: ports settled after 99 ms
 usb: 00:0d.0 xHCI 1.20, 4 ports (1 USB 2, 3 USB 3), 32-byte contexts, 34 scratchpads
@@ -54,10 +54,10 @@ xhci 00:14.0: legacy support at 0x846c: not BIOS owned; SMI enables 0x00000000 c
 xhci 00:14.0: already halted
 xhci 00:14.0: reset after 1 ms
 xhci 00:14.0: USB 2.0 ports 1-12, USB 3.1 ports 13-16
-xhci 00:14.0: 34 scratchpad buffers, array 0x1da000
-xhci 00:14.0: DCBAA 0x1fd000, command ring 0x1fe000, event ring 0x1ff000
+xhci 00:14.0: 34 scratchpad buffers, array 0x2d6000
+xhci 00:14.0: DCBAA 0x2f9000, command ring 0x2fa000, event ring 0x2fb000
 xhci 00:14.0: running
-xhci 00:14.0: ports settled after 107 ms
+xhci 00:14.0: ports settled after 106 ms
 usb: 00:14.0 xHCI 1.20, 16 ports (12 USB 2, 4 USB 3), 32-byte contexts, 34 scratchpads
 xhci 00:14.0: port 1: connected, PORTSC 0x000206e1
 xhci 00:14.0: port 3: connected, PORTSC 0x00020ae1
@@ -83,12 +83,18 @@ xhci 00:14.0: slot 3: interface 1 class 224/1/1, endpoints 0x03 isochronous 0 by
 xhci 00:14.0: slot 3: no driver for this device
 xhci 00:14.0: port 15: connection stable after 100 ms
 xhci 00:14.0: port 15: reset done, SuperSpeed
-xhci 00:14.0: port 15: slot 4 at address 4, 0951:1666 USB 3.10, ep0 512 bytes, 1 configuration
-xhci 00:14.0: slot 4: interface 0 class 8/6/80, endpoints 0x81 bulk 1024 bytes interval 0, 0x02 bulk 1024 bytes interval 0
-xhci 00:14.0: slot 4: endpoint 0x81 configured (DCI 3, interval exponent 0)
-xhci 00:14.0: slot 4: endpoint 0x02 configured (DCI 4, interval exponent 0)
-storage: slot 4: vendor "Kingston", product "DataTraveler 3.0", revision "PMAP", removable
-storage: slot 4: 30277632 blocks of 512 bytes
+xhci 00:14.0: slot 4: control request 0x80/6 failed: timed out
+xhci 00:14.0: port 15: device descriptor (8 bytes): timed out
+xhci 00:14.0: port 15: attach failed (timed out), slot 4 released
+xhci 00:14.0: port 15: setup failed: timed out, trying again
+xhci 00:14.0: port 15: connection stable after 100 ms
+xhci 00:14.0: port 15: reset done, SuperSpeed
+xhci 00:14.0: port 15: slot 5 at address 5, 0951:1666 USB 3.10, ep0 512 bytes, 1 configuration
+xhci 00:14.0: slot 5: interface 0 class 8/6/80, endpoints 0x81 bulk 1024 bytes interval 0, 0x02 bulk 1024 bytes interval 0
+xhci 00:14.0: slot 5: endpoint 0x81 configured (DCI 3, interval exponent 0)
+xhci 00:14.0: slot 5: endpoint 0x02 configured (DCI 4, interval exponent 0)
+storage: slot 5: vendor "Kingston", product "DataTraveler 3.0", revision "PMAP", removable
+storage: slot 5: 30277632 blocks of 512 bytes
 usb: 00:14.0 port 1: 046d:c534 full-speed, keyboard
 usb: 00:14.0 port 3: 046d:c31c low-speed, keyboard
 usb: 00:14.0 port 10: 8087:0033 full-speed, not claimed
@@ -96,18 +102,19 @@ usb: 00:14.0 port 15: 0951:1666 SuperSpeed, disk Kingston DataTraveler 3.0, 14.4
 [[32m ok [0m] usb: 2 controllers, 4 devices
 [[32m ok [0m] keyboard: 2 keyboards
 storage: 00:14.0 port 15: GPT with 2 partitions
-storage: root on 00:14.0 port 15, the disk with the boot partition D0A42F44-095F-4839-B54B-C59D3F9B0F8F
+storage: root on 00:14.0 port 15, the disk with the boot partition C151DD9A-8884-47DF-BAD7-1EABF3487286
 [[32m ok [0m] mount /: ext2 on 00:14.0 port 15 partition 2, 14.3 GiB
-[[32m ok [0m] system: 1 program, ABI 1
+[[32m ok [0m] system: 2 programs, ABI 1
 + ls -l /bin
-total 20
--rwxr-xr-x 1 root root 19688 Sep 29 10:38 t-args
+total 39
+-rwxr-xr-x 1 root root 19688 Sep 29 14:13 t-args
+-rwxr-xr-x 1 root root 19296 Sep 29 14:13 t-fault
 + t-args a 'b c' ''
 [1] a
 [2] b c
 [3] 
 + t-fault null-read
-relay-sh: t-fault: killed (page fault at 0x0, read, ip 0x400205)
+relay-sh: t-fault: killed (page fault at 0x0, read, ip 0x4002e5)
 + mkdir -p /root/notes/old
 + echo remember me > /root/notes/a
 + echo and me >> /root/notes/a
@@ -116,8 +123,8 @@ remember me
 and me
 + ls -l /root/notes
 total 8
--rw-r--r-- 1 root root   19 Sep 29 10:45 a
-drwxr-xr-x 2 root root 4096 Sep 29 10:45 old
+-rw-r--r-- 1 root root   19 Sep 29 14:28 a
+drwxr-xr-x 2 root root 4096 Sep 29 14:28 old
 + cp /root/notes/a /root/notes/b
 + mv /root/notes/b /root/notes/old/c
 + ls /root/notes /root/notes/old
@@ -137,9 +144,9 @@ a
   Size: 0         	Blocks: 0          IO Block: 4096   regular empty file
 Inode: 8195        Links: 1
 Access: (0644/-rw-r--r--)  Uid: (    0/    root)   Gid: (    0/    root)
-Access: 2026-09-29 10:45:29.000000000 +0000
-Modify: 2026-09-29 10:45:29.000000000 +0000
-Change: 2026-09-29 10:45:29.000000000 +0000
+Access: 2026-09-29 14:28:48.000000000 +0000
+Modify: 2026-09-29 14:28:48.000000000 +0000
+Change: 2026-09-29 14:28:48.000000000 +0000
  Birth: -
 + head -n 1 /root/notes/a
 remember me

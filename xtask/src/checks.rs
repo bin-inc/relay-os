@@ -418,7 +418,7 @@ bin  etc
 
     /// The real check scripts against a transcript of each machine: QEMU's
     /// from the `checks` scenario, the NUC's as the NUC wrote them in NUC
-    /// check 3 of milestone 2's plan 1 on 2026-09-29 (`docs/hardware-test.md`),
+    /// check 3 of milestone 2's plan 2 on 2026-09-29 (`docs/hardware-test.md`),
     /// copied off the stick unchanged. A `#nuc>` line must not need a line
     /// of its own next to the `#>` line for the same output, which QEMU
     /// alone cannot show.
