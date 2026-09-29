@@ -36,6 +36,10 @@ send t-fault flags-ud
 expect \nrelay-sh: t-fault: killed \(invalid opcode, ip 0x4[0-9a-f]+\)\n
 send t-args after-a-fault
 expect \n\[1\] after-a-fault\n
+send t-fault flags-tf
+expect \nrelay-sh: t-fault: killed \(CPU exception 1, ip 0x4[0-9a-f]+\)\n
+send t-args after-the-trap-flag
+expect \n\[1\] after-the-trap-flag\n
 send t-fault flags-ac
 expect \nrelay-sh: t-fault: killed \(invalid opcode, ip 0x4[0-9a-f]+\)\n
 send t-args after-ticks-with-ac
