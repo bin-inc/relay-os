@@ -1,7 +1,7 @@
 # Relay OS — User-Space Gate Design: programs, not built-ins (milestones 2 and 3)
 
 - **Date:** 2026-09-29
-- **Status:** Draft for review
+- **Status:** Approved 2026-09-29; revised while planning milestone 2's plan 1 (see §16)
 - **Builds on:** milestone 1 (version 0.2.0,
   `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`,
   cited below as "M1 §n")
@@ -133,14 +133,16 @@ Little-endian throughout.
 
 | Part | Contents |
 |---|---|
-| Header (64 bytes) | magic `RELAYSYS`, format version `u32` (1), ABI version `u32` (`relay_abi::VERSION`), entry count `u32`, total length `u64`, CRC-32 of everything after the header `u32`, reserved zeros |
-| Entry table | per entry: name (up to 64 bytes, no `/`, no NUL), length `u8`; mode `u16` (Unix permission bits); data offset `u64`; data length `u64` |
+| Header (64 bytes) | magic `RELAYSYS` (offset 0), format version `u32` (1, offset 8), ABI version `u32` (`relay_abi::VERSION`, offset 12), entry count `u32` (offset 16), total length `u64` (offset 24), CRC-32 of everything after the header `u32` (offset 32), build time `u64` in seconds since 1970 (offset 40), zeros elsewhere |
+| Entry table | 88 bytes per entry: name (up to 64 bytes, no `/`, no NUL, not `.` or `..`, zero-padded, offset 0), its length `u8` (offset 64), mode `u16` (Unix permission bits only, offset 66), data offset `u64` (offset 72), data length `u64` (offset 80) |
 | Data | each entry's bytes, starting on a 4 KiB boundary |
 
-The writer sorts the entries by name. The reader refuses: a wrong magic or
-format version, a length that does not match what the loader read, a bad
-CRC, a duplicate or invalid name, and data outside the archive. The archive
-is flat: every entry is a file in `/bin`.
+The writer sorts the entries by name. The reader refuses: fewer than 64
+bytes, a wrong magic or format version, a length that does not match what
+the loader read, a bad CRC, an entry table that does not fit, an invalid
+name or mode, names out of order or repeated, and data outside the archive,
+inside the header or table, or not on a 4 KiB boundary. The archive is flat:
+every entry is a file in `/bin`.
 
 `SysImgFs` implements `vfs::FileSystem` read-only directly over the loaded
 bytes, with no copy: the root directory lists the entries, `read_at` reads
@@ -151,9 +153,10 @@ mode, its length, and the archive's build time as the file times.
 
 - **`relay-boot`** reads `\EFI\RELAY\system.img` if present, into pages it
   allocates as `LOADER_DATA`, and puts its physical address and length in
-  `BootInfo` (new fields `system_image_phys`, `system_image_len`; zero when
-  the file is missing). The loader does not check the archive; a missing or
-  unreadable file is not a loader error. `BootInfo::version` goes up by one.
+  `BootInfo` (new fields `system_image_phys`, `system_image_len`; address 0
+  when the file cannot be read, an address and length 0 for an empty file).
+  The loader does not check the archive; a missing or unreadable file is not
+  a loader error. `BootInfo::version` goes up by one.
 - **The kernel** keeps those frames reserved, checks the archive (§4.2) and
   its ABI version, and mounts `SysImgFs` at `/bin`. New startup step 10,
   before the shell (M1 §4.4 step 10 becomes step 11):
@@ -162,13 +165,15 @@ mode, its length, and the archive's build time as the file times.
 
 ### 4.4 Mounting `/bin`
 
-An ext2 root written by 0.2.0 (`flash --kernel` keeps it) has no `/bin`, and
-the read-only fallbacks of M1 §10 cannot create one. So `MountTable::mount`
-accepts a path whose last name does not exist in its parent directory. Such
-a mount point shows up as a directory in the parent's `read_dir` and
-resolves like any other name. `rmdir`, `unlink` and `rename` on it, and
-`mkdir` or `create` of its name, return `EBUSY`, as for any mount point.
-When the root has a real `/bin`, the archive is mounted over it as before.
+The images xtask writes have an empty `/bin` (`ROOT_DIRS`, since 0.2.0), and
+the archive is mounted over it. But the empty read-only root the kernel falls
+back to without a usable one (M1 §10) has none and cannot get one, and a root
+made elsewhere may not either. So `MountTable::mount` also accepts a path
+whose last name does not exist in its parent directory. Such a mount point
+shows up as a directory in the parent's `read_dir` and resolves like any
+other name, and the name behaves as a mount point does: `create` and `mkdir`
+of it are `EEXIST`, `unlink` is `EISDIR`, and `rmdir` and `rename` from or to
+it are `EBUSY`.
 
 ## 5. Processes and memory
 
@@ -659,6 +664,7 @@ New ones:
 | 2 | `spawn` | `t-spawn 1000` reports the same free frames before and after; `t-args a 'b c' ''` prints three arguments |
 | 2 | `system_missing` | no `system.img`: `[FAIL] system: …` and the error screen |
 | 2 | `system_abi` | an archive with another ABI version: the error screen names both versions |
+| 2 | `system_empty` | an empty `system.img`: `system.img: only 0 bytes`, not `no system.img` |
 | 2 | `stale_program` | `t-abi` copied to `/root`: running it prints `Exec format error` |
 | 2 | `respawn` | `exit` restarts the shell with a log line; three quick exits reach the error screen |
 | 3 | `pipes` | `cat` of the 8 MiB file through `wc -c` gives the exact size; `cat big \| head -n 1` ends at once; `seq 5 \| grep -c .` prints 5 |
@@ -690,9 +696,9 @@ exists then. The expected plans:
 **Milestone 2**
 
 1. **Toolchain and archive.** `relay-abi`, `heap` moved out of the kernel,
-   `relay-rt` with a `hello` program built on stable, `sysimg`, the loader
-   loading `system.img`, `/bin` mounted (§4.4). The in-kernel shell can
-   `ls /bin`. This plan proves the user-program build first (§14).
+   `relay-rt` with its first program `t-args` built on stable, `sysimg`, the
+   loader loading `system.img`, `/bin` mounted (§4.4). The in-kernel shell
+   can `ls /bin`. This plan proves the user-program build first (§14).
 2. **Ring 3 and one program.** User segments, TSS `rsp0`, system-call
    entry, per-process address spaces, the ELF checks, `UserSlice`, `exit`,
    `write`, `spawn` and `wait` for one child at a time. The in-kernel shell
@@ -718,7 +724,7 @@ exists then. The expected plans:
 
 | Risk | Mitigation |
 |---|---|
-| Building `no_std` user programs with our own linker script and ELF note on stable Rust turns out awkward | Plan 1 builds and runs `hello` before anything depends on it |
+| Building `no_std` user programs with our own linker script and ELF note on stable Rust turns out awkward | Plan 1 builds `t-args` and checks it with `readelf` before anything depends on it; plan 2 runs it first |
 | `sysret` with a non-canonical return address faults in ring 0 (Intel) | The check of §6.2; `t-fault` covers it indirectly, a unit test covers the check |
 | SMAP makes a forgotten user access fault in the kernel | That is the point: it shows up as a panic in a scenario instead of silently. `UserSlice` is the only path. |
 | Polling input on every ring-3 tick costs too much | Measured on the NUC in check 4 (`t-spin` loop count with and without); if needed, poll every 4th tick |
@@ -739,5 +745,45 @@ exists then. The expected plans:
 
 ## 16. Revisions made during planning
 
-None yet. Changes made while planning either milestone are recorded here,
-as M1 §15 does.
+Changes made while planning either milestone are recorded here, as M1 §15
+does. Facts found before the spec was first merged are already in its body.
+
+1. **Decisions made while planning milestone 2's plan 1** (toolchain and
+   archive):
+   - **Code model** (§8.1, §8.4). User programs use the target's default
+     code model (`kernel`): the prebuilt `core` for `x86_64-unknown-none`
+     is compiled for it, LTO needs one model throughout, and its
+     sign-extended 32-bit addresses reach everything a program linked at
+     `0x40_0000` holds below 2 GiB. A program past 2 GiB fails to link
+     ("relocation truncated"), never silently. They need no `RUSTFLAGS` of
+     their own; xtask builds them in `target/user`, so a build from inside
+     `cargo test` never waits for the outer build's lock.
+   - **The `user` profile** (§8.4) is `relay` (overflow checks and debug
+     assertions on) plus LTO, stripped of debug info: `t-args` is about
+     20 KiB. The user packages are listed in `xtask`'s `USER_PACKAGES` and
+     are not default members; `cargo xtask lint` clippies each for
+     `x86_64-unknown-none`.
+   - **Checks at build time** (§5.2, §10). xtask checks every program with
+     binutils' `readelf` (`LC_ALL=C`), independently of our own code, before
+     it packs `system.img`: an x86_64 `EXEC` with only `PT_LOAD`, `PT_NOTE`
+     and `PT_GNU_STACK` program headers; loadable segments inside
+     `0x40_0000`–`0x1000_0000_0000`, not overlapping (by page), with offsets
+     and addresses congruent modulo 4 KiB, no more file than memory, never
+     writable and executable; the entry point in an executable segment; and
+     a `PT_NOTE` segment (not merely a section) holding the `Relay` note of
+     type 1 with this ABI's version. A missing `readelf` fails the build
+     naming binutils. The kernel's own checks come with plan 2.
+   - **Moved crates** (§3). The heap allocator is `crates/heap` (the kernel
+     keeps `KernelHeap`, the locked `#[global_allocator]`), and CRC-32 is
+     `crates/crc32`, shared by the kernel's GPT code and `sysimg`.
+   - **The first program** is `t-args` (§8.5), which plan 2 runs first.
+   - **Plan 1 keeps the in-kernel shell** (§11.2). A missing, empty, damaged
+     or wrong-ABI archive gives `[FAIL] system: <reason>` and the shell runs
+     on with an empty `/bin`; the error screen comes with plan 4, when the
+     shell leaves the kernel. `mount_fail`'s empty root now lists `bin`.
+   - **The e2e runner** (§12.3) gains the before-boot steps `esp-delete
+     <path>` and `system-abi <n>` (the same programs under ABI `n`).
+   - **Check scripts** (§12.4). `check3-a.sh` expects the `system` line and
+     runs `ls -l /bin`, which must list `t-args`; the recorded transcripts of
+     it in `xtask/fixtures/checks/` get those lines by hand until plan 1's
+     NUC check records real ones.
