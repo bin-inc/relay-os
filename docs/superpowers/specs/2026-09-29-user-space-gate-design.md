@@ -1,7 +1,7 @@
 # Relay OS — User-Space Gate Design: programs, not built-ins (milestones 2 and 3)
 
 - **Date:** 2026-09-29
-- **Status:** Approved 2026-09-29; revised while planning milestone 2's plans 1 and 2 (see §16)
+- **Status:** Approved 2026-09-29; revised while planning milestone 2's plans 1, 2 and 3a (see §16)
 - **Builds on:** milestone 1 (version 0.2.0,
   `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`,
   cited below as "M1 §n")
@@ -233,9 +233,9 @@ enabled and:
 
 - `rdi` = the address of its argument bytes, `rsi` = their length, `rdx` =
   the number of arguments. The arguments are copied to the top of the
-  stack, each followed by a NUL; argument 0 is the program's path as given
-  to `spawn`. At most 64 KiB of arguments (`E2BIG` otherwise, a new error
-  number).
+  stack, each followed by a NUL; argument 0 is what the caller gives (the
+  shells give the command's name as typed, as bash does; §16 item 3). At
+  most 64 KiB of arguments (`E2BIG` otherwise, a new error number).
 - `rsp` 16-byte aligned below the arguments; every other register zero.
 - fds 0–2 as mapped by `SpawnArgs` (§7.3), the current directory from
   `SpawnArgs`.
@@ -287,7 +287,9 @@ killed (`killed (FPU/SSE instruction, ip …)`). Supporting floating point
   context on the process's kernel stack and switches.
 - **The idle task** (process 0, kernel only) runs when nothing is ready: the
   input poll of today's `KernelConsole::poll`, `usb::service`, waking
-  sleepers whose time has come, then `hlt`.
+  sleepers whose time has come, then `hlt`. Sleepers are also woken
+  whenever the running process's ticks are counted (§16 item 3), so a
+  program that never blocks does not keep a sleeper asleep.
 
 ### 6.2 System-call entry (x86_64)
 
@@ -302,7 +304,8 @@ killed (`killed (FPU/SSE instruction, ip …)`). Supporting floating point
   canonical and uses `iretq` otherwise (a non-canonical `rcx` makes `sysret`
   fault in ring 0 on Intel CPUs).
 - Interrupts and exceptions from ring 3 enter through the IDT with the TSS
-  `rsp0` stack.
+  `rsp0` stack; their stubs swap to the kernel's `gs` and load the
+  kernel's flags first (§16 item 3).
 
 ### 6.3 Polling input while programs run
 
@@ -704,9 +707,13 @@ exists then. The expected plans:
    entry, per-process address spaces, the ELF checks, `UserSlice`, `exit`,
    `write`, `spawn` and `wait` for one child at a time. The in-kernel shell
    runs a name it does not know from `/bin` and waits for it.
-3. **Processes and scheduling.** Process table, scheduler, blocking, the
-   idle task, polling on ticks, fault kills, groups, foreground and Ctrl-C,
-   the file, memory and system calls, console modes and tees.
+3. **Processes and scheduling**, in two plans (§16 item 3):
+   - **3a.** Process table, scheduler, blocking, the idle task, polling on
+     ticks, fault kills, groups, foreground and Ctrl-C, `spawn`, `wait`,
+     `kill`, `getpid`, `time`, `sleep` and `sys_info`'s memory figures from
+     ring 3, SMEP/SMAP and CR0.TS. NUC check 3.
+   - **3b.** The file, memory and remaining system calls, `relay-rt`'s
+     allocator, the console's line discipline and calls, and tees.
 4. **The shell moves out.** `relay-rt`'s trait implementations, the
    `Runner` split, `/bin/sh`, the programs, process 1 and its respawn rule;
    the kernel drops `shell`; `check4.sh`. NUC check 4.
@@ -729,7 +736,7 @@ exists then. The expected plans:
 | `sysret` with a non-canonical return address faults in ring 0 (Intel) | The check of §6.2; `t-fault` covers it indirectly, a unit test covers the check |
 | SMAP makes a forgotten user access fault in the kernel | That is the point: it shows up as a panic in a scenario instead of silently. `UserSlice` is the only path. |
 | Polling input on every ring-3 tick costs too much | Measured on the NUC in check 4 (`t-spin` loop count with and without); if needed, poll every 4th tick |
-| QEMU TCG lacks SMEP/SMAP, so a SMAP bug shows only with KVM | CI's e2e job runs with KVM, as today; `RELAY_QEMU_ACCEL=tcg` stays a local convenience |
+| QEMU TCG lacks SMEP/SMAP, so a SMAP bug shows only with KVM | CI's e2e job runs with KVM, as today; `RELAY_QEMU_ACCEL=tcg` stays a local convenience. (Plan 3a found that TCG with the runner's `-cpu max` has both; the `panic_smap` and `panic_smep` scenarios pass under either.) |
 | The gate does not fit two months | Background jobs are the cut line (§1.2); the other milestone 3 items do not depend on them |
 | Programs with floating point are wanted later | CR0.TS kills them clearly today (§5.5); XSAVE support is a contained later change |
 
@@ -909,3 +916,136 @@ does. Facts found before the spec was first merged are already in its body.
      the rest of the image. The startup line becomes `mount /: ext2 on
      00:14.0 port 15 partition 2, 2.0 GiB`, which the check scripts
      expect; the recorded transcripts are those of its NUC check.
+3. **Decisions made while planning milestone 2's plan 3a** (processes and
+   scheduling):
+   - **Plan 3 is two plans** (§13). 3a brings the processes: the table,
+     the scheduler, blocking, the idle task, polling on ticks, Ctrl-C and
+     `kill`, the process calls from ring 3, SMEP/SMAP and CR0.TS, and a NUC
+     check. 3b brings the file, memory and remaining calls, `relay-rt`'s
+     allocator, the console's line discipline and calls, and tees; it is
+     written after 3a merges. Plans 4 and 5 keep their numbers.
+   - **The in-kernel shell is process 1** (§6.6), a process without a
+     program: the kernel's page tables and a kernel stack of its own. It
+     blocks in `wait` while its command runs and on the console while it
+     waits for a line; being kernel code, it is never preempted. The
+     context the kernel booted in becomes the idle task, process 0, with
+     no entry in the table. Plan 4 starts `/bin/sh` as process 1 instead.
+   - **The context switch** (§5.4) saves the callee-saved registers and the
+     flags on the process's own kernel stack and keeps only the stack
+     pointer, by kernel-stack slot. Every switch happens in the kernel with
+     interrupts off and no lock held, and points the CPU at the next
+     process's page tables, TSS `rsp0` and `syscall` stack; debug
+     assertions check the flags (none of TF, DF, AC, NT), that `rsp0`
+     equals the `syscall` stack, and that no kernel lock is held. A new
+     process's kernel stack starts with a frame whose return calls its
+     function; a program's first run goes to ring 3 through
+     `arch::user::enter`, which puts `exec::Entry` in the registers §5.3
+     names, so that detail stays in `arch`.
+   - **Every way in from ring 3 gives the kernel its own `gs` and flags**
+     (§6.2, §16 item 2). The kernel always runs with the per-CPU block as
+     its `gs` base; `syscall` and the interrupt and exception stubs swap
+     it in when they come from ring 3 (the stubs test the interrupted
+     CPL) and back out on the way back, so every kernel context has the
+     same `gs` and a switch never mixes them. The stubs also load the
+     kernel's flags (`push 2; popfq`) when they interrupted ring 3, on
+     every CPU, instead of a `clac` that exists only with SMAP: AC, which
+     an interrupt or trap gate leaves as the program set it, never reaches
+     a handler (the switch's assertion caught it doing so). Debug
+     assertions in both dispatchers check the `gs` and the flags.
+   - **Ending and killing** (§5.4, §11.1). A process that ends gives back
+     its memory and fds at once and stays a zombie, with its kernel stack,
+     until its parent collects it. `kill` and Ctrl-C mark a process and
+     wake it if it is blocked; it ends before its program runs another
+     instruction: on its way back to ring 3 from a system call or a tick,
+     when its blocking point returns, or before its first instruction if
+     it had not run yet. The kernel log says `pid <n>
+     (<path>): killed: Ctrl-C` or `kill`. `kill` of a zombie succeeds and
+     changes nothing; a pid or group that holds process 1 is `EPERM`, and
+     nothing is killed; 0 names no process (`ESRCH`).
+   - **Ticks** (§6.1, §6.3). A tick that interrupts ring 3 polls the console
+     (the USB keyboards and COM1), acts on a Ctrl-C, wakes the sleepers
+     whose time has come and ends the slice if another process is ready. A
+     tick that interrupts the kernel is only counted, and the count is
+     settled when the process returns to ring 3 or gives up the CPU, where
+     the sleepers are woken too: the idle task alone would never run while
+     a program spins. A sleep ends on the tick after the one its time
+     reaches, so it is never shorter than asked. When the timer could not
+     start, nothing is preempted and `sleep` returns at once (nothing
+     waits for ever).
+   - **The console's mode and foreground group** (§6.4, §6.5) exist in 3a as
+     far as Ctrl-C needs them. The in-kernel shell gives the console to its
+     command's group in line mode while it waits, and takes it back (raw,
+     its own group) after. In line mode a Ctrl-C kills the foreground group
+     and drops what was typed before it; one typed before the command has
+     started waits in the queue and is the command's. The shell then says
+     `^C`, as when Ctrl-C stops a built-in (status 130), and a script
+     stops there. Reading in line mode and the `console_*` calls come with
+     3b, milestone 1's two serial findings with them.
+   - **The in-kernel shell's output hook stays** (§16 item 2, until plan 4's
+     tees). Each command gets fresh outputs of the shell's as its fds 1 and
+     2 (its descendants inherit them), whose writes reach the waiting shell
+     (the redirection, the screen, a script's transcript), and the shell's
+     answer is the write's result: a program sees its redirection's write
+     error from the write that flushes the file's 4 KiB buffer on. What a
+     program writes to another command's outputs (an orphan of an earlier
+     command) goes to the screen, never into this command's redirection.
+   - **The mount table is the kernel's** (§7.3), locked for one operation at
+     a time, and each process has its own current directory, put in while
+     the table works for it. A removal marks as gone only the current
+     directory in the table at the time.
+   - **The process calls** (§7.3). Paths and working directories are at most
+     4096 bytes (`ENAMETOOLONG`); `spawn`'s arguments are at least
+     argument 0, each ending in its NUL (`EINVAL` otherwise); at most 8 fd
+     pairs, a child fd below 32 and given once, a parent fd that is open;
+     `NEW_GROUP` is the only flag. `wait`'s status memory is checked before
+     a child is collected, so a bad pointer loses no child; `wait` takes a
+     pid or −1 (0 and below −1 are `EINVAL`). Once pid 2^32 − 1 has been
+     used, no process starts (`EAGAIN`) instead of the counter wrapping
+     around. `time`'s uptime comes from
+     the TSC. `sys_info` has the memory figures in 3a (`MemInfo`, a
+     shorter buffer or another kind is `EINVAL` until 3b). `UserSlice`
+     copies out whole or not at all; `UserStr` copies a byte string in and
+     refuses a length over its limit before it reads anything.
+   - **Orphans** (§5.4) pass to process 1. The in-kernel shell collects the
+     ones that have ended before every command it starts and after every
+     one it waited for, so their zombies never fill the table; plan 4's
+     `/bin/sh` does so before every prompt.
+   - **Argument 0** (§5.3, corrected in its body) is what the caller gives;
+     the in-kernel shell gives the command's name as typed, as bash does,
+     and a program still says its last path name in messages. A bare name
+     too long for a file name is `command not found` (127), as in bash.
+   - **SMEP, SMAP and CR0.TS** (§5.1, §5.5). SMEP and SMAP are on when CPUID
+     reports them, and the kernel log says `cpu: SMEP on, SMAP on`, which
+     the NUC's check script expects. The panic tests `panic=user-read` and
+     `panic=user-exec` show that each is on (the scenarios `panic_smap` and
+     `panic_smep`); QEMU's TCG with `-cpu max` has both too. CR0.TS (with
+     MP) is set once at boot, since the kernel uses no floating point, so
+     x87 and SSE state never passes from one program to the next.
+     CR4.FSGSBASE is cleared whatever the firmware left, so a program
+     cannot set its own `gs` base, which the next program would inherit
+     (a switch saves no segment bases).
+   - **Interrupts** (milestone 1's deferred findings). The LAPIC gets an EOI
+     for any vector it has in service, 32–47 included; an unexpected vector
+     is a storm at 1000 within one second, not over the whole uptime; the
+     timer masks the PIC before anything can fail.
+   - **Plan 2's deferred minors.** A kernel stack that cannot get frames is
+     `ENOMEM` (a full process table stays `EAGAIN`); NMIs, double faults and
+     machine checks have an IST stack each, so one arriving while
+     another's handler runs keeps that one's frame.
+   - **Error numbers** (§7.2). `vfs::Errno` gains `ESRCH`, `EPERM` and
+     `EINTR` (the last never reaches a program: it ends a blocking call of
+     one that was killed).
+   - **Tests** (§8.5, §12.3). `t-spin [SECONDS]`; `t-spawn N` also prints
+     `frames lost: <n>` for the NUC's script, `t-spawn kill` kills a
+     spinning child while it sleeps, `kill-new` one before it has run,
+     `orphan` leaves one behind, `fill` fills the table with napping
+     orphans, `sleepers` blocks a group in `wait` and `sleep` for Ctrl-C;
+     `t-fault` gains `sse`, `gsbase`, `flags-ac` (a spin through ticks with
+     AC, NT and DF set) and `flags-tf` (the trap flag before a call that
+     returns), and `flags-exit` sets the trap flag too. New scenarios: `ctrlc`,
+     `spawn`, `panic_smap`, `panic_smep`.
+   - **Check scripts** (§12.4). `check3-a.sh` runs `t-spin 1`,
+     `t-spawn 100`, `t-spawn kill`, `t-fault sse`, `flags-ac` and `gsbase`,
+     and expects the `cpu:` line; two steps follow by hand (typing during
+     `t-spin 5`, and Ctrl-C of `t-spin`). The recorded transcripts get
+     those lines by hand until plan 3a's NUC check records real ones.
