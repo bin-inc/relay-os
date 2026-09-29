@@ -4,7 +4,7 @@
 //! subcommands, so CI and a local run check exactly the same things. New
 //! crates and scenarios are picked up without touching the workflow.
 
-use crate::config::{KERNEL_TARGET, PROFILE, UEFI_TARGET};
+use crate::config::{KERNEL_TARGET, PROFILE, UEFI_TARGET, USER_PACKAGES, USER_PROFILE};
 use crate::util::{cargo, root};
 use anyhow::{Result, bail};
 
@@ -13,6 +13,8 @@ use anyhow::{Result, bail};
 pub struct Packages {
     pub boot: bool,
     pub kernel: bool,
+    /// The user programs (`USER_PACKAGES`).
+    pub userland: bool,
 }
 
 impl Packages {
@@ -21,6 +23,7 @@ impl Packages {
         Packages {
             boot: has("boot"),
             kernel: has("kernel"),
+            userland: root().join("userland").is_dir(),
         }
     }
 }
@@ -59,6 +62,22 @@ pub fn lint_commands(p: Packages) -> Vec<Vec<String>> {
                 package,
                 "--target",
                 target,
+                "--",
+                "-D",
+                "warnings",
+            ]));
+        }
+    }
+    if p.userland {
+        for package in USER_PACKAGES {
+            v.push(cmd(&[
+                "clippy",
+                "--profile",
+                USER_PROFILE,
+                "--package",
+                package,
+                "--target",
+                KERNEL_TARGET,
                 "--",
                 "-D",
                 "warnings",
@@ -106,17 +125,19 @@ mod tests {
     const NONE: Packages = Packages {
         boot: false,
         kernel: false,
+        userland: false,
     };
     const ALL: Packages = Packages {
         boot: true,
         kernel: true,
+        userland: true,
     };
 
     #[test]
     fn lint_grows_with_the_bare_metal_packages() {
         assert_eq!(lint_commands(NONE).len(), 2);
         let all = lint_commands(ALL);
-        assert_eq!(all.len(), 6);
+        assert_eq!(all.len(), 6 + USER_PACKAGES.len());
         assert!(
             all.iter()
                 .all(|c| c[0] == "fmt" || c.ends_with(&cmd(&["-D", "warnings"])))
@@ -128,6 +149,21 @@ mod tests {
         assert!(
             all.iter()
                 .any(|c| c.contains(&"x86_64-unknown-none".to_string()))
+        );
+        assert!(
+            all.contains(&cmd(&[
+                "clippy",
+                "--profile",
+                "user",
+                "--package",
+                "relay-tests",
+                "--target",
+                "x86_64-unknown-none",
+                "--",
+                "-D",
+                "warnings"
+            ])),
+            "the user programs, for Relay OS"
         );
     }
 

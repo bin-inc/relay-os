@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["boot", "kernel", "crates/boot-info", "crates/term", "crates/vfs", "crates/shell", "crates/ext2", "crates/usb", "crates/heap", "crates/relay-abi", "crates/crc32", "crates/sysimg", "crates/relay-rt", "xtask"]
+members = ["boot", "kernel", "userland/tests", "crates/boot-info", "crates/term", "crates/vfs", "crates/shell", "crates/ext2", "crates/usb", "crates/heap", "crates/relay-abi", "crates/crc32", "crates/sysimg", "crates/relay-rt", "xtask"]
 default-members = ["crates/boot-info", "crates/term", "crates/vfs", "crates/shell", "crates/ext2", "crates/usb", "crates/heap", "crates/relay-abi", "crates/crc32", "crates/sysimg", "crates/relay-rt", "xtask"]
 
 [workspace.package]
@@ -39,3 +39,9 @@ debug = true
 debug-assertions = true
 overflow-checks = true
 
+# User programs (spec §8.4): the target profile, plus LTO, without debug
+# info, since `system.img` holds every program in memory.
+[profile.user]
+inherits = "relay"
+lto = true
+strip = "debuginfo"
