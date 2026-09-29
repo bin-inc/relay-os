@@ -47,3 +47,7 @@ pub const ROOT_DIRS: &[(&str, u32)] = &[
 pub const UEFI_TARGET: &str = "x86_64-unknown-uefi";
 pub const KERNEL_TARGET: &str = "x86_64-unknown-none";
 pub const PROFILE: &str = "relay";
+/// User programs (spec §8.4): `relay` plus LTO, without debug info.
+pub const USER_PROFILE: &str = "user";
+/// The packages under `userland/`, whose binaries make up `system.img`.
+pub const USER_PACKAGES: &[&str] = &["relay-tests"];

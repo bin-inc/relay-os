@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["boot", "kernel", "crates/boot-info", "crates/term", "crates/vfs", "crates/shell", "crates/ext2", "crates/usb", "crates/heap", "crates/relay-abi", "crates/crc32", "crates/sysimg", "xtask"]
-default-members = ["crates/boot-info", "crates/term", "crates/vfs", "crates/shell", "crates/ext2", "crates/usb", "crates/heap", "crates/relay-abi", "crates/crc32", "crates/sysimg", "xtask"]
+members = ["boot", "kernel", "userland/tests", "crates/boot-info", "crates/term", "crates/vfs", "crates/shell", "crates/ext2", "crates/usb", "crates/heap", "crates/relay-abi", "crates/crc32", "crates/sysimg", "crates/relay-rt", "xtask"]
+default-members = ["crates/boot-info", "crates/term", "crates/vfs", "crates/shell", "crates/ext2", "crates/usb", "crates/heap", "crates/relay-abi", "crates/crc32", "crates/sysimg", "crates/relay-rt", "xtask"]
 
 [workspace.package]
 version = "0.2.0"
@@ -19,6 +19,7 @@ heap = { path = "crates/heap" }
 relay-abi = { path = "crates/relay-abi" }
 crc32 = { path = "crates/crc32" }
 sysimg = { path = "crates/sysimg" }
+relay-rt = { path = "crates/relay-rt" }
 uefi = { version = "0.41", default-features = false }
 x86_64 = { version = "0.15.5", default-features = false, features = ["instructions"] }
 bitflags = "2"
@@ -37,3 +38,10 @@ inherits = "release"
 debug = true
 debug-assertions = true
 overflow-checks = true
+
+# User programs (spec §8.4): the target profile, plus LTO, without debug
+# info, since `system.img` holds every program in memory.
+[profile.user]
+inherits = "relay"
+lto = true
+strip = "debuginfo"

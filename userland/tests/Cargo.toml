@@ -1,0 +1,10 @@
+[package]
+name = "relay-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The t-* test programs of /bin (spec §8.5)"
+build = "build.rs"
+
+[dependencies]
+relay-rt.workspace = true

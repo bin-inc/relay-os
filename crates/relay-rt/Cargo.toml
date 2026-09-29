@@ -1,0 +1,12 @@
+[package]
+name = "relay-rt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# Hands the user linker script to the programs' build scripts
+# (DEP_RELAY_RT_SCRIPT).
+links = "relay_rt"
+build = "build.rs"
+
+[dependencies]
+relay-abi.workspace = true
