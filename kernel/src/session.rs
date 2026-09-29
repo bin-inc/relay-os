@@ -6,10 +6,9 @@
 use crate::input::InputQueue;
 use crate::mm::{self, MemStats, frame::FRAME_SIZE};
 use crate::{arch, console, klog, klogln, power, rtc, serial, usb};
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 use shell::{Console, MemInfo, Shell, System};
-use vfs::{Env, FileSystem, MountTable};
+use vfs::{Env, MountTable};
 
 /// Bytes read from COM1 per poll at most, so a flood cannot starve the rest.
 const SERIAL_BURST: usize = 256;
@@ -124,10 +123,9 @@ impl Env for KernelEnv {
     }
 }
 
-/// Runs the shell with `root` mounted at `/` (spec §4.4 step 10). Never
-/// returns.
-pub fn run_shell(root: Box<dyn FileSystem>, test_mode: bool) -> ! {
-    let mut vfs = MountTable::new(root);
+/// Runs the shell over `vfs`, the root at `/` and the programs at `/bin`
+/// (spec §4.4 step 11). Never returns.
+pub fn run_shell(mut vfs: MountTable, test_mode: bool) -> ! {
     let mut console = KernelConsole::new();
     let mut system = KernelSystem { test_mode };
     Shell::new(&mut vfs, &mut console, &mut system).run();

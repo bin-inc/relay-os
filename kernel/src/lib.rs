@@ -20,6 +20,7 @@ pub mod rtc;
 pub mod serial;
 pub mod session;
 pub mod storage;
+pub mod system;
 pub mod timer;
 pub mod usb;
 
@@ -135,7 +136,9 @@ pub fn kernel_main(info: &'static BootInfo) -> ! {
     }
     usb::init(cmdline.debug_usb);
     let root = storage::mount_root(info.boot_partition_guid());
-    session::run_shell(root, cmdline.test_mode)
+    let mut vfs = vfs::MountTable::new(root);
+    system::mount(info, &mut vfs);
+    session::run_shell(vfs, cmdline.test_mode)
 }
 
 /// `check=timer`: the 1 kHz tick measured against the RTC's seconds.
