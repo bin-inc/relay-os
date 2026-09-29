@@ -25,6 +25,14 @@ expect \npid \d+ \(/bin/t-spin\): killed: Ctrl-C\n
 send t-spin
 key {ctrl-c}
 expect \n\^C\nroot@relay:~# 
+# Ctrl-C ends a group that waits in the kernel: t-spawn blocked in wait
+# for a child in a group of its own, and three children in sleep. Each ends
+# on its way out of the kernel, the parent's wait cut short by the kill
+# alone, and the shell says `^C` at once; the child apart sleeps on.
+send t-spawn sleepers
+alive 1
+key {ctrl-c}
+expect t-spawn sleepers\n(pid \d+ \(/bin/t-spawn\): killed: Ctrl-C\n){4}\^C\nroot@relay:~# 
 # At the prompt, Ctrl-C only cancels the line being typed.
 key echo nope{ctrl-c}
 expect \^C\n

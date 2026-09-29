@@ -12,8 +12,12 @@
 //! - `t-spawn fill` starts children that nap for 300 ms until the process
 //!   table is full, and ends without waiting for them: their zombies pass
 //!   to process 1;
+//! - `t-spawn sleepers` starts three children that sleep for a minute in
+//!   its group and one in a group of its own, and waits for that one: a
+//!   group blocked in the kernel, for Ctrl-C, whose `wait` nothing but the
+//!   kill can end;
 //! - `t-spawn child` exits at once (the children of `t-spawn N`), `t-spawn
-//!   nap` after 300 ms.
+//!   nap` after 300 ms, `t-spawn doze` after a minute.
 #![no_std]
 #![no_main]
 
@@ -44,6 +48,11 @@ fn main(args: Args) -> u8 {
             return 0;
         }
         Some(b"fill") => fill(),
+        Some(b"doze") => {
+            sys::sleep(60_000);
+            return 0;
+        }
+        Some(b"sleepers") => sleepers(),
         Some(b"kill") => kill(),
         Some(b"kill-new") => kill_new(),
         Some(b"orphan") => sys::spawn(b"/bin/t-spin", b"t-spin\x001\0", b"", &STD, 0).map(|_| ()),
@@ -63,7 +72,7 @@ fn main(args: Args) -> u8 {
 }
 
 fn usage() -> u8 {
-    let _ = sys::write_all(2, b"usage: t-spawn N|kill|kill-new|orphan|fill\n");
+    let _ = sys::write_all(2, b"usage: t-spawn N|kill|kill-new|orphan|fill|sleepers\n");
     2
 }
 
@@ -114,6 +123,18 @@ fn kill() -> Result<(), u16> {
     }
     let me = sys::getpid();
     let _ = writeln!(Fd(1), "pid above 1: {}", me > 1);
+    Ok(())
+}
+
+/// Children asleep, and this one waiting for one outside its group.
+fn sleepers() -> Result<(), u16> {
+    for _ in 0..3 {
+        sys::spawn(b"/bin/t-spawn", b"t-spawn\0doze\0", b"", &[], 0)?;
+    }
+    let apart = relay_abi::spawn::NEW_GROUP;
+    let pid = sys::spawn(b"/bin/t-spawn", b"t-spawn\0doze\0", b"", &[], apart)?;
+    sys::wait(i64::from(pid), false)?;
+    let _ = sys::write_all(1, b"t-spawn: the sleeper woke\n");
     Ok(())
 }
 
