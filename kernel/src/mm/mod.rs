@@ -17,6 +17,7 @@ pub mod paging;
 pub mod space;
 #[cfg(test)]
 pub mod testing;
+pub mod user;
 
 use boot_info::{BootInfo, HEAP_BASE, HEAP_SIZE, PHYS_MAP_MAX, PHYS_OFFSET};
 use core::fmt;
