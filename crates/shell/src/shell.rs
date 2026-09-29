@@ -496,6 +496,30 @@ mod tests {
     }
 
     #[test]
+    fn a_program_sees_its_redirection_s_write_error() {
+        let mut h = with_programs();
+        static BIG: [u8; 5000] = [b'x'; 5000];
+        h.system.programs[0].writes =
+            vec![(1, b"small\n"), (1, &BIG), (1, b"more\n"), (2, b"note\n")];
+        h.spy.zero_writes.set(true);
+        let (status, out) = h.run("t-args > /tmp/out");
+        assert_eq!(
+            h.system.answers,
+            [Ok(()), Err(Errno::ENOSPC), Err(Errno::ENOSPC), Ok(())],
+            "buffered until 4 KiB, then the disk's error, for good; the screen takes fd 2"
+        );
+        assert_eq!(status, 1);
+        assert!(
+            out.ends_with("t-args: write error: No space left on device\n"),
+            "{out}"
+        );
+        // To the screen, every write is fine.
+        h.system.answers.clear();
+        h.run("t-args");
+        assert!(h.system.answers.iter().all(Result::is_ok));
+    }
+
+    #[test]
     fn a_program_stopped_by_ctrl_c_says_only_so_and_ends_a_script() {
         let mut h = with_programs();
         h.system.programs[0].status = WaitStatus::killed(relay_abi::wait::KILLED_CTRL_C);

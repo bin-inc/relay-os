@@ -3,7 +3,7 @@
 #![cfg(test)]
 
 use crate::Shell;
-use crate::io::{Console, MemInfo, System};
+use crate::io::{Console, MemInfo, Output, System};
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
@@ -95,6 +95,8 @@ pub struct TestSystem {
     pub no_programs: bool,
     /// The arguments of every program started.
     pub spawned: Vec<Vec<Vec<u8>>>,
+    /// What each of the programs' writes was answered.
+    pub answers: Vec<Result<(), Errno>>,
     /// The program started and not yet waited for.
     child: Option<usize>,
 }
@@ -110,6 +112,7 @@ impl TestSystem {
             programs: Vec::new(),
             no_programs: false,
             spawned: Vec::new(),
+            answers: Vec::new(),
             child: None,
         }
     }
@@ -156,7 +159,7 @@ impl System for TestSystem {
             i as u32 + 1
         }))
     }
-    fn wait(&mut self, pid: u32, out: &mut dyn FnMut(u32, &[u8])) -> Result<WaitStatus, Errno> {
+    fn wait(&mut self, pid: u32, out: &mut Output<'_>) -> Result<WaitStatus, Errno> {
         let i = self
             .child
             .take()
@@ -164,7 +167,7 @@ impl System for TestSystem {
             .ok_or(Errno::ECHILD)?;
         let p = &self.programs[i];
         for (fd, bytes) in &p.writes {
-            out(*fd, bytes);
+            self.answers.push(out(*fd, bytes));
         }
         Ok(p.status)
     }

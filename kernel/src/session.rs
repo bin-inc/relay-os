@@ -10,7 +10,7 @@ use crate::syscall::Spawn;
 use crate::{arch, console, exec, klog, klogln, power, proc, rtc, tty};
 use alloc::vec::Vec;
 use relay_abi::{FdMap, WaitStatus};
-use shell::{Console, MemInfo, Shell, System};
+use shell::{Console, MemInfo, Output, Shell, System};
 use vfs::{Env, Errno, Vfs};
 
 /// The screen and serial for output; the USB keyboards and COM1 for input.
@@ -112,7 +112,7 @@ impl System for KernelSystem {
 
     /// The command has the console, in line mode, while the shell waits
     /// for it (spec §6.4): a Ctrl-C kills it.
-    fn wait(&mut self, pid: u32, out: &mut dyn FnMut(u32, &[u8])) -> Result<WaitStatus, Errno> {
+    fn wait(&mut self, pid: u32, out: &mut Output<'_>) -> Result<WaitStatus, Errno> {
         proc::give_console(pid);
         let ended = proc::wait(pid, out);
         proc::take_console();

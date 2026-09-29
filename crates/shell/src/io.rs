@@ -7,6 +7,10 @@ use alloc::vec::Vec;
 use relay_abi::WaitStatus;
 use vfs::{Errno, Vfs};
 
+/// Where a program's output goes (`System::wait`): what it writes, on fd
+/// 1 or 2, and the write's error, if any.
+pub type Output<'a> = dyn FnMut(u32, &[u8]) -> Result<(), Errno> + 'a;
+
 /// The screen and keyboard.
 pub trait Console {
     /// The next input byte, waiting for one. `None` when input has ended,
@@ -61,8 +65,9 @@ pub trait System {
         None
     }
     /// Runs the program `spawn` started until it ends, giving what it
-    /// writes to fds 1 and 2 to `out`, and says how it ended.
-    fn wait(&mut self, _pid: u32, _out: &mut dyn FnMut(u32, &[u8])) -> Result<WaitStatus, Errno> {
+    /// writes to fds 1 and 2 to `out`, whose answer (a redirection file's
+    /// write error) is the program's, and says how it ended.
+    fn wait(&mut self, _pid: u32, _out: &mut Output<'_>) -> Result<WaitStatus, Errno> {
         Err(Errno::ECHILD)
     }
 }

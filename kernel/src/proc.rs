@@ -56,8 +56,9 @@ static SAVED: [AtomicU64; kstack::SLOTS] = [const { AtomicU64::new(0) }; kstack:
 static IDLE: AtomicU64 = AtomicU64::new(0);
 
 /// The in-kernel shell's output while it waits for a command (plan 2's
-/// hook, `System::wait`): what its children write to fds 1 and 2.
-type Out<'a> = &'a mut dyn FnMut(u32, &[u8]);
+/// hook, `System::wait`): what its children write to fds 1 and 2, and the
+/// answer to each write (a redirection file's error).
+type Out<'a> = &'a mut shell::Output<'a>;
 static SHELL_OUT: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Where the running context is saved when it gives up the CPU.
@@ -518,7 +519,7 @@ pub fn collect_orphans() {
 /// write to fds 1 and 2 to `out` meanwhile (plan 2's hook); then it
 /// collects the orphans that have ended. `ECHILD` if `pid` is not its
 /// child.
-pub fn wait(pid: u32, out: &mut dyn FnMut(u32, &[u8])) -> Result<WaitStatus, Errno> {
+pub fn wait(pid: u32, out: &mut shell::Output<'_>) -> Result<WaitStatus, Errno> {
     let mut out: Out<'_> = out;
     SHELL_OUT.store((&raw mut out).cast(), Ordering::Release);
     let ended = collect(Child::Pid(pid), false);
@@ -613,7 +614,7 @@ impl Caller for Current {
                     // SAFETY: set by the in-kernel shell's `wait`, which is
                     // blocked until its child has ended and clears it
                     // before it returns; nothing else calls it meanwhile.
-                    unsafe { (*out.cast::<Out<'_>>())(n, bytes) }
+                    return unsafe { (*out.cast::<Out<'_>>())(n, bytes) };
                 }
             }
         }
