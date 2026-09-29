@@ -1,6 +1,7 @@
 //! Host-side build tool for Relay OS. Run `cargo xtask --help`.
 
 mod build;
+mod checks;
 mod ci;
 mod config;
 mod e2e;

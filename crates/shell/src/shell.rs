@@ -1,11 +1,12 @@
 //! The shell itself: prompt, line editing, parsing, redirection, running a
 //! built-in command and syncing the filesystems after it (spec §7.3, §8.3).
 
-use crate::commands;
+use crate::commands::{self, Script};
 use crate::ctx::Ctx;
 use crate::editor::{Feed, LineEditor};
 use crate::io::{Console, System};
 use crate::parser::{self, HOME, Redirect};
+use crate::transcript::Transcript;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -29,6 +30,10 @@ pub struct Shell<'a> {
     editor: LineEditor,
     status: i32,
     stopped: bool,
+    /// A script's lines are running (`sh`).
+    in_script: bool,
+    /// Where a running script's screen output is copied.
+    transcript: Option<Transcript>,
 }
 
 impl<'a> Shell<'a> {
@@ -44,6 +49,8 @@ impl<'a> Shell<'a> {
             editor: LineEditor::new(),
             status: 0,
             stopped: false,
+            in_script: false,
+            transcript: None,
         }
     }
 
@@ -131,6 +138,8 @@ impl<'a> Shell<'a> {
             return self.finish(NOT_FOUND, format!("{NAME}: {name}: command not found\n"));
         };
         let mut ctx = Ctx::new(&mut *self.vfs, &mut *self.system, &mut *self.console, file);
+        ctx.in_script = self.in_script;
+        ctx.transcript = self.transcript.take();
         let mut status = (builtin.run)(&mut ctx, &cmd.words[1..]);
         let mut message = String::new();
         if let Err(e) = ctx.finish() {
@@ -141,8 +150,72 @@ impl<'a> Shell<'a> {
             message = String::from("^C\n");
             status = CANCELLED;
         }
+        self.transcript = ctx.transcript.take();
         self.stopped = ctx.exit;
+        if let Some(script) = ctx.script.take() {
+            status = self.run_script(script);
+        }
         self.finish(status, message)
+    }
+
+    /// Writes to the screen and, while a script runs, its transcript.
+    fn say(&mut self, bytes: &[u8]) {
+        self.console.write(bytes);
+        if let Some(t) = &mut self.transcript
+            && let Err(e) = t.add(&mut *self.vfs, bytes)
+        {
+            self.end_transcript(e);
+        }
+    }
+
+    /// Writes what the screen showed to the transcript. If that fails the
+    /// transcript ends there, with a message; the script goes on.
+    fn write_transcript(&mut self) {
+        if let Some(t) = &mut self.transcript
+            && let Err(e) = t.write(&mut *self.vfs)
+        {
+            self.end_transcript(e);
+        }
+    }
+
+    fn end_transcript(&mut self, e: Errno) {
+        if let Some(t) = self.transcript.take() {
+            self.console.write(t.ended(e).as_bytes());
+        }
+    }
+
+    /// Runs a script's lines (spec §15 item 12): each command is shown as
+    /// `+ <line>`, then runs and is synced as if typed. Blank and comment
+    /// lines are skipped. Ctrl-C, or `reboot`/`poweroff` returning, ends
+    /// the script; failing commands do not. Returns the last status.
+    fn run_script(&mut self, script: Script) -> i32 {
+        self.in_script = true;
+        self.transcript = Some(Transcript::new(script.transcript, script.transcript_name));
+        let mut status = 0;
+        for line in script.text.lines() {
+            if matches!(parser::parse(line), Ok(c) if c.words.is_empty() && c.redirect.is_none()) {
+                continue;
+            }
+            if self.console.interrupted() {
+                self.say(b"^C\n");
+                status = CANCELLED;
+                break;
+            }
+            // The line runs as written; only its trace is trimmed.
+            self.say(format!("+ {}\n", line.trim()).as_bytes());
+            // On the disk before the command runs: a command that hangs
+            // leaves at least its name.
+            self.write_transcript();
+            self.sync();
+            status = self.execute(line);
+            if status == CANCELLED || self.stopped {
+                break;
+            }
+        }
+        self.write_transcript();
+        self.transcript = None;
+        self.in_script = false;
+        status
     }
 
     /// Opens a redirection target: created if missing, emptied for `>`,
@@ -170,15 +243,20 @@ impl<'a> Shell<'a> {
         Ok((node, offset))
     }
 
-    /// Prints `message`, syncs, and records `status`.
+    /// Prints `message`, adds the line's output to a running script's
+    /// transcript, syncs, and records `status`.
     fn finish(&mut self, status: i32, message: String) -> i32 {
-        self.console.write(message.as_bytes());
-        if let Err(e) = self.vfs.sync() {
-            self.console
-                .write(format!("{NAME}: sync failed: {e}\n").as_bytes());
-        }
+        self.say(message.as_bytes());
+        self.write_transcript();
+        self.sync();
         self.status = status;
         status
+    }
+
+    fn sync(&mut self) {
+        if let Err(e) = self.vfs.sync() {
+            self.say(format!("{NAME}: sync failed: {e}\n").as_bytes());
+        }
     }
 }
 
@@ -228,6 +306,10 @@ mod tests {
         let mut shell = Shell::new(&mut h.vfs, &mut h.console, &mut h.system);
         shell.execute("nope");
         assert_eq!(shell.execute("   "), 127);
+        // So does a comment, and neither is followed by a sync.
+        assert_eq!(shell.execute("# echo hi"), 127);
+        assert_eq!(h.spy.syncs.get(), 1);
+        assert_eq!(h.console.text(), "relay-sh: nope: command not found\n");
     }
 
     #[test]

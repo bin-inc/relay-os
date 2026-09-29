@@ -21,6 +21,9 @@ pub struct TestConsole {
     pub columns: usize,
     /// Ctrl-C was pressed while a command runs.
     pub interrupt: bool,
+    /// Ctrl-C is pressed once `interrupted` has answered false this many
+    /// times.
+    pub interrupt_after: Option<usize>,
 }
 
 impl TestConsole {
@@ -30,6 +33,7 @@ impl TestConsole {
             output: Vec::new(),
             columns: 80,
             interrupt: false,
+            interrupt_after: None,
         }
     }
 
@@ -61,6 +65,11 @@ impl Console for TestConsole {
         self.columns
     }
     fn interrupted(&mut self) -> bool {
+        match &mut self.interrupt_after {
+            Some(0) => self.interrupt = true,
+            Some(n) => *n -= 1,
+            None => {}
+        }
         self.interrupt
     }
 }
@@ -129,6 +138,8 @@ pub struct SpyState {
     pub fail_unlink: Cell<Option<Errno>>,
     /// `read_at` calls.
     pub reads: Cell<u32>,
+    /// The most bytes one `write_at` was given.
+    pub largest_write: Cell<usize>,
 }
 
 /// A `MemFs` that counts syncs and shutdowns and can make them fail.
@@ -158,6 +169,8 @@ impl FileSystem for Spy {
         self.fs.read_at(ino, offset, buf)
     }
     fn write_at(&mut self, ino: Ino, offset: u64, buf: &[u8]) -> Result<usize, Errno> {
+        let largest = self.state.largest_write.get().max(buf.len());
+        self.state.largest_write.set(largest);
         if self.state.zero_writes.get() {
             return Ok(0);
         }

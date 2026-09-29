@@ -6,7 +6,8 @@
 //! (bash would expand it); outside quotes `\` makes the next character
 //! literal. `> file` and `>> file` redirect standard output (at most one
 //! per command). An unquoted `~` alone or before `/` at the start of a word
-//! means `/root`, as in Linux. Every other
+//! means `/root`, as in Linux. An unquoted `#` at the start of a word
+//! begins a comment, which runs to the end of the line. Every other
 //! shell feature is refused: an unquoted `|`, `;`, `&`, `$`, `*`, `?`, `<`,
 //! `` ` ``, `(` or `)` is an error naming the character, instead of being
 //! passed on as if it were plain text; so is `2>` (another stream).
@@ -160,6 +161,8 @@ pub fn parse(line: &str) -> Result<Command, ParseError> {
                 }
                 None => return Err(ParseError::TrailingBackslash),
             },
+            // A comment runs to the end of the line.
+            '#' if !word.started => break,
             c if UNSUPPORTED.contains(&c) => return Err(ParseError::Unsupported(c.into())),
             c => {
                 if !word.started && c == '~' {
@@ -195,6 +198,25 @@ mod tests {
         assert_eq!(words("  ls\t-l   /etc "), ["ls", "-l", "/etc"]);
         assert!(words("").is_empty());
         assert!(words(" \t ").is_empty());
+    }
+
+    #[test]
+    fn a_hash_at_the_start_of_a_word_begins_a_comment() {
+        assert_eq!(words("echo a # b | c; $d"), ["echo", "a"]);
+        assert!(words("# a whole line").is_empty());
+        assert!(words("   #").is_empty());
+        // As in bash: inside a word, quoted or escaped it is a character.
+        assert_eq!(
+            words(r##"echo a#b '#' "#" \#"##),
+            ["echo", "a#b", "#", "#", "#"]
+        );
+        assert_eq!(
+            parse("echo x >> # f"),
+            Err(ParseError::MissingTarget("newline"))
+        );
+        let c = parse("echo x > f # to f").unwrap();
+        assert_eq!(c.words, ["echo", "x"]);
+        assert_eq!(c.redirect.unwrap().path, "f");
     }
 
     #[test]

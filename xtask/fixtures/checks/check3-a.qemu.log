@@ -1,0 +1,144 @@
++ rm -rf /root/notes
++ uname -a
+Relay relay 0.1.0 x86_64
++ date
+Mon Sep 28 14:09:17 UTC 2026
++ dmesg
+Relay OS 0.1.0
+[ ok ] console 1920x1080 (120x33 cells)
+[ ok ] cpu tables
+[ ok ] boot info: 1008 MiB usable in 25 regions, cmdline 'test=1'
+[ ok ] memory: 976 MiB free of 1008 MiB, heap 32 MiB
+acpi: tables FACP APIC HPET MCFG WAET BGRT
+acpi: FADT reset io 0xcf9 <- 0xf, PM1a_CNT io 0x604, PM1b_CNT none, century register 0x32
+[ ok ] acpi: 6 tables, ECAM 0xe0000000 buses 0-255, HPET 0xfed00000, S5 0/0
+[ ok ] timer: TSC 2495.896 MHz (HPET), 1000 Hz tick (xAPIC)
+[ ok ] rtc: 2026-09-28 14:09:17 UTC
+pci: 00:00.0 8086:29c0 060000 host bridge
+pci: 00:01.0 1234:1111 030000 display, bar0 mem32 0x80000000 16M pf, bar2 mem32 0x81011000 4K
+pci: 00:02.0 1b36:000d 0c0330 USB xHCI, bar0 mem64 0x7000000000 16K
+pci: 00:1f.0 8086:2918 060100 ISA bridge
+pci: 00:1f.2 8086:2922 010601 SATA, bar4 io 0x6040 32, bar5 mem32 0x81010000 4K
+pci: 00:1f.3 8086:2930 0c0500 SMBus, bar4 io 0x6000 64
+[ ok ] pci: 6 devices on bus 00, xHCI at 00:02.0
+xhci 00:02.0: xHCI 1.00, 64 slots, 8 ports, 16 interrupters, 32-byte contexts, page size 4 KiB
+xhci 00:02.0: no legacy support capability
+xhci 00:02.0: already halted
+xhci 00:02.0: reset after 1 ms
+xhci 00:02.0: USB 2.0 ports 5-8, USB 3.0 ports 1-4
+xhci 00:02.0: no scratchpad buffers
+xhci 00:02.0: DCBAA 0x119000, command ring 0x11a000, event ring 0x11b000
+xhci 00:02.0: running
+xhci 00:02.0: ports settled after 98 ms
+usb: 00:02.0 xHCI 1.00, 8 ports (4 USB 2, 4 USB 3), 32-byte contexts, 0 scratchpads
+xhci 00:02.0: port 2: connected, PORTSC 0x00021203
+xhci 00:02.0: port 5: connected, PORTSC 0x00020ee1
+xhci 00:02.0: port 2: connection stable after 100 ms
+xhci 00:02.0: port 2: reset done, SuperSpeed
+xhci 00:02.0: port 2: slot 1 at address 1, 46f4:0001 USB 3.00, ep0 512 bytes, 1 configuration
+xhci 00:02.0: slot 1: interface 0 class 8/6/80, endpoints 0x81 bulk 1024 bytes interval 0, 0x02 bulk 1024 bytes interval 0
+xhci 00:02.0: slot 1: endpoint 0x81 configured (DCI 3, interval exponent 0)
+xhci 00:02.0: slot 1: endpoint 0x02 configured (DCI 4, interval exponent 0)
+storage: slot 1: vendor "QEMU", product "QEMU HARDDISK", revision "2.5+"
+storage: slot 1: 524288 blocks of 512 bytes
+xhci 00:02.0: port 5: connection stable after 100 ms
+xhci 00:02.0: port 5: reset done, high-speed
+xhci 00:02.0: port 5: slot 2 at address 2, 0627:0001 USB 2.00, ep0 64 bytes, 1 configuration
+xhci 00:02.0: slot 2: interface 0 class 3/1/1, endpoints 0x81 interrupt 8 bytes interval 7
+xhci 00:02.0: slot 2: endpoint 0x81 configured (DCI 3, interval exponent 6)
+usb: 00:02.0 port 2: 46f4:0001 SuperSpeed, disk QEMU QEMU HARDDISK, 256 MiB
+usb: 00:02.0 port 5: 0627:0001 high-speed, keyboard
+[ ok ] usb: 1 controller, 2 devices
+[ ok ] keyboard: 1 keyboard
+storage: 00:02.0 port 2: GPT with 2 partitions
+storage: root on 00:02.0 port 2, the disk with the boot partition 52454C41-5900-4000-8000-000000000002
+[ ok ] mount /: ext2 on 00:02.0 port 2 partition 2, 190 MiB
++ mkdir -p /root/notes/old
++ echo remember me > /root/notes/a
++ echo and me >> /root/notes/a
++ cat /root/notes/a
+remember me
+and me
++ ls -l /root/notes
+total 8
+-rw-r--r-- 1 root root   19 Sep 28 14:09 a
+drwxr-xr-x 2 root root 4096 Sep 28 14:09 old
++ cp /root/notes/a /root/notes/b
++ mv /root/notes/b /root/notes/old/c
++ ls /root/notes /root/notes/old
+/root/notes:
+a  old
+
+/root/notes/old:
+c
++ rmdir /root/notes/old
+rmdir: failed to remove '/root/notes/old': Directory not empty
++ rm -r /root/notes/old
++ ls /root/notes
+a
++ touch /root/notes/t
++ stat /root/notes/t
+  File: /root/notes/t
+  Size: 0         	Blocks: 0          IO Block: 4096   regular empty file
+Inode: 24322       Links: 1
+Access: (0644/-rw-r--r--)  Uid: (    0/    root)   Gid: (    0/    root)
+Access: 2026-09-28 14:09:17.000000000 +0000
+Modify: 2026-09-28 14:09:17.000000000 +0000
+Change: 2026-09-28 14:09:17.000000000 +0000
+ Birth: -
++ head -n 1 /root/notes/a
+remember me
++ tail -n 1 /root/notes/a
+and me
++ wc /root/notes/a
+ 2  4 19 /root/notes/a
++ cat /root/nope
+cat: /root/nope: No such file or directory
++ rm -r /
+rm: it is dangerous to operate recursively on '/'
++ echo 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde > /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ cat /root/notes/big > /root/notes/tmp
++ cat /root/notes/tmp >> /root/notes/big
++ wc /root/notes/big
+ 131072  131072 8388608 /root/notes/big
++ cp /root/notes/big /root/notes/copy
++ wc /root/notes/copy
+ 131072  131072 8388608 /root/notes/copy
++ rm /root/notes/tmp /root/notes/copy
++ ls /root/notes
+a  big  t
++ df
+Filesystem     1K-blocks Used Available Use% Mounted on
+/dev/root         182368 8300    164340   5% /

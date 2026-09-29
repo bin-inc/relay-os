@@ -155,13 +155,22 @@ The NUC has no serial port, so a keyboard that does not work cannot run
 | `[FAIL] keyboard: no USB keyboard found` and no `port 3` line | The K120 connected after the boot's wait, or not at all | Type anyway: a late keyboard is set up when it appears. If nothing works, `debug=usb`: a `port 3: connected` line means it appeared late, none means the port never saw it; the `ports settled` line shows the wait |
 | Keys show up twice or not at all | Firmware still emulating a keyboard (handoff) | `debug=usb`: the `legacy support` line |
 
-## Check 3 — files on the stick (plan 5)
+## Check 3 — files on the stick (plans 5 and 6)
 
 The full checklist of spec §9.4. The K120 and the stick sit on the ports of
-check 2 (the stick on bus 4 port 3 in Mint's `lsusb -t`).
+check 2 (the stick on bus 4 port 3 in Mint's `lsusb -t`). Since plan 6 the
+commands come from two scripts on the stick, `/root/checks/check3-a.sh` and
+`check3-b.sh` (in the repository under `rootfs/root/checks/`): `sh` runs
+each line as if it were typed, shows it as `+ <command>` before its output,
+and writes everything it shows into a transcript next to the script
+(`check3-a.log`). `verify-usb` checks the transcripts in Mint against the
+output the scripts expect (their `#>` lines), so only the boot screen needs
+a look. The QEMU scenario `checks` runs the same scripts on every pull
+request.
 
 1. In Mint: `cargo xtask flash --full` and type `ERASE` when asked (this
-   erases the files of earlier runs).
+   erases the files of earlier runs and writes the current scripts;
+   `flash --kernel` leaves the scripts on the stick as they were).
 2. Reboot, press F10 and choose the UEFI entry for the Kingston stick.
 3. The screen shows every startup line `[ ok ]`, at the monitor's native
    resolution (`console 1920x1200` on the ASUS PA248QV). After check 2's
@@ -171,33 +180,32 @@ check 2 (the stick on bus 4 port 3 in Mint's `lsusb -t`).
    - `[ ok ] usb: 2 controllers, 4 devices`, `[ ok ] keyboard: 2 keyboards`
    - `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 14.3 GiB`
    - the motd (`Welcome to Relay OS.`) and the prompt `root@relay:~# `.
-4. On the K120, type these and check each result (the `fileops` scenario's
-   operations):
-   - `mkdir -p /root/notes/old`, `echo remember me > /root/notes/a`,
-     `echo and me >> /root/notes/a`, `cat /root/notes/a` → the two lines.
-   - `ls -l /root/notes` → `a` (19 bytes) and the directory `old`, owned
-     by `root root`, with today's date.
-   - `cp /root/notes/a /root/notes/b`, `mv /root/notes/b /root/notes/old/c`,
-     `ls /root/notes /root/notes/old` → `a  old`, then `c`.
-   - `rmdir /root/notes/old` → `rmdir: failed to remove '/root/notes/old':
-     Directory not empty`; `rm -r /root/notes/old`; `ls /root/notes` → `a`.
-   - `touch /root/notes/t`, `stat /root/notes/t` (size 0, mode 0644, the
-     current UTC time), `head -n 1 /root/notes/a`, `tail -n 1
-     /root/notes/a`, `wc /root/notes/a` → `2 4 19`.
-   - `cat /root/nope` → `cat: /root/nope: No such file or directory`;
-     `rm -r /` → `rm: it is dangerous to operate recursively on '/'`.
-   - `df` shows `/dev/root` of about 15 million 1K-blocks; `dmesg` shows the
-     `storage: slot N:` lines (`Kingston`, `DataTraveler 3.0`, `PMAP`,
-     `30277632 blocks of 512 bytes`).
+
+   Photograph the screen.
+4. On the K120, type `sh checks/check3-a.sh`. It runs for about a minute:
+   `uname -a`, `date`, `dmesg` (every startup line of checks 1-3, checked
+   later), the `fileops` scenario's operations on `/root/notes` (`mkdir -p`,
+   `echo >`/`>>`, `cat`, `ls -l`, `cp`, `mv`, `rmdir` of a full directory,
+   `rm -r`, `touch`, `stat`, `head`, `tail`, `wc`, the errors of `cat` and
+   `rm -r /`), an 8 MiB file built by doubling (each step writes up to
+   4 MiB to the stick and syncs), and `df`. Ctrl-C stops it. The prompt
+   comes back after `+ df` and its two lines.
 5. `reboot`: the NUC restarts (`relay: restarting`). Choose the stick again
-   with F10; `cat /root/notes/a` shows both lines and `ls /root/notes`
-   shows `a  t`.
+   with F10 and type `sh checks/check3-b.sh`: the files written before the
+   restart are read back.
 6. `poweroff`: the NUC switches itself off (`relay: powering off`). If the
    screen says `System halted. It is now safe to power off.` instead, note
    the `relay:` line above it and hold the power button.
-7. Boot Mint and run `cargo xtask verify-usb`: `e2fsck: clean`, and the
-   tree lists `/root/notes/a` and `/root/notes/t`.
-8. Photograph the screen after step 3 and after `dmesg`.
+7. Boot Mint and run `cargo xtask verify-usb`: `e2fsck: clean`, the tree
+   lists `/root/notes/a`, `/root/notes/big` (8388608 bytes) and
+   `/root/notes/t`, and the last lines are
+   `/root/checks/check3-a.sh: ok, 63 of 63 commands as expected (run <time>)`
+   and `/root/checks/check3-b.sh: ok, 5 of 5 commands as expected (run
+   <time>)`, with the UTC times of the two runs (after `flash --kernel` the
+   transcripts of an earlier run stay on the stick, so check the times). A
+   `FAILED` line is followed by the script line, the expectation that
+   failed and what the command printed there; a script that was not run is
+   `FAILED, not run`.
 
 ### If it fails
 
@@ -213,6 +221,9 @@ check 2 (the stick on bus 4 port 3 in Mint's `lsusb -t`).
 | A command prints `Input/output error` | A disk request failed after three tries | `dmesg`: the `storage:` and `usb:` lines name the command and block |
 | `reboot` leaves the screen as it is | No reset method worked (unlikely: the last is a triple fault) | Photograph the screen; hold the power button |
 | `verify-usb` reports errors | A write was lost or wrong | Do not flash again: keep the stick as it is and report the output |
+| `verify-usb`: `check3-a.sh: FAILED` | A command printed something else than the script expects | The line after it names the command, the expectation and the line it printed instead; the whole transcript is `/root/checks/check3-a.log` on the stick (`cat checks/check3-a.log` on the NUC) |
+| `verify-usb`: `… are not in the transcript` | The script stopped (Ctrl-C, a hang, a restart) before that command | Photograph the screen where it stopped; the transcript ends with the last command that ran |
+| `sh: cannot write the transcript …` | `/` is read-only (see the `mount /` line) | Nothing ran; fix the mount first |
 
 ## Results log
 
