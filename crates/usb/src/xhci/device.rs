@@ -4,7 +4,7 @@
 //! nothing else.
 
 use super::context::{CONTROL, EndpointContext, Input, Output, SlotContext, speed_id};
-use super::regs::CCS;
+use super::regs::{CCS, CSC};
 use super::transfer::DATA_BUFFER_SIZE;
 use super::trb::Trb;
 use super::{Device, Slot, Xhci};
@@ -20,6 +20,11 @@ use core::time::Duration;
 /// A connection must last this long before the port is reset (USB 2.0
 /// 7.1.7.3: 100 ms of debounce).
 pub const DEBOUNCE: Duration = Duration::from_millis(100);
+/// How often the debounce looks at the port (Linux: 25 ms).
+const DEBOUNCE_STEP: Duration = Duration::from_millis(25);
+/// How long a connection may bounce before the debounce gives up (Linux:
+/// 2 s).
+const DEBOUNCE_LIMIT: Duration = Duration::from_secs(2);
 /// How long a device gets after SET_ADDRESS before its next request.
 const SET_ADDRESS_RECOVERY: Duration = Duration::from_millis(10);
 /// Input control context flags: A0 is the slot context, A1 EP0.
@@ -85,10 +90,10 @@ impl<H: Hal> Xhci<H> {
     }
 
     /// Sets up the device on `port` (spec §6.2 steps 1-5): debounce (the
-    /// port must still be connected 100 ms after this call starts), port
-    /// reset, Enable Slot, Address Device, device descriptor (fixing EP0's
-    /// packet size), configuration descriptor. On an error the slot is
-    /// disabled and everything allocated for it freed.
+    /// connection must be stable for 100 ms), port reset, Enable Slot,
+    /// Address Device, device descriptor (fixing EP0's packet size),
+    /// configuration descriptor. On an error the slot is disabled and
+    /// everything allocated for it freed.
     pub fn attach(&mut self, port: u8) -> Result<Device, UsbError> {
         if self.dead {
             return Err(UsbError::ControllerDead);
@@ -107,19 +112,7 @@ impl<H: Hal> Xhci<H> {
             );
             return Err(UsbError::Unsupported("port already attached"));
         }
-        let start = self.hal.now();
-        if self.connected(port) {
-            let waited = self.hal.now() - start;
-            self.hal.sleep(DEBOUNCE.saturating_sub(waited));
-        }
-        if !self.connected(port) {
-            xlog!(
-                &self.hal,
-                &self.name,
-                "port {port}: not connected after debounce"
-            );
-            return Err(UsbError::Disconnected);
-        }
+        self.debounce(port)?;
         let speed = self.reset_port(port)?;
         let slot = self.enable_slot(port)?;
         match self.enumerate(slot, port, speed) {
@@ -137,6 +130,62 @@ impl<H: Hal> Xhci<H> {
                 );
                 self.release_slot(slot);
                 Err(e)
+            }
+        }
+    }
+
+    /// Waits until the connection on `port` has been stable for 100 ms
+    /// (USB 2.0 7.1.7.3), as Linux's `hub_port_debounce` does: it looks
+    /// every 25 ms, and a change of CCS, or a CSC, starts the 100 ms again.
+    /// It clears CSC, so the next `port_changes` does not take the bounce
+    /// for a replug; a change after the debounce sets it again. A
+    /// connection stable for 100 ms is `Ok`, none for 100 ms is
+    /// `Disconnected`. After 2 s of bouncing it gives up: `Disconnected` if
+    /// the last look showed no connection (the next connect is a change
+    /// again), `Timeout` if it did (the host tries again).
+    fn debounce(&self, port: u8) -> Result<(), UsbError> {
+        let start = self.hal.now();
+        let (mut since, mut connected) = (start, None);
+        let stable = loop {
+            let sc = self.regs.portsc(&self.hal, port);
+            let now = self.hal.now();
+            let ccs = sc & CCS != 0;
+            if sc & CSC != 0 || connected != Some(ccs) {
+                self.clear_changes(port, sc, CSC);
+                (since, connected) = (now, Some(ccs));
+            } else if now - since >= DEBOUNCE {
+                break true;
+            }
+            if now - start >= DEBOUNCE_LIMIT {
+                break false;
+            }
+            self.hal.sleep(DEBOUNCE_STEP);
+        };
+        let waited = (self.hal.now() - start).as_millis();
+        match (connected, stable) {
+            (Some(true), true) => {
+                xlog!(
+                    &self.hal,
+                    &self.name,
+                    "port {port}: connection stable after {waited} ms"
+                );
+                Ok(())
+            }
+            (Some(true), false) => {
+                xlog!(
+                    &self.hal,
+                    &self.name,
+                    "port {port}: connection not stable after {waited} ms"
+                );
+                Err(UsbError::Timeout)
+            }
+            _ => {
+                xlog!(
+                    &self.hal,
+                    &self.name,
+                    "port {port}: not connected after debounce"
+                );
+                Err(UsbError::Disconnected)
             }
         }
     }
@@ -585,6 +634,105 @@ mod tests {
             .filter(|(p, v)| *p == 1 && v & PR != 0)
             .count();
         assert_eq!(resets, 0);
+    }
+
+    /// When the port reset of `port` began (the fake's reset takes 10 ms).
+    fn reset_began(hal: &FakeHal, port: u8) -> Duration {
+        hal.fake().reset_done_at(port).expect("the port was reset") - Duration::from_millis(10)
+    }
+
+    #[test]
+    fn a_steady_connection_is_reset_after_100_ms() {
+        let k120 = FakeUsbDevice::k120();
+        let (hal, mut xhci) = plugged(FakeConfig::basic(), 1, &k120);
+        let start = hal.clock();
+        xhci.attach(1).unwrap();
+        let waited = reset_began(&hal, 1) - start;
+        assert!(waited >= DEBOUNCE && waited < DEBOUNCE + Duration::from_millis(5));
+        assert!(
+            hal.log_text()
+                .contains("xhci 00:14.0: port 1: connection stable after 100 ms")
+        );
+    }
+
+    #[test]
+    fn a_device_that_bounces_is_reset_100_ms_after_its_last_change() {
+        // Out at 50 ms and in at 60 ms; and out and in again between two
+        // looks, where only CSC shows it.
+        for (out, back) in [(50, 60), (30, 40)] {
+            let k120 = FakeUsbDevice::k120();
+            let (hal, mut xhci) = plugged(FakeConfig::basic(), 1, &k120);
+            let start = hal.clock();
+            let again = k120.clone();
+            hal.fake()
+                .after(Duration::from_millis(out), |x, _| x.unplug(1));
+            hal.fake()
+                .after(Duration::from_millis(back), move |x, _| x.plug(1, again));
+            assert_eq!(xhci.attach(1).map(|d| d.port), Ok(1));
+            let settled = Duration::from_millis(back) + DEBOUNCE;
+            assert!(
+                reset_began(&hal, 1) - start >= settled,
+                "bounce at {out}-{back} ms: reset {:?} after the attach began",
+                reset_began(&hal, 1) - start
+            );
+            assert!(hal.clock() - start >= settled);
+            // The bounce is not taken for a replug later.
+            assert_eq!(xhci.port_changes(), vec![], "bounce at {out}-{back} ms");
+            // A real unplug still is.
+            hal.fake().unplug(1);
+            let changes = xhci.port_changes();
+            assert_eq!(changes.len(), 1);
+            assert_eq!(
+                (changes[0].connected, changes[0].reconnected),
+                (false, true)
+            );
+        }
+    }
+
+    #[test]
+    fn a_replug_while_the_unplugs_csc_is_cleared_still_counts() {
+        // Out at 40 ms; in again just as the debounce, looking at 50 ms,
+        // clears the unplug's CSC, which clears the replug's too: only CCS
+        // shows the device is back. One of these instants is the one.
+        for us in 0..=10 {
+            let k120 = FakeUsbDevice::k120();
+            let (hal, mut xhci) = plugged(FakeConfig::basic(), 1, &k120);
+            let again = k120.clone();
+            hal.fake()
+                .after(Duration::from_millis(40), |x, _| x.unplug(1));
+            let back = Duration::from_millis(50) + Duration::from_micros(us);
+            hal.fake().after(back, move |x, _| x.plug(1, again));
+            assert_eq!(xhci.attach(1).map(|d| d.port), Ok(1), "back at {back:?}");
+        }
+    }
+
+    #[test]
+    fn a_connection_that_keeps_bouncing_is_given_up_after_2_s_without_a_reset() {
+        // Every 40 ms out for 20 ms, for 3 s; at 2 s it is in, or out.
+        for (phase, outcome) in [(10, UsbError::Timeout), (30, UsbError::Disconnected)] {
+            let k120 = FakeUsbDevice::k120();
+            let (hal, mut xhci) = plugged(FakeConfig::basic(), 1, &k120);
+            let start = hal.clock();
+            for n in 0..75 {
+                let again = k120.clone();
+                let out = Duration::from_millis(phase + 40 * n);
+                hal.fake().after(out, |x, _| x.unplug(1));
+                let back = out + Duration::from_millis(20);
+                hal.fake().after(back, move |x, _| x.plug(1, again));
+            }
+            assert_eq!(xhci.attach(1).err(), Some(outcome), "phase {phase} ms");
+            let took = hal.clock() - start;
+            assert!(took >= Duration::from_secs(2) && took < Duration::from_millis(2050));
+            assert_eq!(hal.fake().reset_done_at(1), None, "no reset");
+            assert!(!hal.fake().slot_enabled(1));
+            let log = hal.log_text();
+            match outcome {
+                UsbError::Timeout => {
+                    assert!(log.contains("port 1: connection not stable after 2000 ms"))
+                }
+                _ => assert!(log.contains("port 1: not connected after debounce")),
+            }
+        }
     }
 
     #[test]

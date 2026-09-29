@@ -165,7 +165,7 @@ impl FakeXhci {
             panic!("fake xhci: R/S set without an event ring");
         }
         self.scratchpad_pages = self.read_scratchpads(dma);
-        if let Some(delay) = self.config.run_time {
+        if let Some(delay) = self.config.run_time.filter(|_| !self.config.starts_late) {
             self.after(delay, |x, _| x.usbsts &= !HCH);
         }
     }

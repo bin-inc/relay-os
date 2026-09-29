@@ -120,6 +120,13 @@ impl Memory {
             s.free(hal);
         }
     }
+
+    /// Leaks all of it: a controller that did not halt may still write any
+    /// of it (spec §15 item 10: nothing of a dead controller is freed).
+    fn keep<H: Hal>(self, hal: &H, name: &str) {
+        xlog!(hal, name, "memory kept: the controller did not halt");
+        core::mem::forget(self);
+    }
 }
 
 /// Programs the rings and starts the controller (xHCI 4.2): slots, DCBAA,
@@ -202,7 +209,8 @@ impl<H: Hal> Xhci<H> {
     /// registers at `mmio_phys`, BIOS handoff, halt, reset, scratchpad
     /// buffers, DCBAA, command and event rings, run, port power. `name`
     /// (the PCI address, "00:14.0") starts every log line. On an error
-    /// everything allocated is freed again.
+    /// everything allocated is freed again, unless the controller did not
+    /// start and then did not halt either: then its memory is kept.
     pub fn new(hal: H, mmio_phys: u64, mmio_len: usize, name: &str) -> Result<Xhci<H>, UsbError> {
         let started = hal.now();
         let Some(base) = hal.map_mmio(mmio_phys, mmio_len) else {
@@ -293,7 +301,12 @@ impl<H: Hal> Xhci<H> {
             mem.events.phys()
         );
         if let Err(e) = run(&hal, &regs, &params, &mem, name) {
-            mem.free(&hal);
+            // It may yet start (late): its memory is freed only once it
+            // is halted.
+            match halt(&hal, &regs, name) {
+                Ok(()) => mem.free(&hal),
+                Err(_) => mem.keep(&hal, name),
+            }
             return Err(e);
         }
         let powered = power_ports(&hal, &regs, &params);
@@ -489,6 +502,35 @@ mod tests {
             hal.log_text()
                 .contains("USBSTS.HCH still 1 1000 ms after R/S = 1")
         );
+    }
+
+    #[test]
+    fn a_controller_that_neither_runs_nor_halts_keeps_its_memory() {
+        let mut config = FakeConfig::intel();
+        // Found halted, so the first halt does not need it to halt.
+        config.running = false;
+        config.starts_late = true;
+        config.halt_time = None;
+        let hal = FakeHal::with_controller(config);
+        assert_eq!(new(&hal).err(), Some(UsbError::Timeout));
+        assert!(hal.fake().running(), "it started after all");
+        // The scratchpads and their array, the DCBAA, both rings and the
+        // ERST: the controller may still write any of them.
+        assert_eq!(hal.outstanding_dma(), 7);
+        let log = hal.log_text();
+        assert!(log.contains("USBSTS.HCH still 0 1000 ms after R/S = 0"));
+        assert!(log.ends_with("xhci 00:14.0: memory kept: the controller did not halt"));
+    }
+
+    #[test]
+    fn a_controller_that_does_not_run_but_halts_when_asked_is_freed() {
+        let mut config = FakeConfig::intel();
+        config.starts_late = true;
+        let hal = FakeHal::with_controller(config);
+        assert_eq!(new(&hal).err(), Some(UsbError::Timeout));
+        assert!(!hal.fake().running());
+        assert_eq!(hal.outstanding_dma(), 0);
+        assert!(!hal.log_text().contains("memory kept"));
     }
 
     #[test]

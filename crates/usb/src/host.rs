@@ -22,7 +22,7 @@ pub const ATTACH_TRIES: u32 = 3;
 
 mod boot_line;
 
-pub use boot_line::{Attached, DiskId, DiskInfo, Found};
+pub use boot_line::{Attached, DiskId, DiskInfo, Found, Size};
 
 /// A disk in use: its id, the port of its device and the driver.
 struct Disk {

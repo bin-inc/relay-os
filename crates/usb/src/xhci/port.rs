@@ -39,7 +39,7 @@ impl<H: Hal> Xhci<H> {
     }
 
     /// Clears the change bits in `bits` (RW1C) and nothing else.
-    fn clear_changes(&self, port: u8, portsc: u32, bits: u32) {
+    pub(super) fn clear_changes(&self, port: u8, portsc: u32, bits: u32) {
         if portsc & bits != 0 {
             let value = portsc_neutral(portsc) | portsc & bits;
             self.regs.set_portsc(&self.hal, port, value);
@@ -67,8 +67,9 @@ impl<H: Hal> Xhci<H> {
 
     /// Ports whose status changed since the last call, in port order, with
     /// their change bits cleared. Right after `new` every port that is
-    /// connected counts as changed, so the caller attaches boot-time devices
-    /// and later hot-plugged ones the same way. Calls `poll` first.
+    /// connected counts as changed, and only those, so the caller attaches
+    /// boot-time devices and later hot-plugged ones the same way. Calls
+    /// `poll` first.
     pub fn port_changes(&mut self) -> Vec<PortChange> {
         self.poll();
         let mut changes = Vec::new();
@@ -89,7 +90,10 @@ impl<H: Hal> Xhci<H> {
             self.clear_changes(port, sc, CHANGE_BITS);
             let connected = sc & CCS != 0;
             let reconnected = sc & CSC != 0;
-            if self.ports[i].is_none() || !(reconnected || first && connected) {
+            // At the first look only a connection counts: a CSC on an empty
+            // port (a device gone before the driver started) is no news.
+            let counts = if first { connected } else { reconnected };
+            if self.ports[i].is_none() || !counts {
                 continue;
             }
             let what = if connected {
@@ -439,6 +443,33 @@ mod tests {
                 assert_eq!(hal.fake().portsc(port) & CHANGE_BITS, 0, "port {port}");
             }
         }
+    }
+
+    #[test]
+    fn an_empty_port_with_a_connect_change_is_not_in_the_first_port_changes() {
+        let (hal, mut xhci) = start(FakeConfig::basic());
+        // In and out again before the first look: CSC set, no connection.
+        hal.fake().plug(2, FakeUsbDevice::k120());
+        hal.fake().unplug(2);
+        assert_eq!(hal.fake().portsc(2) & (CCS | CSC), CSC);
+        assert_eq!(xhci.port_changes(), vec![]);
+        assert!(!hal.log_text().contains("port 2: disconnected"));
+        assert_eq!(hal.fake().portsc(2) & CHANGE_BITS, 0, "CSC cleared");
+        assert_eq!(xhci.port_changes(), vec![]);
+        // Later a disconnect counts again.
+        hal.fake().plug(2, FakeUsbDevice::k120());
+        assert_eq!(xhci.port_changes(), vec![change(2, true, true)]);
+        hal.fake().unplug(2);
+        assert_eq!(xhci.port_changes(), vec![change(2, false, true)]);
+        assert!(hal.log_text().contains("port 2: disconnected, PORTSC"));
+    }
+
+    #[test]
+    fn a_connection_at_the_first_look_counts_without_a_connect_change() {
+        let (hal, mut xhci) = start(FakeConfig::basic());
+        hal.fake().plug(2, FakeUsbDevice::k120());
+        xhci.clear_changes(2, xhci.portsc(2), CSC);
+        assert_eq!(xhci.port_changes(), vec![change(2, true, false)]);
     }
 
     #[test]

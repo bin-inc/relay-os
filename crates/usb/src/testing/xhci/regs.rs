@@ -230,6 +230,9 @@ impl FakeXhci {
         }
         self.usbcmd = value;
         if was & RUN != 0 && value & RUN == 0 {
+            if self.config.starts_late {
+                self.usbsts &= !HCH;
+            }
             if let Some(delay) = self.config.halt_time {
                 self.after(delay, |x, _| x.usbsts |= HCH);
             }
