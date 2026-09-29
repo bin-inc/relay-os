@@ -23,8 +23,7 @@ impl Qemu {
     /// Copies the image and a fresh OVMF variable store into `run_dir`,
     /// which becomes private to this user.
     pub fn prepare(image: &Path, run_dir: &Path) -> Result<Qemu> {
-        fs::create_dir_all(run_dir)?;
-        fs::set_permissions(run_dir, fs::Permissions::from_mode(0o700))?;
+        private_dir(run_dir)?;
         let disk = run_dir.join("disk.img");
         let vars = run_dir.join("OVMF_VARS.fd");
         fs::copy(image, &disk).context("copying disk image")?;
@@ -82,6 +81,14 @@ impl Qemu {
         }
         c
     }
+}
+
+/// Creates `dir` if needed and makes it private to this user (mode 0700):
+/// it holds the QMP socket, and QMP can make QEMU run commands.
+pub fn private_dir(dir: &Path) -> Result<()> {
+    fs::create_dir_all(dir)?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    Ok(())
 }
 
 /// QEMU tries `-accel` options in order. By default KVM, falling back to TCG
@@ -151,13 +158,16 @@ mod tests {
     #[test]
     fn the_run_directory_is_private() {
         let dir = crate::util::out_dir().join("qemu-selftest");
-        let image = dir.join("image");
         fs::create_dir_all(&dir).unwrap();
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::write(&image, b"").unwrap();
         let run = dir.join("run");
         let _ = fs::remove_dir_all(&run);
-        Qemu::prepare(&image, &run).unwrap();
+        // Not `Qemu::prepare`, which also needs OVMF: the `unit` job has none.
+        private_dir(&run).unwrap();
+        let mode = fs::metadata(&run).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        // An existing directory is made private too.
+        fs::set_permissions(&run, fs::Permissions::from_mode(0o755)).unwrap();
+        private_dir(&run).unwrap();
         let mode = fs::metadata(&run).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700);
     }
