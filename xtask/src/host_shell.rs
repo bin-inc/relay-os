@@ -278,7 +278,7 @@ mod tests {
         let img = dir.join("disk.img");
         let _ = std::fs::remove_file(&img);
         File::create(&img).unwrap().set_len(IMAGE_BYTES).unwrap();
-        image::partition(&img, true).unwrap();
+        image::partition(&img, true, None).unwrap();
         let layout = image::read_layout(&img).unwrap();
         let staging = image::stage_rootfs().unwrap();
         image::make_ext2(&img, layout.root, &staging).unwrap();

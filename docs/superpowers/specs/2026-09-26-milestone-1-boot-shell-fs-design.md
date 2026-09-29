@@ -144,7 +144,7 @@ GPT with two partitions:
 | # | Type | Size | Contents |
 |---|---|---|---|
 | 1 | EFI System (FAT32, label `RELAYESP`) | 64 MiB | `\EFI\BOOT\BOOTX64.EFI`, `\EFI\RELAY\kernel.elf`, optional `\EFI\RELAY\cmdline` |
-| 2 | Linux filesystem (ext2, label `relayroot`) | rest of the disk (image: about 190 MiB; stick: about 14.3 GB) | the `/` tree |
+| 2 | Linux filesystem (ext2, label `relayroot`) | image: the rest of the disk, about 190 MiB; stick: 2 GiB, the rest of the stick unused (since milestone 2's plan 2, user-space gate spec §16 item 2; about 14.3 GB before) | the `/` tree |
 
 ### 4.2 `relay-boot` (UEFI application)
 
@@ -677,7 +677,7 @@ directories have `0755`.
 | `cargo xtask host-shell <img>` | Runs the `shell` crate on the host over the ext2 partition of an image file, through a file-backed `BlockDevice`. Used to develop the filesystem and shell before the hardware drivers exist. |
 | `cargo xtask test` | `cargo test` for all host-testable crates, then `build` and `image`, then every QEMU scenario (§9.3). Exits non-zero on the first failure and prints the serial log and screenshot path. |
 | `cargo xtask flash --kernel` | Replaces `BOOTX64.EFI`, `kernel.elf` and `cmdline` on the stick's ESP using `mcopy -o`, addressing the ESP by its byte offset on the whole-disk device (§15). The stick's `cmdline` is empty by default; `test=1` goes only into QEMU test images. The ext2 root isn't touched, so files created on the NUC are kept. |
-| `cargo xtask flash --full` | After a typed confirmation: writes a new GPT, formats the ESP, runs `mke2fs` over the rest of the stick (same options as `image`), fills it, sets ownership, then writes the ESP files. |
+| `cargo xtask flash --full` | After a typed confirmation: writes a new GPT, formats the ESP, runs `mke2fs` over a 2 GiB root partition (same options as `image`; the whole rest of the stick until milestone 2's plan 2), fills it, sets ownership, then writes the ESP files. |
 | `cargo xtask verify-usb` | Runs `e2fsck -fn` on the stick's ext2 partition, prints its file tree using `debugfs`, and checks the transcripts of the check scripts in `/root/checks` (§15 item 12). |
 | `cargo xtask setup-udev` | Writes a udev rule that gives the invoking user read/write access to the disk and partitions **with this stick's serial only**, and prints the three `sudo` commands that install it (§15). |
 

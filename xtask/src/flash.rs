@@ -4,7 +4,7 @@
 
 use crate::build::Artifacts;
 use crate::checks::{self, Machine};
-use crate::config::{USB_BY_ID, USB_MAX_BYTES, USB_SERIAL};
+use crate::config::{STICK_ROOT_SECTORS, USB_BY_ID, USB_MAX_BYTES, USB_SERIAL};
 use crate::image::{self, Layout, Partition, e2fs_target};
 use crate::util::{out_dir, run, run_stdout};
 use anyhow::{Context, Result, bail};
@@ -181,13 +181,13 @@ pub fn flash_full(art: &Artifacts, cmdline: &str, yes: bool) -> Result<()> {
     let stick = resolve()?;
     unmount_all(&stick)?;
     ensure_access(&stick, true)?;
-    image::partition(Stick::target(), false)?;
+    image::partition(Stick::target(), false, Some(STICK_ROOT_SECTORS))?;
     let layout = image::read_layout(Stick::target())?;
     image::write_esp(Stick::target(), layout.esp, art, cmdline, true)?;
     let staging = image::stage_rootfs()?;
     println!(
-        "creating ext2 on {:.1} GB (takes a minute)...",
-        layout.root.bytes() as f64 / 1e9
+        "creating ext2 on {:.1} GiB...",
+        layout.root.bytes() as f64 / (1u64 << 30) as f64
     );
     image::make_ext2(Stick::target(), layout.root, &staging)?;
     sync()?;

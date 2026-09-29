@@ -18,6 +18,11 @@ pub const SMALL_IMAGE_BYTES: u64 = (ROOT_START_LBA * SECTOR) + (32 << 20) + (1 <
 pub const ESP_START_LBA: u64 = 2048;
 pub const ESP_SECTORS: u64 = 131_072; // 64 MiB
 pub const ROOT_START_LBA: u64 = ESP_START_LBA + ESP_SECTORS;
+/// The ext2 root on the stick: 2 GiB, not the rest of the stick. ext2 has
+/// no lazy inode-table initialisation and USB sticks take no discard, so
+/// `mke2fs` writes every inode table over USB: about 32 MiB for 2 GiB, 230
+/// MiB for the whole 15.4 GB stick. The rest of the stick stays unused.
+pub const STICK_ROOT_SECTORS: u64 = (2 << 30) / SECTOR;
 
 pub const ESP_TYPE_GUID: &str = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
 pub const LINUX_FS_TYPE_GUID: &str = "0FC63DAF-8483-4772-8E79-3D69D8477DE4";
