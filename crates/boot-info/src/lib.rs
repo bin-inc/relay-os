@@ -7,7 +7,8 @@
 
 /// `"RELAYBOO"` in ASCII, little-endian.
 pub const BOOT_INFO_MAGIC: u64 = u64::from_le_bytes(*b"RELAYBOO");
-pub const BOOT_INFO_VERSION: u32 = 1;
+/// 2: `system_image_*` (the user-space gate, spec §4.3).
+pub const BOOT_INFO_VERSION: u32 = 2;
 
 /// Virtual address the kernel ELF is linked at.
 pub const KERNEL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
@@ -146,6 +147,11 @@ pub struct BootInfo {
     /// order. Only meaningful when `has_boot_partition_guid` is 1.
     pub boot_partition_guid: [u8; 16],
     pub has_boot_partition_guid: u32,
+    /// Physical address and length of `\EFI\RELAY\system.img`, which the
+    /// loader read into `LOADER_DATA` pages (`Bootloader` memory, which the
+    /// kernel never hands out). Length 0: there was no such file.
+    pub system_image_phys: u64,
+    pub system_image_len: u64,
 }
 
 impl BootInfo {
@@ -172,6 +178,12 @@ impl BootInfo {
 
     pub fn boot_partition_guid(&self) -> Option<[u8; 16]> {
         (self.has_boot_partition_guid == 1).then_some(self.boot_partition_guid)
+    }
+
+    /// `(physical address, length)` of the system archive, if the loader
+    /// found one.
+    pub fn system_image(&self) -> Option<(u64, u64)> {
+        (self.system_image_len != 0).then_some((self.system_image_phys, self.system_image_len))
     }
 }
 
@@ -201,6 +213,8 @@ mod tests {
             cmdline_len: 0,
             boot_partition_guid: [0; 16],
             has_boot_partition_guid: 0,
+            system_image_phys: 0,
+            system_image_len: 0,
         }
     }
 
@@ -213,8 +227,11 @@ mod tests {
     fn validity_checks_magic_and_version() {
         let mut bi = blank();
         assert!(bi.is_valid());
-        bi.version = 2;
-        assert!(!bi.is_valid());
+        assert_eq!(BOOT_INFO_VERSION, 2);
+        for other in [1, 3] {
+            bi.version = other;
+            assert!(!bi.is_valid(), "version {other}");
+        }
         bi.version = BOOT_INFO_VERSION;
         bi.magic = 0;
         assert!(!bi.is_valid());
@@ -230,6 +247,16 @@ mod tests {
         assert_eq!(bi.cmdline().len(), CMDLINE_MAX);
         bi.cmdline[0] = 0xFF;
         assert_eq!(bi.cmdline(), "");
+    }
+
+    #[test]
+    fn the_system_image_is_there_when_it_has_a_length() {
+        let mut bi = blank();
+        assert_eq!(bi.system_image(), None);
+        bi.system_image_phys = 0x1234_5000;
+        assert_eq!(bi.system_image(), None, "no length, no file");
+        bi.system_image_len = 23_784;
+        assert_eq!(bi.system_image(), Some((0x1234_5000, 23_784)));
     }
 
     fn fb(width: u32, height: u32, stride: u32, format: PixelFormat) -> FramebufferInfo {
