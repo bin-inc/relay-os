@@ -1,5 +1,5 @@
 //! What the CPU enforces (user-space gate §5.1, §5.5): SMEP and SMAP, where
-//! CPUID reports them, and CR0.TS.
+//! CPUID reports them, CR0.TS, and no `fs`/`gs` base of a program's own.
 //!
 //! - The kernel copies a program's memory through the linear map
 //!   (`UserSlice`), never at the program's own addresses, and runs none of
@@ -10,6 +10,9 @@
 //!   so CR0.TS stays set: any x87, MMX or SSE instruction (and `fwait`,
 //!   with MP) raises #NM, and a program that uses one is killed instead of
 //!   reading or corrupting another's registers.
+//! - CR4.FSGSBASE stays clear, whatever the firmware left: with it a program
+//!   could set its own `gs` base (`wrgsbase`), which `swapgs` would carry
+//!   into the next program, since a switch saves no segment bases.
 
 use core::fmt;
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
@@ -42,9 +45,10 @@ pub fn features(max_leaf: u32, leaf7_ebx: u32) -> Protection {
     }
 }
 
-/// CR4 with SMEP (bit 20) and SMAP (bit 21) set as `p` says.
+/// CR4 with SMEP (bit 20) and SMAP (bit 21) set as `p` says, and FSGSBASE
+/// (bit 16) clear.
 pub fn cr4_with(cr4: u64, p: Protection) -> u64 {
-    let mut cr4 = cr4 & !(1 << 20 | 1 << 21);
+    let mut cr4 = cr4 & !(1 << 20 | 1 << 21 | 1 << 16);
     if p.smep {
         cr4 |= 1 << 20;
     }
@@ -143,5 +147,7 @@ mod tests {
             smap: false,
         };
         assert_eq!(cr4_with(0, smep), 1 << 20);
+        // FSGSBASE, as a firmware may leave it.
+        assert_eq!(cr4_with(0x6F0 | 1 << 16, p), 0x6F0 | 3 << 20);
     }
 }

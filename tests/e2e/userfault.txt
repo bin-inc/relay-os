@@ -23,6 +23,8 @@ send t-fault div0
 expect \nrelay-sh: t-fault: killed \(divide error, ip 0x4[0-9a-f]+\)\n
 send t-fault sse
 expect \nrelay-sh: t-fault: killed \(FPU/SSE instruction, ip 0x4[0-9a-f]+\)\n
+send t-fault gsbase
+expect \nrelay-sh: t-fault: killed \(invalid opcode, ip 0x4[0-9a-f]+\)\n
 send t-fault stack
 expect \nrelay-sh: t-fault: killed \(stack overflow at 0x7fffffeff[0-9a-f]{3}, ip 0x4[0-9a-f]+\)\n
 send t-fault kernel-read
