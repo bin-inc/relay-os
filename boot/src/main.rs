@@ -183,6 +183,7 @@ fn main() -> Status {
     let (entry, kernel_phys, kernel_len) = load_kernel(&kernel_file, &mut tables);
     mark(3);
     drop(kernel_file);
+    // Between squares 3 and 4: a stop at square 3 can be this read.
     let (system_phys, system_len) = load_system_image();
 
     // Linear map of RAM (from the current memory map) and the framebuffer.

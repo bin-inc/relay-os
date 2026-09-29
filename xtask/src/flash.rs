@@ -141,7 +141,8 @@ fn sync() -> Result<()> {
     run(&mut Command::new("sync"))
 }
 
-/// `flash --kernel`: replace loader, kernel and cmdline on the ESP only.
+/// `flash --kernel`: replace loader, kernel, `system.img` and cmdline on the
+/// ESP only.
 pub fn flash_kernel(art: &Artifacts, cmdline: &str) -> Result<()> {
     let stick = resolve()?;
     unmount_all(&stick)?;
@@ -151,7 +152,7 @@ pub fn flash_kernel(art: &Artifacts, cmdline: &str) -> Result<()> {
     image::write_esp(Stick::target(), layout.esp, art, cmdline, false)?;
     sync()?;
     println!(
-        "updated loader and kernel on {} ({})",
+        "updated loader, kernel and system.img on {} ({})",
         stick.dev.display(),
         stick.name
     );

@@ -57,6 +57,13 @@ dmesg
 #> ...
 #!> \[FAIL\].*
 
+# The programs of /bin: the system archive the loader read from the ESP.
+ls -l /bin
+#> total \d+
+#> ...
+#> -rwxr-xr-x 1 root root +\d+ \w{3} [ \d]\d \d\d:\d\d t-args
+#> ...
+
 # The file operations of the fileops scenario.
 mkdir -p /root/notes/old
 echo remember me > /root/notes/a

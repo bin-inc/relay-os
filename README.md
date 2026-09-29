@@ -5,6 +5,8 @@ from a USB stick on an Intel NUC 12 Pro, shows a terminal over HDMI and
 stores files on the stick's ext2 root filesystem.
 
 Design: `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`
+(milestone 1) and `docs/superpowers/specs/2026-09-29-user-space-gate-design.md`
+(milestones 2 and 3: the shell and its commands as programs in ring 3).
 
 ## Quick start
 
@@ -28,14 +30,17 @@ has the whole checklist):
 5. Back in Linux Mint: `cargo xtask verify-usb` checks the filesystem and
    the output of both scripts.
 
-After a code change, `cargo xtask flash --kernel` replaces only the loader
-and the kernel and keeps the files on the stick.
+After a code change, `cargo xtask flash --kernel` replaces only the loader,
+the kernel and the programs of `/bin` (`system.img`) and keeps the files on
+the stick.
 
 ## Requirements (host)
 
 Linux with `rustup`, `qemu-system-x86_64`, OVMF (`/usr/share/OVMF`),
-`mtools`, `e2fsprogs`, `util-linux` (`sfdisk`) and `udisks2`. The Rust
-toolchain and targets are installed automatically from `rust-toolchain.toml`.
+`mtools`, `e2fsprogs`, `util-linux` (`sfdisk`), `udisks2`, `binutils`
+(`readelf` checks every user program) and `linux-libc-dev` (the tests check
+the error numbers against Linux's headers). The Rust toolchain and targets
+are installed automatically from `rust-toolchain.toml`.
 
 ## Common commands
 
@@ -49,7 +54,7 @@ toolchain and targets are installed automatically from `rust-toolchain.toml`.
 | `cargo xtask image` | Build `target/relay/relay-os.img` |
 | `cargo xtask host-shell <img>` | Run the shell on this machine over the image's ext2 partition (changes it in place; `poweroff` leaves) |
 | `cargo xtask flash --full` | Erase and write the Kingston test stick |
-| `cargo xtask flash --kernel` | Update loader and kernel on the stick, keep files |
+| `cargo xtask flash --kernel` | Update loader, kernel and `system.img` on the stick, keep files |
 | `cargo xtask verify-usb` | `e2fsck` the stick, list its files and check the transcripts of the check scripts |
 
 Set `RELAY_QEMU_ACCEL=tcg` to run QEMU without KVM.
@@ -67,7 +72,7 @@ the `e2e-logs` artefact. Hardware checks on the NUC stay manual
 
 | Path | Contents |
 |---|---|
-| `boot/` | `relay-boot`, the UEFI loader (`BOOTX64.EFI`) |
+| `boot/` | `relay-boot`, the UEFI loader (`BOOTX64.EFI`); it also loads `system.img` |
 | `kernel/` | `relay-kernel`, the higher-half kernel |
 | `crates/boot-info` | Loader → kernel hand-off structure |
 | `crates/term` | Framebuffer text terminal |
@@ -75,7 +80,13 @@ the `e2e-logs` artefact. Hardware checks on the NUC stay manual
 | `crates/ext2` | ext2 driver with its block cache |
 | `crates/shell` | Line editor, parser, built-in commands and scripts (`sh FILE`) |
 | `crates/usb` | xHCI host controller driver, HID boot keyboard and USB mass storage (BOT, SCSI), over a `Hal` trait |
-| `xtask/` | Build, image, QEMU, test and flash tool |
+| `crates/heap` | The heap allocator of the kernel (and, later, of user programs) |
+| `crates/crc32` | CRC-32, for GPT and `system.img` |
+| `crates/relay-abi` | The system-call ABI: version, call numbers, error numbers, result encoding |
+| `crates/relay-rt` | The runtime of user programs: entry, arguments, system calls, panic handler, ABI note, linker script |
+| `crates/sysimg` | The `system.img` archive: format, writer, reader, and `SysImgFs`, mounted at `/bin` |
+| `userland/` | User programs: `tests/` holds the `t-*` test programs |
+| `xtask/` | Build, image, QEMU, test and flash tool; it builds `userland/`, checks each program with `readelf` and packs `system.img` |
 | `rootfs/` | Files copied into `/`, among them the NUC check scripts in `root/checks/` |
 | `tests/e2e/` | QEMU end-to-end scenarios |
 | `docs/hardware-test.md` | Manual checklist for the NUC |

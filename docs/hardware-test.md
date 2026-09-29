@@ -51,7 +51,7 @@ at the leftmost one:
 |---|---|---|
 | 1 | red | video mode set |
 | 2 | orange | boot partition and ACPI lookups done |
-| 3 | yellow | kernel file loaded |
+| 3 | yellow | kernel file loaded; next is reading `system.img` |
 | 4 | green | page tables for RAM and screen built |
 | 5 | cyan | kernel stack and jump code mapped |
 | 6 | blue | boot-info memory reserved |
@@ -158,7 +158,7 @@ The NUC has no serial port, so a keyboard that does not work cannot run
 | `[FAIL] keyboard: no USB keyboard found` and no `port 3` line | The K120 connected after the boot's wait, or not at all | Type anyway: a late keyboard is set up when it appears. If nothing works, `debug=usb`: a `port 3: connected` line means it appeared late, none means the port never saw it; the `ports settled` line shows the wait |
 | Keys show up twice or not at all | Firmware still emulating a keyboard (handoff) | `debug=usb`: the `legacy support` line |
 
-## Check 3 — files on the stick (plans 5 and 6)
+## Check 3 — files on the stick (plans 5 and 6; milestone 2)
 
 The full checklist of spec §9.4. The K120 and the stick sit on the ports of
 check 2 (the stick on bus 4 port 3 in Mint's `lsusb -t`). Since plan 6 the
@@ -182,12 +182,16 @@ request.
      DataTraveler 3.0, 14.4 GiB`
    - `[ ok ] usb: 2 controllers, 4 devices`, `[ ok ] keyboard: 2 keyboards`
    - `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 14.3 GiB`
+   - `[ ok ] system: 1 program, ABI 1` (milestone 2: the programs of `/bin`
+     from `\EFI\RELAY\system.img`; the count grows as later plans add
+     programs)
    - the motd (`Welcome to Relay OS.`) and the prompt `root@relay:~# `.
 
    Photograph the screen.
 4. On the K120, type `sh checks/check3-a.sh`. It runs for about a minute:
    `uname -a`, `date`, `dmesg` (every startup line of checks 1-3, checked
-   later), the `fileops` scenario's operations on `/root/notes` (`mkdir -p`,
+   later), `ls -l /bin` (the programs of the system archive), the `fileops`
+   scenario's operations on `/root/notes` (`mkdir -p`,
    `echo >`/`>>`, `cat`, `ls -l`, `cp`, `mv`, `rmdir` of a full directory,
    `rm -r`, `touch`, `stat`, `head`, `tail`, `wc`, the errors of `cat` and
    `rm -r /`), an 8 MiB file built by doubling (each step writes up to
@@ -202,7 +206,7 @@ request.
 7. Boot Mint and run `cargo xtask verify-usb`: `e2fsck: clean`, the tree
    lists `/root/notes/a`, `/root/notes/big` (8388608 bytes) and
    `/root/notes/t`, and the last lines are
-   `/root/checks/check3-a.sh: ok, 63 of 63 commands as expected (run <time>)`
+   `/root/checks/check3-a.sh: ok, 64 of 64 commands as expected (run <time>)`
    and `/root/checks/check3-b.sh: ok, 5 of 5 commands as expected (run
    <time>)`, with the UTC times of the two runs (after `flash --kernel` the
    transcripts of an earlier run stay on the stick, so check the times). A
@@ -218,6 +222,8 @@ request.
 | `port 15: setup failed: …` | Enumeration failed three times | Replug the stick into the same port and reboot; `debug=usb` shows each try |
 | `[FAIL] mount /: no disk with a GPT` | The stick was set up but its reads fail, or it has no GPT | `dmesg`: a `usb: 00:14.0 port 15: read at block N: …` line and the `storage: slot N:` lines with the sense mean the reads fail; `storage: 00:14.0 port 15: no valid GPT` means re-run `flash --full` |
 | `mount /: warning: no disk has the boot partition …; using …` above `[ ok ] mount /` | The loader's boot GUID matches no partition, and the one disk with an ESP and a Linux partition was used | Note the GUID in the warning and the `boot info` line; the files are usable |
+| `[FAIL] system: no system.img` | The loader could not read `\EFI\RELAY\system.img` (it is missing, or the FAT is damaged) | `cargo xtask flash --kernel` writes it with the loader and the kernel |
+| `[FAIL] system: ABI N, kernel wants M` or `[FAIL] system: system.img: …` | The archive on the ESP is from another build, or damaged | `cargo xtask flash --kernel` from the same worktree as the kernel |
 | `[FAIL] mount /: no disk with the boot partition` | No disk has the boot partition, and none has exactly one ESP and one Linux partition | `dmesg`: the `storage:` GPT lines list what each disk has |
 | `[FAIL] mount /: …; mounted read-only` | The stick refused a write (worn out or write-protected) | The files can be read; note the `usb: … write at block N:` line in `dmesg` |
 | `[FAIL] mount /: ext2 on 00:14.0 port 15 partition 2, 14.3 GiB: Invalid argument` | The ext2 root is not what `flash --full` writes | `dmesg` shows the `ext2:` reason; re-run `flash --full` |
