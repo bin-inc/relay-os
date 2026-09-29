@@ -21,6 +21,7 @@ pub mod rtc;
 pub mod serial;
 pub mod session;
 pub mod storage;
+pub mod syscall;
 pub mod system;
 pub mod timer;
 pub mod usb;
