@@ -230,6 +230,7 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9,
     ];
     frame.rax = crate::proc::system_call(frame.rax, args);
+    crate::proc::before_user();
     if !is_canonical(frame.rip) {
         crate::proc::non_canonical_return(frame.rip);
     }

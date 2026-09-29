@@ -80,6 +80,12 @@ extern "C" fn dispatch(frame: &ExceptionFrame) {
         Action::Timer => {
             TICKS.fetch_add(1, Ordering::Relaxed);
             super::lapic::eoi();
+            // After the EOI: the tick may switch to another process.
+            if frame.cs & 3 == 3 {
+                crate::proc::user_tick();
+            } else {
+                crate::proc::kernel_tick();
+            }
         }
         Action::Legacy { eoi_master, .. } => {
             SPURIOUS.fetch_add(1, Ordering::Relaxed);

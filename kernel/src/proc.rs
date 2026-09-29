@@ -102,6 +102,11 @@ fn reschedule() {
     let switch = {
         let mut t = PROCS.lock();
         let me = t.current();
+        if me != 0 {
+            settle_ticks(&mut t, 0);
+        } else {
+            KERNEL_TICKS.store(0, Ordering::Relaxed);
+        }
         let save = save_slot(&t);
         (t.schedule() != me).then(|| (save, next(&t)))
     };
@@ -113,6 +118,58 @@ fn reschedule() {
     }
     if enabled {
         interrupts::enable();
+    }
+}
+
+/// Ticks that interrupted the kernel since they were last counted: the
+/// kernel is not preemptible, so such a tick only counts here (spec §6.1's
+/// `need_resched`), and the count is settled when the running process
+/// returns to ring 3 or gives up the CPU.
+static KERNEL_TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// Charges the ticks that interrupted the kernel (and `more`) to the
+/// running process; whether its slice is used up while another process is
+/// ready. Due sleepers are woken first, so a sleeper does not wait for the
+/// idle task behind a process that never blocks.
+fn settle_ticks(t: &mut Table<Res>, more: u64) -> bool {
+    t.wake_sleepers(timer::ticks());
+    let n = KERNEL_TICKS.swap(0, Ordering::Relaxed) + more;
+    let mut used_up = false;
+    for _ in 0..n {
+        used_up |= t.tick();
+    }
+    used_up
+}
+
+/// A tick interrupted the kernel (spec §6.1): counted for later, nothing
+/// else. The idle task's ticks are nobody's.
+pub fn kernel_tick() {
+    KERNEL_TICKS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// A tick interrupted a program (spec §6.1, §6.3): the kernel holds nothing
+/// now, so the tick polls the console, and the program gives up the CPU if
+/// its slice is used up.
+pub fn user_tick() {
+    tty::poll();
+    let used_up = {
+        let mut t = PROCS.lock();
+        if tty::has_input() {
+            t.wake_all(Blocked::Console);
+        }
+        settle_ticks(&mut t, 1)
+    };
+    if used_up {
+        reschedule();
+    }
+}
+
+/// On the way back to ring 3 from a system call: the ticks the call took
+/// are counted, and the program gives up the CPU if its slice is used up.
+pub fn before_user() {
+    let used_up = settle_ticks(&mut PROCS.lock(), 0);
+    if used_up {
+        reschedule();
     }
 }
 
