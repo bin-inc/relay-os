@@ -181,7 +181,10 @@ request.
    - `usb: 00:14.0 port 15: 0951:1666 SuperSpeed, disk Kingston
      DataTraveler 3.0, 14.4 GiB`
    - `[ ok ] usb: 2 controllers, 4 devices`, `[ ok ] keyboard: 2 keyboards`
-   - `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 14.3 GiB`
+   - `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 2.0 GiB` (the
+     root is 2 GiB since milestone 2's plan 2; a stick written by an older
+     `flash --full` still shows `14.3 GiB`, which the check scripts refuse:
+     run `flash --full` again)
    - `[ ok ] system: 2 programs, ABI 1` (milestone 2: the programs of
      `/bin` from `\EFI\RELAY\system.img`; the count grows as later plans
      add programs)
@@ -231,7 +234,7 @@ request.
 | `relay-sh: t-args: Exec format error` | The kernel refused the program; `dmesg` shows `spawn /bin/t-args: <reason>` | `cargo xtask flash --kernel` from the same worktree as the kernel |
 | `[FAIL] mount /: no disk with the boot partition` | No disk has the boot partition, and none has exactly one ESP and one Linux partition | `dmesg`: the `storage:` GPT lines list what each disk has |
 | `[FAIL] mount /: …; mounted read-only` | The stick refused a write (worn out or write-protected) | The files can be read; note the `usb: … write at block N:` line in `dmesg` |
-| `[FAIL] mount /: ext2 on 00:14.0 port 15 partition 2, 14.3 GiB: Invalid argument` | The ext2 root is not what `flash --full` writes | `dmesg` shows the `ext2:` reason; re-run `flash --full` |
+| `[FAIL] mount /: ext2 on 00:14.0 port 15 partition 2, 2.0 GiB: Invalid argument` | The ext2 root is not what `flash --full` writes | `dmesg` shows the `ext2:` reason; re-run `flash --full` |
 | A command prints `Input/output error` | A disk request failed after three tries | `dmesg`: the `storage:` and `usb:` lines name the command and block |
 | `reboot` leaves the screen as it is | No reset method worked (unlikely: the last is a triple fault) | Photograph the screen; hold the power button |
 | `verify-usb` reports errors | A write was lost or wrong | Do not flash again: keep the stick as it is and report the output |

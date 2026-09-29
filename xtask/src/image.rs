@@ -35,7 +35,9 @@ pub struct Layout {
 
 /// The sfdisk script for our two-partition layout. `fixed_guids` pins the
 /// disk and partition GUIDs (QEMU image); otherwise sfdisk picks random ones.
-pub fn sfdisk_script(fixed_guids: bool) -> String {
+/// The GPT for an image (`fixed_guids`: the image's own GUIDs) or the
+/// stick, with a root of `root_sectors`, or the rest of the disk.
+pub fn sfdisk_script(fixed_guids: bool, root_sectors: Option<u64>) -> String {
     let (disk, esp, rootp) = if fixed_guids {
         (
             format!("label-id: {IMAGE_DISK_GUID}\n"),
@@ -48,11 +50,12 @@ pub fn sfdisk_script(fixed_guids: bool) -> String {
     format!(
         "label: gpt\n{disk}first-lba: {ESP_START_LBA}\n\
          start={ESP_START_LBA}, size={ESP_SECTORS}, type={ESP_TYPE_GUID}{esp}, name=\"{ESP_LABEL}\"\n\
-         start={ROOT_START_LBA}, type={LINUX_FS_TYPE_GUID}{rootp}, name=\"{ROOT_LABEL}\"\n"
+         start={ROOT_START_LBA}, {size}type={LINUX_FS_TYPE_GUID}{rootp}, name=\"{ROOT_LABEL}\"\n",
+        size = root_sectors.map_or(String::new(), |n| format!("size={n}, "))
     )
 }
 
-pub fn partition(target: &Path, fixed_guids: bool) -> Result<()> {
+pub fn partition(target: &Path, fixed_guids: bool, root_sectors: Option<u64>) -> Result<()> {
     let mut child = Command::new("sfdisk")
         .args([
             "--quiet",
@@ -71,7 +74,7 @@ pub fn partition(target: &Path, fixed_guids: bool) -> Result<()> {
         .stdin
         .take()
         .unwrap()
-        .write_all(sfdisk_script(fixed_guids).as_bytes())?;
+        .write_all(sfdisk_script(fixed_guids, root_sectors).as_bytes())?;
     let out = child.wait_with_output()?;
     if !out.status.success() {
         bail!("sfdisk failed: {}", String::from_utf8_lossy(&out.stderr));
@@ -351,7 +354,7 @@ pub fn build_image_as(art: &Artifacts, cmdline: &str, name: &str, bytes: u64) ->
     fs::create_dir_all(out_dir())?;
     let _ = fs::remove_file(&img);
     fs::File::create(&img)?.set_len(bytes)?;
-    partition(&img, true)?;
+    partition(&img, true, None)?;
     let layout = read_layout(&img)?;
     write_esp(&img, layout.esp, art, cmdline, true)?;
     let staging = stage_rootfs()?;
@@ -366,7 +369,7 @@ mod tests {
 
     #[test]
     fn fixed_script_pins_guids() {
-        let s = sfdisk_script(true);
+        let s = sfdisk_script(true, None);
         assert!(s.contains(&format!("label-id: {IMAGE_DISK_GUID}")));
         assert!(s.contains(&format!("uuid={IMAGE_ESP_GUID}")));
         assert!(s.contains("start=2048, size=131072"));
@@ -375,8 +378,21 @@ mod tests {
 
     #[test]
     fn random_script_has_no_guids() {
-        assert!(!sfdisk_script(false).contains("uuid="));
-        assert!(!sfdisk_script(false).contains("label-id"));
+        assert!(!sfdisk_script(false, None).contains("uuid="));
+        assert!(!sfdisk_script(false, None).contains("label-id"));
+    }
+
+    #[test]
+    fn the_stick_s_root_is_2_gib_and_the_image_s_the_rest() {
+        assert_eq!(STICK_ROOT_SECTORS * SECTOR, 2 << 30);
+        let stick = sfdisk_script(false, Some(STICK_ROOT_SECTORS));
+        assert!(
+            stick.contains("start=133120, size=4194304, type=0FC63DAF"),
+            "{stick}"
+        );
+        let image = sfdisk_script(true, None);
+        let root = image.lines().last().unwrap();
+        assert!(!root.contains("size="), "{root}");
     }
 
     #[test]

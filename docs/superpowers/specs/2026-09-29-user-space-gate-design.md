@@ -899,3 +899,14 @@ does. Facts found before the spec was first merged are already in its body.
      `t-fault null-read`; the recorded transcripts get those lines by hand
      until plan 2's NUC check records real ones (their `ls -l /bin` still
      lists only `t-args`, which the script's `...` lines allow).
+   - **The stick's root is 2 GiB** (M1 §4.1, added at the owner's request
+     after plan 2's NUC check). `flash --full` makes the ext2 root 2 GiB
+     instead of the rest of the stick, and leaves the rest unused: ext2
+     has no lazy inode-table initialisation and a USB stick takes no
+     discard, so `mke2fs` writes every inode table over USB, about 32 MiB
+     for 2 GiB instead of 230 MiB for the whole stick, and the check after
+     it reads them all back. The images xtask builds keep a root that is
+     the rest of the image. The startup line becomes `mount /: ext2 on
+     00:14.0 port 15 partition 2, 2.0 GiB`, which the check scripts
+     expect; their recorded transcripts get it by hand until the next NUC
+     check records it.

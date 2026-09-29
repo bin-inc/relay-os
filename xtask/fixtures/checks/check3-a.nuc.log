@@ -103,7 +103,7 @@ usb: 00:14.0 port 15: 0951:1666 SuperSpeed, disk Kingston DataTraveler 3.0, 14.4
 [[32m ok [0m] keyboard: 2 keyboards
 storage: 00:14.0 port 15: GPT with 2 partitions
 storage: root on 00:14.0 port 15, the disk with the boot partition C151DD9A-8884-47DF-BAD7-1EABF3487286
-[[32m ok [0m] mount /: ext2 on 00:14.0 port 15 partition 2, 14.3 GiB
+[[32m ok [0m] mount /: ext2 on 00:14.0 port 15 partition 2, 2.0 GiB
 [[32m ok [0m] system: 2 programs, ABI 1
 + ls -l /bin
 total 39
@@ -203,4 +203,4 @@ rm: it is dangerous to operate recursively on '/'
 a  big  t
 + df
 Filesystem     1K-blocks Used Available Use% Mounted on
-/dev/root       14834712 8304  14072848   1% /
+/dev/root        2064208 8304   1951048   1% /

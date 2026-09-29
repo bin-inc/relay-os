@@ -52,7 +52,7 @@ dmesg
 #> ...
 #nuc> storage: root on 00:14\.0 port 15, the disk with the boot partition [0-9A-F-]{36}
 #qemu> \[ ok \] mount /: ext2 on .*
-#nuc> \[ ok \] mount /: ext2 on 00:14\.0 port 15 partition 2, 14\.3 GiB
+#nuc> \[ ok \] mount /: ext2 on 00:14\.0 port 15 partition 2, 2\.0 GiB
 #> \[ ok \] system: \d+ programs?, ABI 1
 #> ...
 #!> \[FAIL\].*
@@ -161,4 +161,4 @@ ls /root/notes
 df
 #> Filesystem +1K-blocks +Used +Available +Use% Mounted on
 #qemu> /dev/root +\d+ +\d+ +\d+ +\d+% /
-#nuc> /dev/root +1[45]\d{6} +\d+ +\d+ +\d+% /
+#nuc> /dev/root +20\d{5} +\d+ +\d+ +\d+% /

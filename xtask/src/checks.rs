@@ -419,9 +419,10 @@ bin  etc
     /// The real check scripts against a transcript of each machine: QEMU's
     /// from the `checks` scenario, the NUC's as the NUC wrote them in NUC
     /// check 3 of milestone 2's plan 2 on 2026-09-29 (`docs/hardware-test.md`),
-    /// copied off the stick unchanged. A `#nuc>` line must not need a line
-    /// of its own next to the `#>` line for the same output, which QEMU
-    /// alone cannot show.
+    /// copied off the stick, with the `mount /` and `df` lines of the 2 GiB
+    /// root put in by hand until the next NUC check records them. A `#nuc>`
+    /// line must not need a line of its own next to the `#>` line for the
+    /// same output, which QEMU alone cannot show.
     #[test]
     fn the_check_scripts_pass_on_both_machines() {
         let parts = [
