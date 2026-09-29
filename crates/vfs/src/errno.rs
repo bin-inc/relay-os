@@ -1,4 +1,5 @@
-//! Error numbers with Linux names and messages (spec §8.1, §10).
+//! Error numbers with Linux names, messages and values (spec §8.1, §10 of
+//! milestone 1; §7.2 of the user-space gate).
 
 use crate::IoError;
 use core::fmt;
@@ -22,6 +23,22 @@ pub enum Errno {
     EBUSY,
     /// A file would grow past the largest size the filesystem can map.
     EFBIG,
+    /// The arguments of a new program are too long.
+    E2BIG,
+    /// A file that is not a program this kernel can run.
+    ENOEXEC,
+    /// A file descriptor that is not open.
+    EBADF,
+    /// No such child to wait for.
+    ECHILD,
+    /// A limit on processes was reached; trying later may work.
+    EAGAIN,
+    /// Not enough memory for a program.
+    ENOMEM,
+    /// A pointer a program passed does not point at its memory.
+    EFAULT,
+    /// A system call this kernel does not have.
+    ENOSYS,
 }
 
 impl Errno {
@@ -41,6 +58,43 @@ impl Errno {
             Errno::EXDEV => "Invalid cross-device link",
             Errno::EBUSY => "Device or resource busy",
             Errno::EFBIG => "File too large",
+            Errno::E2BIG => "Argument list too long",
+            Errno::ENOEXEC => "Exec format error",
+            Errno::EBADF => "Bad file descriptor",
+            Errno::ECHILD => "No child processes",
+            Errno::EAGAIN => "Resource temporarily unavailable",
+            Errno::ENOMEM => "Cannot allocate memory",
+            Errno::EFAULT => "Bad address",
+            Errno::ENOSYS => "Function not implemented",
+        }
+    }
+
+    /// The number a system call returns for it (`relay_abi::errno`, Linux's
+    /// values).
+    pub const fn number(self) -> u16 {
+        use relay_abi::errno as n;
+        match self {
+            Errno::ENOENT => n::ENOENT,
+            Errno::EEXIST => n::EEXIST,
+            Errno::ENOTDIR => n::ENOTDIR,
+            Errno::EISDIR => n::EISDIR,
+            Errno::ENOTEMPTY => n::ENOTEMPTY,
+            Errno::ENOSPC => n::ENOSPC,
+            Errno::EIO => n::EIO,
+            Errno::EROFS => n::EROFS,
+            Errno::EINVAL => n::EINVAL,
+            Errno::ENAMETOOLONG => n::ENAMETOOLONG,
+            Errno::EXDEV => n::EXDEV,
+            Errno::EBUSY => n::EBUSY,
+            Errno::EFBIG => n::EFBIG,
+            Errno::E2BIG => n::E2BIG,
+            Errno::ENOEXEC => n::ENOEXEC,
+            Errno::EBADF => n::EBADF,
+            Errno::ECHILD => n::ECHILD,
+            Errno::EAGAIN => n::EAGAIN,
+            Errno::ENOMEM => n::ENOMEM,
+            Errno::EFAULT => n::EFAULT,
+            Errno::ENOSYS => n::ENOSYS,
         }
     }
 }
@@ -71,6 +125,50 @@ mod tests {
         assert_eq!(Errno::EROFS.to_string(), "Read-only file system");
         assert_eq!(Errno::EXDEV.to_string(), "Invalid cross-device link");
         assert_eq!(Errno::EFBIG.to_string(), "File too large");
+    }
+
+    /// Every variant, so the tests below cover each one.
+    const ALL: [Errno; 21] = [
+        Errno::ENOENT,
+        Errno::EEXIST,
+        Errno::ENOTDIR,
+        Errno::EISDIR,
+        Errno::ENOTEMPTY,
+        Errno::ENOSPC,
+        Errno::EIO,
+        Errno::EROFS,
+        Errno::EINVAL,
+        Errno::ENAMETOOLONG,
+        Errno::EXDEV,
+        Errno::EBUSY,
+        Errno::EFBIG,
+        Errno::E2BIG,
+        Errno::ENOEXEC,
+        Errno::EBADF,
+        Errno::ECHILD,
+        Errno::EAGAIN,
+        Errno::ENOMEM,
+        Errno::EFAULT,
+        Errno::ENOSYS,
+    ];
+
+    /// The name, number and message the host's C library gives: the real
+    /// thing, independent of `relay_abi`'s table.
+    #[test]
+    fn each_number_and_message_is_the_host_s() {
+        for e in ALL {
+            let n = e.number();
+            let host = std::io::Error::from_raw_os_error(i32::from(n)).to_string();
+            assert_eq!(
+                host,
+                format!("{} (os error {n})", e.message()),
+                "{e:?} is {n}"
+            );
+        }
+        let mut numbers: Vec<u16> = ALL.iter().map(|e| e.number()).collect();
+        numbers.sort();
+        numbers.dedup();
+        assert_eq!(numbers.len(), ALL.len(), "numbers are unique");
     }
 
     #[test]
