@@ -283,6 +283,15 @@ pub fn system_image(programs: &[Program]) -> Result<Vec<u8>> {
     sysimg::write(relay_abi::VERSION, now, &entries).map_err(|e| anyhow::anyhow!("system.img: {e}"))
 }
 
+/// `image` with its programs under ABI version `abi` instead (the e2e step
+/// `system-abi`).
+pub fn with_abi(image: &[u8], abi: u32) -> Result<Vec<u8>> {
+    let archive = sysimg::Archive::parse(image).map_err(|e| anyhow::anyhow!("system.img: {e}"))?;
+    let entries: Vec<sysimg::Entry<'_>> = archive.entries().collect();
+    sysimg::write(abi, archive.build_time(), &entries)
+        .map_err(|e| anyhow::anyhow!("system.img: {e}"))
+}
+
 /// Builds the programs and writes `target/relay/system.img`.
 pub fn build_system_image() -> Result<PathBuf> {
     let image = system_image(&build()?)?;
