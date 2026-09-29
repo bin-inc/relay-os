@@ -9,8 +9,10 @@
 extern crate alloc;
 
 mod format;
+mod fs;
 
 pub use format::{
     Archive, DATA_ALIGN, ENTRY_LEN, Entry, FORMAT_VERSION, HEADER_LEN, MAGIC, MODE_MASK, NAME_MAX,
     SysImgError, valid_name, write,
 };
+pub use fs::{ROOT, SysImgFs};
