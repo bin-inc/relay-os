@@ -163,16 +163,17 @@ impl<'a> Shell<'a> {
     }
 
     /// Runs a program (user-space gate §8.2): `/bin/<name>`, or `name`
-    /// itself when it holds a `/`, with the words after it as arguments.
-    /// Its fd 1 is standard output (the redirection file, if any), its fd 2
-    /// the screen; a running script's transcript gets both.
+    /// itself when it holds a `/`, with `name` as argument 0 and the words
+    /// after it as the others, as bash does. Its fd 1 is standard output
+    /// (the redirection file, if any), its fd 2 the screen; a running
+    /// script's transcript gets both.
     fn run_program(&mut self, name: &str, words: &[String], file: Option<(Node, u64)>) -> i32 {
         let path = if name.contains('/') {
             String::from(name)
         } else {
             format!("/bin/{name}")
         };
-        let mut args: Vec<&[u8]> = alloc::vec![path.as_bytes()];
+        let mut args: Vec<&[u8]> = alloc::vec![name.as_bytes()];
         args.extend(words.iter().map(|w| w.as_bytes()));
         let started = self.system.spawn(&mut *self.vfs, path.as_bytes(), &args);
         let pid = match started {
@@ -181,7 +182,10 @@ impl<'a> Shell<'a> {
             // `..`, `.` and `''` name directories there, which a search
             // for a command skips, as bash's does.
             None => return self.finish(NOT_FOUND, format!("{NAME}: {name}: command not found\n")),
-            Some(Err(Errno::ENOENT | Errno::EISDIR)) if !name.contains('/') => {
+            // A name too long for a file name is no file in /bin either.
+            Some(Err(Errno::ENOENT | Errno::EISDIR | Errno::ENAMETOOLONG))
+                if !name.contains('/') =>
+            {
                 return self.finish(NOT_FOUND, format!("{NAME}: {name}: command not found\n"));
             }
             Some(Err(e)) => {
@@ -394,13 +398,14 @@ mod tests {
         assert_eq!(
             h.system.spawned,
             [vec![
-                b"/bin/t-args".to_vec(),
+                b"t-args".to_vec(),
                 b"a".to_vec(),
                 b"b c".to_vec(),
                 b"".to_vec()
-            ]]
+            ]],
+            "argument 0 is the name as typed, as in bash"
         );
-        // A path runs as given; argument 0 is the path as typed.
+        // A path runs as given, and is argument 0 as typed.
         assert_eq!(h.run("/bin/t-args").0, 3);
         h.run("cd /bin");
         assert_eq!(h.run("./t-args x").0, 3);
@@ -479,6 +484,22 @@ mod tests {
         }
         // Given as a path, a directory still says so.
         assert_eq!(h.run("./"), (126, "relay-sh: ./: Is a directory\n".into()));
+    }
+
+    #[test]
+    fn a_name_too_long_for_a_file_is_not_found() {
+        let mut h = with_programs();
+        let long = "x".repeat(300);
+        assert_eq!(
+            h.run(&long),
+            (127, format!("relay-sh: {long}: command not found\n")),
+            "as bash says"
+        );
+        // Given as a path, the error is the path's.
+        assert_eq!(
+            h.run(&format!("/{long}")),
+            (126, format!("relay-sh: /{long}: File name too long\n"))
+        );
     }
 
     #[test]
