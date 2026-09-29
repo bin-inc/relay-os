@@ -146,6 +146,13 @@ name = "crc32"
 version = "0.2.0"
 
 [[package]]
+name = "elf"
+version = "0.2.0"
+dependencies = [
+ "relay-abi",
+]
+
+[[package]]
 name = "ext2"
 version = "0.2.0"
 dependencies = [
