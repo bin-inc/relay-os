@@ -88,8 +88,13 @@ impl System for KernelSystem {
         Some(proc::spawn(vfs, path, args))
     }
 
+    /// The command has the console, in line mode, while the shell waits
+    /// for it (spec §6.4): a Ctrl-C kills it.
     fn wait(&mut self, pid: u32, out: &mut dyn FnMut(u32, &[u8])) -> Result<WaitStatus, Errno> {
-        proc::wait(pid, out)
+        proc::give_console(pid);
+        let ended = proc::wait(pid, out);
+        proc::take_console();
+        ended
     }
 }
 

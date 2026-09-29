@@ -201,7 +201,13 @@ impl<'a> Shell<'a> {
             Ok(w) if w.how == relay_abi::wait::EXITED => w.code as i32,
             Ok(w) => {
                 let (what, status) = killed::killed(&w);
-                message = format!("{NAME}: {name}: {what}\n");
+                // Ctrl-C says only `^C`, as for a built-in, and stops a
+                // script (spec §6.4).
+                message = if status == CANCELLED {
+                    String::from("^C\n")
+                } else {
+                    format!("{NAME}: {name}: {what}\n")
+                };
                 status
             }
             Err(e) => {
@@ -487,6 +493,21 @@ mod tests {
             h.run("/bin/t-args"),
             (127, "relay-sh: /bin/t-args: command not found\n".into())
         );
+    }
+
+    #[test]
+    fn a_program_stopped_by_ctrl_c_says_only_so_and_ends_a_script() {
+        let mut h = with_programs();
+        h.system.programs[0].status = WaitStatus::killed(relay_abi::wait::KILLED_CTRL_C);
+        assert_eq!(
+            h.run("t-args"),
+            (130, "[1] a\nt-args: note\n[2] b c\n^C\n".into())
+        );
+        h.put("/root/s.sh", b"t-args\necho after\n");
+        let (status, out) = h.run("sh /root/s.sh");
+        assert_eq!(status, 130);
+        assert!(out.ends_with("[2] b c\n^C\n"), "{out}");
+        assert!(!out.contains("after"), "the script stops: {out}");
     }
 
     #[test]

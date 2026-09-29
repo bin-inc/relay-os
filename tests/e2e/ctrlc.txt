@@ -1,4 +1,5 @@
-# Programs share the CPU (user-space gate §6.1, §6.3; milestone 2, plan 3a):
+# Programs share the CPU and Ctrl-C stops them (user-space gate §6.1,
+# §6.3, §6.4; milestone 2, plan 3a):
 # t-spin never makes a system call, so only the timer takes the CPU from
 # it, and every tick that interrupts it also polls the keyboard: what is
 # typed on the USB keyboard while it spins is all there when the shell
@@ -10,3 +11,22 @@ alive 1
 key echo typed-while-it-spins
 expect \n\d+ iterations\n
 expect \ntyped-while-it-spins\n
+# Ctrl-C on the keyboard kills the command's process group (spec §6.4):
+# t-spin alone would never end. The shell says `^C`, as when Ctrl-C stops
+# a built-in, and the kernel log names the process.
+send t-spin
+alive 1
+key {ctrl-c}
+expect \n\^C\nroot@relay:~# 
+send dmesg
+expect \npid \d+ \(/bin/t-spin\): killed: Ctrl-C\n
+# A Ctrl-C typed before the command has even started is the command's too:
+# it ends at once, whichever comes first.
+send t-spin
+key {ctrl-c}
+expect \n\^C\nroot@relay:~# 
+# At the prompt, Ctrl-C only cancels the line being typed.
+key echo nope{ctrl-c}
+expect \^C\n
+send echo still here
+expect \nstill here\n

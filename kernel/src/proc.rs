@@ -147,30 +147,81 @@ pub fn kernel_tick() {
     KERNEL_TICKS.fetch_add(1, Ordering::Relaxed);
 }
 
+/// What the console's input asks of the processes: a Ctrl-C in line mode
+/// kills the foreground group (spec §6.4), and anything typed wakes whoever
+/// waits for input.
+fn console_input(t: &mut Table<Res>) {
+    if let Some(pgid) = tty::ctrl_c() {
+        // Refused only for process 1's group, which never has the console
+        // in line mode.
+        let _ = t.kill(-i64::from(pgid), relay_abi::wait::KILLED_CTRL_C);
+    }
+    if tty::has_input() {
+        t.wake_all(Blocked::Console);
+    }
+}
+
 /// A tick interrupted a program (spec §6.1, §6.3): the kernel holds nothing
 /// now, so the tick polls the console, and the program gives up the CPU if
-/// its slice is used up.
+/// its slice is used up, or ends if it was killed.
 pub fn user_tick() {
     tty::poll();
     let used_up = {
         let mut t = PROCS.lock();
-        if tty::has_input() {
-            t.wake_all(Blocked::Console);
-        }
+        console_input(&mut t);
         settle_ticks(&mut t, 1)
     };
     if used_up {
         reschedule();
     }
+    end_if_killed();
 }
 
 /// On the way back to ring 3 from a system call: the ticks the call took
-/// are counted, and the program gives up the CPU if its slice is used up.
+/// are counted, the program gives up the CPU if its slice is used up, and
+/// it ends if it was killed meanwhile.
 pub fn before_user() {
     let used_up = settle_ticks(&mut PROCS.lock(), 0);
     if used_up {
         reschedule();
     }
+    end_if_killed();
+}
+
+/// Ends the running process if Ctrl-C or `kill` marked it (spec §11.1):
+/// before it runs another instruction of its program.
+fn end_if_killed() {
+    let killed = {
+        let t = PROCS.lock();
+        t.get(t.current()).and_then(|p| p.killed)
+    };
+    if let Some(reason) = killed {
+        let status = WaitStatus::killed(reason);
+        {
+            let t = PROCS.lock();
+            let me = t.current();
+            let name = t.get(me).map_or("?", |p| p.name.as_str());
+            klogln!("pid {me} ({name}): killed: {status}");
+        }
+        end(status);
+    }
+}
+
+/// Gives the console to the process group of the running process's child
+/// `pid`, in line mode, while the in-kernel shell waits for it (spec
+/// §6.4). A Ctrl-C typed before the command started waits in the input
+/// queue, and the next poll in line mode finds it: it is the command's.
+pub fn give_console(pid: u32) {
+    if let Some(p) = PROCS.lock().get(pid) {
+        tty::set_foreground(p.pgid);
+        tty::set_line_mode(true);
+    }
+}
+
+/// Gives the console back to the in-kernel shell: its own group, raw mode.
+pub fn take_console() {
+    tty::set_line_mode(false);
+    tty::set_foreground(table::INIT);
 }
 
 /// The running process blocks on `why` until something wakes it.
@@ -186,9 +237,7 @@ fn block(why: Blocked) {
 fn idle() -> ! {
     loop {
         tty::poll();
-        if tty::has_input() {
-            PROCS.lock().wake_all(Blocked::Console);
-        }
+        console_input(&mut PROCS.lock());
         usb::service();
         PROCS.lock().wake_sleepers(timer::ticks());
         if PROCS.lock().others_ready() {
