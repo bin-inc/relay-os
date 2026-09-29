@@ -1,7 +1,7 @@
 # Relay OS — User-Space Gate Design: programs, not built-ins (milestones 2 and 3)
 
 - **Date:** 2026-09-29
-- **Status:** Approved 2026-09-29; revised while planning milestone 2's plan 1 (see §16)
+- **Status:** Approved 2026-09-29; revised while planning milestone 2's plans 1 and 2 (see §16)
 - **Builds on:** milestone 1 (version 0.2.0,
   `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`,
   cited below as "M1 §n")
@@ -180,9 +180,10 @@ it are `EBUSY`.
 ### 5.1 Address spaces
 
 Every process has its own PML4. Entries 0–255 (the lower half) belong to the
-process; the kernel's entries (385 and up, `FIRST_SHARED_PML4_ENTRY`) are
-copied in when the address space is created, so the kernel is mapped in
-every process. Entries 256–384 stay empty.
+process; the kernel's entries (256–511: the linear map, the heap, the
+kernel stacks and the kernel image) are copied in when the address space
+is created, so the kernel is mapped in every process. None of them changes
+after the kernel has set up its memory (§16 item 2).
 
 | Range | Use |
 |---|---|
@@ -293,8 +294,8 @@ killed (`killed (FPU/SSE instruction, ip …)`). Supporting floating point
 - The GDT gains user code and data segments in the order `syscall`/`sysret`
   needs (kernel code, kernel data, user data, user code). The TSS gains
   `rsp0`, set to the running process's kernel stack on every switch.
-- `STAR`, `LSTAR` and `SFMASK` are set up; `SFMASK` clears IF, DF, TF and
-  AC on entry. The entry stub switches to the kernel stack through a
+- `STAR`, `LSTAR` and `SFMASK` are set up; `SFMASK` clears IF, DF, TF, AC
+  and NT on entry (§16 item 2). The entry stub switches to the kernel stack through a
   per-CPU block reached with `swapgs`, saves the user registers, re-enables
   interrupts and calls the architecture-neutral dispatcher.
 - Before returning with `sysret` the stub checks that the user `rip` is
@@ -787,3 +788,107 @@ does. Facts found before the spec was first merged are already in its body.
      runs `ls -l /bin`, which must list `t-args`; the recorded transcripts of
      it in `xtask/fixtures/checks/` get those lines by hand until plan 1's
      NUC check records real ones.
+2. **Decisions made while planning milestone 2's plan 2** (ring 3 and one
+   program):
+   - **The kernel's whole upper half is shared** (§5.1, corrected in its
+     body). PML4 entries 256–384 hold the linear map (`PHYS_OFFSET`, up to
+     64 TiB) and the heap, which system calls need as much as the kernel
+     image; every address space copies entries 256–511. `mm::init` gives
+     every upper-half entry a table (about 1 MiB), so the kernel half never
+     gains a PML4 entry later and a copy made once sees every later kernel
+     mapping (`map_mmio`, kernel stacks).
+   - **A program's flags stay its own** (§6.2, corrected in its body; found
+     by the prototype's review). A program sets any flag `popfq` allows, and
+     neither `syscall` nor an exception clears all of them. `SFMASK` also
+     clears NT, which would otherwise make the next `iretq` into a program
+     fault in ring 0 once an `exit` carried it back to the kernel, as Linux
+     found in 2014; the way back to the waiting kernel (`leave`) loads the
+     kernel's own flags, so a program's AC never reaches ring 0 (it would
+     switch SMAP off in plan 3); and a debug assertion checks that no TF,
+     DF, AC or NT came back. The `sysenter` MSRs are zeroed, so `sysenter`
+     is a general protection fault whatever the firmware left in them.
+   - **A return to a non-canonical address** (§6.2). A system call whose
+     return address is not canonical kills the program as a general
+     protection fault at that address, instead of returning with `iretq`:
+     on Intel CPUs `iretq` to a non-canonical `rip` faults in ring 0 as
+     well, only on the kernel stack. The top user page is never mapped
+     (§5.1), so no program reaches this; `is_canonical` is unit-tested.
+   - **`UserSlice` copies through the linear map** (§5.1, §11.1). After the
+     walk of the program's tables it copies from the frames they name, so
+     the kernel never touches a program's addresses and SMAP (plan 3) needs
+     no `stac`/`clac`. Plan 2 only copies in (`write`); copying out and
+     `UserStr` come with plan 3's first calls that need them. `write`
+     copies a page at a time, so a buffer that runs into a page the program
+     does not have writes every byte before it (as Linux does).
+   - **The ELF checks are `crates/elf`** (§3.1, §5.2), shared by the
+     kernel's `spawn` and xtask's build as `sysimg` is, so one test runs
+     every patched `t-args` through both and the build refuses exactly
+     what the kernel refuses; `readelf` stays the independent check. Both
+     also check ELF64, little-endian and at most 16 MiB (plan 1's deferred
+     finding). OS/ABI and the ident version are not rules.
+   - **Scheduler scope: none in plan 2** (§5.4, §6.1). One child at a time:
+     `spawn` loads it (`EAGAIN` while one exists), `wait` runs it to
+     completion on its own kernel stack, saving the waiting kernel's
+     callee-saved registers and stack pointer (`arch::user::enter`, and
+     `leave` back); the timer only counts ticks meanwhile. There is no
+     preemption, blocking, idle task or Ctrl-C yet, so a program that
+     never ends hangs the shell until plan 3. `spawn` and `wait` are kernel
+     functions the in-kernel shell uses; from ring 3 every call but `exit`
+     and `write` is `ENOSYS` until plan 3 brings the process table, when a
+     parent can block. Plan 3 turns `enter`/`leave` into the context switch.
+   - **The in-kernel shell's hook** (§8.2). `shell::System` gains `spawn`
+     (reads the program through the `Vfs`) and `wait` (runs it, its fd 1
+     going to the command's standard output and fd 2 to the screen, a
+     running script's transcript getting both); both default to "no
+     programs", as on the host. A name that is no built-in runs
+     `/bin/<name>`, a name with a `/` runs as given, argument 0 is the path
+     as typed. Not found is `relay-sh: <name>: command not found` (127), a
+     missing path `No such file or directory` (127), any other refusal
+     `relay-sh: <name>: <message>` (126), as bash. `..`, `.` and an empty
+     name are directories in `/bin`, and a search for a command skips
+     directories: they are `command not found`, as in milestone 1. A
+     program's write error is reported as a built-in's; a program that was
+     killed keeps its report and status next to it. Plan 4's `Runner`
+     replaces the hook, and the kernel drops it with the `shell` crate.
+   - **Kernel stacks** (§5.4) are in PML4 entry 509: 64 slots, each an
+     unmapped guard page and 64 KiB. Their page tables stay once made, so
+     frame comparisons in scenarios start after a first program.
+   - **Faults** (§11.1). Exceptions 2, 8 and 18 (NMI, double fault, machine
+     check) are the machine's, not the program's, and reach the panic
+     screen; NMIs and machine checks now use the double fault's IST stack,
+     so one taken with a program's stack pointer in ring 0 (between
+     `syscall` and the switch, or before `sysret`) still does. Every other
+     exception in ring 3 kills the program. A page fault in the stack's
+     guard page is a stack overflow (`stack overflow at <address>`); a
+     stack-segment fault counts as a general protection fault; any other
+     exception is `CPU exception <n>`, status 139. The words are
+     `relay_abi::WaitStatus`'s `Display`, so the kernel log
+     (`pid <n> (<path>): killed: …`), the in-kernel shell and plan 4's
+     `/bin/sh` say the same; the shell adds `killed (…)` and bash's status.
+     Plan 2's in-kernel shell names itself `relay-sh`, as in milestone 1.
+     Every other exception is status 139, although bash would give some of
+     them another signal's (a debug exception SIGTRAP): the kinds are the
+     ABI's, and the shell does not read architecture numbers. A refusal of
+     a program (`ENOEXEC`) always has its reason in the kernel log, a file
+     over 16 MiB too, which is refused before it is read.
+   - **Limits** (§11.1). The 8 MiB reserve applies to every frame of a
+     program's address space, its page tables included, not to kernel
+     stacks. An argument holding a NUL is `EINVAL`.
+   - **Error numbers** (§7.2). `vfs::Errno` gains the numbers plan 2
+     returns (`E2BIG`, `ENOEXEC`, `EBADF`, `ECHILD`, `EAGAIN`, `ENOMEM`,
+     `EFAULT`, `ENOSYS`) and `number()`, checked against the host C
+     library's messages; the others come with the plans that return them.
+   - **Tests** (§8.5, §12.3). `t-fault` has every kind but `sse`, which
+     needs plan 3's CR0.TS, and two more: `flags-exit` and `flags-ud` set
+     NT, AC and DF, then exit or fault. The e2e runner gains `expect-same NAME REGEX`
+     (the regex's group must capture what it did the first time), used to
+     compare `free` before and after. Scenarios `programs` (arguments,
+     paths, redirection, refusals) and `userfault` (every `t-fault` kind,
+     and a program after each); plan 3 adds `sse` to `userfault`. The
+     scenarios check the messages, not `$?` (§12.3): no shell of milestone
+     2 prints it, since shell variables are milestone 3's (§9.4); the
+     statuses are host-tested.
+   - **Check scripts** (§12.4). `check3-a.sh` runs `t-args a 'b c' ''` and
+     `t-fault null-read`; the recorded transcripts get those lines by hand
+     until plan 2's NUC check records real ones (their `ls -l /bin` still
+     lists only `t-args`, which the script's `...` lines allow).
