@@ -99,6 +99,13 @@ pub fn enable(regs: &mut impl Regs, spurious_vector: u8) {
     }
 }
 
+/// Whether `vector` is in service: the LAPIC delivered it and waits for its
+/// EOI.
+pub fn in_service(regs: &mut impl Regs, vector: u8) -> bool {
+    let reg = ISR0 + 0x10 * u32::from(vector / 32);
+    regs.read(reg) & (1 << (vector % 32)) != 0
+}
+
 /// Starts the timer in periodic mode (divide by 16), interrupting on
 /// `vector` every `count` timer ticks.
 pub fn start_periodic(regs: &mut impl Regs, vector: u8, count: u32) {
@@ -128,6 +135,15 @@ pub fn periodic_count(timer_hz: u64, tick_hz: u64) -> u32 {
 
 /// The LAPIC, once the timer driver has set it up.
 pub static LAPIC: Once<Lapic> = Once::new();
+
+/// Whether the LAPIC has `vector` in service (false before the timer
+/// driver has set it up).
+pub fn vector_in_service(vector: u8) -> bool {
+    LAPIC
+        .get()
+        .copied()
+        .is_some_and(|mut l| in_service(&mut l, vector))
+}
 
 /// Signals end of interrupt to the LAPIC (for every vector except the
 /// spurious one).
@@ -216,6 +232,18 @@ mod tests {
                 self.isr[i] &= !(1 << top);
             }
             self.writes.push((reg, value));
+        }
+    }
+
+    #[test]
+    fn a_vector_is_in_service_by_its_isr_bit() {
+        let mut r = Fake::default();
+        r.isr[1] = 1 << 3; // vector 35
+        r.isr[7] = 1 << 31; // vector 255
+        assert!(in_service(&mut r, 35));
+        assert!(in_service(&mut r, 255));
+        for v in [0, 3, 34, 36, 67, 254] {
+            assert!(!in_service(&mut r, v), "vector {v}");
         }
     }
 

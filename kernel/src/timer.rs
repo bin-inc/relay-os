@@ -192,11 +192,24 @@ impl fmt::Display for TimerInfo {
     }
 }
 
-/// Finds the TSC frequency, masks the legacy PIC, starts the LAPIC timer at
+/// Masks the legacy PIC, finds the TSC frequency, starts the LAPIC timer at
 /// `TICK_HZ` and enables interrupts. `hpet` is the HPET base from ACPI;
 /// `force_hpet` (cmdline `tsc=hpet`) measures against it even when CPUID
 /// has the frequency.
 pub fn init(hpet: Option<u64>, force_hpet: bool) -> Result<TimerInfo, TimerError> {
+    init_on(&mut pic::RealPorts, hpet, force_hpet)
+}
+
+/// `init`, with the PIC's ports `io`. The PIC is masked before anything can
+/// fail: an unmasked PIC delivers its IRQs on the firmware's vectors (0x08
+/// is the double fault's) as soon as anything enables interrupts, and the
+/// first system call does.
+fn init_on(
+    io: &mut impl pic::PortOut,
+    hpet: Option<u64>,
+    force_hpet: bool,
+) -> Result<TimerInfo, TimerError> {
+    pic::remap_and_mask(io, irq::PIC_BASE);
     let (tsc_hz, source) = match cpuid_tsc() {
         Some(found) if !force_hpet => found,
         _ => {
@@ -206,7 +219,6 @@ pub fn init(hpet: Option<u64>, force_hpet: bool) -> Result<TimerInfo, TimerError
     };
     TSC_HZ.store(tsc_hz, Ordering::Relaxed);
 
-    pic::remap_and_mask(&mut pic::RealPorts, irq::PIC_BASE);
     let mode = Lapic::detect();
     let mmio = match mode {
         Mode::XApic { phys } => mm::map_mmio(phys, 0x1000, Cache::Uncached)? as usize,
@@ -327,6 +339,28 @@ pub fn count_ticks_over(seconds: u64, mut clock: impl FnMut() -> u8) -> Option<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct Ports(Vec<(u16, u8)>);
+
+    impl pic::PortOut for Ports {
+        fn outb(&mut self, port: u16, value: u8) {
+            self.0.push((port, value));
+        }
+    }
+
+    #[test]
+    fn the_pic_is_masked_even_when_the_timer_cannot_start() {
+        // No HPET to measure against, as on a machine whose ACPI tables
+        // lack one: `init` fails before it touches the LAPIC.
+        let mut io = Ports::default();
+        assert!(matches!(
+            init_on(&mut io, None, true),
+            Err(TimerError::NoSource)
+        ));
+        assert!(io.0.contains(&(pic::MASTER_DATA, 0xFF)), "master masked");
+        assert!(io.0.contains(&(pic::SLAVE_DATA, 0xFF)), "slave masked");
+    }
 
     #[test]
     fn a_sleep_is_never_shorter_than_asked() {
