@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["boot", "kernel", "crates/boot-info", "crates/term", "crates/vfs", "crates/shell", "crates/ext2", "crates/usb", "crates/heap", "crates/relay-abi", "xtask"]
-default-members = ["crates/boot-info", "crates/term", "crates/vfs", "crates/shell", "crates/ext2", "crates/usb", "crates/heap", "crates/relay-abi", "xtask"]
+members = ["boot", "kernel", "crates/boot-info", "crates/term", "crates/vfs", "crates/shell", "crates/ext2", "crates/usb", "crates/heap", "crates/relay-abi", "crates/crc32", "crates/sysimg", "xtask"]
+default-members = ["crates/boot-info", "crates/term", "crates/vfs", "crates/shell", "crates/ext2", "crates/usb", "crates/heap", "crates/relay-abi", "crates/crc32", "crates/sysimg", "xtask"]
 
 [workspace.package]
 version = "0.2.0"
@@ -17,6 +17,8 @@ ext2 = { path = "crates/ext2" }
 usb = { path = "crates/usb" }
 heap = { path = "crates/heap" }
 relay-abi = { path = "crates/relay-abi" }
+crc32 = { path = "crates/crc32" }
+sysimg = { path = "crates/sysimg" }
 uefi = { version = "0.41", default-features = false }
 x86_64 = { version = "0.15.5", default-features = false, features = ["instructions"] }
 bitflags = "2"

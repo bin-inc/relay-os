@@ -3,7 +3,7 @@
 //! either is bad. Everything read from the disk is untrusted (spec §10): a
 //! corrupt or hostile table is refused or skipped, never a panic.
 
-use super::crc32::crc32;
+use ::crc32::crc32;
 use alloc::vec::Vec;
 use core::fmt;
 use vfs::{BlockDevice, IoError};

@@ -1,5 +1,6 @@
-//! CRC-32 as GPT needs it (spec §6.5): the header and the partition entry
-//! array each carry one.
+//! CRC-32 (IEEE 802.3), as GPT (spec §6.5 of milestone 1) and the system
+//! archive (spec §4.2 of the user-space gate) use it.
+#![cfg_attr(not(test), no_std)]
 
 /// The reflected IEEE 802.3 polynomial.
 const POLY: u32 = 0xEDB8_8320;
@@ -48,7 +49,7 @@ mod tests {
     fn every_byte_value_counts() {
         // zlib's crc32 of the bytes 0..=255 in order, which reaches every
         // entry of the table.
-        let all: alloc::vec::Vec<u8> = (0..=255).collect();
+        let all: Vec<u8> = (0..=255).collect();
         assert_eq!(crc32(&all), 0x2905_8C73);
     }
 }
