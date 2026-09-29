@@ -417,10 +417,11 @@ bin  etc
     }
 
     /// The real check scripts against a transcript of each machine: QEMU's
-    /// from the `checks` scenario, the NUC's with its startup lines as
-    /// checks 1–3 recorded them (`docs/hardware-test.md`), in the kernel's
-    /// order. A `#nuc>` line must not need a line of its own next to the
-    /// `#>` line for the same output, which QEMU alone cannot show.
+    /// from the `checks` scenario, the NUC's as the NUC wrote them in the
+    /// full hardware checklist of 2026-09-29 (`docs/hardware-test.md`),
+    /// copied off the stick unchanged. A `#nuc>` line must not need a line
+    /// of its own next to the `#>` line for the same output, which QEMU
+    /// alone cannot show.
     #[test]
     fn the_check_scripts_pass_on_both_machines() {
         let parts = [
