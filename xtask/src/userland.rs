@@ -5,7 +5,7 @@
 
 use crate::config::{KERNEL_TARGET, USER_PACKAGES, USER_PROFILE};
 use crate::util::{cargo, out_dir, root, run_stdout};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -57,10 +57,20 @@ pub fn build() -> Result<Vec<Program>> {
         }
     }
     programs.sort_by(|a, b| a.name.cmp(&b.name));
+    require_tool("readelf", "binutils")?;
     for p in &programs {
         check_program(&p.path).with_context(|| format!("{} is not a Relay OS program", p.name))?;
     }
     Ok(programs)
+}
+
+/// Fails, naming the tool and the package it comes in, if `program`
+/// cannot be started, so a missing tool is not blamed on what it checks.
+fn require_tool(program: &str, package: &str) -> Result<()> {
+    match Command::new(program).arg("--version").output() {
+        Ok(_) => Ok(()),
+        Err(e) => bail!("cannot run {program} ({e}): install {package}"),
+    }
 }
 
 /// What `readelf` says about a program's ELF header and program headers.
@@ -440,6 +450,19 @@ mod tests {
             b[at + 32..at + 40].copy_from_slice(&(memsz + 1).to_le_bytes());
         });
         assert!(e.contains("has more file"), "{e}");
+    }
+
+    #[test]
+    fn a_missing_tool_is_named() {
+        require_tool("readelf", "binutils").unwrap();
+        let e = require_tool("readelf-that-is-not-installed", "binutils")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.starts_with("cannot run readelf-that-is-not-installed ("),
+            "{e}"
+        );
+        assert!(e.ends_with("): install binutils"), "{e}");
     }
 
     #[test]
