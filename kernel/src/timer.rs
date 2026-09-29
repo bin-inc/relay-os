@@ -235,6 +235,16 @@ pub fn is_ticking() -> bool {
     TICKING.load(Ordering::Relaxed)
 }
 
+/// The tick a sleep of `ms` milliseconds that starts at tick `now` ends on:
+/// the ticks `ms` takes, rounded up, and one more, since the next tick may
+/// come right after `now`. So a sleep is never shorter than asked.
+pub fn sleep_until(now: u64, ms: u64) -> u64 {
+    let ticks = ms
+        .checked_mul(TICK_HZ)
+        .map_or(u64::MAX, |t| t.div_ceil(1000));
+    now.saturating_add(ticks).saturating_add(1)
+}
+
 /// Timer ticks since the timer started (1 per millisecond).
 pub fn ticks() -> u64 {
     irq::TICKS.load(Ordering::Relaxed)
@@ -317,6 +327,16 @@ pub fn count_ticks_over(seconds: u64, mut clock: impl FnMut() -> u8) -> Option<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sleep_is_never_shorter_than_asked() {
+        // At tick 100 the next tick may come at once: 1 ms needs 2 more.
+        assert_eq!(sleep_until(100, 1), 102);
+        assert_eq!(sleep_until(100, 20), 121);
+        assert_eq!(sleep_until(0, 0), 1);
+        assert_eq!(sleep_until(u64::MAX - 5, 10), u64::MAX, "no overflow");
+        assert_eq!(sleep_until(7, u64::MAX), u64::MAX);
+    }
 
     #[test]
     fn tsc_cycles_become_time() {

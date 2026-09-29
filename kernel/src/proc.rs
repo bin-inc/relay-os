@@ -445,8 +445,7 @@ impl Caller for Current {
         if ms == 0 || !timer::is_ticking() {
             return;
         }
-        let until = timer::ticks().saturating_add(ms.saturating_mul(timer::TICK_HZ) / 1000);
-        block(Blocked::Sleep(until));
+        block(Blocked::Sleep(timer::sleep_until(timer::ticks(), ms)));
     }
 
     fn output(&mut self, fd: u32, bytes: &[u8]) {
