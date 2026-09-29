@@ -17,10 +17,12 @@ pub mod mm;
 pub mod panic_screen;
 pub mod pci;
 pub mod power;
+pub mod proc;
 pub mod rtc;
 pub mod serial;
 pub mod session;
 pub mod storage;
+pub mod syscall;
 pub mod system;
 pub mod timer;
 pub mod usb;
@@ -47,6 +49,7 @@ pub fn kernel_main(info: &'static BootInfo) -> ! {
     console::set_framebuffer(&info.framebuffer);
     arch::gdt::init();
     arch::idt::init();
+    arch::user::init();
     let cmdline = Cmdline::parse(info.cmdline());
     serial::init();
     if cmdline.panic_test == Some(PanicTest::Early) {

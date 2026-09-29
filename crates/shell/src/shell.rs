@@ -1,5 +1,6 @@
 //! The shell itself: prompt, line editing, parsing, redirection, running a
-//! built-in command and syncing the filesystems after it (spec §7.3, §8.3).
+//! built-in command or a program and syncing the filesystems after it
+//! (spec §7.3, §8.3; user-space gate §8.2).
 
 use crate::commands::{self, Script};
 use crate::ctx::Ctx;
@@ -16,10 +17,14 @@ use vfs::{Errno, FileType, Node, Vfs, path};
 pub const NAME: &str = "relay-sh";
 /// Exit status of an unknown command.
 pub const NOT_FOUND: i32 = 127;
+/// Exit status of a program that could not be started (bash's).
+pub const CANNOT_RUN: i32 = 126;
 /// Exit status of a line that does not parse.
 pub const SYNTAX: i32 = 2;
 /// Exit status after Ctrl-C.
 pub const CANCELLED: i32 = 130;
+/// Exit status of a program that was killed (bash's for SIGKILL).
+pub const KILLED: i32 = 137;
 /// The most of `/etc/motd` shown at start.
 const MOTD_MAX: usize = 16 * 1024;
 
@@ -135,7 +140,7 @@ impl<'a> Shell<'a> {
             return self.finish(0, String::new());
         };
         let Some(builtin) = commands::find(name) else {
-            return self.finish(NOT_FOUND, format!("{NAME}: {name}: command not found\n"));
+            return self.run_program(name, &cmd.words[1..], file);
         };
         let mut ctx = Ctx::new(&mut *self.vfs, &mut *self.system, &mut *self.console, file);
         ctx.in_script = self.in_script;
@@ -155,6 +160,60 @@ impl<'a> Shell<'a> {
         if let Some(script) = ctx.script.take() {
             status = self.run_script(script);
         }
+        self.finish(status, message)
+    }
+
+    /// Runs a program (user-space gate §8.2): `/bin/<name>`, or `name`
+    /// itself when it holds a `/`, with the words after it as arguments.
+    /// Its fd 1 is standard output (the redirection file, if any), its fd 2
+    /// the screen; a running script's transcript gets both.
+    fn run_program(&mut self, name: &str, words: &[String], file: Option<(Node, u64)>) -> i32 {
+        let path = if name.contains('/') {
+            String::from(name)
+        } else {
+            format!("/bin/{name}")
+        };
+        let mut args: Vec<&[u8]> = alloc::vec![path.as_bytes()];
+        args.extend(words.iter().map(|w| w.as_bytes()));
+        let started = self.system.spawn(&mut *self.vfs, path.as_bytes(), &args);
+        let pid = match started {
+            Some(Ok(pid)) => pid,
+            // No programs here (the host), or none by that name in /bin:
+            // `..`, `.` and `''` name directories there, which a search
+            // for a command skips, as bash's does.
+            None => return self.finish(NOT_FOUND, format!("{NAME}: {name}: command not found\n")),
+            Some(Err(Errno::ENOENT | Errno::EISDIR)) if !name.contains('/') => {
+                return self.finish(NOT_FOUND, format!("{NAME}: {name}: command not found\n"));
+            }
+            Some(Err(e)) => {
+                let status = if e == Errno::ENOENT {
+                    NOT_FOUND
+                } else {
+                    CANNOT_RUN
+                };
+                return self.finish(status, format!("{NAME}: {name}: {e}\n"));
+            }
+        };
+        let mut ctx = Ctx::new(&mut *self.vfs, &mut *self.system, &mut *self.console, file);
+        ctx.transcript = self.transcript.take();
+        let ended = ctx.wait_program(pid);
+        let mut message = String::new();
+        let mut status = match ended {
+            Ok(w) if w.how == relay_abi::wait::EXITED => w.code as i32,
+            Ok(_) => {
+                message = format!("{NAME}: {name}: killed\n");
+                KILLED
+            }
+            Err(e) => {
+                message = format!("{NAME}: {name}: {e}\n");
+                CANNOT_RUN
+            }
+        };
+        if let Err(e) = ctx.finish() {
+            message = format!("{name}: write error: {e}\n");
+            status = 1;
+        }
+        self.transcript = ctx.transcript.take();
         self.finish(status, message)
     }
 
@@ -263,8 +322,9 @@ impl<'a> Shell<'a> {
 #[cfg(test)]
 mod tests {
     use crate::Shell;
-    use crate::testing::Harness;
+    use crate::testing::{FakeProgram, Harness};
     use alloc::string::String;
+    use relay_abi::WaitStatus;
     use vfs::Errno;
 
     #[test]
@@ -297,6 +357,148 @@ mod tests {
         assert_eq!(
             h.run("echo 'open"),
             (2, "relay-sh: syntax error: unterminated quote\n".into())
+        );
+    }
+
+    /// `t-args` in `/bin`, printing its arguments on fd 1 and a line on
+    /// fd 2, and exiting with 3.
+    fn with_programs() -> Harness {
+        let mut h = Harness::new();
+        h.dir("/bin");
+        h.put("/bin/t-args", b"\x7fELF");
+        h.put("/root/text", b"not a program");
+        h.system.programs.push(FakeProgram {
+            path: "/bin/t-args",
+            writes: vec![(1, b"[1] a\n"), (2, b"t-args: note\n"), (1, b"[2] b c\n")],
+            status: WaitStatus::exited(3),
+        });
+        h
+    }
+
+    #[test]
+    fn a_name_that_is_no_built_in_runs_from_bin() {
+        let mut h = with_programs();
+        assert_eq!(
+            h.run("t-args a 'b c' ''"),
+            (3, "[1] a\nt-args: note\n[2] b c\n".into())
+        );
+        assert_eq!(
+            h.system.spawned,
+            [vec![
+                b"/bin/t-args".to_vec(),
+                b"a".to_vec(),
+                b"b c".to_vec(),
+                b"".to_vec()
+            ]]
+        );
+        // A path runs as given; argument 0 is the path as typed.
+        assert_eq!(h.run("/bin/t-args").0, 3);
+        h.run("cd /bin");
+        assert_eq!(h.run("./t-args x").0, 3);
+        assert_eq!(h.system.spawned[2], [b"./t-args".to_vec(), b"x".to_vec()]);
+        // Built-ins come first.
+        h.put("/bin/echo", b"\x7fELF");
+        assert_eq!(h.run("echo hi"), (0, "hi\n".into()));
+        assert_eq!(h.system.spawned.len(), 3);
+    }
+
+    #[test]
+    fn a_program_s_output_follows_the_redirection_and_its_errors_the_screen() {
+        let mut h = with_programs();
+        assert_eq!(h.run("t-args > /tmp/out"), (3, "t-args: note\n".into()));
+        assert_eq!(h.get("/tmp/out"), b"[1] a\n[2] b c\n");
+        h.run("t-args >> /tmp/out");
+        assert_eq!(h.get("/tmp/out"), b"[1] a\n[2] b c\n[1] a\n[2] b c\n");
+        // A full disk is a write error, as for a built-in.
+        h.spy.zero_writes.set(true);
+        assert_eq!(
+            h.run("t-args > /tmp/out"),
+            (
+                1,
+                "t-args: note\nt-args: write error: No space left on device\n".into()
+            )
+        );
+    }
+
+    #[test]
+    fn what_cannot_run_says_why() {
+        let mut h = with_programs();
+        assert_eq!(
+            h.run("nosuch x"),
+            (127, "relay-sh: nosuch: command not found\n".into())
+        );
+        assert_eq!(
+            h.run("/root/nosuch"),
+            (
+                127,
+                "relay-sh: /root/nosuch: No such file or directory\n".into()
+            )
+        );
+        assert_eq!(
+            h.run("/root/text"),
+            (126, "relay-sh: /root/text: Exec format error\n".into())
+        );
+        assert_eq!(
+            h.run("/root"),
+            (126, "relay-sh: /root: Is a directory\n".into())
+        );
+        // In a script too; the script goes on.
+        h.put("/root/s.sh", b"nosuch\nt-args\n");
+        let (status, out) = h.run("sh /root/s.sh");
+        assert_eq!(status, 3);
+        assert!(
+            out.contains("+ nosuch\nrelay-sh: nosuch: command not found\n+ t-args\n[1] a\n"),
+            "{out}"
+        );
+        let transcript = String::from_utf8(h.get("/root/s.log")).unwrap();
+        assert!(
+            transcript.contains("+ t-args\n[1] a\nt-args: note\n[2] b c\n"),
+            "{transcript}"
+        );
+    }
+
+    #[test]
+    fn names_of_directories_in_bin_are_not_commands() {
+        let mut h = with_programs();
+        for name in ["..", ".", "''"] {
+            let shown = if name == "''" { "" } else { name };
+            assert_eq!(
+                h.run(name),
+                (127, format!("relay-sh: {shown}: command not found\n")),
+                "{name}"
+            );
+        }
+        // Given as a path, a directory still says so.
+        assert_eq!(h.run("./"), (126, "relay-sh: ./: Is a directory\n".into()));
+    }
+
+    #[test]
+    fn without_programs_every_unknown_name_is_not_found() {
+        let mut h = with_programs();
+        h.system.no_programs = true;
+        assert_eq!(
+            h.run("t-args"),
+            (127, "relay-sh: t-args: command not found\n".into())
+        );
+        assert_eq!(
+            h.run("/bin/t-args"),
+            (127, "relay-sh: /bin/t-args: command not found\n".into())
+        );
+    }
+
+    #[test]
+    fn a_killed_program_is_reported() {
+        let mut h = with_programs();
+        h.system.programs[0].status = WaitStatus {
+            how: relay_abi::wait::KILLED,
+            ..Default::default()
+        };
+        assert_eq!(
+            h.run("t-args"),
+            (
+                137,
+                "[1] a\nt-args: note\n[2] b c\nrelay-sh: t-args: killed\n".into()
+            )
         );
     }
 

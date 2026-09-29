@@ -1,14 +1,15 @@
 //! The shell's surroundings in the kernel (spec §7.2, §7.3): the console as
 //! `shell::Console` (input from the USB keyboards and COM1), the clock,
-//! memory figures and kernel log as `shell::System`, and `vfs::Env` for
-//! filesystems.
+//! memory figures, kernel log and programs as `shell::System`, and
+//! `vfs::Env` for filesystems.
 
 use crate::input::InputQueue;
 use crate::mm::{self, MemStats, frame::FRAME_SIZE};
-use crate::{arch, console, klog, klogln, power, rtc, serial, usb};
+use crate::{arch, console, klog, klogln, power, proc, rtc, serial, usb};
 use alloc::vec::Vec;
+use relay_abi::WaitStatus;
 use shell::{Console, MemInfo, Shell, System};
-use vfs::{Env, MountTable};
+use vfs::{Env, Errno, MountTable, Vfs};
 
 /// Bytes read from COM1 per poll at most, so a flood cannot starve the rest.
 const SERIAL_BURST: usize = 256;
@@ -107,6 +108,19 @@ impl System for KernelSystem {
 
     fn poweroff(&mut self) {
         power::poweroff(self.test_mode)
+    }
+
+    fn spawn(
+        &mut self,
+        vfs: &mut dyn Vfs,
+        path: &[u8],
+        args: &[&[u8]],
+    ) -> Option<Result<u32, Errno>> {
+        Some(proc::spawn(vfs, path, args))
+    }
+
+    fn wait(&mut self, pid: u32, out: &mut dyn FnMut(u32, &[u8])) -> Result<WaitStatus, Errno> {
+        proc::wait(pid, out)
     }
 }
 

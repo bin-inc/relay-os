@@ -1,0 +1,376 @@
+//! The programs the kernel runs (user-space gate §5), as plan 2 of
+//! milestone 2 has them: one child at a time, started by the in-kernel
+//! shell. `spawn` loads the child; `wait` runs it on its own kernel stack
+//! until it exits, and gives everything it had back. There is no
+//! scheduler: while the child runs, the shell waits inside `wait`, and the
+//! timer only counts ticks. Plan 3 replaces this with the process table and
+//! the scheduler; `arch::user::{enter, leave}` becomes its context switch.
+
+use crate::exec::{self, Entry};
+use crate::mm::kstack::KernelStack;
+use crate::mm::paging::MapError;
+use crate::mm::space::AddressSpace;
+use crate::mm::user::UserSlice;
+use crate::syscall::{self, Caller, Outcome};
+use crate::{arch, klogln, mm};
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
+use relay_abi::WaitStatus;
+use spin::Mutex;
+use vfs::{Errno, FileType, Vfs};
+
+/// A program `spawn` loaded and nobody has waited for yet.
+struct Child {
+    pid: u32,
+    space: AddressSpace,
+    stack: KernelStack,
+    entry: Entry,
+}
+
+static CHILD: Mutex<Option<Child>> = Mutex::new(None);
+/// Pids count from 1 and are not used again while the kernel runs.
+static NEXT_PID: AtomicU32 = AtomicU32::new(1);
+
+/// The child while it runs: what its system calls reach. Lives on
+/// `wait`'s stack; `RUNNING` points at it for that long.
+struct Running<'a> {
+    space: &'a AddressSpace,
+    out: &'a mut dyn FnMut(u32, &[u8]),
+    /// The stack pointer `arch::user::enter` saved; `leave` goes back to it.
+    waiter: u64,
+    status: Option<WaitStatus>,
+}
+
+static RUNNING: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+impl Caller for Running<'_> {
+    fn read(&mut self, slice: &UserSlice, offset: u64, buf: &mut [u8]) -> Result<(), Errno> {
+        // The lock is held only for the copy: the output may reach a disk,
+        // whose driver allocates memory too.
+        mm::with_user_memory(|mem, _| slice.read(self.space, mem, offset, buf))
+    }
+
+    fn output(&mut self, fd: u32, bytes: &[u8]) {
+        (self.out)(fd, bytes);
+    }
+}
+
+/// Why `spawn` refuses a file.
+#[derive(Debug, PartialEq, Eq)]
+enum Refusal {
+    /// It cannot be read (missing, a directory, a disk error).
+    Unreadable(Errno),
+    /// It is not a program this kernel runs: `ENOEXEC`, and the reason
+    /// goes to the kernel log.
+    NotAProgram(elf::ElfError),
+}
+
+impl From<Errno> for Refusal {
+    fn from(e: Errno) -> Refusal {
+        Refusal::Unreadable(e)
+    }
+}
+
+/// The file at `path` and the program in it (spec §5.2). A file over 16
+/// MiB is refused before anything is read.
+fn read_program(vfs: &mut dyn Vfs, path: &[u8]) -> Result<(Vec<u8>, elf::Program), Refusal> {
+    let node = vfs.lookup(path)?;
+    let stat = vfs.stat(node)?;
+    if stat.kind == FileType::Directory {
+        return Err(Errno::EISDIR.into());
+    }
+    let size = usize::try_from(stat.size).unwrap_or(usize::MAX);
+    if size > elf::MAX_SIZE {
+        return Err(Refusal::NotAProgram(elf::ElfError::TooBig(size)));
+    }
+    let mut file = alloc::vec![0; size];
+    let mut done = 0;
+    while done < file.len() {
+        match vfs.read_at(node, done as u64, &mut file[done..])? {
+            0 => break,
+            n => done += n,
+        }
+    }
+    file.truncate(done);
+    match elf::check(&file, arch::ELF_MACHINE, relay_abi::VERSION) {
+        Ok(program) => Ok((file, program)),
+        Err(e) => Err(Refusal::NotAProgram(e)),
+    }
+}
+
+fn memory_error(e: MapError) -> Errno {
+    match e {
+        MapError::OutOfMemory => Errno::ENOMEM,
+        _ => Errno::ENOEXEC,
+    }
+}
+
+/// Loads the program at `path` (read through `vfs`) with `args` (argument
+/// 0 first) as the child; its pid. `EAGAIN` while another child exists.
+pub fn spawn(vfs: &mut dyn Vfs, path: &[u8], args: &[&[u8]]) -> Result<u32, Errno> {
+    let mut child = CHILD.lock();
+    if child.is_some() {
+        return Err(Errno::EAGAIN);
+    }
+    let name = String::from_utf8_lossy(path);
+    let (file, program) = read_program(vfs, path).map_err(|r| match r {
+        Refusal::Unreadable(e) => e,
+        Refusal::NotAProgram(e) => {
+            klogln!("spawn {name}: {e}");
+            Errno::ENOEXEC
+        }
+    })?;
+    let arg_bytes = exec::arg_bytes(args)?;
+    let stack = mm::alloc_kernel_stack().ok_or(Errno::EAGAIN)?;
+    let loaded = mm::with_user_memory(|mem, kernel| {
+        let mut space = AddressSpace::new(mem, kernel).map_err(memory_error)?;
+        match exec::load(
+            &mut space,
+            mem,
+            &file,
+            &program,
+            &arg_bytes,
+            args.len() as u64,
+        ) {
+            Ok(entry) => Ok((space, entry)),
+            Err(e) => {
+                space.destroy(mem);
+                Err(e)
+            }
+        }
+    });
+    let (space, entry) = match loaded {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            mm::free_kernel_stack(stack);
+            klogln!("spawn {name}: {e}");
+            return Err(e);
+        }
+    };
+    let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+    *child = Some(Child {
+        pid,
+        space,
+        stack,
+        entry,
+    });
+    Ok(pid)
+}
+
+/// Runs the child `pid` until it ends, giving what it writes to fds 1 and 2
+/// to `out`; then gives back its memory and kernel stack. `ECHILD` if
+/// `pid` is not the child.
+pub fn wait(pid: u32, out: &mut dyn FnMut(u32, &[u8])) -> Result<WaitStatus, Errno> {
+    let child = {
+        let mut slot = CHILD.lock();
+        match slot.take() {
+            Some(c) if c.pid == pid => c,
+            other => {
+                *slot = other;
+                return Err(Errno::ECHILD);
+            }
+        }
+    };
+    let mut running = Running {
+        space: &child.space,
+        out,
+        waiter: 0,
+        status: None,
+    };
+    // From here until `run` returns, `running` is reached only through
+    // this pointer: here, and in its system calls (`RUNNING`).
+    let r = &raw mut running;
+    let e = child.entry;
+    let entry = arch::user::UserEntry {
+        ip: e.ip,
+        sp: e.sp,
+        rdi: e.args,
+        rsi: e.args_len,
+        rdx: e.argc,
+    };
+    RUNNING.store(r.cast(), Ordering::Release);
+    // SAFETY: `running` outlives the run, and nothing else touches it
+    // while this function waits in `run`; the space shares the kernel's
+    // upper half.
+    unsafe {
+        arch::user::run(
+            &entry,
+            child.stack.top(),
+            child.space.pml4(),
+            mm::kernel_pml4(),
+            &raw mut (*r).waiter,
+        );
+    }
+    RUNNING.store(core::ptr::null_mut(), Ordering::Release);
+    // SAFETY: the run is over; `r` is the only way to `running` again.
+    let status = unsafe { (*r).status }.unwrap_or_default();
+    mm::with_user_memory(|mem, _| child.space.destroy(mem));
+    mm::free_kernel_stack(child.stack);
+    Ok(status)
+}
+
+/// The running child and the stack pointer to leave to.
+///
+/// # Safety
+/// Only while a child runs (from inside its system calls and faults).
+unsafe fn running<'a>() -> &'a mut Running<'a> {
+    let p = RUNNING.load(Ordering::Acquire);
+    assert!(!p.is_null(), "a system call without a running program");
+    // SAFETY: set by `wait` to its `Running`, which lives until `run`
+    // returns.
+    unsafe { &mut *p.cast::<Running<'a>>() }
+}
+
+/// Ends the running child with `status` and goes back to `wait`.
+fn end(status: WaitStatus) -> ! {
+    // SAFETY: called on the child's kernel stack while it runs.
+    let r = unsafe { running() };
+    r.status = Some(status);
+    let waiter = &raw mut r.waiter;
+    // SAFETY: `enter` saved it and has not returned.
+    unsafe { arch::user::leave(waiter) }
+}
+
+/// A system call of the running child: its result register, or, for
+/// `exit`, back to `wait`.
+pub fn system_call(number: u64, args: [u64; 6]) -> u64 {
+    // SAFETY: called from the entry stub, on the child's kernel stack.
+    let r = unsafe { running() };
+    match syscall::dispatch(r, number, args) {
+        Outcome::Return(result) => result,
+        Outcome::Exit(code) => end(WaitStatus::exited(code)),
+    }
+}
+
+/// A system call would return to a non-canonical address (spec §6.2):
+/// `sysret` would fault in ring 0, so the child is killed instead.
+pub fn non_canonical_return(ip: u64) -> ! {
+    klogln!("pid killed: return to non-canonical address {ip:#x}");
+    end(WaitStatus {
+        how: relay_abi::wait::KILLED,
+        ip,
+        ..WaitStatus::default()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::boxed::Box;
+    use vfs::{DirEntry, Env, FileSystem, Ino, MemFs, MountTable, Stat, StatFs};
+
+    struct Clock;
+
+    impl Env for Clock {
+        fn now(&self) -> u64 {
+            0
+        }
+        fn log(&self, _: &str) {}
+    }
+
+    /// A `MemFs` whose files must not be read: a file refused by its size
+    /// is never read into memory.
+    struct NoReads(MemFs);
+
+    impl FileSystem for NoReads {
+        fn root(&self) -> Ino {
+            self.0.root()
+        }
+        fn stat(&mut self, ino: Ino) -> Result<Stat, Errno> {
+            self.0.stat(ino)
+        }
+        fn lookup(&mut self, dir: Ino, name: &[u8]) -> Result<Ino, Errno> {
+            self.0.lookup(dir, name)
+        }
+        fn read_dir(&mut self, dir: Ino) -> Result<Vec<DirEntry>, Errno> {
+            self.0.read_dir(dir)
+        }
+        fn read_link(&mut self, ino: Ino) -> Result<Vec<u8>, Errno> {
+            self.0.read_link(ino)
+        }
+        fn read_at(&mut self, ino: Ino, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+            assert!(buf.len() <= elf::MAX_SIZE, "a read of {} bytes", buf.len());
+            self.0.read_at(ino, offset, buf)
+        }
+        fn write_at(&mut self, ino: Ino, offset: u64, buf: &[u8]) -> Result<usize, Errno> {
+            self.0.write_at(ino, offset, buf)
+        }
+        fn truncate(&mut self, ino: Ino, size: u64) -> Result<(), Errno> {
+            self.0.truncate(ino, size)
+        }
+        fn touch(&mut self, ino: Ino) -> Result<(), Errno> {
+            self.0.touch(ino)
+        }
+        fn create(&mut self, dir: Ino, name: &[u8]) -> Result<Ino, Errno> {
+            self.0.create(dir, name)
+        }
+        fn mkdir(&mut self, dir: Ino, name: &[u8]) -> Result<Ino, Errno> {
+            self.0.mkdir(dir, name)
+        }
+        fn unlink(&mut self, dir: Ino, name: &[u8]) -> Result<(), Errno> {
+            self.0.unlink(dir, name)
+        }
+        fn rmdir(&mut self, dir: Ino, name: &[u8]) -> Result<(), Errno> {
+            self.0.rmdir(dir, name)
+        }
+        fn rename(
+            &mut self,
+            from_dir: Ino,
+            from: &[u8],
+            to_dir: Ino,
+            to: &[u8],
+        ) -> Result<(), Errno> {
+            self.0.rename(from_dir, from, to_dir, to)
+        }
+        fn statfs(&mut self) -> Result<StatFs, Errno> {
+            self.0.statfs()
+        }
+        fn sync(&mut self) -> Result<(), Errno> {
+            self.0.sync()
+        }
+        fn shutdown(&mut self) -> Result<(), Errno> {
+            self.0.shutdown()
+        }
+    }
+
+    /// `/root` with a text file and a sparse file of 16 MiB and one byte,
+    /// on a filesystem that fails a test if more than 16 MiB are read.
+    fn root() -> MountTable {
+        let fs = NoReads(MemFs::new(Box::new(Clock)));
+        let mut vfs = MountTable::new(Box::new(fs));
+        vfs.mkdir(b"/root").unwrap();
+        let text = vfs.create(b"/root/text").unwrap();
+        vfs.write_at(text, 0, b"not a program\n").unwrap();
+        let big = vfs.create(b"/root/big").unwrap();
+        vfs.truncate(big, elf::MAX_SIZE as u64 + 1).unwrap();
+        vfs
+    }
+
+    #[test]
+    fn a_file_that_is_no_program_says_why() {
+        let mut vfs = root();
+        assert_eq!(
+            read_program(&mut vfs, b"/root/text").unwrap_err(),
+            Refusal::NotAProgram(elf::ElfError::NotElf)
+        );
+        assert_eq!(
+            read_program(&mut vfs, b"/root/big").unwrap_err(),
+            Refusal::NotAProgram(elf::ElfError::TooBig(16 * 1024 * 1024 + 1)),
+            "refused by its size, with the reason for the log"
+        );
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_its_error() {
+        let mut vfs = root();
+        assert_eq!(
+            read_program(&mut vfs, b"/root/missing").unwrap_err(),
+            Refusal::Unreadable(Errno::ENOENT)
+        );
+        assert_eq!(
+            read_program(&mut vfs, b"/root").unwrap_err(),
+            Refusal::Unreadable(Errno::EISDIR)
+        );
+    }
+}

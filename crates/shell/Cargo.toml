@@ -6,3 +6,4 @@ license.workspace = true
 
 [dependencies]
 vfs = { workspace = true }
+relay-abi = { workspace = true }

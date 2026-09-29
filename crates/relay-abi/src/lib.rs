@@ -1,6 +1,7 @@
 //! The Relay system-call ABI (spec §7 of the user-space gate): the version,
 //! the ELF note that marks a program built for it, the call numbers, the
-//! error numbers and how a call's result carries a value or an error.
+//! error numbers, how a call's result carries a value or an error, and the
+//! structs the calls pass.
 //!
 //! The kernel and the programs' runtime both build on this crate, so they
 //! cannot disagree. It holds no architecture detail: which registers carry
@@ -11,9 +12,11 @@
 mod call;
 pub mod errno;
 mod result;
+pub mod wait;
 
 pub use call::Call;
 pub use result::{MAX_ERRNO, decode, encode};
+pub use wait::WaitStatus;
 
 /// Changes whenever a call's meaning or a struct's layout changes; adding
 /// a call does not change it (spec §7.4). Written into `system.img`'s

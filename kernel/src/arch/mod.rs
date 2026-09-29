@@ -1,10 +1,12 @@
-//! x86_64-specific setup: segmentation, interrupt table, CPU control.
+//! x86_64-specific setup: segmentation, interrupt table, CPU control, and
+//! ring 3.
 
 pub mod gdt;
 pub mod idt;
 pub mod irq;
 pub mod lapic;
 pub mod pic;
+pub mod user;
 
 /// Stops the CPU for good (interrupts stay disabled).
 pub fn halt_forever() -> ! {
@@ -31,3 +33,6 @@ pub fn idle_forever() -> ! {
         x86_64::instructions::interrupts::enable_and_hlt();
     }
 }
+
+/// `e_machine` of the programs this kernel runs.
+pub const ELF_MACHINE: u16 = elf::EM_X86_64;
