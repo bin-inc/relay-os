@@ -39,6 +39,10 @@ pub enum Errno {
     EFAULT,
     /// A system call this kernel does not have.
     ENOSYS,
+    /// No process or process group by that number.
+    ESRCH,
+    /// Process 1 cannot be killed.
+    EPERM,
 }
 
 impl Errno {
@@ -66,6 +70,8 @@ impl Errno {
             Errno::ENOMEM => "Cannot allocate memory",
             Errno::EFAULT => "Bad address",
             Errno::ENOSYS => "Function not implemented",
+            Errno::ESRCH => "No such process",
+            Errno::EPERM => "Operation not permitted",
         }
     }
 
@@ -95,6 +101,8 @@ impl Errno {
             Errno::ENOMEM => n::ENOMEM,
             Errno::EFAULT => n::EFAULT,
             Errno::ENOSYS => n::ENOSYS,
+            Errno::ESRCH => n::ESRCH,
+            Errno::EPERM => n::EPERM,
         }
     }
 }
@@ -128,7 +136,7 @@ mod tests {
     }
 
     /// Every variant, so the tests below cover each one.
-    const ALL: [Errno; 21] = [
+    const ALL: [Errno; 23] = [
         Errno::ENOENT,
         Errno::EEXIST,
         Errno::ENOTDIR,
@@ -150,6 +158,8 @@ mod tests {
         Errno::ENOMEM,
         Errno::EFAULT,
         Errno::ENOSYS,
+        Errno::ESRCH,
+        Errno::EPERM,
     ];
 
     /// The name, number and message the host's C library gives: the real

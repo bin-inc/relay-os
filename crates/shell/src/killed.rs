@@ -1,18 +1,27 @@
 //! What the shell says about a program that did not exit by itself (spec
 //! §11.1 of the user-space gate): `killed (page fault at 0x0, read, ip
 //! 0x401a2c)`, and the status bash would give for the signal Linux would
-//! send (128 + 11 for SIGSEGV, + 4 for SIGILL, + 8 for SIGFPE).
+//! send (128 + 11 for SIGSEGV, + 4 for SIGILL, + 8 for SIGFPE, + 2 for
+//! SIGINT on a Ctrl-C, + 9 for SIGKILL on a `kill`).
 
 use alloc::format;
 use alloc::string::String;
 use relay_abi::WaitStatus;
 use relay_abi::wait::*;
 
-/// A program killed with no reason the shell knows (bash's SIGKILL).
+/// A program killed with `kill`, or with no reason the shell knows
+/// (bash's SIGKILL).
 pub const KILLED: i32 = 128 + 9;
+/// A program killed with Ctrl-C (bash's SIGINT), as a built-in Ctrl-C
+/// stops.
+pub const INTERRUPTED: i32 = 128 + 2;
 
-/// The words for a program that did not exit, and its exit status.
+/// The words for a program that did not exit, and its exit status. A
+/// Ctrl-C is only `^C`, as the shell says when Ctrl-C stops a built-in.
 pub fn killed(w: &WaitStatus) -> (String, i32) {
+    if w.how == relay_abi::wait::KILLED && w.code == KILLED_CTRL_C {
+        return (String::from("^C"), INTERRUPTED);
+    }
     if !w.is_known_fault() {
         return (String::from("killed"), KILLED);
     }
@@ -58,5 +67,17 @@ mod tests {
             ..WaitStatus::default()
         };
         assert_eq!(killed(&w), ("killed".into(), 137));
+    }
+
+    #[test]
+    fn ctrl_c_and_kill_get_bash_s_statuses() {
+        assert_eq!(
+            killed(&WaitStatus::killed(KILLED_CTRL_C)),
+            ("^C".into(), 130)
+        );
+        assert_eq!(
+            killed(&WaitStatus::killed(relay_abi::wait::KILLED_KILL)),
+            ("killed".into(), 137)
+        );
     }
 }
