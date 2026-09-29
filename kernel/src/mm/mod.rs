@@ -12,6 +12,7 @@
 
 pub mod frame;
 pub mod heap;
+pub mod kstack;
 pub mod paging;
 pub mod space;
 #[cfg(test)]
@@ -21,6 +22,7 @@ use boot_info::{BootInfo, HEAP_BASE, HEAP_SIZE, PHYS_MAP_MAX, PHYS_OFFSET};
 use core::fmt;
 use frame::{FRAME_SIZE, FrameAllocator};
 use heap::{HeapStats, KernelHeap};
+use kstack::{KernelStack, KernelStacks};
 use paging::{Cache, MapError, PAGE, PAT_VALUE, PageTables, PhysMem};
 use spin::Mutex;
 use x86_64::PhysAddr;
@@ -39,6 +41,7 @@ const IA32_PAT: u32 = 0x277;
 struct Memory {
     frames: FrameAllocator<'static>,
     tables: PageTables,
+    stacks: KernelStacks,
 }
 
 static MEMORY: Mutex<Option<Memory>> = Mutex::new(None);
@@ -84,6 +87,26 @@ pub fn with_user_memory<R>(f: impl FnOnce(&mut UserMem<'_>, &PageTables) -> R) -
     let mut guard = MEMORY.lock();
     let m = guard.as_mut().expect("mm::init has not run");
     f(&mut UserMem(LinearMem(&mut m.frames)), &m.tables)
+}
+
+/// A kernel stack for a program (user-space gate §5.4), from the frames
+/// the kernel keeps for itself; `None` when every slot is in use.
+pub fn alloc_kernel_stack() -> Option<KernelStack> {
+    let mut guard = MEMORY.lock();
+    let m = guard.as_mut().expect("mm::init has not run");
+    m.stacks.alloc(&mut m.tables, &mut LinearMem(&mut m.frames))
+}
+
+/// Gives back a kernel stack nothing runs on any more.
+pub fn free_kernel_stack(stack: KernelStack) {
+    let mut guard = MEMORY.lock();
+    let m = guard.as_mut().expect("mm::init has not run");
+    let pages: alloc::vec::Vec<u64> = stack.pages().collect();
+    m.stacks
+        .free(stack, &mut m.tables, &mut LinearMem(&mut m.frames));
+    for virt in pages {
+        x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(virt));
+    }
 }
 
 /// The kernel's own page tables, for CR3 when no program runs.
@@ -221,7 +244,11 @@ pub fn init(info: &BootInfo) -> Result<MemStats, MemError> {
     // SAFETY: just mapped, owned by the heap from now on.
     unsafe { HEAP.init(HEAP_BASE as usize, HEAP_SIZE as usize) };
 
-    *MEMORY.lock() = Some(Memory { frames, tables });
+    *MEMORY.lock() = Some(Memory {
+        frames,
+        tables,
+        stacks: KernelStacks::new(),
+    });
     heap_self_test();
     Ok(stats())
 }
