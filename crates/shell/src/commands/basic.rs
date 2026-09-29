@@ -9,7 +9,7 @@ use vfs::path;
 
 /// The system name `uname` prints, and all of `uname -a`.
 pub const UNAME: &str = "Relay";
-pub const UNAME_ALL: &str = "Relay relay 0.1.0 x86_64";
+pub const UNAME_ALL: &str = concat!("Relay relay ", env!("CARGO_PKG_VERSION"), " x86_64");
 
 /// `cd [dir]`: no argument goes to `/root`. `cd -` is not supported.
 pub fn cd(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
@@ -170,7 +170,8 @@ mod tests {
     fn uname_prints_the_system() {
         let mut h = Harness::new();
         assert_eq!(h.run("uname"), (0, "Relay\n".into()));
-        assert_eq!(h.run("uname -a"), (0, "Relay relay 0.1.0 x86_64\n".into()));
+        // Milestone 1 is version 0.2.0 (spec §15 item 12), from Cargo.toml.
+        assert_eq!(h.run("uname -a"), (0, "Relay relay 0.2.0 x86_64\n".into()));
         assert_eq!(
             h.run("uname -r"),
             (1, "uname: invalid option -- 'r'\n".into())

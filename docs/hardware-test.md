@@ -24,7 +24,7 @@ normally.
 1. In Mint: `cargo xtask flash --full` and type `ERASE` when asked.
 2. Boot the stick (see above).
 3. Within about 5 s the monitor must show, on black:
-   - `Relay OS 0.1.0`
+   - `Relay OS 0.2.0`
    - `[ ok ] console WxH (CxR cells)` — note W×H. It should be the monitor's
      native resolution (1920×1200 on the ASUS PA248QV); the terminal uses at
      most the top-left 1920×1080 of it, so wider or taller screens have a
@@ -125,8 +125,11 @@ Unifying receiver on port 1 and the stick on a USB 3 port.
 3. On the K120, type and check each result:
    - `echo hello`, Enter → `hello`.
    - `echo Hello, World!` with Shift → `Hello, World!`.
-   - Caps Lock: the K120's Caps Lock light goes on; `echo abc` shows
-     `ABC`; Caps Lock again turns the light off.
+   - Caps Lock: type `echo ` with Caps Lock off, press Caps Lock (its light
+     goes on), type `abc` and Enter → `ABC`; Caps Lock again turns the light
+     off. (Typed with Caps Lock on, the command itself becomes `ECHO`, and
+     `relay-sh: ECHO: command not found` is right: command names are
+     case-sensitive, as in bash.)
    - Backspace, ←/→, Home/End while editing a line; ↑/↓ for history.
    - Hold a letter: after half a second it repeats, about 30 times a
      second, and stops when released.
@@ -237,3 +240,4 @@ request.
 | 2026-09-26 | 1b, `check=timer` | `ba9dedf` | Pass | `memory: 15915 MiB free of 15948 MiB, heap 32 MiB`; `acpi: 30 tables, ECAM 0xc0000000 buses 0-255, HPET 0xfed00000, S5 7/0`; `timer: TSC 2496.000 MHz (CPUID 0x15), 1000 Hz tick (xAPIC)`; `rtc: 2026-09-26 13:45:11 UTC`; `timer check: ok, 3000 ticks in 3 RTC seconds`; xHCI `00:0d.0` (bar0 `0x603d190000` 64K) and `00:14.0` (bar0 `0x603d180000` 64K); `pci: 24 devices on buses 00 01 72` (matches `lspci`). Every step `[ ok ]`. |
 | 2026-09-28 | 2 | `a3db39a` | Pass | `usb: 00:0d.0 xHCI 1.20, 4 ports (1 USB 2, 3 USB 3), 32-byte contexts, 34 scratchpads`; `usb: 00:14.0 xHCI 1.20, 16 ports (12 USB 2, 4 USB 3), 32-byte contexts, 34 scratchpads`; port 1 `046d:c534 full-speed, keyboard` (EP0 8 bytes), port 3 `046d:c31c low-speed, keyboard`, port 10 `8087:0033 full-speed, not claimed` (internal Bluetooth, isochronous endpoints), port 15 `0951:1666 SuperSpeed, not claimed` (hot reset done); `usb: 2 controllers, 4 devices`, `keyboard: 2 keyboards`, `[FAIL] mount /: no storage driver yet` (expected), prompt. Typing on the K120: Shift, Caps Lock with its light, Backspace, arrows, history, repeat after about half a second, Ctrl-C, `dmesg`; unplugging and replugging the K120, then `echo back` works. |
 | 2026-09-28 | 3 | `3ad0688` | Pass | `flash --full`, then F10: every startup line `[ ok ]`, `console 1920x1200 (120x33 cells)`; `usb: 00:14.0 port 15: 0951:1666 SuperSpeed, disk Kingston DataTraveler 3.0, 14.4 GiB` (`storage: slot 4: vendor "Kingston", product "DataTraveler 3.0", revision "PMAP", removable`, `30277632 blocks of 512 bytes`, ready at the first TEST UNIT READY); `storage: root on 00:14.0 port 15, the disk with the boot partition 4EBD57DE-8DBB-4D34-B3B5-D18607581E70`; `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 14.3 GiB`; motd and `root@relay:~#`. The step 4 commands on the K120 gave the listed output (`ls -l`: `a` 19 bytes, `old`; `rmdir` refused, `rm -r` worked; `stat`, `head`, `tail`, `wc`, `cat` of a missing file, `rm -r /`, `df`). `reboot`, F10 again: `cat /root/notes/a` shows both lines, `ls /root/notes` shows `a  t`. `poweroff`: `relay: powering off` and the NUC switched itself off. In Mint `verify-usb`: `e2fsck: clean`, `/root/notes/a` (19 bytes) and `/root/notes/t` listed. |
+| 2026-09-29 | 1–3, the full checklist (milestone 1 done) | `363f65e` | Pass | `flash --full` of 0.2.0, then F10: `Relay OS 0.2.0`, every startup line `[ ok ]`, `console 1920x1200 (120x33 cells)`, `boot info: 15947 MiB usable in 32 regions`, `acpi: 30 tables, … S5 7/0`, `timer: TSC 2496.000 MHz (CPUID 0x15)`, `pci: 24 devices on buses 00 01 72`; both xHCI controllers with 32-byte contexts and 34 scratchpads; ports 1, 3, 10 and 15 as in check 2, the Kingston `14.4 GiB`; `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 14.3 GiB`, root found by the boot partition GUID. `dmesg` shows `port N: connection stable after 100 ms` for each device and no empty port reported disconnected. Check 2 typed on the K120: Shift, Caps Lock with its light, Backspace, arrows, Home/End, history, key repeat, Ctrl-C, `uname -a` → `Relay relay 0.2.0 x86_64`, `date`, `free`, `dmesg`; unplugging and replugging the K120 works. Check 3 by script: `sh checks/check3-a.sh`, `reboot`, `sh checks/check3-b.sh`, `poweroff`; the root was left clean. In Mint `verify-usb`: `e2fsck: clean`, `/root/notes/a` (19 bytes), `/root/notes/big` (8388608 bytes, written in 4 MiB steps within the 5 s bulk timeout) and `/root/notes/t`; `check3-a.sh: ok, 63 of 63 commands as expected`, `check3-b.sh: ok, 5 of 5 commands as expected`. |
