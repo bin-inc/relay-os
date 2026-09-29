@@ -6,9 +6,10 @@
 
 use crate::mm::{self, MemStats, frame::FRAME_SIZE};
 use crate::mounts::KernelVfs;
-use crate::{arch, console, klog, klogln, power, proc, rtc, tty};
+use crate::syscall::Spawn;
+use crate::{arch, console, exec, klog, klogln, power, proc, rtc, tty};
 use alloc::vec::Vec;
-use relay_abi::WaitStatus;
+use relay_abi::{FdMap, WaitStatus};
 use shell::{Console, MemInfo, Shell, System};
 use vfs::{Env, Errno, Vfs};
 
@@ -79,13 +80,28 @@ impl System for KernelSystem {
         power::poweroff(self.test_mode)
     }
 
+    /// Through the kernel's mount table from the shell's current directory
+    /// (which `vfs` is), in a new process group, with the shell's fds 0-2.
     fn spawn(
         &mut self,
-        vfs: &mut dyn Vfs,
+        _vfs: &mut dyn Vfs,
         path: &[u8],
         args: &[&[u8]],
     ) -> Option<Result<u32, Errno>> {
-        Some(proc::spawn(vfs, path, args))
+        let std = [0, 1, 2].map(|fd| FdMap {
+            child: fd,
+            parent: fd,
+        });
+        Some(exec::arg_bytes(args).and_then(|bytes| {
+            proc::spawn(&Spawn {
+                path: path.to_vec(),
+                args: bytes,
+                argc: args.len() as u64,
+                cwd: Vec::new(),
+                fds: std.to_vec(),
+                new_group: true,
+            })
+        }))
     }
 
     /// The command has the console, in line mode, while the shell waits

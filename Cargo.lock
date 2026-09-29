@@ -309,6 +309,7 @@ dependencies = [
 name = "relay-tests"
 version = "0.2.0"
 dependencies = [
+ "relay-abi",
  "relay-rt",
 ]
 

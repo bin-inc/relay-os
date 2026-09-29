@@ -2,7 +2,8 @@
 //! says and decodes the result into a value or an error number.
 
 use core::fmt;
-use relay_abi::{Call, decode};
+use relay_abi::spawn::{SPAWN_FDS, WAIT_NOHANG};
+use relay_abi::{Call, FdMap, MemInfo, SpawnArgs, WaitStatus, decode};
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 use crate::arch::syscall;
@@ -35,6 +36,63 @@ pub fn write_all(fd: u32, mut bytes: &[u8]) -> Result<(), u16> {
         }
     }
     Ok(())
+}
+
+/// Starts the program at `path` with `args` (each followed by a NUL,
+/// argument 0 first) in `cwd` (empty: this program's), giving it the fds
+/// `fds` names (child, parent) and closing its others; with `NEW_GROUP` in
+/// `flags` it starts a process group of its own. Its pid.
+pub fn spawn(path: &[u8], args: &[u8], cwd: &[u8], fds: &[FdMap], flags: u32) -> Result<u32, u16> {
+    if fds.len() > SPAWN_FDS {
+        return Err(relay_abi::errno::EINVAL);
+    }
+    let mut a = SpawnArgs {
+        path: path.as_ptr() as u64,
+        path_len: path.len() as u64,
+        args: args.as_ptr() as u64,
+        args_len: args.len() as u64,
+        cwd: cwd.as_ptr() as u64,
+        cwd_len: cwd.len() as u64,
+        fd_count: fds.len() as u32,
+        flags,
+        ..SpawnArgs::default()
+    };
+    a.fds[..fds.len()].copy_from_slice(fds);
+    let r = unsafe { syscall(Call::Spawn, [&raw const a as u64, 0, 0, 0, 0, 0]) };
+    decode(r).map(|pid| pid as u32)
+}
+
+/// Waits for the child `pid` (or any, `relay_abi::spawn::WAIT_ANY`) to
+/// end: its pid and how it ended. With `nohang`, `None` at once if none
+/// has.
+pub fn wait(pid: i64, nohang: bool) -> Result<Option<(u32, WaitStatus)>, u16> {
+    let mut w = WaitStatus::default();
+    let flags = if nohang { WAIT_NOHANG } else { 0 };
+    let args = [pid as u64, u64::from(flags), &raw mut w as u64, 0, 0, 0];
+    match decode(unsafe { syscall(Call::Wait, args) })? {
+        0 => Ok(None),
+        pid => Ok(Some((pid as u32, w))),
+    }
+}
+
+/// Kills the process `target`, or the process group `-target`.
+pub fn kill(target: i64) -> Result<(), u16> {
+    decode(unsafe { syscall(Call::Kill, [target as u64, 0, 0, 0, 0, 0]) }).map(|_| ())
+}
+
+/// This program's pid.
+pub fn getpid() -> u32 {
+    unsafe { syscall(Call::Getpid, [0; 6]) as u32 }
+}
+
+/// The memory figures of `free`.
+pub fn memory() -> Result<MemInfo, u16> {
+    let mut m = MemInfo::default();
+    let len = core::mem::size_of::<MemInfo>() as u64;
+    let kind = u64::from(relay_abi::info::INFO_MEMORY);
+    let args = [kind, &raw mut m as u64, len, 0, 0, 0];
+    decode(unsafe { syscall(Call::SysInfo, args) })?;
+    Ok(m)
 }
 
 /// The wall clock and the time since the machine started.

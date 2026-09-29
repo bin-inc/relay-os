@@ -7,4 +7,5 @@ description = "The t-* test programs of /bin (spec §8.5)"
 build = "build.rs"
 
 [dependencies]
+relay-abi.workspace = true
 relay-rt.workspace = true

@@ -15,17 +15,19 @@ pub mod table;
 
 use crate::arch::context::{self, Next};
 use crate::exec::{self, Entry};
-use crate::fd::FdTable;
+use crate::fd::{FdTable, File};
 use crate::mm::kstack::{self, KernelStack};
 use crate::mm::paging::MapError;
 use crate::mm::space::AddressSpace;
-use crate::mm::user::UserSlice;
-use crate::syscall::{self, Caller, Outcome};
+use crate::mm::user::{UserSlice, UserStr};
+use crate::mounts::KernelVfs;
+use crate::syscall::{self, Caller, Child, Outcome, Spawn};
 use crate::{arch, console, klogln, mm, mounts, rtc, timer, tty, usb};
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
-use relay_abi::{Time, WaitStatus};
+use relay_abi::{MemInfo, Time, WaitStatus};
 use spin::Mutex;
 use table::{Blocked, Table, Want};
 use vfs::{Cwd, Errno, FileType, Vfs};
@@ -386,34 +388,37 @@ fn memory_error(e: MapError) -> Errno {
     }
 }
 
-/// Loads the program at `path` (read through `vfs`) with `args` (argument
-/// 0 first) as a child of the running process, in a new process group,
-/// with the running process's fds 0-2 and current directory; its pid.
-/// `EAGAIN` when the table is full.
-pub fn spawn(vfs: &mut dyn Vfs, path: &[u8], args: &[&[u8]]) -> Result<u32, Errno> {
-    if PROCS.lock().len() >= table::MAX {
-        return Err(Errno::EAGAIN);
-    }
-    let name = String::from_utf8_lossy(path);
-    let (file, program) = read_program(vfs, path, mm::heap_room()).map_err(|r| match r {
-        Refusal::Unreadable(e) => e,
-        Refusal::NotAProgram(e) => {
-            klogln!("spawn {name}: {e}");
-            Errno::ENOEXEC
+/// Starts the child `s` of the running process (spec §5.2-§5.4, §7.3): the
+/// program at its path, read through the mount table from the running
+/// process's current directory, with its arguments, fds, working directory
+/// and group. `EAGAIN` when the table is full; the fds and the working
+/// directory are checked before the program is read.
+pub fn spawn(s: &Spawn) -> Result<u32, Errno> {
+    let (fds, mut cwd) = {
+        let t = PROCS.lock();
+        if t.len() >= table::MAX {
+            return Err(Errno::EAGAIN);
         }
-    })?;
-    let arg_bytes = exec::arg_bytes(args)?;
+        let parent = t.get(t.current()).expect("a process spawns");
+        (parent.res.fds.for_child(&s.fds)?, parent.res.cwd.clone())
+    };
+    let mut cwd = cwd.take().expect("the parent has its current directory");
+    if !s.cwd.is_empty() {
+        mounts::with(&mut cwd, |t| t.chdir(&s.cwd))?;
+    }
+    let name = String::from_utf8_lossy(&s.path);
+    let (file, program) =
+        read_program(&mut KernelVfs, &s.path, mm::heap_room()).map_err(|r| match r {
+            Refusal::Unreadable(e) => e,
+            Refusal::NotAProgram(e) => {
+                klogln!("spawn {name}: {e}");
+                Errno::ENOEXEC
+            }
+        })?;
     let stack = mm::alloc_kernel_stack().ok_or(Errno::EAGAIN)?;
     let loaded = mm::with_user_memory(|mem, kernel| {
         let mut space = AddressSpace::new(mem, kernel).map_err(memory_error)?;
-        match exec::load(
-            &mut space,
-            mem,
-            &file,
-            &program,
-            &arg_bytes,
-            args.len() as u64,
-        ) {
+        match exec::load(&mut space, mem, &file, &program, &s.args, s.argc) {
             Ok(entry) => Ok((space, entry)),
             Err(e) => {
                 space.destroy(mem);
@@ -430,65 +435,65 @@ pub fn spawn(vfs: &mut dyn Vfs, path: &[u8], args: &[&[u8]]) -> Result<u32, Errn
         }
     };
     prepare(&stack, first_run, 0);
-    let mut t = PROCS.lock();
-    let me = t.current();
-    let parent = t.get(me);
-    let fds = parent.map_or_else(FdTable::new, |p| {
-        p.res
-            .fds
-            .for_child(&[
-                relay_abi::FdMap {
-                    child: 0,
-                    parent: 0,
-                },
-                relay_abi::FdMap {
-                    child: 1,
-                    parent: 1,
-                },
-                relay_abi::FdMap {
-                    child: 2,
-                    parent: 2,
-                },
-            ])
-            .unwrap_or_default()
-    });
-    let cwd = parent.and_then(|p| p.res.cwd.clone());
     let res = Res {
         stack,
         space: Some(space),
         entry: Some(entry),
         fds,
-        cwd,
+        cwd: Some(cwd),
     };
-    t.insert(me, true, name.into_owned(), res)
+    let mut t = PROCS.lock();
+    let me = t.current();
+    t.insert(me, s.new_group, name.into_owned(), res)
         .map_err(|e| unreachable!("room was checked, and nothing else runs: {e}"))
 }
 
-/// Waits until the child `pid` of the running process has ended, giving
-/// what the in-kernel shell's children write to fds 1 and 2 to `out`
-/// meanwhile; then gives back what was left of it. `ECHILD` if `pid` is
-/// not its child.
-pub fn wait(pid: u32, out: &mut dyn FnMut(u32, &[u8])) -> Result<WaitStatus, Errno> {
-    let mut out: Out<'_> = out;
-    SHELL_OUT.store((&raw mut out).cast(), Ordering::Release);
-    let ended = loop {
+/// A child of the running process that has ended, taken out of the table
+/// with its kernel stack given back; `None` with `nohang` when none has.
+/// `ECHILD` if there is no such child; `EINTR` if the running process was
+/// killed while it waited (it ends on its way back to ring 3).
+fn collect(child: Child, nohang: bool) -> Result<Option<(u32, WaitStatus)>, Errno> {
+    let want = match child {
+        Child::Any => Want::Any,
+        Child::Pid(pid) => Want::Pid(pid),
+    };
+    loop {
         let reaped = {
             let mut t = PROCS.lock();
             let me = t.current();
-            t.reap(me, Want::Pid(pid))
+            if t.get(me).is_some_and(|p| p.killed.is_some()) {
+                return Err(Errno::EINTR);
+            }
+            t.reap(me, want)?
         };
         match reaped {
-            Ok(Some(p)) => break Ok(p),
-            Ok(None) => block(Blocked::Wait),
-            Err(e) => break Err(e),
+            Some(p) => {
+                mm::free_kernel_stack(p.res.stack);
+                let table::State::Zombie(status) = p.state else {
+                    unreachable!("reap takes only zombies")
+                };
+                return Ok(Some((p.pid, status)));
+            }
+            None if nohang => return Ok(None),
+            None => block(Blocked::Wait),
         }
-    };
+    }
+}
+
+/// The in-kernel shell waits for its child `pid`, giving what its children
+/// write to fds 1 and 2 to `out` meanwhile (plan 2's hook); then it
+/// collects the orphans that have ended, which pass to it as process 1
+/// (plan 4's `/bin/sh` does that before every prompt). `ECHILD` if `pid`
+/// is not its child.
+pub fn wait(pid: u32, out: &mut dyn FnMut(u32, &[u8])) -> Result<WaitStatus, Errno> {
+    let mut out: Out<'_> = out;
+    SHELL_OUT.store((&raw mut out).cast(), Ordering::Release);
+    let ended = collect(Child::Pid(pid), false);
     SHELL_OUT.store(core::ptr::null_mut(), Ordering::Release);
-    let p = ended?;
-    mm::free_kernel_stack(p.res.stack);
-    match p.state {
-        table::State::Zombie(status) => Ok(status),
-        _ => unreachable!("reap takes only zombies"),
+    while let Ok(Some(_)) = collect(Child::Any, true) {}
+    match ended? {
+        Some((_, status)) => Ok(status),
+        None => unreachable!("wait without nohang collects a child"),
     }
 }
 
@@ -518,23 +523,93 @@ fn end(status: WaitStatus) -> ! {
 /// The running process's side of the dispatcher.
 struct Current;
 
-impl Caller for Current {
-    fn read(&mut self, slice: &UserSlice, offset: u64, buf: &mut [u8]) -> Result<(), Errno> {
+impl Current {
+    /// Runs `f` with the running process's address space.
+    fn space<R>(
+        &self,
+        f: impl FnOnce(&AddressSpace, &mut mm::UserMem<'_>) -> Result<R, Errno>,
+    ) -> Result<R, Errno> {
         let t = PROCS.lock();
         let space = t
             .get(t.current())
             .and_then(|p| p.res.space.as_ref())
             .ok_or(Errno::EFAULT)?;
-        mm::with_user_memory(|mem, _| slice.read(space, mem, offset, buf))
+        mm::with_user_memory(|mem, _| f(space, mem))
+    }
+
+    /// The running process's file open as `fd`.
+    fn file(&self, fd: u64) -> Result<Arc<File>, Errno> {
+        let t = PROCS.lock();
+        let p = t.get(t.current()).ok_or(Errno::EBADF)?;
+        p.res.fds.get(fd).cloned()
+    }
+}
+
+impl Caller for Current {
+    fn read(&mut self, slice: &UserSlice, offset: u64, buf: &mut [u8]) -> Result<(), Errno> {
+        self.space(|space, mem| slice.read(space, mem, offset, buf))
     }
 
     fn write(&mut self, slice: &UserSlice, offset: u64, bytes: &[u8]) -> Result<(), Errno> {
-        let t = PROCS.lock();
-        let space = t
-            .get(t.current())
-            .and_then(|p| p.res.space.as_ref())
-            .ok_or(Errno::EFAULT)?;
-        mm::with_user_memory(|mem, _| slice.write(space, mem, offset, bytes))
+        self.space(|space, mem| slice.write(space, mem, offset, bytes))
+    }
+
+    fn writable(&mut self, slice: &UserSlice) -> Result<(), Errno> {
+        self.space(|space, mem| slice.check_writable(space, mem))
+    }
+
+    fn read_str(&mut self, s: &UserStr) -> Result<Vec<u8>, Errno> {
+        self.space(|space, mem| s.read(space, mem))
+    }
+
+    fn writable_fd(&mut self, fd: u64) -> Result<(), Errno> {
+        self.file(fd).map(|_| ())
+    }
+
+    fn output(&mut self, fd: u64, bytes: &[u8]) -> Result<(), Errno> {
+        match *self.file(fd)? {
+            File::Console => console::write_output(bytes),
+            File::ShellOutput(n) => {
+                let out = SHELL_OUT.load(Ordering::Acquire);
+                if out.is_null() {
+                    // The shell waits for nobody: its prompt is on the
+                    // screen, and so is this.
+                    console::write_output(bytes);
+                } else {
+                    // SAFETY: set by the in-kernel shell's `wait`, which is
+                    // blocked until its child has ended and clears it
+                    // before it returns; nothing else calls it meanwhile.
+                    unsafe { (*out.cast::<Out<'_>>())(n, bytes) }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn spawn(&mut self, s: &Spawn) -> Result<u32, Errno> {
+        spawn(s)
+    }
+
+    fn wait(&mut self, child: Child, nohang: bool) -> Result<Option<(u32, WaitStatus)>, Errno> {
+        collect(child, nohang)
+    }
+
+    fn kill(&mut self, target: i64) -> Result<(), Errno> {
+        PROCS.lock().kill(target, relay_abi::wait::KILLED_KILL)
+    }
+
+    fn pid(&self) -> u32 {
+        PROCS.lock().current()
+    }
+
+    fn memory(&self) -> MemInfo {
+        let s = mm::stats();
+        MemInfo {
+            ram_total: s.total_frames * mm::frame::FRAME_SIZE,
+            ram_free: s.free_frames * mm::frame::FRAME_SIZE,
+            heap_total: s.heap.total as u64,
+            heap_used: s.heap.used as u64,
+        }
     }
 
     fn time(&self) -> Time {
@@ -552,18 +627,6 @@ impl Caller for Current {
             return;
         }
         block(Blocked::Sleep(timer::sleep_until(timer::ticks(), ms)));
-    }
-
-    fn output(&mut self, fd: u32, bytes: &[u8]) {
-        let out = SHELL_OUT.load(Ordering::Acquire);
-        if out.is_null() {
-            console::write_output(bytes);
-        } else {
-            // SAFETY: set by the in-kernel shell's `wait`, which is blocked
-            // until this child has ended, and cleared before it returns;
-            // nothing else calls it meanwhile.
-            unsafe { (*out.cast::<Out<'_>>())(fd, bytes) }
-        }
     }
 }
 

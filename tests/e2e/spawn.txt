@@ -1,0 +1,27 @@
+# Programs start programs (user-space gate §5.4, §7.3, §12.2; milestone 2,
+# plan 3a): a thousand children that exit at once leave the free frames as
+# they were, `kill` ends a program that never makes a system call while
+# its parent sleeps, process 1 cannot be killed, and an orphan passes to
+# process 1, which collects it.
+timeout 60
+expect root@relay:~# $
+send t-args warm-up
+expect \n\[1\] warm-up\n
+send t-spawn 1000
+expect-same frames \nfree frames before: (\d+)\n
+expect-same frames free frames after: (\d+)\n
+send free
+expect-same mem \nMem:\s+\d+\s+(\d+)\s
+send t-args a 'b c' ''
+expect \n\[1\] a\n\[2\] b c\n\[3\] \nroot@relay:~# $
+send t-spawn kill
+expect \nt-spin: kill\nkill 1: EPERM\nkill 999999: ESRCH\npid above 1: true\n
+send dmesg
+expect \npid \d+ \(/bin/t-spin\): killed: kill\n
+# The orphan prints when its second is up, over the prompt.
+send t-spawn orphan
+expect # \d+ iterations\n
+send t-args after-the-orphan
+expect \n\[1\] after-the-orphan\n
+send free
+expect-same mem \nMem:\s+\d+\s+(\d+)\s

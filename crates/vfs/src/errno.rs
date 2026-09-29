@@ -43,6 +43,8 @@ pub enum Errno {
     ESRCH,
     /// Process 1 cannot be killed.
     EPERM,
+    /// A call that blocked was cut short (the process was killed).
+    EINTR,
 }
 
 impl Errno {
@@ -72,6 +74,7 @@ impl Errno {
             Errno::ENOSYS => "Function not implemented",
             Errno::ESRCH => "No such process",
             Errno::EPERM => "Operation not permitted",
+            Errno::EINTR => "Interrupted system call",
         }
     }
 
@@ -103,6 +106,7 @@ impl Errno {
             Errno::ENOSYS => n::ENOSYS,
             Errno::ESRCH => n::ESRCH,
             Errno::EPERM => n::EPERM,
+            Errno::EINTR => n::EINTR,
         }
     }
 }
@@ -136,7 +140,7 @@ mod tests {
     }
 
     /// Every variant, so the tests below cover each one.
-    const ALL: [Errno; 23] = [
+    const ALL: [Errno; 24] = [
         Errno::ENOENT,
         Errno::EEXIST,
         Errno::ENOTDIR,
@@ -160,6 +164,7 @@ mod tests {
         Errno::ENOSYS,
         Errno::ESRCH,
         Errno::EPERM,
+        Errno::EINTR,
     ];
 
     /// The name, number and message the host's C library gives: the real
