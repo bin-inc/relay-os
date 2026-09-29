@@ -15,6 +15,9 @@
 //!                                   another ABI version)
 //! timeout 20                       (seconds, for the following expects)
 //! expect <regex>                   (waits for serial output, ANSI stripped)
+//! expect-same <name> <regex>       (as expect; the regex's first group must
+//!                                   capture what it did the first time a
+//!                                   step of that name matched)
 //! send <text>                      (types <text> + Enter over serial)
 //! key <text>                       (types <text> + Enter on the USB keyboard,
 //!                                   QMP send-key; {up}, {ctrl-c}: see keys.rs)
@@ -49,6 +52,7 @@ use crate::userland;
 use crate::util::{out_dir, root};
 use anyhow::{Context, Result, bail};
 use regex::Regex;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -81,6 +85,12 @@ pub fn typing_time(presses: usize) -> Duration {
 pub enum Step {
     Timeout(u64),
     Expect(String),
+    /// As `Expect`; the first group must capture what it captured the first
+    /// time a step with this name matched (free memory before and after).
+    ExpectSame {
+        name: String,
+        pattern: String,
+    },
     Send(String),
     /// Text typed on the emulated USB keyboard.
     Key(String),
@@ -207,6 +217,9 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
             "expect" => {
                 Regex::new(rest).with_context(|| format!("{name}:{line_no}: bad regex"))?;
                 Step::Expect(rest.to_string())
+            }
+            "expect-same" => {
+                parse_expect_same(rest).with_context(|| format!("{name}:{line_no}"))?
             }
             "send" => Step::Send(rest.to_string()),
             "key" => {
@@ -547,7 +560,69 @@ fn wait_for_qmp(child: &mut Child, socket: &Path, timeout: Duration, stderr: &Pa
     }
 }
 
-fn run_step(r: &mut Running, step: &Step, timeout: &mut Duration, run_dir: &Path) -> Result<()> {
+/// `expect-same NAME REGEX`: a name without spaces, then a regex with at
+/// least one group.
+fn parse_expect_same(rest: &str) -> Result<Step> {
+    let (name, pattern) = rest
+        .split_once(' ')
+        .context("expect-same needs a name and a regex")?;
+    let re = Regex::new(pattern).context("bad regex")?;
+    if re.captures_len() < 2 {
+        bail!("expect-same's regex needs a group to compare");
+    }
+    Ok(Step::ExpectSame {
+        name: name.to_string(),
+        pattern: pattern.to_string(),
+    })
+}
+
+/// Records `value` as what `name` captured, or checks it against what it
+/// captured before.
+fn same_as_before(seen: &mut HashMap<String, String>, name: &str, value: &str) -> Result<()> {
+    match seen.get(name) {
+        Some(first) if first != value => {
+            bail!("{name} is {value}, but it was {first} the first time")
+        }
+        Some(_) => Ok(()),
+        None => {
+            seen.insert(name.to_string(), value.to_string());
+            Ok(())
+        }
+    }
+}
+
+/// Waits until `re` matches the serial output after what earlier steps
+/// consumed; its captures.
+fn wait_for_match(r: &mut Running, re: &Regex, timeout: Duration) -> Result<Vec<String>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let text = r.text();
+        let rest = &text[r.consumed.min(text.len())..];
+        if let Some(c) = re.captures(rest) {
+            let groups = c
+                .iter()
+                .map(|g| g.map_or(String::new(), |g| g.as_str().to_string()))
+                .collect();
+            r.consumed += c.get(0).unwrap().end();
+            return Ok(groups);
+        }
+        if let Ok(Some(status)) = r.child.try_wait() {
+            bail!("QEMU exited ({status}) while waiting for /{re}/");
+        }
+        if Instant::now() > deadline {
+            bail!("timed out after {timeout:?} waiting for /{re}/");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn run_step(
+    r: &mut Running,
+    step: &Step,
+    timeout: &mut Duration,
+    run_dir: &Path,
+    seen: &mut HashMap<String, String>,
+) -> Result<()> {
     let offline = matches!(
         step,
         Step::Timeout(_) | Step::FileLines { .. } | Step::CheckScript(_)
@@ -558,22 +633,11 @@ fn run_step(r: &mut Running, step: &Step, timeout: &mut Duration, run_dir: &Path
     match step {
         Step::Timeout(s) => *timeout = Duration::from_secs(*s),
         Step::Expect(pattern) => {
-            let re = Regex::new(pattern)?;
-            let deadline = Instant::now() + *timeout;
-            loop {
-                let text = r.text();
-                if let Some(m) = re.find(&text[r.consumed.min(text.len())..]) {
-                    r.consumed += m.end();
-                    return Ok(());
-                }
-                if let Ok(Some(status)) = r.child.try_wait() {
-                    bail!("QEMU exited ({status}) while waiting for /{pattern}/");
-                }
-                if Instant::now() > deadline {
-                    bail!("timed out after {timeout:?} waiting for /{pattern}/");
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
+            wait_for_match(r, &Regex::new(pattern)?, *timeout)?;
+        }
+        Step::ExpectSame { name, pattern } => {
+            let groups = wait_for_match(r, &Regex::new(pattern)?, *timeout)?;
+            same_as_before(seen, name, &groups[1])?;
         }
         Step::Send(text) => {
             r.stdin.write_all(text.as_bytes())?;
@@ -693,8 +757,9 @@ pub fn run_scenario(image: &Path, layout: &Layout, scenario: &Scenario) -> Resul
     let run_dir = out_dir().join("e2e").join(&scenario.name);
     let mut r = start(image, layout, scenario, &run_dir)?;
     let mut timeout = Duration::from_secs(20);
+    let mut seen = HashMap::new();
     for (line, step) in &scenario.steps {
-        if let Err(e) = run_step(&mut r, step, &mut timeout, &run_dir) {
+        if let Err(e) = run_step(&mut r, step, &mut timeout, &run_dir, &mut seen) {
             bail!(
                 "scenario '{}' failed at line {line} ({step:?}): {e:#}\n--- last serial output ---\n{}\n--- full log: {} ---",
                 scenario.name,
@@ -835,6 +900,41 @@ mod tests {
         );
         assert!(parse_scenario("x", "check-script").is_err());
         assert!(parse_scenario("x", "check-script root/a.sh").is_err());
+    }
+
+    #[test]
+    fn parses_the_expect_same_step() {
+        let s = parse_scenario("x", r"expect-same mem Mem:\s+\d+\s+(\d+)").unwrap();
+        assert_eq!(
+            s.steps[0],
+            (
+                1,
+                Step::ExpectSame {
+                    name: "mem".into(),
+                    pattern: r"Mem:\s+\d+\s+(\d+)".into()
+                }
+            )
+        );
+        assert!(parse_scenario("x", "expect-same mem").is_err(), "no regex");
+        assert!(
+            parse_scenario("x", r"expect-same mem Mem:\s+\d+").is_err(),
+            "no group"
+        );
+        assert!(
+            parse_scenario("x", "expect-same mem (").is_err(),
+            "bad regex"
+        );
+    }
+
+    #[test]
+    fn expect_same_compares_with_the_first_value() {
+        let mut seen = HashMap::new();
+        same_as_before(&mut seen, "mem", "1024").unwrap();
+        same_as_before(&mut seen, "mem", "1024").unwrap();
+        same_as_before(&mut seen, "heap", "7").unwrap();
+        let e = same_as_before(&mut seen, "mem", "1028").unwrap_err();
+        assert_eq!(e.to_string(), "mem is 1028, but it was 1024 the first time");
+        same_as_before(&mut seen, "mem", "1024").unwrap();
     }
 
     #[test]
