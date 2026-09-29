@@ -142,6 +142,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "413d67b29ef1021b4d60f4aa1e925ca031751e213832b4b1d588fae623c05c60"
 
 [[package]]
+name = "crc32"
+version = "0.2.0"
+
+[[package]]
 name = "ext2"
 version = "0.2.0"
 dependencies = [
@@ -273,6 +277,7 @@ name = "relay-kernel"
 version = "0.2.0"
 dependencies = [
  "boot-info",
+ "crc32",
  "ext2",
  "heap",
  "shell",
@@ -359,6 +364,14 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "sysimg"
+version = "0.2.0"
+dependencies = [
+ "crc32",
+ "vfs",
 ]
 
 [[package]]

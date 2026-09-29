@@ -22,5 +22,6 @@ vfs.workspace = true
 ext2.workspace = true
 usb.workspace = true
 heap.workspace = true
+crc32.workspace = true
 x86_64.workspace = true
 spin.workspace = true

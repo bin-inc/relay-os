@@ -54,8 +54,19 @@ pub trait Vfs {
 
 struct Mount {
     fs: Box<dyn FileSystem>,
-    /// The directory it is mounted on; `None` for `/`.
-    on: Option<Node>,
+    /// Where it is mounted; `None` for `/`.
+    on: Option<MountPoint>,
+}
+
+/// A directory of the filesystem below, or a name that directory does not
+/// have (spec §4.4 of the user-space gate: `/bin` on a root without one).
+/// A mount on a name is shown in its directory like any other, and the
+/// name behaves as a mount point does: it cannot be created, removed or
+/// renamed through the mount table, the only way the shell reaches files.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MountPoint {
+    Dir(Node),
+    Name(Node, Vec<u8>),
 }
 
 /// The names walked to reach a directory: `(node, name)` pairs from `/`
@@ -95,17 +106,29 @@ impl MountTable {
         }
     }
 
-    /// Mounts `fs` on the directory at `path`. `EBUSY` if something is
+    /// Mounts `fs` on the directory at `path`, or on its last name if the
+    /// directory holding it has no such name. `EBUSY` if something is
     /// mounted there already.
     pub fn mount(&mut self, path: &[u8], fs: Box<dyn FileSystem>) -> Result<(), Errno> {
-        let trail = self.walk(path)?;
-        let on = trail.last().expect("never empty").0;
-        if self.stat(on)?.kind != FileType::Directory {
-            return Err(Errno::ENOTDIR);
-        }
-        if on.ino == self.fs(on.mount)?.root() || self.mounted_on(on).is_some() {
-            return Err(Errno::EBUSY);
-        }
+        let on = match self.walk(path) {
+            Ok(trail) => {
+                let on = trail.last().expect("never empty").0;
+                if self.stat(on)?.kind != FileType::Directory {
+                    return Err(Errno::ENOTDIR);
+                }
+                if on.ino == self.fs(on.mount)?.root() || self.mounted_on(on).is_some() {
+                    return Err(Errno::EBUSY);
+                }
+                MountPoint::Dir(on)
+            }
+            Err(Errno::ENOENT) => {
+                // Only the last name may be missing.
+                let parent = self.parent(path)?;
+                let name = parent.name.ok_or(Errno::ENOENT)?;
+                MountPoint::Name(parent.dir, name)
+            }
+            Err(e) => return Err(e),
+        };
         self.mounts.push(Mount { fs, on: Some(on) });
         Ok(())
     }
@@ -118,7 +141,31 @@ impl MountTable {
     }
 
     fn mounted_on(&self, node: Node) -> Option<usize> {
-        self.mounts.iter().position(|m| m.on == Some(node))
+        self.mounts
+            .iter()
+            .position(|m| m.on == Some(MountPoint::Dir(node)))
+    }
+
+    /// The mount on the name `name` in `dir`, which `dir` does not have.
+    fn mounted_at_name(&self, dir: Node, name: &[u8]) -> Option<usize> {
+        self.mounts.iter().position(|m| match &m.on {
+            Some(MountPoint::Name(d, n)) => *d == dir && n == name,
+            _ => false,
+        })
+    }
+
+    /// The root of mount `m`.
+    fn mount_root(&self, m: usize) -> Node {
+        Node {
+            mount: m,
+            ino: self.mounts[m].fs.root(),
+        }
+    }
+
+    /// Something is mounted on `node`, or it is a mounted filesystem's root
+    /// (what `child` gives for a mount on a name).
+    fn is_mount_point(&self, node: Node) -> bool {
+        self.mounted_on(node).is_some() || (node.mount != 0 && node == self.mount_root(node.mount))
     }
 
     fn is_dir(&mut self, node: Node) -> Result<bool, Errno> {
@@ -172,6 +219,10 @@ impl MountTable {
                 }
             }
             Component::Name(name) => {
+                if let Some(m) = self.mounted_at_name(here, name) {
+                    trail.push((self.mount_root(m), name.to_vec()));
+                    return Ok(());
+                }
                 let ino = self.fs(here.mount)?.lookup(here.ino, name)?;
                 let mut node = Node {
                     mount: here.mount,
@@ -211,11 +262,15 @@ impl MountTable {
         })
     }
 
-    /// The node `parent`'s name refers to, if any.
+    /// The node `parent`'s name refers to, if any: for a mount on a name,
+    /// the mounted root.
     fn child(&mut self, parent: &Parent) -> Result<Option<Node>, Errno> {
         let Some(name) = &parent.name else {
             return Ok(None);
         };
+        if let Some(m) = self.mounted_at_name(parent.dir, name) {
+            return Ok(Some(self.mount_root(m)));
+        }
         match self.fs(parent.dir.mount)?.lookup(parent.dir.ino, name) {
             Ok(ino) => Ok(Some(Node {
                 mount: parent.dir.mount,
@@ -260,7 +315,18 @@ impl Vfs for MountTable {
     }
 
     fn read_dir(&mut self, node: Node) -> Result<Vec<DirEntry>, Errno> {
-        self.fs(node.mount)?.read_dir(node.ino)
+        let mut entries = self.fs(node.mount)?.read_dir(node.ino)?;
+        for (m, mount) in self.mounts.iter().enumerate() {
+            if let Some(MountPoint::Name(dir, name)) = &mount.on
+                && *dir == node
+            {
+                entries.push(DirEntry {
+                    name: name.clone(),
+                    ino: self.mounts[m].fs.root(),
+                });
+            }
+        }
+        Ok(entries)
     }
 
     fn read_link(&mut self, node: Node) -> Result<Vec<u8>, Errno> {
@@ -291,6 +357,9 @@ impl Vfs for MountTable {
         if parent.trailing_slash {
             return Err(Errno::EISDIR);
         }
+        if self.mounted_at_name(parent.dir, name).is_some() {
+            return Err(Errno::EEXIST);
+        }
         let ino = self.fs(parent.dir.mount)?.create(parent.dir.ino, name)?;
         Ok(Node {
             mount: parent.dir.mount,
@@ -303,6 +372,9 @@ impl Vfs for MountTable {
         let Some(name) = &parent.name else {
             return Err(Errno::EEXIST);
         };
+        if self.mounted_at_name(parent.dir, name).is_some() {
+            return Err(Errno::EEXIST);
+        }
         self.fs(parent.dir.mount)?.mkdir(parent.dir.ino, name)?;
         Ok(())
     }
@@ -312,6 +384,9 @@ impl Vfs for MountTable {
         let Some(name) = &parent.name else {
             return Err(Errno::EISDIR);
         };
+        if self.mounted_at_name(parent.dir, name).is_some() {
+            return Err(Errno::EISDIR);
+        }
         if parent.trailing_slash
             && let Some(child) = self.child(&parent)?
             && !self.is_dir(child)?
@@ -334,7 +409,7 @@ impl Vfs for MountTable {
             });
         };
         let child = self.child(&parent)?;
-        if child.is_some_and(|c| self.mounted_on(c).is_some()) {
+        if child.is_some_and(|c| self.is_mount_point(c)) {
             return Err(Errno::EBUSY);
         }
         self.fs(parent.dir.mount)?.rmdir(parent.dir.ino, name)?;
@@ -359,11 +434,11 @@ impl Vfs for MountTable {
         if (src.trailing_slash || dst.trailing_slash) && !self.is_dir(moving)? {
             return Err(Errno::ENOTDIR);
         }
-        if self.mounted_on(moving).is_some() {
+        if self.is_mount_point(moving) {
             return Err(Errno::EBUSY);
         }
         let target = self.child(&dst)?;
-        if target.is_some_and(|t| self.mounted_on(t).is_some()) {
+        if target.is_some_and(|t| self.is_mount_point(t)) {
             return Err(Errno::EBUSY);
         }
         let (from_dir, to_dir) = (src.dir.ino, dst.dir.ino);
@@ -621,6 +696,104 @@ mod tests {
         // New files land in the mounted filesystem.
         t.create(b"/tmp/new").unwrap();
         assert_eq!(t.lookup(b"/tmp/new").unwrap().mount, 1);
+    }
+
+    fn programs() -> MemFs {
+        let mut fs = memfs();
+        let r = fs.root();
+        let f = fs.create(r, b"prog").unwrap();
+        fs.write_at(f, 0, b"program").unwrap();
+        fs.read_only()
+    }
+
+    fn names_in(t: &mut MountTable, path: &[u8]) -> Vec<Vec<u8>> {
+        let node = t.lookup(path).unwrap();
+        let mut names: Vec<Vec<u8>> = t
+            .read_dir(node)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_filesystem_mounts_on_a_name_its_directory_does_not_have() {
+        let mut t = table();
+        t.mount(b"/bin", Box::new(programs())).unwrap();
+        assert_eq!(read(&mut t, b"/bin/prog").unwrap(), b"program");
+        assert_eq!(t.lookup(b"/bin/prog").unwrap().mount, 1);
+        let bin = t.lookup(b"/bin/").unwrap();
+        assert_eq!(t.stat(bin).unwrap().kind, FileType::Directory);
+        assert_eq!(
+            names_in(&mut t, b"/"),
+            [&b"."[..], b"..", b"bin", b"etc", b"root", b"tmp"],
+            "listed once in its directory"
+        );
+        assert_eq!(
+            names_in(&mut t, b"/etc"),
+            [&b"."[..], b"..", b"motd"],
+            "and nowhere else"
+        );
+        t.chdir(b"/bin").unwrap();
+        assert_eq!(t.cwd(), b"/bin");
+        assert_eq!(t.lookup(b".").unwrap().mount, 1);
+        assert_eq!(read(&mut t, b"prog").unwrap(), b"program");
+        assert_eq!(read(&mut t, b"../etc/motd").unwrap(), b"welcome\n");
+        assert_eq!(read(&mut t, b"/bin/../bin/./prog").unwrap(), b"program");
+        assert!(t.statfs(b"/bin").is_ok());
+    }
+
+    #[test]
+    fn a_mount_on_a_name_is_a_mount_point_like_any_other() {
+        let mut t = table();
+        t.mount(b"/bin", Box::new(programs())).unwrap();
+        assert_eq!(t.rmdir(b"/bin"), Err(Errno::EBUSY));
+        assert_eq!(t.rmdir(b"/bin/"), Err(Errno::EBUSY));
+        assert_eq!(t.unlink(b"/bin"), Err(Errno::EISDIR));
+        assert_eq!(t.mkdir(b"/bin"), Err(Errno::EEXIST));
+        assert_eq!(t.create(b"/bin"), Err(Errno::EEXIST));
+        assert_eq!(t.rename(b"/bin", b"/bin2"), Err(Errno::EBUSY));
+        assert_eq!(t.rename(b"/etc/motd", b"/bin"), Err(Errno::EBUSY));
+        assert_eq!(t.rename(b"/tmp", b"/bin"), Err(Errno::EBUSY));
+        assert_eq!(t.rename(b"/etc/motd", b"/bin/motd"), Err(Errno::EXDEV));
+        assert_eq!(t.create(b"/bin/new"), Err(Errno::EROFS));
+        assert_eq!(t.mount(b"/bin", Box::new(memfs())), Err(Errno::EBUSY));
+        // The filesystem below never got the name.
+        assert_eq!(names_in(&mut t, b"/root"), [&b"."[..], b"..", b"link"]);
+        t.mkdir(b"/tmp/bin").unwrap();
+        assert_eq!(
+            names_in(&mut t, b"/tmp"),
+            [&b"."[..], b"..", b"bin"],
+            "other directories keep the name free"
+        );
+    }
+
+    #[test]
+    fn only_the_last_name_of_a_mount_point_may_be_missing() {
+        let mut t = table();
+        assert_eq!(
+            t.mount(b"/missing/bin", Box::new(memfs())),
+            Err(Errno::ENOENT)
+        );
+        assert_eq!(
+            t.mount(b"/etc/motd/bin", Box::new(memfs())),
+            Err(Errno::ENOTDIR)
+        );
+        assert_eq!(
+            t.mount(b"/root/link/bin", Box::new(memfs())),
+            Err(Errno::ENOTDIR)
+        );
+        assert_eq!(
+            t.mount(b"/tmp/..", Box::new(memfs())),
+            Err(Errno::EBUSY),
+            "that is /"
+        );
+        // A read-only root (the fallbacks of M1 §10) gets one too.
+        let mut ro = MountTable::new(Box::new(memfs().read_only()));
+        ro.mount(b"/bin", Box::new(programs())).unwrap();
+        assert_eq!(read(&mut ro, b"/bin/prog").unwrap(), b"program");
     }
 
     #[test]
