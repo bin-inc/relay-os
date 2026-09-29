@@ -149,6 +149,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "heap"
+version = "0.2.0"
+
+[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -252,6 +256,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "relay-abi"
+version = "0.2.0"
+
+[[package]]
 name = "relay-boot"
 version = "0.2.0"
 dependencies = [
@@ -266,6 +274,7 @@ version = "0.2.0"
 dependencies = [
  "boot-info",
  "ext2",
+ "heap",
  "shell",
  "spin",
  "term",
