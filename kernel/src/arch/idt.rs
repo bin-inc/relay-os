@@ -200,12 +200,18 @@ extern "C" fn exception_dispatch(frame: &ExceptionFrame) -> ! {
     crate::panic_screen::exception(frame)
 }
 
-/// Gates for the 32 exceptions (double fault on its IST stack) and for
-/// every hardware interrupt vector, 32-255.
+/// Vectors that run on the IST stack whatever the stack pointer was: a
+/// double fault (the kernel stack may have overflowed), an NMI and a
+/// machine check (they may arrive between `syscall` and the switch to the
+/// kernel stack, or just before `sysret`, with a program's stack pointer).
+const IST_VECTORS: [usize; 3] = [2, 8, 18];
+
+/// Gates for the 32 exceptions (three on the IST stack) and for every
+/// hardware interrupt vector, 32-255.
 fn gates(selector: u16) -> [Gate; 256] {
     let mut gates = [Gate::MISSING; 256];
     for (v, stub) in STUBS.iter().enumerate() {
-        let ist = if v == 8 {
+        let ist = if IST_VECTORS.contains(&v) {
             super::gdt::DOUBLE_FAULT_IST
         } else {
             0
@@ -256,7 +262,10 @@ mod tests {
         let g = gates(0x08);
         assert!(g.iter().all(|gate| gate.type_attr == 0x8E));
         assert_eq!(g[8].ist, 1, "double fault on IST1");
-        assert_eq!(g[48].ist, 0);
+        assert_eq!(g[2].ist, 1, "NMI on IST1");
+        assert_eq!(g[18].ist, 1, "machine check on IST1");
+        let others = (0..256).filter(|v| ![2, 8, 18].contains(v));
+        assert!(others.into_iter().all(|v| g[v].ist == 0));
         let addr = |v: usize| {
             g[v].offset_lo as u64 | (g[v].offset_mid as u64) << 16 | (g[v].offset_hi as u64) << 32
         };
