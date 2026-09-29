@@ -1,9 +1,11 @@
 //! What the shell needs from its surroundings besides files (spec §7.3).
 //! The kernel implements both traits over its console, clock, memory
-//! manager, log and ACPI; `xtask host-shell` over the host terminal; the
-//! tests over buffers.
+//! manager, log, ACPI and programs; `xtask host-shell` over the host
+//! terminal; the tests over buffers.
 
 use alloc::vec::Vec;
+use relay_abi::WaitStatus;
+use vfs::{Errno, Vfs};
 
 /// The screen and keyboard.
 pub trait Console {
@@ -46,4 +48,21 @@ pub trait System {
     /// Turns the machine off. Returns only where it cannot; the shell then
     /// stops.
     fn poweroff(&mut self);
+    /// Starts the program at `path`, read through `vfs`, with `args`
+    /// (argument 0 is the path); its pid. `None` where programs cannot run
+    /// (on the host). The in-kernel shell's way to programs until the shell
+    /// itself becomes one (user-space gate plan 4).
+    fn spawn(
+        &mut self,
+        _vfs: &mut dyn Vfs,
+        _path: &[u8],
+        _args: &[&[u8]],
+    ) -> Option<Result<u32, Errno>> {
+        None
+    }
+    /// Runs the program `spawn` started until it ends, giving what it
+    /// writes to fds 1 and 2 to `out`, and says how it ended.
+    fn wait(&mut self, _pid: u32, _out: &mut dyn FnMut(u32, &[u8])) -> Result<WaitStatus, Errno> {
+        Err(Errno::ECHILD)
+    }
 }

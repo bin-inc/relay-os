@@ -9,6 +9,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
+use relay_abi::WaitStatus;
 use vfs::{Errno, Node, Vfs};
 
 /// Output to a file is collected up to this size before it is written.
@@ -72,33 +73,42 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Where output goes, borrowed apart from the system.
+    fn streams(&mut self) -> Streams<'_> {
+        Streams {
+            vfs: &mut *self.vfs,
+            console: &mut *self.console,
+            out: &mut self.out,
+            transcript: &mut self.transcript,
+        }
+    }
+
     /// Standard output.
     pub fn out(&mut self, bytes: &[u8]) {
-        match &mut self.out {
-            Output::Console => self.screen(bytes),
-            Output::File { buf, .. } => {
-                buf.extend_from_slice(bytes);
-                if buf.len() >= FILE_BUFFER {
-                    self.flush();
-                }
-            }
-        }
+        self.streams().out(bytes);
     }
 
     /// Errors always go to the screen, never into a redirection file.
     pub fn err(&mut self, bytes: &[u8]) {
-        self.screen(bytes);
+        self.streams().screen(bytes);
     }
 
-    /// Writes to the screen and a running script's transcript.
-    fn screen(&mut self, bytes: &[u8]) {
-        self.console.write(bytes);
-        if let Some(t) = &mut self.transcript
-            && let Err(e) = t.add(&mut *self.vfs, bytes)
-        {
-            self.console.write(t.ended(e).as_bytes());
-            self.transcript = None;
-        }
+    /// Waits for the program `pid` (`System::spawn`): what it writes to fd 1
+    /// is standard output, to fd 2 the screen.
+    pub(crate) fn wait_program(&mut self, pid: u32) -> Result<WaitStatus, Errno> {
+        let mut streams = Streams {
+            vfs: &mut *self.vfs,
+            console: &mut *self.console,
+            out: &mut self.out,
+            transcript: &mut self.transcript,
+        };
+        self.system.wait(pid, &mut |fd, bytes| {
+            if fd == 1 {
+                streams.out(bytes);
+            } else {
+                streams.screen(bytes);
+            }
+        })
     }
 
     /// Whether Ctrl-C has stopped the command. Long loops (reading a file,
@@ -134,13 +144,61 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Writes what is left of the output; the first write error, if any.
+    pub(crate) fn finish(&mut self) -> Result<(), Errno> {
+        self.streams().flush();
+        match self.out {
+            Output::File { error: Some(e), .. } => Err(e),
+            _ => Ok(()),
+        }
+    }
+
+    /// Prints `name: message` on the screen and returns exit status 1.
+    pub fn fail(&mut self, name: &str, message: fmt::Arguments<'_>) -> i32 {
+        self.err(format!("{name}: {message}\n").as_bytes());
+        1
+    }
+}
+
+/// A command's standard output, the screen and a script's transcript.
+struct Streams<'s> {
+    vfs: &'s mut dyn Vfs,
+    console: &'s mut dyn Console,
+    out: &'s mut Output,
+    transcript: &'s mut Option<Transcript>,
+}
+
+impl Streams<'_> {
+    fn out(&mut self, bytes: &[u8]) {
+        match &mut *self.out {
+            Output::Console => self.screen(bytes),
+            Output::File { buf, .. } => {
+                buf.extend_from_slice(bytes);
+                if buf.len() >= FILE_BUFFER {
+                    self.flush();
+                }
+            }
+        }
+    }
+
+    /// Writes to the screen and a running script's transcript.
+    fn screen(&mut self, bytes: &[u8]) {
+        self.console.write(bytes);
+        if let Some(t) = &mut *self.transcript
+            && let Err(e) = t.add(&mut *self.vfs, bytes)
+        {
+            self.console.write(t.ended(e).as_bytes());
+            *self.transcript = None;
+        }
+    }
+
     fn flush(&mut self) {
         let Output::File {
             node,
             offset,
             buf,
             error,
-        } = &mut self.out
+        } = &mut *self.out
         else {
             return;
         };
@@ -158,21 +216,6 @@ impl<'a> Ctx<'a> {
             }
         }
         buf.clear();
-    }
-
-    /// Writes what is left of the output; the first write error, if any.
-    pub(crate) fn finish(&mut self) -> Result<(), Errno> {
-        self.flush();
-        match self.out {
-            Output::File { error: Some(e), .. } => Err(e),
-            _ => Ok(()),
-        }
-    }
-
-    /// Prints `name: message` on the screen and returns exit status 1.
-    pub fn fail(&mut self, name: &str, message: fmt::Arguments<'_>) -> i32 {
-        self.err(format!("{name}: {message}\n").as_bytes());
-        1
     }
 }
 
