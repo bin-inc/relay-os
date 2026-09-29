@@ -81,8 +81,9 @@ impl System for KernelSystem {
     }
 
     /// Through the kernel's mount table from the shell's current directory
-    /// (which `vfs` is), in a new process group, with the shell's fds 0-2;
-    /// the orphans that have ended are collected first.
+    /// (which `vfs` is), in a new process group, with the shell's fds 0-2,
+    /// its outputs fresh for this command; the orphans that have ended are
+    /// collected first.
     fn spawn(
         &mut self,
         _vfs: &mut dyn Vfs,
@@ -93,8 +94,10 @@ impl System for KernelSystem {
             child: fd,
             parent: fd,
         });
-        // Orphans that ended while the shell waited for nobody.
+        // Orphans that ended while the shell waited for nobody; and
+        // outputs of the command's own.
         proc::collect_orphans();
+        proc::renew_outputs();
         Some(exec::arg_bytes(args).and_then(|bytes| {
             proc::spawn(&Spawn {
                 path: path.to_vec(),

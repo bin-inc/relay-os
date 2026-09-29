@@ -52,6 +52,11 @@ impl FdTable {
         t
     }
 
+    /// Opens `file` as `fd` (below 32), closing what was there.
+    pub fn set(&mut self, fd: usize, file: Arc<File>) {
+        self.slots[fd] = Some(file);
+    }
+
     /// The file open as `fd`; `EBADF` if none is.
     pub fn get(&self, fd: u64) -> Result<&Arc<File>, Errno> {
         usize::try_from(fd)
@@ -123,6 +128,17 @@ mod tests {
         drop(child);
         assert_eq!(Arc::strong_count(parent.get(2).unwrap()), 1);
         assert_eq!(parent.for_child(&[]).unwrap().open(), 0);
+    }
+
+    #[test]
+    fn a_file_put_in_replaces_the_old_one_for_later_children_only() {
+        let mut shell = FdTable::shell();
+        let before = shell.for_child(&[map(1, 1)]).unwrap();
+        shell.set(1, Arc::new(File::ShellOutput(1)));
+        let after = shell.for_child(&[map(1, 1)]).unwrap();
+        assert!(!Arc::ptr_eq(before.get(1).unwrap(), after.get(1).unwrap()));
+        assert!(Arc::ptr_eq(after.get(1).unwrap(), shell.get(1).unwrap()));
+        assert_eq!(**before.get(1).unwrap(), File::ShellOutput(1));
     }
 
     #[test]

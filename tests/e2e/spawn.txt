@@ -22,11 +22,14 @@ expect \npid \d+ \(/bin/t-spin\): killed: kill\n
 # line comes right after the command, with no output of t-args before it.
 send t-spawn kill-new
 expect t-spawn kill-new\npid \d+ \(/bin/t-args\): killed: kill\nt-args: kill\n
-# The orphan prints when its second is up, over the prompt.
+# An orphan's output goes to the screen, never into the output of the
+# command the shell waits for next: the orphaned t-spin 1 prints while
+# t-spin 2 runs, redirected.
 send t-spawn orphan
-expect # \d+ iterations\n
-send t-args after-the-orphan
-expect \n\[1\] after-the-orphan\n
+send t-spin 2 > /root/o.txt
+expect > /root/o.txt\n\d+ iterations\n
+send cat /root/o.txt
+expect # cat /root/o.txt\n\d+ iterations\nroot@relay:~# $
 send free
 expect-same mem \nMem:\s+\d+\s+(\d+)\s
 # Orphans that end while the shell waits for nobody are collected before

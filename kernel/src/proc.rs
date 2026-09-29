@@ -483,6 +483,28 @@ fn collect(child: Child, nohang: bool) -> Result<Option<(u32, WaitStatus)>, Errn
     }
 }
 
+/// Gives the in-kernel shell fresh standard output and error for the
+/// command it starts next: its hook answers only what that command and its
+/// descendants write (they inherit these files), so an orphan of an
+/// earlier command, which holds that command's, writes to the screen.
+pub fn renew_outputs() {
+    let mut t = PROCS.lock();
+    let me = t.current();
+    if let Some(p) = t.get_mut(me) {
+        p.res.fds.set(1, Arc::new(File::ShellOutput(1)));
+        p.res.fds.set(2, Arc::new(File::ShellOutput(2)));
+    }
+}
+
+/// Whether `file` is one of the in-kernel shell's outputs now, the ones its
+/// current command has.
+fn shell_output_now(file: &Arc<File>, fd: u32) -> bool {
+    let t = PROCS.lock();
+    t.get(table::INIT)
+        .and_then(|p| p.res.fds.get(u64::from(fd)).ok())
+        .is_some_and(|now| Arc::ptr_eq(now, file))
+}
+
 /// Collects the running process's children that have ended: for the
 /// in-kernel shell, process 1, the orphans that passed to it. It does so
 /// before each command it starts and after each it waited for, so their
@@ -578,13 +600,14 @@ impl Caller for Current {
     }
 
     fn output(&mut self, fd: u64, bytes: &[u8]) -> Result<(), Errno> {
-        match *self.file(fd)? {
+        let file = self.file(fd)?;
+        match *file {
             File::Console => console::write_output(bytes),
             File::ShellOutput(n) => {
                 let out = SHELL_OUT.load(Ordering::Acquire);
-                if out.is_null() {
-                    // The shell waits for nobody: its prompt is on the
-                    // screen, and so is this.
+                if out.is_null() || !shell_output_now(&file, n) {
+                    // The shell waits for nobody, or for another command:
+                    // this goes to the screen.
                     console::write_output(bytes);
                 } else {
                     // SAFETY: set by the in-kernel shell's `wait`, which is
