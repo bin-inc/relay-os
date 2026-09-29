@@ -1,8 +1,8 @@
 //! How a child ended, as `wait` reports it (spec §7.3): it exited with a
-//! code, or it was killed, with the reason and, for a fault, what the CPU
-//! refused, where and at which instruction. Its `Display` says so in the
-//! words of spec §11.1 (`page fault at 0x0, read, ip 0x401a2c`), for the
-//! kernel log and the shells.
+//! code, or it was killed, with the reason (a fault, Ctrl-C, `kill`) and,
+//! for a fault, what the CPU refused, where and at which instruction. Its
+//! `Display` says so in the words of spec §11.1 (`page fault at 0x0, read,
+//! ip 0x401a2c`), for the kernel log and the shells.
 
 use core::fmt;
 
@@ -13,6 +13,11 @@ pub const KILLED: u32 = 2;
 
 /// `WaitStatus::code` of a killed child: the CPU refused what it did.
 pub const KILLED_FAULT: u32 = 1;
+/// `WaitStatus::code` of a killed child: Ctrl-C, typed while its process
+/// group had the console (spec §6.4).
+pub const KILLED_CTRL_C: u32 = 2;
+/// `WaitStatus::code` of a killed child: the `kill` call.
+pub const KILLED_KILL: u32 = 3;
 
 /// `WaitStatus::fault`: what the CPU refused (spec §11.1), in words any
 /// architecture has.
@@ -72,6 +77,18 @@ impl WaitStatus {
             && self.fault <= FAULT_OTHER
     }
 
+    /// A child killed for `reason` ([`KILLED_CTRL_C`] or [`KILLED_KILL`]).
+    pub const fn killed(reason: u32) -> WaitStatus {
+        WaitStatus {
+            how: KILLED,
+            code: reason,
+            fault: 0,
+            detail: 0,
+            address: 0,
+            ip: 0,
+        }
+    }
+
     /// A child killed for `fault` at instruction `ip`.
     pub const fn fault(fault: u32, detail: u32, address: u64, ip: u64) -> WaitStatus {
         WaitStatus {
@@ -87,10 +104,17 @@ impl WaitStatus {
 
 impl fmt::Display for WaitStatus {
     /// `exited with 3`; for a fault what it was, where and at which
-    /// instruction; `killed` for any other end.
+    /// instruction; `Ctrl-C` or `kill` for those kills; `killed` for any
+    /// other end.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.how == EXITED {
             return write!(f, "exited with {}", self.code);
+        }
+        if self.how == KILLED && self.code == KILLED_CTRL_C {
+            return f.write_str("Ctrl-C");
+        }
+        if self.how == KILLED && self.code == KILLED_KILL {
+            return f.write_str("kill");
         }
         if !self.is_known_fault() {
             return f.write_str("killed");
@@ -224,6 +248,26 @@ mod tests {
         };
         assert_eq!(other_reason.to_string(), "killed");
         assert!(!other_reason.is_known_fault());
+    }
+
+    #[test]
+    fn ctrl_c_and_kill_are_kills_with_their_reason() {
+        let c = WaitStatus::killed(KILLED_CTRL_C);
+        assert_eq!((c.how, c.code), (KILLED, 2));
+        assert_eq!(c.to_string(), "Ctrl-C");
+        assert!(!c.is_known_fault());
+        let k = WaitStatus::killed(KILLED_KILL);
+        assert_eq!((k.how, k.code), (KILLED, 3));
+        assert_eq!(k.to_string(), "kill");
+        assert_eq!(
+            k,
+            WaitStatus {
+                how: KILLED,
+                code: 3,
+                ..WaitStatus::default()
+            }
+        );
+        assert_eq!([KILLED_FAULT, KILLED_CTRL_C, KILLED_KILL], [1, 2, 3]);
         assert!(WaitStatus::fault(FAULT_OTHER, 3, 0, 0).is_known_fault());
     }
 }

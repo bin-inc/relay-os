@@ -11,6 +11,7 @@ pub mod block;
 pub mod cmdline;
 pub mod console;
 pub mod exec;
+pub mod fd;
 pub mod input;
 pub mod klog;
 pub mod mm;
