@@ -4,6 +4,7 @@
 //! exit. Plan 2 of milestone 2 serves `exit` and `write` to fds 1 and 2;
 //! every other call is `ENOSYS` until the plan that brings it.
 
+use crate::mm::paging::PAGE;
 use crate::mm::user::UserSlice;
 use relay_abi::{Call, encode};
 use vfs::Errno;
@@ -27,9 +28,6 @@ pub enum Outcome {
     Exit(u8),
 }
 
-/// Bytes copied out of a program per step of a `write`.
-const CHUNK: usize = 4096;
-
 /// Serves call `number` with `args` for `caller`.
 pub fn dispatch(caller: &mut impl Caller, number: u64, args: [u64; 6]) -> Outcome {
     let result = match Call::from_number(number) {
@@ -41,18 +39,21 @@ pub fn dispatch(caller: &mut impl Caller, number: u64, args: [u64; 6]) -> Outcom
 }
 
 /// `write(fd, buffer, length)`: fds 1 and 2 are the console. Copies the
-/// buffer out in pieces; a piece that is not the program's ends the call
-/// with the bytes written before it, or with `EFAULT` if there were none.
+/// buffer out a page at a time; a page that is not the program's ends the
+/// call with the bytes written before it, or with `EFAULT` if there were
+/// none.
 fn write(caller: &mut impl Caller, fd: u64, addr: u64, len: u64) -> Result<u64, Errno> {
     let fd = match fd {
         1 | 2 => fd as u32,
         _ => return Err(Errno::EBADF),
     };
     let slice = UserSlice::new(addr, len)?;
-    let mut buf = [0u8; CHUNK];
+    let mut buf = [0u8; PAGE as usize];
     let mut done = 0;
     while done < len {
-        let n = (len - done).min(CHUNK as u64) as usize;
+        // To the end of the page, so a bad page costs only its own bytes.
+        // `UserSlice::new` checked that `addr + len` does not overflow.
+        let n = (len - done).min(PAGE - (addr + done) % PAGE) as usize;
         if let Err(e) = caller.read(&slice, done, &mut buf[..n]) {
             return if done > 0 { Ok(done) } else { Err(e) };
         }
@@ -184,13 +185,19 @@ mod tests {
             Err(errno::EFAULT)
         );
         assert!(f.written.is_empty());
-        // The pieces before the hole are written.
+        // Every byte before the hole is written, as on Linux.
+        assert_eq!(call(&mut f, Call::Write, [1, end - 5000, 9000]), Ok(5000));
+        let want: Vec<u8> = (3 * PAGE - 5000..3 * PAGE)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        assert_eq!(text(&f, 1), want);
+        f.written.clear();
         assert_eq!(
-            call(&mut f, Call::Write, [1, end - 5000, 9000]),
-            Ok(4096),
-            "the first piece only"
+            call(&mut f, Call::Write, [1, end - 904, 2000]),
+            Ok(904),
+            "less than a page before the hole"
         );
-        assert_eq!(text(&f, 1).len(), 4096);
+        assert_eq!(text(&f, 1).len(), 904);
     }
 
     #[test]
