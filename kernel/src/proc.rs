@@ -483,17 +483,25 @@ fn collect(child: Child, nohang: bool) -> Result<Option<(u32, WaitStatus)>, Errn
     }
 }
 
+/// Collects the running process's children that have ended: for the
+/// in-kernel shell, process 1, the orphans that passed to it. It does so
+/// before each command it starts and after each it waited for, so their
+/// zombies never fill the table (plan 4's `/bin/sh` does it before every
+/// prompt).
+pub fn collect_orphans() {
+    while let Ok(Some(_)) = collect(Child::Any, true) {}
+}
+
 /// The in-kernel shell waits for its child `pid`, giving what its children
 /// write to fds 1 and 2 to `out` meanwhile (plan 2's hook); then it
-/// collects the orphans that have ended, which pass to it as process 1
-/// (plan 4's `/bin/sh` does that before every prompt). `ECHILD` if `pid`
-/// is not its child.
+/// collects the orphans that have ended. `ECHILD` if `pid` is not its
+/// child.
 pub fn wait(pid: u32, out: &mut dyn FnMut(u32, &[u8])) -> Result<WaitStatus, Errno> {
     let mut out: Out<'_> = out;
     SHELL_OUT.store((&raw mut out).cast(), Ordering::Release);
     let ended = collect(Child::Pid(pid), false);
     SHELL_OUT.store(core::ptr::null_mut(), Ordering::Release);
-    while let Ok(Some(_)) = collect(Child::Any, true) {}
+    collect_orphans();
     match ended? {
         Some((_, status)) => Ok(status),
         None => unreachable!("wait without nohang collects a child"),

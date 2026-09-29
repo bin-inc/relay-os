@@ -29,3 +29,11 @@ send t-args after-the-orphan
 expect \n\[1\] after-the-orphan\n
 send free
 expect-same mem \nMem:\s+\d+\s+(\d+)\s
+# Orphans that end while the shell waits for nobody are collected before
+# its next command starts: a table full of their zombies would refuse
+# every program until a reboot.
+send t-spawn fill
+expect \nfilled the table with 62 children\n
+alive 1
+send t-spawn 10
+expect \nfree frames after: \d+\n

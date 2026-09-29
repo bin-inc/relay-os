@@ -9,7 +9,11 @@
 //!   none of its code may run;
 //! - `t-spawn orphan` starts `t-spin 1` and ends without waiting for it,
 //!   so it passes to process 1;
-//! - `t-spawn child` exits at once (the children of `t-spawn N`).
+//! - `t-spawn fill` starts children that nap for 300 ms until the process
+//!   table is full, and ends without waiting for them: their zombies pass
+//!   to process 1;
+//! - `t-spawn child` exits at once (the children of `t-spawn N`), `t-spawn
+//!   nap` after 300 ms.
 #![no_std]
 #![no_main]
 
@@ -35,6 +39,11 @@ const STD: [FdMap; 2] = [
 fn main(args: Args) -> u8 {
     let r = match args.get(1) {
         Some(b"child") => return 0,
+        Some(b"nap") => {
+            sys::sleep(300);
+            return 0;
+        }
+        Some(b"fill") => fill(),
         Some(b"kill") => kill(),
         Some(b"kill-new") => kill_new(),
         Some(b"orphan") => sys::spawn(b"/bin/t-spin", b"t-spin\x001\0", b"", &STD, 0).map(|_| ()),
@@ -54,7 +63,7 @@ fn main(args: Args) -> u8 {
 }
 
 fn usage() -> u8 {
-    let _ = sys::write_all(2, b"usage: t-spawn N|kill|kill-new|orphan\n");
+    let _ = sys::write_all(2, b"usage: t-spawn N|kill|kill-new|orphan|fill\n");
     2
 }
 
@@ -105,6 +114,20 @@ fn kill() -> Result<(), u16> {
     }
     let me = sys::getpid();
     let _ = writeln!(Fd(1), "pid above 1: {}", me > 1);
+    Ok(())
+}
+
+/// Starts napping children until the table is full, and leaves them.
+fn fill() -> Result<(), u16> {
+    let mut n = 0;
+    loop {
+        match sys::spawn(b"/bin/t-spawn", b"t-spawn\0nap\0", b"", &[], 0) {
+            Ok(_) => n += 1,
+            Err(relay_abi::errno::EAGAIN) => break,
+            Err(e) => return Err(e),
+        }
+    }
+    let _ = writeln!(Fd(1), "filled the table with {n} children");
     Ok(())
 }
 
