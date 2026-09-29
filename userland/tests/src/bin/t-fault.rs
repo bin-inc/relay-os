@@ -2,8 +2,10 @@
 //! so a scenario sees the kernel end the program, not itself:
 //! `null-read`, `null-write`, `write-code`, `exec-data`, `ud`, `div0`,
 //! `stack` (runs into the guard page below the stack) and `kernel-read`
-//! (reads an upper-half address). Plan 3 adds `sse`, once CR0.TS makes
-//! SSE fault.
+//! (reads an upper-half address). `flags-exit` and `flags-ud` set the
+//! nested-task, alignment-check and direction flags, then exit or fault:
+//! none of them may reach the kernel or the next program. Plan 3 adds
+//! `sse`, once CR0.TS makes SSE fault.
 #![no_std]
 #![no_main]
 
@@ -15,6 +17,9 @@ relay_rt::main!(main);
 
 /// Somewhere writable and not executable to jump to: `ret`, in data.
 static mut DATA: [u8; 16] = [0xC3; 16];
+
+/// RFLAGS bits: direction, nested task, alignment check.
+const FLAGS: u64 = (1 << 10) | (1 << 14) | (1 << 18);
 
 fn main(args: Args) -> u8 {
     let kind = args.get(1).unwrap_or(b"");
@@ -38,10 +43,29 @@ fn main(args: Args) -> u8 {
             b"kernel-read" => {
                 asm!("mov {0}, qword ptr [{0}]", inout(reg) 0xFFFF_8000_0000_0000u64 => _)
             }
+            // `exit(0)` at once: no Rust code runs with these flags.
+            b"flags-exit" => asm!(
+                "pushfq",
+                "or qword ptr [rsp], {flags}",
+                "popfq",
+                "syscall",
+                flags = in(reg) FLAGS,
+                in("rax") 1u64,
+                in("rdi") 0u64,
+                options(noreturn),
+            ),
+            b"flags-ud" => asm!(
+                "pushfq",
+                "or qword ptr [rsp], {flags}",
+                "popfq",
+                "ud2",
+                flags = in(reg) FLAGS,
+                options(noreturn),
+            ),
             _ => {
                 let _ = sys::write_all(
                     2,
-                    b"usage: t-fault null-read|null-write|write-code|exec-data|ud|div0|stack|kernel-read\n",
+                    b"usage: t-fault null-read|null-write|write-code|exec-data|ud|div0|stack|kernel-read|flags-exit|flags-ud\n",
                 );
                 return 2;
             }
