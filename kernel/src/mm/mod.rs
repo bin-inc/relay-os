@@ -90,9 +90,9 @@ pub fn with_user_memory<R>(f: impl FnOnce(&mut UserMem<'_>, &PageTables) -> R) -
     f(&mut UserMem(LinearMem(&mut m.frames)), &m.tables)
 }
 
-/// A kernel stack for a program (user-space gate §5.4), from the frames
-/// the kernel keeps for itself; `None` when every slot is in use.
-pub fn alloc_kernel_stack() -> Option<KernelStack> {
+/// A kernel stack for a process (user-space gate §5.4), from the frames
+/// the kernel keeps for itself.
+pub fn alloc_kernel_stack() -> Result<KernelStack, kstack::StackError> {
     let mut guard = MEMORY.lock();
     let m = guard.as_mut().expect("mm::init has not run");
     m.stacks.alloc(&mut m.tables, &mut LinearMem(&mut m.frames))

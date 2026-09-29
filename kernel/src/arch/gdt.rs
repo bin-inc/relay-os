@@ -1,9 +1,10 @@
 //! GDT with the kernel's and ring 3's code and data segments, in the order
 //! `syscall` and `sysret` need (user-space gate §6.2), and a TSS: `rsp0` is
 //! the stack the CPU switches to when an interrupt or exception arrives in
-//! ring 3, and IST1 the stack for double faults, NMIs and machine checks
-//! (so a kernel stack overflow, or an NMI taken with a program's stack
-//! pointer, still reaches the panic screen).
+//! ring 3, and IST1-3 the stacks for double faults, NMIs and machine checks,
+//! one each (so a kernel stack overflow, or an NMI taken with a program's
+//! stack pointer, still reaches the panic screen, and one arriving while
+//! another's handler runs does not overwrite its frame).
 
 use spin::Once;
 use x86_64::VirtAddr;
@@ -12,8 +13,10 @@ use x86_64::instructions::tables::load_tss;
 use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
 use x86_64::structures::tss::TaskStateSegment;
 
-/// IST index (1-based in the gate, 0-based in the TSS table).
+/// IST indexes (1-based in the gate, 0-based in the TSS table).
 pub const DOUBLE_FAULT_IST: u8 = 1;
+pub const NMI_IST: u8 = 2;
+pub const MACHINE_CHECK_IST: u8 = 3;
 const IST_STACK_SIZE: usize = 16 * 1024;
 
 /// The selectors, as `gdt()` lays the table out: kernel code and data,
@@ -27,7 +30,14 @@ pub const USER_CODE: u16 = 0x20 | 3;
 #[repr(align(16))]
 #[allow(dead_code)] // only its address is used
 struct Stack([u8; IST_STACK_SIZE]);
-static mut DOUBLE_FAULT_STACK: Stack = Stack([0; IST_STACK_SIZE]);
+/// The IST stacks, in IST order.
+static mut IST_STACKS: [Stack; 3] = [const { Stack([0; IST_STACK_SIZE]) }; 3];
+
+/// The top of IST stack `ist` (1-3).
+fn ist_top(ist: u8) -> u64 {
+    let stacks = &raw const IST_STACKS;
+    stacks as u64 + u64::from(ist) * IST_STACK_SIZE as u64
+}
 
 /// Written by `set_kernel_stack` while the CPU may read it, so it is not
 /// behind a reference.
@@ -68,8 +78,9 @@ pub fn init() {
     // SAFETY: runs once, before interrupts and before anything reads the
     // TSS; the stack is 'static.
     unsafe {
-        let top = &raw const DOUBLE_FAULT_STACK as u64 + IST_STACK_SIZE as u64;
-        (*tss).interrupt_stack_table[(DOUBLE_FAULT_IST - 1) as usize] = VirtAddr::new(top);
+        for ist in [DOUBLE_FAULT_IST, NMI_IST, MACHINE_CHECK_IST] {
+            (*tss).interrupt_stack_table[(ist - 1) as usize] = VirtAddr::new(ist_top(ist));
+        }
     }
     // SAFETY: the TSS is 'static and stays where it is.
     let (gdt, sel) = GDT.call_once(|| gdt(unsafe { Descriptor::tss_segment_unchecked(tss) }));
@@ -103,6 +114,18 @@ pub fn kernel_stack() -> u64 {
 mod tests {
     use super::*;
     use x86_64::PrivilegeLevel;
+
+    #[test]
+    fn each_ist_stack_is_its_own() {
+        let tops = [DOUBLE_FAULT_IST, NMI_IST, MACHINE_CHECK_IST].map(ist_top);
+        assert_eq!(
+            tops[0],
+            &raw const IST_STACKS as u64 + IST_STACK_SIZE as u64
+        );
+        assert_eq!(tops[1] - tops[0], IST_STACK_SIZE as u64);
+        assert_eq!(tops[2] - tops[1], IST_STACK_SIZE as u64);
+        assert!(tops.iter().all(|t| t % 16 == 0));
+    }
 
     #[test]
     fn the_segments_are_in_the_order_sysret_needs() {

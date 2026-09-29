@@ -419,7 +419,7 @@ pub fn spawn(s: &Spawn) -> Result<u32, Errno> {
                 Errno::ENOEXEC
             }
         })?;
-    let stack = mm::alloc_kernel_stack().ok_or(Errno::EAGAIN)?;
+    let stack = mm::alloc_kernel_stack().map_err(kstack::StackError::errno)?;
     let loaded = mm::with_user_memory(|mem, kernel| {
         let mut space = AddressSpace::new(mem, kernel).map_err(memory_error)?;
         match exec::load(&mut space, mem, &file, &program, &s.args, s.argc) {
