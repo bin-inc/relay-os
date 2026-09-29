@@ -908,5 +908,4 @@ does. Facts found before the spec was first merged are already in its body.
      it reads them all back. The images xtask builds keep a root that is
      the rest of the image. The startup line becomes `mount /: ext2 on
      00:14.0 port 15 partition 2, 2.0 GiB`, which the check scripts
-     expect; their recorded transcripts get it by hand until the next NUC
-     check records it.
+     expect; the recorded transcripts are those of its NUC check.
