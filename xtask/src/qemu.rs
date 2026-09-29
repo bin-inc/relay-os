@@ -3,21 +3,27 @@
 use crate::config::{OVMF_CODE, OVMF_VARS};
 use anyhow::{Context, Result};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// The QEMU id of the USB stick, for QMP `device_del`.
+pub const STICK_DEVICE: &str = "stick-usb";
 
 pub struct Qemu {
     pub disk: PathBuf,
     pub vars: PathBuf,
     pub headless: bool,
-    /// Abstract-namespace socket name for QMP (see `qmp_name`).
-    pub qmp_name: Option<String>,
+    /// Where QEMU listens for QMP: a socket in the run directory, which
+    /// only its owner can enter (QMP can make QEMU run commands).
+    pub qmp: Option<PathBuf>,
 }
 
 impl Qemu {
-    /// Copies the image and a fresh OVMF variable store into `run_dir`.
+    /// Copies the image and a fresh OVMF variable store into `run_dir`,
+    /// which becomes private to this user.
     pub fn prepare(image: &Path, run_dir: &Path) -> Result<Qemu> {
-        fs::create_dir_all(run_dir)?;
+        private_dir(run_dir)?;
         let disk = run_dir.join("disk.img");
         let vars = run_dir.join("OVMF_VARS.fd");
         fs::copy(image, &disk).context("copying disk image")?;
@@ -26,7 +32,7 @@ impl Qemu {
             disk,
             vars,
             headless: false,
-            qmp_name: None,
+            qmp: None,
         })
     }
 
@@ -53,30 +59,36 @@ impl Qemu {
                 "if=none,id=stick,format=raw,file={}",
                 self.disk.display()
             ))
-            .args(["-device", "usb-storage,bus=xhci.0,drive=stick"])
+            .arg("-device")
+            .arg(format!(
+                "usb-storage,bus=xhci.0,drive=stick,id={STICK_DEVICE}"
+            ))
             .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
             .args(["-serial", "stdio", "-monitor", "none"]);
         if self.headless {
             c.args(["-display", "none"]);
         }
-        if let Some(name) = &self.qmp_name {
+        if let Some(socket) = &self.qmp {
+            // Unix socket addresses hold 108 bytes, less than a deep
+            // checkout's path: QEMU binds the name in its own directory.
+            let name = socket.file_name().unwrap_or_default().to_string_lossy();
+            if let Some(dir) = socket.parent() {
+                c.current_dir(dir);
+            }
             c.arg("-chardev")
-                .arg(format!(
-                    "socket,id=qmp,path={name},server=on,wait=off,abstract=on"
-                ))
+                .arg(format!("socket,id=qmp,path={name},server=on,wait=off"))
                 .args(["-mon", "chardev=qmp,mode=control"]);
         }
         c
     }
 }
 
-/// A QMP socket name for one QEMU run. It lives in Linux's abstract socket
-/// namespace, so it has no filesystem path and no dependence on how deep the
-/// checkout is (Unix socket paths are limited to 108 bytes).
-pub fn qmp_name(tag: &str) -> String {
-    let mut name = format!("relay-qmp-{}-{tag}", std::process::id());
-    name.truncate(100);
-    name
+/// Creates `dir` if needed and makes it private to this user (mode 0700):
+/// it holds the QMP socket, and QMP can make QEMU run commands.
+pub fn private_dir(dir: &Path) -> Result<()> {
+    fs::create_dir_all(dir)?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    Ok(())
 }
 
 /// QEMU tries `-accel` options in order. By default KVM, falling back to TCG
@@ -110,40 +122,53 @@ mod tests {
         assert_eq!(accelerators(Some("kvm, tcg")), vec!["kvm", "tcg"]);
     }
 
-    /// Unix socket paths are limited to 108 bytes, which a deep checkout
-    /// exceeded; QMP therefore listens on an abstract socket (a name, no path).
+    /// QMP can make QEMU run any command, so its socket is a file in the
+    /// run directory, which only its owner can enter, not a name in the
+    /// abstract namespace, which every user can reach. Unix socket paths
+    /// hold 108 bytes, less than a deep checkout's: QEMU runs in the run
+    /// directory and binds the bare name.
     #[test]
-    fn qmp_listens_on_an_abstract_socket() {
+    fn qmp_listens_in_the_private_run_directory() {
         let deep = Path::new("/very/deep").join("x".repeat(200));
         let q = Qemu {
             disk: deep.join("disk.img"),
             vars: deep.join("OVMF_VARS.fd"),
             headless: true,
-            qmp_name: Some("relay-qmp-42-boot".into()),
+            qmp: Some(deep.join("qmp.sock")),
         };
-        let args: Vec<String> = q
-            .command()
+        let c = q.command();
+        let args: Vec<String> = c
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         let at = args.iter().position(|a| a == "-chardev").expect("-chardev");
         assert_eq!(
             args[at + 1],
-            "socket,id=qmp,path=relay-qmp-42-boot,server=on,wait=off,abstract=on"
+            "socket,id=qmp,path=qmp.sock,server=on,wait=off"
         );
+        assert_eq!(c.get_current_dir(), Some(deep.as_path()));
         assert!(
             args.windows(2)
                 .any(|w| w == ["-mon", "chardev=qmp,mode=control"])
         );
-        assert!(!args.iter().any(|a| a == "-qmp"));
+        assert!(!args.iter().any(|a| a == "-qmp" || a.contains("abstract")));
+        assert!(args.contains(&"usb-storage,bus=xhci.0,drive=stick,id=stick-usb".into()));
     }
 
     #[test]
-    fn qmp_names_are_short_and_unique_per_scenario() {
-        let a = qmp_name("boot");
-        assert!(a.starts_with("relay-qmp-") && a.ends_with("-boot"));
-        assert!(a.contains(&std::process::id().to_string()));
-        assert_ne!(a, qmp_name("panic_ud"));
-        assert!(qmp_name(&"s".repeat(300)).len() <= 100);
+    fn the_run_directory_is_private() {
+        let dir = crate::util::out_dir().join("qemu-selftest");
+        fs::create_dir_all(&dir).unwrap();
+        let run = dir.join("run");
+        let _ = fs::remove_dir_all(&run);
+        // Not `Qemu::prepare`, which also needs OVMF: the `unit` job has none.
+        private_dir(&run).unwrap();
+        let mode = fs::metadata(&run).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        // An existing directory is made private too.
+        fs::set_permissions(&run, fs::Permissions::from_mode(0o755)).unwrap();
+        private_dir(&run).unwrap();
+        let mode = fs::metadata(&run).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
     }
 }

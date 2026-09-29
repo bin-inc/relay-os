@@ -1,0 +1,20 @@
+# The stick pulled out while / is mounted (spec §15 item 11, decision 3):
+# every request fails at once with EIO instead of waiting for a device that
+# is gone, the shell keeps running, and poweroff will not go on without a
+# clean shutdown.
+timeout 30
+expect root@relay:~# $
+send echo before > /root/f
+send cat /root/f
+expect \nbefore\n
+unplug
+expect port \d: slot \d+ released
+# Three tries of 5 s each would be 15 s per request.
+timeout 3
+send touch /root/g
+expect \nrelay-sh: sync failed: Input/output error\n
+send echo still here
+expect \nstill here\n
+send poweroff
+expect \npoweroff: cannot shut the filesystems down cleanly: Input/output error\npoweroff: use 'poweroff -f' to go ahead anyway\n
+expect root@relay:~# $
