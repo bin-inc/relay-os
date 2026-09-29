@@ -1,0 +1,6 @@
+# An empty \EFI\RELAY\system.img (a copy cut short) is named as such, not
+# reported missing (user-space gate spec §4.3).
+esp-write /EFI/RELAY/system.img
+timeout 30
+expect \[FAIL\] system: system\.img: only 0 bytes
+expect root@relay:~# $

@@ -15,7 +15,7 @@ use vfs::{Errno, MountTable};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SystemError {
-    /// The loader found no `system.img`.
+    /// The loader could not read a `system.img`.
     Missing,
     /// The loader's range is not memory it allocated.
     NotLoaderMemory {
@@ -179,6 +179,8 @@ mod tests {
     #[test]
     fn a_bad_archive_is_not_mounted() {
         let mut vfs = table(true);
+        let e = mount_into(&mut vfs, &[]).unwrap_err();
+        assert_eq!(e.to_string(), "system.img: only 0 bytes", "an empty file");
         let junk: &'static [u8] =
             Vec::leak(b"this is not an archive, but long enough to have a header....".repeat(2));
         let e = mount_into(&mut vfs, junk).unwrap_err();

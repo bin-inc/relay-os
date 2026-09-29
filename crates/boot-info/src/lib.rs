@@ -149,7 +149,8 @@ pub struct BootInfo {
     pub has_boot_partition_guid: u32,
     /// Physical address and length of `\EFI\RELAY\system.img`, which the
     /// loader read into `LOADER_DATA` pages (`Bootloader` memory, which the
-    /// kernel never hands out). Length 0: there was no such file.
+    /// kernel never hands out). Address 0: the loader could not read such a
+    /// file; an empty file has an address and length 0.
     pub system_image_phys: u64,
     pub system_image_len: u64,
 }
@@ -181,9 +182,9 @@ impl BootInfo {
     }
 
     /// `(physical address, length)` of the system archive, if the loader
-    /// found one.
+    /// read one (perhaps an empty one).
     pub fn system_image(&self) -> Option<(u64, u64)> {
-        (self.system_image_len != 0).then_some((self.system_image_phys, self.system_image_len))
+        (self.system_image_phys != 0).then_some((self.system_image_phys, self.system_image_len))
     }
 }
 
@@ -250,13 +251,15 @@ mod tests {
     }
 
     #[test]
-    fn the_system_image_is_there_when_it_has_a_length() {
+    fn the_system_image_is_there_when_it_has_an_address() {
         let mut bi = blank();
         assert_eq!(bi.system_image(), None);
-        bi.system_image_phys = 0x1234_5000;
-        assert_eq!(bi.system_image(), None, "no length, no file");
         bi.system_image_len = 23_784;
+        assert_eq!(bi.system_image(), None, "no address, no file");
+        bi.system_image_phys = 0x1234_5000;
         assert_eq!(bi.system_image(), Some((0x1234_5000, 23_784)));
+        bi.system_image_len = 0;
+        assert_eq!(bi.system_image(), Some((0x1234_5000, 0)), "an empty file");
     }
 
     fn fb(width: u32, height: u32, stride: u32, format: PixelFormat) -> FramebufferInfo {

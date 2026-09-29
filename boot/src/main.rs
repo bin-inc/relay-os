@@ -135,13 +135,14 @@ fn load_kernel(file: &[u8], tables: &mut paging::Tables) -> (u64, u64, u64) {
 
 /// Copies `\EFI\RELAY\system.img` into `LOADER_DATA` pages, which the
 /// kernel keeps (spec §4.3 of the user-space gate), and returns their
-/// physical address and the file's length; `(0, 0)` without the file. The
-/// kernel checks the contents.
+/// physical address and the file's length; `(0, 0)` if the file cannot be
+/// read. An empty file gets a page, so the kernel can tell it from none.
+/// The kernel checks the contents.
 fn load_system_image() -> (u64, u64) {
-    let Some(file) = read_file(SYSTEM_PATH).filter(|f| !f.is_empty()) else {
+    let Some(file) = read_file(SYSTEM_PATH) else {
         return (0, 0);
     };
-    let base = alloc_pages(MemoryType::LOADER_DATA, file.len().div_ceil(4096));
+    let base = alloc_pages(MemoryType::LOADER_DATA, file.len().div_ceil(4096).max(1));
     unsafe { core::ptr::copy_nonoverlapping(file.as_ptr(), base, file.len()) };
     (base as u64, file.len() as u64)
 }
