@@ -210,8 +210,11 @@ impl<'a> Shell<'a> {
             }
         };
         if let Err(e) = ctx.finish() {
-            message = format!("{name}: write error: {e}\n");
-            status = 1;
+            // A program that did not exit keeps its report and status.
+            if message.is_empty() {
+                status = 1;
+            }
+            message.insert_str(0, &format!("{name}: write error: {e}\n"));
         }
         self.transcript = ctx.transcript.take();
         self.finish(status, message)
@@ -516,6 +519,17 @@ mod tests {
             )
         );
         assert_eq!(h.get("/tmp/out"), b"[1] a\n[2] b c\n");
+        // A write error too: both are reported, and the kill's status stays.
+        h.spy.zero_writes.set(true);
+        assert_eq!(
+            h.run("t-args > /tmp/out"),
+            (
+                139,
+                "t-args: note\nt-args: write error: No space left on device\n\
+                 relay-sh: t-args: killed (page fault at 0x0, read, ip 0x401a2c)\n"
+                    .into()
+            )
+        );
     }
 
     #[test]
