@@ -178,9 +178,11 @@ impl<'a> Shell<'a> {
         let started = self.system.spawn(&mut *self.vfs, path.as_bytes(), &args);
         let pid = match started {
             Some(Ok(pid)) => pid,
-            // No programs here (the host), or none by that name in /bin.
+            // No programs here (the host), or none by that name in /bin:
+            // `..`, `.` and `''` name directories there, which a search
+            // for a command skips, as bash's does.
             None => return self.finish(NOT_FOUND, format!("{NAME}: {name}: command not found\n")),
-            Some(Err(Errno::ENOENT)) if !name.contains('/') => {
+            Some(Err(Errno::ENOENT | Errno::EISDIR)) if !name.contains('/') => {
                 return self.finish(NOT_FOUND, format!("{NAME}: {name}: command not found\n"));
             }
             Some(Err(e)) => {
@@ -453,6 +455,21 @@ mod tests {
             transcript.contains("+ t-args\n[1] a\nt-args: note\n[2] b c\n"),
             "{transcript}"
         );
+    }
+
+    #[test]
+    fn names_of_directories_in_bin_are_not_commands() {
+        let mut h = with_programs();
+        for name in ["..", ".", "''"] {
+            let shown = if name == "''" { "" } else { name };
+            assert_eq!(
+                h.run(name),
+                (127, format!("relay-sh: {shown}: command not found\n")),
+                "{name}"
+            );
+        }
+        // Given as a path, a directory still says so.
+        assert_eq!(h.run("./"), (126, "relay-sh: ./: Is a directory\n".into()));
     }
 
     #[test]
