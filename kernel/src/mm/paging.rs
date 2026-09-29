@@ -165,6 +165,20 @@ impl PageTables {
         Ok(PageTables { pml4 })
     }
 
+    /// Gives every empty upper-half PML4 entry (256-511) an empty table,
+    /// so the kernel's half never gains a PML4 entry again: every address
+    /// space copies these entries once, when it is made, and still sees
+    /// every kernel mapping made later (user-space gate §5.1).
+    pub fn fill_upper_half(&mut self, mem: &mut impl PhysMem) -> Result<(), MapError> {
+        for i in 256..512 {
+            if mem.table(self.pml4)[i] & PRESENT == 0 {
+                let t = mem.alloc_table().ok_or(MapError::OutOfMemory)?;
+                mem.table(self.pml4)[i] = t | PRESENT | WRITABLE;
+            }
+        }
+        Ok(())
+    }
+
     /// Sets PML4 entry `i` directly, for sharing a subtree of other tables.
     pub fn set_pml4_entry(&mut self, mem: &mut impl PhysMem, i: usize, entry: u64) {
         mem.table(self.pml4)[i] = entry;
@@ -441,42 +455,7 @@ pub fn linear_ranges(map: &[MemoryRegion]) -> impl Iterator<Item = (u64, u64)> +
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
-    /// Page tables in host memory, with made-up physical addresses.
-    struct FakeMem {
-        tables: HashMap<u64, Box<[u64; 512]>>,
-        next: u64,
-        limit: usize,
-    }
-
-    impl FakeMem {
-        fn new() -> FakeMem {
-            FakeMem {
-                tables: HashMap::new(),
-                next: 0x1000_0000,
-                limit: usize::MAX,
-            }
-        }
-    }
-
-    impl PhysMem for FakeMem {
-        fn table(&mut self, phys: u64) -> &mut [u64; 512] {
-            self.tables.get_mut(&phys).expect("not a table frame")
-        }
-        fn alloc_table(&mut self) -> Option<u64> {
-            if self.tables.len() >= self.limit {
-                return None;
-            }
-            let p = self.next;
-            self.next += PAGE;
-            self.tables.insert(p, Box::new([0; 512]));
-            Some(p)
-        }
-        fn free_frame(&mut self, phys: u64) {
-            assert!(self.tables.remove(&phys).is_some(), "{phys:#x} freed twice");
-        }
-    }
+    use crate::mm::testing::FakeMem;
 
     const V: u64 = 0xFFFF_8000_0000_0000;
 
@@ -655,6 +634,41 @@ mod tests {
             m.table(t.pml4)[..256].iter().all(|&e| e == 0),
             "lower half empty"
         );
+    }
+
+    #[test]
+    fn the_upper_half_gets_every_pml4_entry_up_front() {
+        let (mut m, mut t) = setup();
+        t.set_pml4_entry(&mut m, 511, 0x1234_5000 | PRESENT | WRITABLE);
+        t.fill_upper_half(&mut m).unwrap();
+        let pml4 = *m.table(t.pml4);
+        assert_eq!(pml4[511], 0x1234_5003, "the loader's entry stays");
+        for (i, e) in pml4.iter().enumerate() {
+            if i < 256 {
+                assert_eq!(*e, 0, "entry {i}: the lower half stays empty");
+            } else {
+                assert_eq!(
+                    e & (PRESENT | WRITABLE | USER),
+                    PRESENT | WRITABLE,
+                    "entry {i}"
+                );
+            }
+        }
+        // 255 new tables, each empty; filling again adds none.
+        assert_eq!(m.tables.len(), 1 + 255);
+        t.fill_upper_half(&mut m).unwrap();
+        assert_eq!(m.tables.len(), 1 + 255);
+        // Kernel mappings now go under those tables.
+        t.map(&mut m, V + 0x1000, 0x1000, PAGE, Cache::WriteBack)
+            .unwrap();
+        assert_eq!(m.table(t.pml4)[256], pml4[256]);
+    }
+
+    #[test]
+    fn filling_the_upper_half_can_run_out_of_memory() {
+        let (mut m, mut t) = setup();
+        m.limit = 10;
+        assert_eq!(t.fill_upper_half(&mut m), Err(MapError::OutOfMemory));
     }
 
     /// A lower-half address of a program's (spec §5.1).

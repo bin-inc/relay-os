@@ -6,11 +6,16 @@
 //! map from the RAM regions only (write-back) plus the framebuffer
 //! (write-combining through PAT entry 1), and drops everything in the lower
 //! half, including the loader's identity-mapped trampoline. Device memory is
-//! mapped later, on demand, with `map_mmio`.
+//! mapped later, on demand, with `map_mmio`. Every upper-half PML4 entry
+//! exists from `init` on, so programs' address spaces (`space`) share the
+//! kernel's half by copying those entries once.
 
 pub mod frame;
 pub mod heap;
 pub mod paging;
+pub mod space;
+#[cfg(test)]
+pub mod testing;
 
 use boot_info::{BootInfo, HEAP_BASE, HEAP_SIZE, PHYS_MAP_MAX, PHYS_OFFSET};
 use core::fmt;
@@ -38,9 +43,58 @@ struct Memory {
 
 static MEMORY: Mutex<Option<Memory>> = Mutex::new(None);
 
+/// Frames user memory must leave free (user-space gate §11.1): 8 MiB, so
+/// DMA buffers, page tables and kernel stacks never run out.
+pub const USER_RESERVE_FRAMES: u64 = (8 << 20) / FRAME_SIZE;
+
+/// Whether one more frame may go to a program's memory while `free` frames
+/// are free.
+pub fn user_may_take(free: u64) -> bool {
+    free > USER_RESERVE_FRAMES
+}
+
 /// Page tables are reached through the linear map; new ones come from the
 /// frame allocator.
 struct LinearMem<'a>(&'a mut FrameAllocator<'static>);
+
+/// The same for a program's memory, which leaves `USER_RESERVE_FRAMES`
+/// free.
+pub struct UserMem<'a>(LinearMem<'a>);
+
+impl PhysMem for UserMem<'_> {
+    fn table(&mut self, phys: u64) -> &mut [u64; 512] {
+        self.0.table(phys)
+    }
+
+    fn alloc_table(&mut self) -> Option<u64> {
+        if !user_may_take(self.0.0.free_frames()) {
+            return None;
+        }
+        self.0.alloc_table()
+    }
+
+    fn free_frame(&mut self, phys: u64) {
+        self.0.free_frame(phys)
+    }
+}
+
+/// Runs `f` with the frames for a program's memory and the kernel's page
+/// tables (which a new `AddressSpace` shares).
+pub fn with_user_memory<R>(f: impl FnOnce(&mut UserMem<'_>, &PageTables) -> R) -> R {
+    let mut guard = MEMORY.lock();
+    let m = guard.as_mut().expect("mm::init has not run");
+    f(&mut UserMem(LinearMem(&mut m.frames)), &m.tables)
+}
+
+/// The kernel's own page tables, for CR3 when no program runs.
+pub fn kernel_pml4() -> u64 {
+    MEMORY
+        .lock()
+        .as_ref()
+        .expect("mm::init has not run")
+        .tables
+        .pml4
+}
 
 impl PhysMem for LinearMem<'_> {
     fn table(&mut self, phys: u64) -> &mut [u64; 512] {
@@ -123,6 +177,7 @@ pub fn init(info: &BootInfo) -> Result<MemStats, MemError> {
             tables.set_pml4_entry(&mut mem, i, e);
         }
     }
+    tables.fill_upper_half(&mut mem)?;
     for (start, end) in paging::linear_ranges(map) {
         let start = start & !(PAGE - 1);
         let end = end.next_multiple_of(PAGE);
@@ -235,6 +290,14 @@ pub fn map_mmio(phys: u64, len: u64, cache: Cache) -> Result<*mut u8, MapError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_memory_leaves_8_mib_free() {
+        assert_eq!(USER_RESERVE_FRAMES, 2048);
+        assert!(user_may_take(2049), "the frame taken leaves 2048");
+        assert!(!user_may_take(2048));
+        assert!(!user_may_take(0));
+    }
 
     #[test]
     fn dma_buffers_take_whole_aligned_frames() {
