@@ -1,7 +1,9 @@
 //! The user programs (spec §8 of the user-space gate): building the
 //! packages under `userland/` for Relay OS, checking that every binary is
 //! a program the kernel will load (spec §5.2), and packing them into
-//! `system.img` (spec §4.2).
+//! `system.img` (spec §4.2). Each program is checked twice: by binutils'
+//! `readelf`, independently of our code, and by the kernel's own check
+//! (the `elf` crate), so the build refuses exactly what the kernel would.
 
 use crate::config::{KERNEL_TARGET, USER_PACKAGES, USER_PROFILE};
 use crate::util::{cargo, out_dir, root, run_stdout};
@@ -11,10 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Lowest and end of the addresses a program's segments may use (spec
-/// §5.1): above the unmapped first 4 MiB, below the `mem_map` area.
-pub const PROGRAM_BASE: u64 = 0x40_0000;
-pub const PROGRAM_END: u64 = 0x1000_0000_0000;
+pub use elf::{PROGRAM_BASE, PROGRAM_END};
 
 /// One built program: its name in `/bin` and the binary.
 #[derive(Clone, Debug)]
@@ -59,9 +58,18 @@ pub fn build() -> Result<Vec<Program>> {
     programs.sort_by(|a, b| a.name.cmp(&b.name));
     require_tool("readelf", "binutils")?;
     for p in &programs {
-        check_program(&p.path).with_context(|| format!("{} is not a Relay OS program", p.name))?;
+        check_program(&p.path)
+            .and_then(|()| kernel_check(&p.path))
+            .with_context(|| format!("{} is not a Relay OS program", p.name))?;
     }
     Ok(programs)
+}
+
+/// The kernel's own check of `path` (spec §5.2), as `spawn` runs it.
+fn kernel_check(path: &Path) -> Result<()> {
+    elf::check(&fs::read(path)?, elf::EM_X86_64, relay_abi::VERSION)
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("the kernel's check: {e}"))
 }
 
 /// Fails, naming the tool and the package it comes in, if `program`
@@ -160,13 +168,19 @@ fn relay_note(notes: &[u8]) -> Result<Option<u32>> {
 }
 
 /// Checks the rules of spec §5.2 that the build decides, as the kernel will
-/// read the program: a static x86_64 executable with only `PT_LOAD`,
+/// read the program: at most 16 MiB, a little-endian ELF64 file, a static
+/// x86_64 executable with only `PT_LOAD`,
 /// `PT_NOTE` and `PT_GNU_STACK` program headers; loadable segments in the
 /// program area, not overlapping, with offsets and addresses congruent
 /// modulo 4 KiB, no more file than memory, never writable and executable;
 /// the entry point in an executable segment; and a `PT_NOTE` segment
 /// holding the `Relay` note with this ABI's version.
 pub fn check_program(path: &Path) -> Result<()> {
+    let size = fs::metadata(path)?.len();
+    ensure!(
+        size <= elf::MAX_SIZE as u64,
+        "{size} bytes, more than 16 MiB"
+    );
     let text = readelf(path)?;
     let field = |name: &str| {
         text.lines()
@@ -174,6 +188,16 @@ pub fn check_program(path: &Path) -> Result<()> {
             .map(|v| v.trim().to_string())
             .unwrap_or_default()
     };
+    ensure!(
+        field("Class:") == "ELF64",
+        "class {}, not ELF64",
+        field("Class:")
+    );
+    ensure!(
+        field("Data:").ends_with("little endian"),
+        "data {}, not little endian",
+        field("Data:")
+    );
     ensure!(
         field("Type:").starts_with("EXEC"),
         "type {}, not EXEC",
@@ -328,7 +352,25 @@ mod tests {
         }
     }
 
+    /// Whether the build (`readelf`) and the kernel (the `elf` crate) agree
+    /// on `path`; what the build says.
+    fn both(path: &Path) -> String {
+        let build = check_program(path);
+        let kernel = kernel_check(path);
+        assert_eq!(
+            build.is_ok(),
+            kernel.is_ok(),
+            "{}: the build says {build:?}, the kernel {kernel:?}",
+            path.display()
+        );
+        match build {
+            Ok(()) => "accepted".into(),
+            Err(e) => e.to_string(),
+        }
+    }
+
     /// `t-args` with one ELF field changed, and what `check_program` says.
+    /// The kernel's check must refuse it as well, or accept it as well.
     fn patched(name: &str, edit: impl Fn(&mut Vec<u8>)) -> String {
         let mut bytes = fs::read(t_args().path).unwrap();
         edit(&mut bytes);
@@ -336,10 +378,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
         fs::write(&path, &bytes).unwrap();
-        match check_program(&path) {
-            Ok(()) => "accepted".into(),
-            Err(e) => e.to_string(),
-        }
+        both(&path)
     }
 
     fn u64_at(b: &[u8], at: usize) -> u64 {
@@ -359,9 +398,7 @@ mod tests {
     #[test]
     fn check_program_refuses_what_the_kernel_would() {
         assert_eq!(patched("same", |_| {}), "accepted");
-        let host = check_program(Path::new("/bin/true"))
-            .unwrap_err()
-            .to_string();
+        let host = both(Path::new("/bin/true"));
         assert!(host.contains("not EXEC"), "a Linux program: {host}");
         let e = patched("dyn", |b| b[0x10] = 3);
         assert!(e.contains("type DYN"), "{e}");
@@ -402,6 +439,18 @@ mod tests {
             b[at] = b'X';
         });
         assert!(e.contains("no PT_NOTE segment holds the Relay note"), "{e}");
+    }
+
+    #[test]
+    fn only_little_endian_elf64_up_to_16_mib() {
+        let e = patched("elf32", |b| b[4] = 1);
+        assert!(e.contains("class ELF32, not ELF64"), "{e}");
+        let e = patched("big-endian", |b| b[5] = 2);
+        assert!(e.contains("not little endian"), "{e}");
+        let e = patched("16mib", |b| b.resize(elf::MAX_SIZE, 0));
+        assert_eq!(e, "accepted", "16 MiB exactly");
+        let e = patched("too-big", |b| b.resize(elf::MAX_SIZE + 1, 0));
+        assert_eq!(e, "16777217 bytes, more than 16 MiB");
     }
 
     /// The file offset of the `n`th program header of type `kind`.

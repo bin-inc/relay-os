@@ -516,6 +516,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
+ "elf",
  "ext2",
  "regex",
  "relay-abi",
