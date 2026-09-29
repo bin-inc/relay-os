@@ -75,6 +75,16 @@ enum MountPoint {
 /// (whose name is empty) to the directory itself.
 type Trail = Vec<(Node, Vec<u8>)>;
 
+/// A current directory apart from the table: each process has its own
+/// (user-space gate §5.4), and the kernel puts it in with
+/// `MountTable::swap_cwd` while it works for that process. A removal marks
+/// only the current directory that is in the table at the time as gone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Cwd {
+    trail: Trail,
+    gone: bool,
+}
+
 /// The mount table plus the current directory.
 pub struct MountTable {
     mounts: Vec<Mount>,
@@ -106,6 +116,24 @@ impl MountTable {
             cwd: alloc::vec![(node, Vec::new())],
             cwd_gone: false,
         }
+    }
+
+    /// The root, as a current directory to put in with `swap_cwd`.
+    pub fn root_cwd(&self) -> Cwd {
+        Cwd {
+            trail: self.cwd[..1].to_vec(),
+            gone: false,
+        }
+    }
+
+    /// Makes `cwd` the current directory and returns the one it replaces.
+    pub fn swap_cwd(&mut self, cwd: Cwd) -> Cwd {
+        let old = Cwd {
+            trail: core::mem::replace(&mut self.cwd, cwd.trail),
+            gone: self.cwd_gone,
+        };
+        self.cwd_gone = cwd.gone;
+        old
     }
 
     /// Mounts `fs` on the directory at `path`, or on its last name if the
@@ -536,6 +564,31 @@ mod tests {
         assert_eq!(t.cwd(), b"/root");
         assert_eq!(read(&mut t, b"../etc/motd").unwrap(), b"welcome\n");
         assert_eq!(read(&mut t, b".//..//etc/./motd").unwrap(), b"welcome\n");
+    }
+
+    #[test]
+    fn a_current_directory_can_be_put_aside_and_back() {
+        let mut t = table();
+        t.chdir(b"/root").unwrap();
+        let shell = t.swap_cwd(t.root_cwd());
+        assert_eq!(t.cwd(), b"/");
+        assert_eq!(read(&mut t, b"etc/motd").unwrap(), b"welcome\n");
+        t.mkdir(b"tmp/x").unwrap();
+        t.chdir(b"tmp/x").unwrap();
+        t.rmdir(b"/tmp/x").unwrap();
+        assert_eq!(read(&mut t, b"../../etc/motd"), Err(Errno::ENOENT), "gone");
+        let gone = t.swap_cwd(shell);
+        assert_eq!(t.cwd(), b"/root");
+        assert_eq!(read(&mut t, b"../etc/motd").unwrap(), b"welcome\n");
+        let shell = t.swap_cwd(gone);
+        assert_eq!(t.cwd(), b"/tmp/x", "the prompt's path");
+        assert_eq!(
+            read(&mut t, b"../../etc/motd"),
+            Err(Errno::ENOENT),
+            "still gone"
+        );
+        t.swap_cwd(shell);
+        assert_eq!(read(&mut t, b"../etc/motd").unwrap(), b"welcome\n");
     }
 
     #[test]
