@@ -146,6 +146,13 @@ name = "crc32"
 version = "0.2.0"
 
 [[package]]
+name = "elf"
+version = "0.2.0"
+dependencies = [
+ "relay-abi",
+]
+
+[[package]]
 name = "ext2"
 version = "0.2.0"
 dependencies = [
@@ -278,6 +285,7 @@ version = "0.2.0"
 dependencies = [
  "boot-info",
  "crc32",
+ "elf",
  "ext2",
  "heap",
  "relay-abi",
@@ -509,6 +517,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
+ "elf",
  "ext2",
  "regex",
  "relay-abi",

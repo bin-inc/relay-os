@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+elf = { workspace = true }
 ext2 = { workspace = true }
 regex = "1"
 relay-abi = { workspace = true }
