@@ -2,10 +2,14 @@
 //! memory only through `PhysMem`, so it is tested on the host against a fake;
 //! the kernel's implementation goes through the linear map.
 //!
-//! Every mapping made here is writable and not executable (the kernel image
-//! keeps the loader's mappings). Each physical page appears at most once in
-//! the linear map, at `PHYS_OFFSET + phys`, so there are never two mappings
-//! of one page with different cache types.
+//! The kernel's own mappings (`map`) are writable and not executable (the
+//! kernel image keeps the loader's mappings). Each physical page appears at
+//! most once in the linear map, at `PHYS_OFFSET + phys`, so there are never
+//! two mappings of one page with different cache types.
+//!
+//! A program's pages (`map_user`, user-space gate §5.1) are 4 KiB pages in
+//! the lower half with the user bit and the permissions of their segment;
+//! `free_lower_half` gives back every one of them with its tables.
 
 use boot_info::{MemoryKind, MemoryRegion};
 
@@ -14,6 +18,7 @@ pub const HUGE: u64 = 2 << 20;
 
 const PRESENT: u64 = 1;
 const WRITABLE: u64 = 1 << 1;
+const USER: u64 = 1 << 2;
 const PWT: u64 = 1 << 3;
 const PCD: u64 = 1 << 4;
 const ACCESSED: u64 = 1 << 5;
@@ -22,6 +27,41 @@ const HUGE_PAGE: u64 = 1 << 7;
 const NO_EXECUTE: u64 = 1 << 63;
 const ADDR: u64 = 0x000F_FFFF_FFFF_F000;
 const HUGE_ADDR: u64 = 0x000F_FFFF_FFE0_0000;
+/// The first address of the upper half; PML4 entries 256-511.
+pub const UPPER_HALF: u64 = 0xFFFF_8000_0000_0000;
+/// The end of the lower half (PML4 entries 0-255), which programs own.
+pub const LOWER_HALF_END: u64 = 0x0000_8000_0000_0000;
+
+/// What a program may do with one of its pages (user-space gate §5.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Perm {
+    /// Code: read and execute.
+    ReadExec,
+    /// Read-only data: not executable.
+    Read,
+    /// Data, the stack: writable, not executable.
+    ReadWrite,
+}
+
+impl Perm {
+    fn bits(self) -> u64 {
+        match self {
+            Perm::ReadExec => 0,
+            Perm::Read => NO_EXECUTE,
+            Perm::ReadWrite => WRITABLE | NO_EXECUTE,
+        }
+    }
+
+    fn of_entry(e: u64) -> Perm {
+        if e & WRITABLE != 0 {
+            Perm::ReadWrite
+        } else if e & NO_EXECUTE != 0 {
+            Perm::Read
+        } else {
+            Perm::ReadExec
+        }
+    }
+}
 
 /// Memory types used by the kernel. The PWT/PCD bits of an entry pick one
 /// of the first four PAT entries (the PAT bit itself is never set).
@@ -62,8 +102,18 @@ pub const PAT_VALUE: u64 = 0x0007_0406_0007_0106;
 pub trait PhysMem {
     /// The page table stored in the frame at `phys`.
     fn table(&mut self, phys: u64) -> &mut [u64; 512];
-    /// A zeroed frame for a new table, or `None` when memory is exhausted.
+    /// A zeroed frame for a new table (or a program's page), or `None`
+    /// when memory is exhausted.
     fn alloc_table(&mut self) -> Option<u64>;
+    /// Gives back a frame from `alloc_table`.
+    fn free_frame(&mut self, phys: u64);
+    /// The bytes of the frame at `phys`.
+    fn bytes(&mut self, phys: u64) -> &mut [u8; PAGE as usize] {
+        let table: *mut [u64; 512] = self.table(phys);
+        // SAFETY: a frame of 512 `u64`s is 4096 bytes, and bytes have no
+        // alignment of their own.
+        unsafe { &mut *table.cast::<[u8; PAGE as usize]>() }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +128,10 @@ pub enum MapError {
     Unaligned,
     /// The physical range lies beyond what the linear map can cover.
     OutOfRange,
+    /// A program's page must lie in the lower half.
+    NotUser {
+        virt: u64,
+    },
 }
 
 impl core::fmt::Display for MapError {
@@ -87,6 +141,7 @@ impl core::fmt::Display for MapError {
             MapError::Conflict { virt } => write!(f, "{virt:#x} is already mapped differently"),
             MapError::Unaligned => write!(f, "range is not page-aligned"),
             MapError::OutOfRange => write!(f, "physical address beyond the linear map"),
+            MapError::NotUser { virt } => write!(f, "{virt:#x} is not in the lower half"),
         }
     }
 }
@@ -108,6 +163,20 @@ impl PageTables {
     pub fn new(mem: &mut impl PhysMem) -> Result<PageTables, MapError> {
         let pml4 = mem.alloc_table().ok_or(MapError::OutOfMemory)?;
         Ok(PageTables { pml4 })
+    }
+
+    /// Gives every empty upper-half PML4 entry (256-511) an empty table,
+    /// so the kernel's half never gains a PML4 entry again: every address
+    /// space copies these entries once, when it is made, and still sees
+    /// every kernel mapping made later (user-space gate §5.1).
+    pub fn fill_upper_half(&mut self, mem: &mut impl PhysMem) -> Result<(), MapError> {
+        for i in 256..512 {
+            if mem.table(self.pml4)[i] & PRESENT == 0 {
+                let t = mem.alloc_table().ok_or(MapError::OutOfMemory)?;
+                mem.table(self.pml4)[i] = t | PRESENT | WRITABLE;
+            }
+        }
+        Ok(())
     }
 
     /// Sets PML4 entry `i` directly, for sharing a subtree of other tables.
@@ -146,6 +215,8 @@ impl PageTables {
     }
 
     /// The next-level table under entry `i` of `table`, created if missing.
+    /// Tables of the lower half carry the user bit (the leaf entry decides
+    /// what ring 3 may do); the kernel's never do.
     fn child(
         &mut self,
         mem: &mut impl PhysMem,
@@ -153,12 +224,17 @@ impl PageTables {
         i: usize,
         virt: u64,
     ) -> Result<u64, MapError> {
+        let flags = if virt < LOWER_HALF_END {
+            PRESENT | WRITABLE | USER
+        } else {
+            PRESENT | WRITABLE
+        };
         let e = mem.table(table)[i];
         if e & PRESENT == 0 {
             let t = mem.alloc_table().ok_or(MapError::OutOfMemory)?;
-            mem.table(table)[i] = t | PRESENT | WRITABLE;
+            mem.table(table)[i] = t | flags;
             Ok(t)
-        } else if e & HUGE_PAGE != 0 {
+        } else if e & HUGE_PAGE != 0 || e & flags != flags {
             Err(MapError::Conflict { virt })
         } else {
             Ok(e & ADDR)
@@ -170,6 +246,92 @@ impl PageTables {
         let pdpt = self.child(mem, self.pml4, index(virt, 3), virt)?;
         let pd = self.child(mem, pdpt, index(virt, 2), virt)?;
         Ok((pd, index(virt, 1)))
+    }
+
+    /// Maps the 4 KiB page at `virt` in the lower half to the frame `phys`
+    /// for ring 3, with `perm`. A page already mapped is a conflict: a
+    /// program's pages are mapped once, when they are allocated.
+    pub fn map_user(
+        &mut self,
+        mem: &mut impl PhysMem,
+        virt: u64,
+        phys: u64,
+        perm: Perm,
+    ) -> Result<(), MapError> {
+        if !(virt | phys).is_multiple_of(PAGE) {
+            return Err(MapError::Unaligned);
+        }
+        if virt >= LOWER_HALF_END {
+            return Err(MapError::NotUser { virt });
+        }
+        let (pd, i) = self.pd_slot(mem, virt)?;
+        let pt = self.child(mem, pd, i, virt)?;
+        let slot = &mut mem.table(pt)[index(virt, 0)];
+        if *slot & PRESENT != 0 {
+            return Err(MapError::Conflict { virt });
+        }
+        *slot = phys | PRESENT | USER | perm.bits();
+        Ok(())
+    }
+
+    /// The 4 KiB leaf entry for `virt`, if every table on the way is there.
+    fn leaf(&self, mem: &mut impl PhysMem, virt: u64) -> Option<(u64, usize)> {
+        let mut table = self.pml4;
+        for level in (1..4).rev() {
+            let e = mem.table(table)[index(virt, level)];
+            if e & PRESENT == 0 || e & HUGE_PAGE != 0 {
+                return None;
+            }
+            table = e & ADDR;
+        }
+        Some((table, index(virt, 0)))
+    }
+
+    /// Removes the 4 KiB page at `virt` and returns its frame; `None` if
+    /// no 4 KiB page is mapped there. The tables stay; the caller flushes
+    /// the TLB.
+    pub fn unmap(&mut self, mem: &mut impl PhysMem, virt: u64) -> Option<u64> {
+        let (pt, i) = self.leaf(mem, virt)?;
+        let e = mem.table(pt)[i];
+        if e & PRESENT == 0 {
+            return None;
+        }
+        mem.table(pt)[i] = 0;
+        Some(e & ADDR)
+    }
+
+    /// The frame and permission of the page holding `virt`, if ring 3 may
+    /// use it: in the lower half, and the user bit at every level.
+    pub fn user_page(&self, mem: &mut impl PhysMem, virt: u64) -> Option<(u64, Perm)> {
+        if virt >= LOWER_HALF_END {
+            return None;
+        }
+        let mut table = self.pml4;
+        for level in (0..4).rev() {
+            let e = mem.table(table)[index(virt, level)];
+            if e & (PRESENT | USER) != PRESENT | USER || e & HUGE_PAGE != 0 {
+                return None;
+            }
+            if level == 0 {
+                return Some((e & ADDR, Perm::of_entry(e)));
+            }
+            table = e & ADDR;
+        }
+        None
+    }
+
+    /// Gives back every page of the lower half and every table below its
+    /// PML4 entries, which are left empty (user-space gate §5.1). Only
+    /// `map_user` puts pages there, so all of them are 4 KiB pages.
+    pub fn free_lower_half(&mut self, mem: &mut impl PhysMem) {
+        for i in 0..256 {
+            let pdpt = mem.table(self.pml4)[i];
+            if pdpt & PRESENT == 0 {
+                continue;
+            }
+            mem.table(self.pml4)[i] = 0;
+            free_table(mem, pdpt & ADDR, 2);
+        }
     }
 
     /// Maps one 2 MiB page. `Ok(false)` if that slot already holds a table
@@ -247,6 +409,23 @@ impl PageTables {
     }
 }
 
+/// Frees the table at `table` of `level` (2 a PDPT, 1 a PD, 0 a PT), the
+/// tables below it and, from a PT, the pages it maps.
+fn free_table(mem: &mut impl PhysMem, table: u64, level: u32) {
+    for i in 0..512 {
+        let e = mem.table(table)[i];
+        if e & PRESENT == 0 {
+            continue;
+        }
+        if level == 0 {
+            mem.free_frame(e & ADDR);
+        } else {
+            free_table(mem, e & ADDR, level - 1);
+        }
+    }
+    mem.free_frame(table);
+}
+
 /// The physical ranges the kernel's linear map covers: every RAM-type
 /// region (usable, loader, kernel and ACPI memory), with touching regions
 /// merged so 2 MiB pages can span their boundaries. Reserved and MMIO
@@ -276,39 +455,7 @@ pub fn linear_ranges(map: &[MemoryRegion]) -> impl Iterator<Item = (u64, u64)> +
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
-    /// Page tables in host memory, with made-up physical addresses.
-    struct FakeMem {
-        tables: HashMap<u64, Box<[u64; 512]>>,
-        next: u64,
-        limit: usize,
-    }
-
-    impl FakeMem {
-        fn new() -> FakeMem {
-            FakeMem {
-                tables: HashMap::new(),
-                next: 0x1000_0000,
-                limit: usize::MAX,
-            }
-        }
-    }
-
-    impl PhysMem for FakeMem {
-        fn table(&mut self, phys: u64) -> &mut [u64; 512] {
-            self.tables.get_mut(&phys).expect("not a table frame")
-        }
-        fn alloc_table(&mut self) -> Option<u64> {
-            if self.tables.len() >= self.limit {
-                return None;
-            }
-            let p = self.next;
-            self.next += PAGE;
-            self.tables.insert(p, Box::new([0; 512]));
-            Some(p)
-        }
-    }
+    use crate::mm::testing::FakeMem;
 
     const V: u64 = 0xFFFF_8000_0000_0000;
 
@@ -487,6 +634,207 @@ mod tests {
             m.table(t.pml4)[..256].iter().all(|&e| e == 0),
             "lower half empty"
         );
+    }
+
+    #[test]
+    fn the_upper_half_gets_every_pml4_entry_up_front() {
+        let (mut m, mut t) = setup();
+        t.set_pml4_entry(&mut m, 511, 0x1234_5000 | PRESENT | WRITABLE);
+        t.fill_upper_half(&mut m).unwrap();
+        let pml4 = *m.table(t.pml4);
+        assert_eq!(pml4[511], 0x1234_5003, "the loader's entry stays");
+        for (i, e) in pml4.iter().enumerate() {
+            if i < 256 {
+                assert_eq!(*e, 0, "entry {i}: the lower half stays empty");
+            } else {
+                assert_eq!(
+                    e & (PRESENT | WRITABLE | USER),
+                    PRESENT | WRITABLE,
+                    "entry {i}"
+                );
+            }
+        }
+        // 255 new tables, each empty; filling again adds none.
+        assert_eq!(m.tables.len(), 1 + 255);
+        t.fill_upper_half(&mut m).unwrap();
+        assert_eq!(m.tables.len(), 1 + 255);
+        // Kernel mappings now go under those tables.
+        t.map(&mut m, V + 0x1000, 0x1000, PAGE, Cache::WriteBack)
+            .unwrap();
+        assert_eq!(m.table(t.pml4)[256], pml4[256]);
+    }
+
+    #[test]
+    fn filling_the_upper_half_can_run_out_of_memory() {
+        let (mut m, mut t) = setup();
+        m.limit = 10;
+        assert_eq!(t.fill_upper_half(&mut m), Err(MapError::OutOfMemory));
+    }
+
+    /// A lower-half address of a program's (spec §5.1).
+    const U: u64 = 0x40_0000;
+
+    /// The raw leaf entry for `v`.
+    fn leaf_entry(m: &mut FakeMem, t: &PageTables, v: u64) -> u64 {
+        let (pt, i) = t.leaf(m, v).expect("tables");
+        m.table(pt)[i]
+    }
+
+    #[test]
+    fn user_pages_carry_the_user_bit_and_their_permission() {
+        let (mut m, mut t) = setup();
+        let perms = [Perm::ReadExec, Perm::Read, Perm::ReadWrite];
+        for (n, perm) in perms.into_iter().enumerate() {
+            let frame = m.alloc_table().unwrap();
+            let v = U + n as u64 * PAGE;
+            t.map_user(&mut m, v, frame, perm).unwrap();
+            assert_eq!(t.user_page(&mut m, v + 0x123), Some((frame, perm)));
+        }
+        let code = leaf_entry(&mut m, &t, U);
+        assert_eq!(code & (USER | WRITABLE | NO_EXECUTE), USER, "R-X");
+        let rodata = leaf_entry(&mut m, &t, U + PAGE);
+        assert_eq!(rodata & (USER | WRITABLE | NO_EXECUTE), USER | NO_EXECUTE);
+        let data = leaf_entry(&mut m, &t, U + 2 * PAGE);
+        assert_eq!(
+            data & (USER | WRITABLE | NO_EXECUTE),
+            USER | WRITABLE | NO_EXECUTE
+        );
+        // The tables on the way let the leaf decide.
+        let mut table = t.pml4;
+        for level in (1..4).rev() {
+            let e = m.table(table)[index(U, level)];
+            assert_eq!(
+                e & (PRESENT | WRITABLE | USER | NO_EXECUTE),
+                PRESENT | WRITABLE | USER
+            );
+            table = e & ADDR;
+        }
+        assert_eq!(t.user_page(&mut m, U + 3 * PAGE), None, "not mapped");
+    }
+
+    #[test]
+    fn kernel_pages_are_not_user_pages() {
+        let (mut m, mut t) = setup();
+        t.map(&mut m, V + 0x1000, 0x1000, PAGE, Cache::WriteBack)
+            .unwrap();
+        assert_eq!(t.user_page(&mut m, V + 0x1000), None);
+        let pdpt = m.table(t.pml4)[index(V, 3)];
+        assert_eq!(pdpt & USER, 0, "kernel tables have no user bit");
+        // A kernel-only mapping in the lower half (none exists, but the
+        // walk must not trust the leaf alone).
+        let frame = m.alloc_table().unwrap();
+        t.map_user(&mut m, U, frame, Perm::ReadWrite).unwrap();
+        let (pt, i) = t.leaf(&mut m, U).unwrap();
+        m.table(pt)[i] &= !USER;
+        assert_eq!(t.user_page(&mut m, U), None);
+        assert_eq!(t.user_page(&mut m, LOWER_HALF_END), None);
+        assert_eq!(t.user_page(&mut m, u64::MAX), None);
+        // An upper-half page is never a program's, whatever its bits say.
+        let mut table = t.pml4;
+        for level in (0..4).rev() {
+            let e = &mut m.table(table)[index(V + 0x1000, level)];
+            *e |= USER;
+            table = *e & ADDR;
+        }
+        assert_eq!(t.user_page(&mut m, V + 0x1000), None);
+    }
+
+    #[test]
+    fn user_pages_are_lower_half_4k_pages_mapped_once() {
+        let (mut m, mut t) = setup();
+        let frame = m.alloc_table().unwrap();
+        assert_eq!(
+            t.map_user(&mut m, LOWER_HALF_END, frame, Perm::Read),
+            Err(MapError::NotUser {
+                virt: LOWER_HALF_END
+            })
+        );
+        assert_eq!(
+            t.map_user(&mut m, U + 8, frame, Perm::Read),
+            Err(MapError::Unaligned)
+        );
+        t.map_user(&mut m, U, frame, Perm::Read).unwrap();
+        assert_eq!(
+            t.map_user(&mut m, U, frame, Perm::Read),
+            Err(MapError::Conflict { virt: U })
+        );
+        // A lower-half table without the user bit is not used for one.
+        let kernel_table = m.alloc_table().unwrap();
+        t.set_pml4_entry(&mut m, 1, kernel_table | PRESENT | WRITABLE);
+        assert_eq!(
+            t.map_user(&mut m, 1 << 39, frame, Perm::Read),
+            Err(MapError::Conflict { virt: 1 << 39 })
+        );
+        // The last page below the upper half is fine.
+        t.map_user(&mut m, LOWER_HALF_END - PAGE, frame, Perm::Read)
+            .unwrap();
+    }
+
+    #[test]
+    fn unmap_returns_the_frame_and_leaves_nothing_behind() {
+        let (mut m, mut t) = setup();
+        let frame = m.alloc_table().unwrap();
+        t.map_user(&mut m, U, frame, Perm::ReadWrite).unwrap();
+        assert_eq!(t.unmap(&mut m, U), Some(frame));
+        assert_eq!(t.user_page(&mut m, U), None);
+        assert_eq!(t.unmap(&mut m, U), None, "already gone");
+        assert_eq!(t.unmap(&mut m, U + HUGE), None, "never mapped");
+        // Kernel pages too (the kernel-stack area).
+        t.map(&mut m, V + 0x5000, 0x5000, PAGE, Cache::WriteBack)
+            .unwrap();
+        assert_eq!(t.unmap(&mut m, V + 0x5000), Some(0x5000));
+        assert_eq!(t.translate(&mut m, V + 0x5000), None);
+        // Not a 4 KiB page: left alone.
+        t.map(&mut m, V + HUGE, HUGE, HUGE, Cache::WriteBack)
+            .unwrap();
+        assert_eq!(t.unmap(&mut m, V + HUGE), None);
+        assert!(t.translate(&mut m, V + HUGE).is_some());
+    }
+
+    #[test]
+    fn freeing_the_lower_half_gives_back_every_frame() {
+        let (mut m, mut t) = setup();
+        t.map(&mut m, V + 0x1000, 0x1000, PAGE, Cache::WriteBack)
+            .unwrap();
+        let kernel = m.tables.len();
+        // Pages spread over several tables of each level: two PML4 entries,
+        // two PDPT entries, two PDs, several PTs.
+        let spots = [
+            U,
+            U + PAGE,
+            U + HUGE,
+            U + (1 << 30),
+            0x7FFF_FFFF_E000,
+            0x7FFF_FFF0_0000,
+        ];
+        for v in spots {
+            let frame = m.alloc_table().unwrap();
+            t.map_user(&mut m, v, frame, Perm::ReadWrite).unwrap();
+        }
+        assert!(m.tables.len() > kernel + spots.len() + 4);
+        t.free_lower_half(&mut m);
+        assert_eq!(m.tables.len(), kernel, "only the kernel's tables are left");
+        assert!(m.table(t.pml4)[..256].iter().all(|&e| e == 0));
+        assert_eq!(
+            t.translate(&mut m, V + 0x1000).map(|(p, ..)| p),
+            Some(0x1000),
+            "the kernel half is untouched"
+        );
+        for v in spots {
+            assert_eq!(t.user_page(&mut m, v), None);
+        }
+        // An empty lower half frees nothing.
+        t.free_lower_half(&mut m);
+        assert_eq!(m.tables.len(), kernel);
+    }
+
+    #[test]
+    fn a_frame_s_bytes_are_its_table_s() {
+        let (mut m, _) = setup();
+        let f = m.alloc_table().unwrap();
+        m.bytes(f)[8..16].copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+        assert_eq!(m.table(f)[1], 0x1122_3344_5566_7788);
+        assert_eq!(m.bytes(f).len(), 4096);
     }
 
     #[test]
