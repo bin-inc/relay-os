@@ -118,7 +118,18 @@ pub fn init() {
 /// with `kernel_stack` (its top) for its system calls, interrupts and
 /// faults. Returns once something calls `leave(waiter)`, with the kernel's
 /// own tables (`kernel_pml4`) back in CR3 and interrupts as they were.
-pub fn run(entry: &UserEntry, kernel_stack: u64, pml4: u64, kernel_pml4: u64, waiter: &mut u64) {
+/// `waiter` is where `enter` saves the stack pointer to go back to.
+///
+/// # Safety
+/// `waiter` must stay valid until `run` returns, and only this program's
+/// `leave` may use it; `pml4` must map the kernel as the current tables do.
+pub unsafe fn run(
+    entry: &UserEntry,
+    kernel_stack: u64,
+    pml4: u64,
+    kernel_pml4: u64,
+    waiter: *mut u64,
+) {
     let enabled = interrupts::are_enabled();
     interrupts::disable();
     super::gdt::set_kernel_stack(kernel_stack);
@@ -178,7 +189,7 @@ unsafe extern "C" fn enter(waiter: *mut u64, entry: *const UserEntry) {
 /// `waiter` must be what `enter` saved, and that `enter` must not have
 /// returned yet.
 #[unsafe(naked)]
-pub unsafe extern "C" fn leave(waiter: *const u64) -> ! {
+pub unsafe extern "C" fn leave(waiter: *mut u64) -> ! {
     naked_asm!(
         "cli",
         "mov rsp, [rdi]",
