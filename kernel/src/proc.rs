@@ -77,8 +77,15 @@ impl From<Errno> for Refusal {
 }
 
 /// The file at `path` and the program in it (spec §5.2). A file over 16
-/// MiB is refused before anything is read.
-fn read_program(vfs: &mut dyn Vfs, path: &[u8]) -> Result<(Vec<u8>, elf::Program), Refusal> {
+/// MiB, or one whose first bytes are not an ELF file's, is refused before
+/// the rest is read; one bigger than `room` bytes of heap is `ENOMEM`
+/// before anything is allocated for it, since the kernel's heap panics
+/// when it runs out.
+fn read_program(
+    vfs: &mut dyn Vfs,
+    path: &[u8],
+    room: usize,
+) -> Result<(Vec<u8>, elf::Program), Refusal> {
     let node = vfs.lookup(path)?;
     let stat = vfs.stat(node)?;
     if stat.kind == FileType::Directory {
@@ -87,6 +94,20 @@ fn read_program(vfs: &mut dyn Vfs, path: &[u8]) -> Result<(Vec<u8>, elf::Program
     let size = usize::try_from(stat.size).unwrap_or(usize::MAX);
     if size > elf::MAX_SIZE {
         return Err(Refusal::NotAProgram(elf::ElfError::TooBig(size)));
+    }
+    let mut magic = [0u8; 4];
+    let mut done = 0;
+    while done < magic.len() {
+        match vfs.read_at(node, done as u64, &mut magic[done..])? {
+            0 => break,
+            n => done += n,
+        }
+    }
+    if magic != *b"\x7fELF" {
+        return Err(Refusal::NotAProgram(elf::ElfError::NotElf));
+    }
+    if size > room {
+        return Err(Errno::ENOMEM.into());
     }
     let mut file = alloc::vec![0; size];
     let mut done = 0;
@@ -118,7 +139,7 @@ pub fn spawn(vfs: &mut dyn Vfs, path: &[u8], args: &[&[u8]]) -> Result<u32, Errn
         return Err(Errno::EAGAIN);
     }
     let name = String::from_utf8_lossy(path);
-    let (file, program) = read_program(vfs, path).map_err(|r| match r {
+    let (file, program) = read_program(vfs, path, mm::heap_room()).map_err(|r| match r {
         Refusal::Unreadable(e) => e,
         Refusal::NotAProgram(e) => {
             klogln!("spawn {name}: {e}");
@@ -289,50 +310,53 @@ mod tests {
         fn log(&self, _: &str) {}
     }
 
-    /// A `MemFs` whose files must not be read: a file refused by its size
-    /// is never read into memory.
-    struct NoReads(MemFs);
+    /// A `MemFs` that fails a test when one read asks for more than `limit`
+    /// bytes: a refused file is never read into memory.
+    struct NoReads {
+        fs: MemFs,
+        limit: usize,
+    }
 
     impl FileSystem for NoReads {
         fn root(&self) -> Ino {
-            self.0.root()
+            self.fs.root()
         }
         fn stat(&mut self, ino: Ino) -> Result<Stat, Errno> {
-            self.0.stat(ino)
+            self.fs.stat(ino)
         }
         fn lookup(&mut self, dir: Ino, name: &[u8]) -> Result<Ino, Errno> {
-            self.0.lookup(dir, name)
+            self.fs.lookup(dir, name)
         }
         fn read_dir(&mut self, dir: Ino) -> Result<Vec<DirEntry>, Errno> {
-            self.0.read_dir(dir)
+            self.fs.read_dir(dir)
         }
         fn read_link(&mut self, ino: Ino) -> Result<Vec<u8>, Errno> {
-            self.0.read_link(ino)
+            self.fs.read_link(ino)
         }
         fn read_at(&mut self, ino: Ino, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
-            assert!(buf.len() <= elf::MAX_SIZE, "a read of {} bytes", buf.len());
-            self.0.read_at(ino, offset, buf)
+            assert!(buf.len() <= self.limit, "a read of {} bytes", buf.len());
+            self.fs.read_at(ino, offset, buf)
         }
         fn write_at(&mut self, ino: Ino, offset: u64, buf: &[u8]) -> Result<usize, Errno> {
-            self.0.write_at(ino, offset, buf)
+            self.fs.write_at(ino, offset, buf)
         }
         fn truncate(&mut self, ino: Ino, size: u64) -> Result<(), Errno> {
-            self.0.truncate(ino, size)
+            self.fs.truncate(ino, size)
         }
         fn touch(&mut self, ino: Ino) -> Result<(), Errno> {
-            self.0.touch(ino)
+            self.fs.touch(ino)
         }
         fn create(&mut self, dir: Ino, name: &[u8]) -> Result<Ino, Errno> {
-            self.0.create(dir, name)
+            self.fs.create(dir, name)
         }
         fn mkdir(&mut self, dir: Ino, name: &[u8]) -> Result<Ino, Errno> {
-            self.0.mkdir(dir, name)
+            self.fs.mkdir(dir, name)
         }
         fn unlink(&mut self, dir: Ino, name: &[u8]) -> Result<(), Errno> {
-            self.0.unlink(dir, name)
+            self.fs.unlink(dir, name)
         }
         fn rmdir(&mut self, dir: Ino, name: &[u8]) -> Result<(), Errno> {
-            self.0.rmdir(dir, name)
+            self.fs.rmdir(dir, name)
         }
         fn rename(
             &mut self,
@@ -341,29 +365,41 @@ mod tests {
             to_dir: Ino,
             to: &[u8],
         ) -> Result<(), Errno> {
-            self.0.rename(from_dir, from, to_dir, to)
+            self.fs.rename(from_dir, from, to_dir, to)
         }
         fn statfs(&mut self) -> Result<StatFs, Errno> {
-            self.0.statfs()
+            self.fs.statfs()
         }
         fn sync(&mut self) -> Result<(), Errno> {
-            self.0.sync()
+            self.fs.sync()
         }
         fn shutdown(&mut self) -> Result<(), Errno> {
-            self.0.shutdown()
+            self.fs.shutdown()
         }
     }
 
     /// `/root` with a text file and a sparse file of 16 MiB and one byte,
     /// on a filesystem that fails a test if more than 16 MiB are read.
     fn root() -> MountTable {
-        let fs = NoReads(MemFs::new(Box::new(Clock)));
+        root_reading_at_most(elf::MAX_SIZE)
+    }
+
+    /// The same, failing a test on a read of more than `limit` bytes.
+    fn root_reading_at_most(limit: usize) -> MountTable {
+        let fs = NoReads {
+            fs: MemFs::new(Box::new(Clock)),
+            limit,
+        };
         let mut vfs = MountTable::new(Box::new(fs));
         vfs.mkdir(b"/root").unwrap();
         let text = vfs.create(b"/root/text").unwrap();
         vfs.write_at(text, 0, b"not a program\n").unwrap();
         let big = vfs.create(b"/root/big").unwrap();
         vfs.truncate(big, elf::MAX_SIZE as u64 + 1).unwrap();
+        // An ELF file's first bytes, then a mebibyte of nothing.
+        let elf = vfs.create(b"/root/elf").unwrap();
+        vfs.write_at(elf, 0, b"\x7fELF").unwrap();
+        vfs.truncate(elf, 1 << 20).unwrap();
         vfs
     }
 
@@ -371,11 +407,11 @@ mod tests {
     fn a_file_that_is_no_program_says_why() {
         let mut vfs = root();
         assert_eq!(
-            read_program(&mut vfs, b"/root/text").unwrap_err(),
+            read_program(&mut vfs, b"/root/text", usize::MAX).unwrap_err(),
             Refusal::NotAProgram(elf::ElfError::NotElf)
         );
         assert_eq!(
-            read_program(&mut vfs, b"/root/big").unwrap_err(),
+            read_program(&mut vfs, b"/root/big", usize::MAX).unwrap_err(),
             Refusal::NotAProgram(elf::ElfError::TooBig(16 * 1024 * 1024 + 1)),
             "refused by its size, with the reason for the log"
         );
@@ -385,12 +421,37 @@ mod tests {
     fn a_file_that_cannot_be_read_is_its_error() {
         let mut vfs = root();
         assert_eq!(
-            read_program(&mut vfs, b"/root/missing").unwrap_err(),
+            read_program(&mut vfs, b"/root/missing", usize::MAX).unwrap_err(),
             Refusal::Unreadable(Errno::ENOENT)
         );
         assert_eq!(
-            read_program(&mut vfs, b"/root").unwrap_err(),
+            read_program(&mut vfs, b"/root", usize::MAX).unwrap_err(),
             Refusal::Unreadable(Errno::EISDIR)
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_no_elf_file_is_refused_by_its_first_bytes() {
+        let mut vfs = root_reading_at_most(4);
+        assert_eq!(
+            read_program(&mut vfs, b"/root/text", usize::MAX).unwrap_err(),
+            Refusal::NotAProgram(elf::ElfError::NotElf)
+        );
+    }
+
+    #[test]
+    fn a_program_the_heap_has_no_room_for_is_enomem_before_it_is_read() {
+        let mut vfs = root_reading_at_most(4);
+        assert_eq!(
+            read_program(&mut vfs, b"/root/elf", (1 << 20) - 1).unwrap_err(),
+            Refusal::Unreadable(Errno::ENOMEM)
+        );
+        // With room, it is read and checked.
+        let mut vfs = root();
+        assert_eq!(
+            read_program(&mut vfs, b"/root/elf", 1 << 20).unwrap_err(),
+            Refusal::NotAProgram(elf::ElfError::Not64Bit),
+            "read whole and checked: no ELF64 header behind the magic"
         );
     }
 }

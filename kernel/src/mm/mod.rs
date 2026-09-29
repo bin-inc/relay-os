@@ -110,6 +110,15 @@ pub fn free_kernel_stack(stack: KernelStack) {
     }
 }
 
+/// Heap the kernel keeps for everything else while it reads a program.
+const HEAP_MARGIN: usize = 1 << 20;
+
+/// The most bytes one allocation may take now without the heap running out
+/// (which panics): the largest free block, less a margin for the rest.
+pub fn heap_room() -> usize {
+    HEAP.stats().largest_free.saturating_sub(HEAP_MARGIN)
+}
+
 /// The kernel's own page tables, for CR3 when no program runs.
 pub fn kernel_pml4() -> u64 {
     MEMORY
