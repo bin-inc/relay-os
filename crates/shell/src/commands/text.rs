@@ -46,6 +46,10 @@ pub fn cat(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     }
     let mut status = 0;
     for op in &opts.operands {
+        // The shell reports the write error when the command ends.
+        if ctx.out_failed() {
+            break;
+        }
         let name = quote_if_needed(op);
         let node = match ctx.vfs.lookup(op.as_bytes()) {
             Ok(node) => node,
@@ -61,7 +65,7 @@ pub fn cat(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
         }
         if let Err(e) = stream(ctx, node, 0, |ctx, bytes| {
             ctx.out(bytes);
-            true
+            !ctx.out_failed()
         }) {
             status = ctx.fail("cat", format_args!("{name}: {e}"));
         }
@@ -339,6 +343,25 @@ mod tests {
             (1, "cat: 'a b': No such file or directory\n".into())
         );
         assert_eq!(h.run("cat"), (1, "cat: missing operand\n".into()));
+    }
+
+    #[test]
+    fn cat_stops_at_the_first_write_error() {
+        // GNU stops once its output cannot be written: the other inputs
+        // are not read, and their errors are not reported.
+        let mut h = Harness::with_capacity(5 * 4096);
+        h.put("/tmp/big", &[b'x'; 8192]);
+        assert_eq!(
+            h.run("cat /tmp/big /tmp/nope /tmp/big > /tmp/out"),
+            (1, "cat: write error: No space left on device\n".into())
+        );
+        assert_eq!(h.get("/tmp/out").len(), 4096);
+        // Nor is the rest of a big input read over USB for nothing.
+        let mut h = Harness::with_capacity(4 * 4096 + 4 * super::CHUNK as u64);
+        h.put("/tmp/big", &vec![b'x'; 4 * super::CHUNK]);
+        h.spy.reads.set(0);
+        assert_eq!(h.run("cat /tmp/big > /tmp/out").0, 1);
+        assert_eq!(h.spy.reads.get(), 1);
     }
 
     #[test]

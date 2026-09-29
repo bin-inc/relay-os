@@ -99,6 +99,12 @@ impl<'a> Ctx<'a> {
         matches!(self.out, Output::Console)
     }
 
+    /// Whether writing standard output to its file has failed; later output
+    /// is dropped, so a command may as well stop.
+    pub fn out_failed(&self) -> bool {
+        matches!(self.out, Output::File { error: Some(_), .. })
+    }
+
     /// The file standard output goes to, if any.
     pub fn output_node(&self) -> Option<Node> {
         match self.out {
