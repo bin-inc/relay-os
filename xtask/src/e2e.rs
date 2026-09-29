@@ -10,6 +10,9 @@
 //! break-root                       (before any other step: the root's ext2
 //!                                   magic is zeroed until the scenario ends)
 //! esp-write /EFI/RELAY/kernel.elf garbage   (before boot: replace an ESP file)
+//! esp-delete /EFI/RELAY/system.img  (before boot: remove an ESP file)
+//! system-abi 99                    (before boot: system.img, rewritten with
+//!                                   another ABI version)
 //! timeout 20                       (seconds, for the following expects)
 //! expect <regex>                   (waits for serial output, ANSI stripped)
 //! send <text>                      (types <text> + Enter over serial)
@@ -38,10 +41,11 @@
 
 use crate::build;
 use crate::checks;
-use crate::image::{self, Layout, Partition, esp_write, set_cmdline};
+use crate::image::{self, Layout, Partition, esp_delete, esp_write, set_cmdline};
 use crate::keys;
 use crate::qemu::{self, Qemu};
 use crate::qmp::Qmp;
+use crate::userland;
 use crate::util::{out_dir, root};
 use anyhow::{Context, Result, bail};
 use regex::Regex;
@@ -112,6 +116,18 @@ pub enum Step {
     },
 }
 
+/// A change to the ESP before booting.
+#[derive(Debug, PartialEq)]
+pub enum EspEdit {
+    /// `esp-write`: the file at this path gets these contents.
+    Write(String, String),
+    /// `esp-delete`: the file at this path is removed.
+    Delete(String),
+    /// `system-abi`: `system.img` holds the same programs under another
+    /// ABI version.
+    SystemAbi(u32),
+}
+
 #[derive(Debug, PartialEq)]
 pub struct Scenario {
     pub name: String,
@@ -121,8 +137,8 @@ pub struct Scenario {
     /// `break-root`: the root filesystem is unrecognisable while the
     /// scenario runs.
     pub break_root: bool,
-    /// ESP files to overwrite before booting: (path, contents).
-    pub esp_writes: Vec<(String, String)>,
+    /// Changes to the ESP before booting, in order.
+    pub esp_edits: Vec<EspEdit>,
     /// (line number, step)
     pub steps: Vec<(usize, Step)>,
 }
@@ -131,7 +147,7 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
     let mut cmdline = DEFAULT_CMDLINE.to_string();
     let mut small_disk = false;
     let mut break_root = false;
-    let mut esp_writes = Vec::new();
+    let mut esp_edits = Vec::new();
     let mut steps = Vec::new();
     for (i, raw) in text.lines().enumerate() {
         let line_no = i + 1;
@@ -163,15 +179,28 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
                 break_root = true;
                 continue;
             }
-            "esp-write" => {
+            "esp-write" | "esp-delete" | "system-abi" => {
                 if !steps.is_empty() {
-                    bail!("{name}:{line_no}: esp-write must come before other steps");
+                    bail!("{name}:{line_no}: {word} must come before other steps");
                 }
-                let (path, contents) = rest.split_once(' ').unwrap_or((rest, ""));
-                if !path.starts_with('/') {
-                    bail!("{name}:{line_no}: esp-write path must be absolute");
-                }
-                esp_writes.push((path.to_string(), contents.to_string()));
+                let edit =
+                    match word {
+                        "system-abi" => EspEdit::SystemAbi(rest.parse().with_context(|| {
+                            format!("{name}:{line_no}: system-abi needs a number")
+                        })?),
+                        _ => {
+                            let (path, contents) = rest.split_once(' ').unwrap_or((rest, ""));
+                            if !path.starts_with('/') {
+                                bail!("{name}:{line_no}: {word} path must be absolute");
+                            }
+                            if word == "esp-write" {
+                                EspEdit::Write(path.to_string(), contents.to_string())
+                            } else {
+                                EspEdit::Delete(path.to_string())
+                            }
+                        }
+                    };
+                esp_edits.push(edit);
                 continue;
             }
             "timeout" => Step::Timeout(rest.parse().with_context(|| format!("{name}:{line_no}"))?),
@@ -207,7 +236,7 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
         cmdline,
         small_disk,
         break_root,
-        esp_writes,
+        esp_edits,
         steps,
     })
 }
@@ -355,8 +384,24 @@ impl Drop for Running {
 fn start(image: &Path, layout: &Layout, scenario: &Scenario, run_dir: &Path) -> Result<Running> {
     let mut q = Qemu::prepare(image, run_dir)?;
     set_cmdline(&q.disk, layout.esp, &scenario.cmdline, run_dir)?;
-    for (path, contents) in &scenario.esp_writes {
-        esp_write(&q.disk, layout.esp, path, contents.as_bytes(), run_dir)?;
+    for edit in &scenario.esp_edits {
+        match edit {
+            EspEdit::Write(path, contents) => {
+                esp_write(&q.disk, layout.esp, path, contents.as_bytes(), run_dir)?
+            }
+            EspEdit::Delete(path) => esp_delete(&q.disk, layout.esp, path)?,
+            EspEdit::SystemAbi(abi) => {
+                let image = fs::read(out_dir().join("system.img"))?;
+                let other = userland::with_abi(&image, *abi)?;
+                esp_write(
+                    &q.disk,
+                    layout.esp,
+                    "/EFI/RELAY/system.img",
+                    &other,
+                    run_dir,
+                )?;
+            }
+        }
     }
     if scenario.break_root {
         image::set_ext2_magic(&q.disk, layout.root, false)?;
@@ -751,11 +796,34 @@ mod tests {
         let s =
             parse_scenario("x", "esp-write /EFI/RELAY/kernel.elf not an elf\nexpect x").unwrap();
         assert_eq!(
-            s.esp_writes,
-            vec![("/EFI/RELAY/kernel.elf".into(), "not an elf".into())]
+            s.esp_edits,
+            vec![EspEdit::Write(
+                "/EFI/RELAY/kernel.elf".into(),
+                "not an elf".into()
+            )]
         );
         assert!(parse_scenario("x", "esp-write relative x").is_err());
         assert!(parse_scenario("x", "expect a\nesp-write /x y").is_err());
+    }
+
+    #[test]
+    fn parses_esp_deletes_and_other_abis() {
+        let s = parse_scenario(
+            "x",
+            "esp-delete /EFI/RELAY/system.img\nsystem-abi 99\nexpect x",
+        )
+        .unwrap();
+        assert_eq!(
+            s.esp_edits,
+            vec![
+                EspEdit::Delete("/EFI/RELAY/system.img".into()),
+                EspEdit::SystemAbi(99)
+            ]
+        );
+        assert!(parse_scenario("x", "esp-delete relative").is_err());
+        assert!(parse_scenario("x", "system-abi many").is_err());
+        assert!(parse_scenario("x", "expect a\nsystem-abi 2").is_err());
+        assert!(parse_scenario("x", "expect a\nesp-delete /x").is_err());
     }
 
     #[test]

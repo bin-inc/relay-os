@@ -23,5 +23,7 @@ ext2.workspace = true
 usb.workspace = true
 heap.workspace = true
 crc32.workspace = true
+relay-abi.workspace = true
+sysimg.workspace = true
 x86_64.workspace = true
 spin.workspace = true

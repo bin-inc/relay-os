@@ -98,6 +98,10 @@ usb: 00:14.0 port 15: 0951:1666 SuperSpeed, disk Kingston DataTraveler 3.0, 14.4
 storage: 00:14.0 port 15: GPT with 2 partitions
 storage: root on 00:14.0 port 15, the disk with the boot partition 955BDD5B-405B-4F50-8760-0231C3B8D298
 [[32m ok [0m] mount /: ext2 on 00:14.0 port 15 partition 2, 14.3 GiB
+[[32m ok [0m] system: 1 program, ABI 1
++ ls -l /bin
+total 20
+-rwxr-xr-x 1 root root 19688 Sep 29 08:34 t-args
 + mkdir -p /root/notes/old
 + echo remember me > /root/notes/a
 + echo and me >> /root/notes/a

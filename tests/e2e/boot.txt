@@ -1,6 +1,6 @@
 # The loader hands off, the kernel draws on the framebuffer, every startup
 # step reports ok, / is the stick's ext2 partition, and the shell shows the
-# motd and starts in /root (spec §9.3 #1).
+# motd and starts in /root (spec §9.3 #1), with the system archive at /bin.
 timeout 30
 expect Relay OS \d+\.\d+\.\d+
 expect \[ ok \] console \d+x\d+ \(\d+x\d+ cells\)
@@ -24,6 +24,8 @@ expect \[ ok \] keyboard: 1 keyboard
 # image's fixed GUID, xtask/src/config.rs), not by the fallback.
 expect storage: root on 00:02\.0 port 2, the disk with the boot partition 52454C41-5900-4000-8000-000000000002
 expect \[ ok \] mount /: ext2 on 00:02\.0 port 2 partition 2, 190 MiB
+# The programs of /bin, from \EFI\RELAY\system.img (user-space gate §4.3).
+expect \[ ok \] system: \d+ programs?, ABI 1
 expect \nWelcome to Relay OS\.\n
 expect root@relay:~# $
 screenshot-nonblank

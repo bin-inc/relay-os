@@ -59,7 +59,9 @@ struct Mount {
 }
 
 /// A directory of the filesystem below, or a name that directory does not
-/// have (spec §4.4 of the user-space gate: `/bin` on a root without one).
+/// have (spec §4.4 of the user-space gate: `/bin` on a root without one,
+/// such as the empty read-only root the kernel falls back to; the images
+/// xtask writes have a `/bin`).
 /// A mount on a name is shown in its directory like any other, and the
 /// name behaves as a mount point does: it cannot be created, removed or
 /// renamed through the mount table, the only way the shell reaches files.

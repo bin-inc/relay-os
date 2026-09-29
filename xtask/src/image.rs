@@ -168,6 +168,14 @@ pub fn esp_write(
         .arg(format!("::{path}")))
 }
 
+/// Removes one file (absolute ESP path, `/` separators) from an existing
+/// ESP.
+pub fn esp_delete(target: &Path, esp: Partition, path: &str) -> Result<()> {
+    run(mtools("mdel")
+        .args(["-i", &mtools_target(target, esp)])
+        .arg(format!("::{path}")))
+}
+
 /// Replaces only the cmdline file on an existing ESP.
 pub fn set_cmdline(target: &Path, esp: Partition, cmdline: &str, scratch: &Path) -> Result<()> {
     esp_write(

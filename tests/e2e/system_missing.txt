@@ -1,0 +1,10 @@
+# Without \EFI\RELAY\system.img the startup line says so and the shell
+# runs on, with nothing in /bin (user-space gate spec §4.3).
+esp-delete /EFI/RELAY/system.img
+timeout 30
+expect \[ ok \] mount /: ext2 on .*
+expect \[FAIL\] system: no system\.img
+expect root@relay:~# $
+send ls /bin
+send echo done
+expect \ndone\n

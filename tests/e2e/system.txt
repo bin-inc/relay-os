@@ -1,0 +1,29 @@
+# /bin is the system archive the loader read from the ESP (user-space gate
+# spec §4.3, §4.4): its programs are listed and read like other files, and
+# nothing in it can be changed or removed.
+timeout 30
+expect \[ ok \] system: \d+ programs?, ABI 1
+expect root@relay:~# $
+send ls /bin
+expect \nt-args\n
+send ls -l /bin/t-args
+expect \n-rwxr-xr-x 1 root root +\d+ \w{3} [ \d]\d \d\d:\d\d /bin/t-args\n
+send cp /bin/t-args /root/t-args
+send ls -l /root/t-args
+expect \n-rw-r--r-- 1 root root +\d+ \w{3} [ \d]\d \d\d:\d\d /root/t-args\n
+send touch /bin/t-args
+expect \ntouch: cannot touch '/bin/t-args': Read-only file system\n
+send rm /bin/t-args
+expect \nrm: cannot remove '/bin/t-args': Read-only file system\n
+send echo x > /bin/new
+expect \nrelay-sh: /bin/new: Read-only file system\n
+send rmdir /bin
+expect \nrmdir: failed to remove '/bin': Device or resource busy\n
+send mv /bin /root/bin
+expect \nmv: cannot move '/bin' to '/root/bin': Device or resource busy\n
+send cd /bin
+send pwd
+expect \n/bin\n
+send cd ..
+send ls /bin
+expect \nt-args\n

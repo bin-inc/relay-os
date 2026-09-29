@@ -1,7 +1,8 @@
 //! relay-boot: the Relay OS UEFI loader.
 //!
-//! Loads \EFI\RELAY\kernel.elf, sets up the display, builds page tables,
-//! exits boot services and jumps to the kernel with a `BootInfo`.
+//! Loads \EFI\RELAY\kernel.elf and \EFI\RELAY\system.img, sets up the
+//! display, builds page tables, exits boot services and jumps to the kernel
+//! with a `BootInfo`.
 #![no_std]
 #![no_main]
 
@@ -28,6 +29,7 @@ use x86_64::structures::paging::PageTableFlags as F;
 
 const KERNEL_PATH: &CStr16 = cstr16!("\\EFI\\RELAY\\kernel.elf");
 const CMDLINE_PATH: &CStr16 = cstr16!("\\EFI\\RELAY\\cmdline");
+const SYSTEM_PATH: &CStr16 = cstr16!("\\EFI\\RELAY\\system.img");
 /// Spare memory-map slots for descriptors created by our own allocations.
 const MMAP_SLACK: usize = 64;
 
@@ -131,6 +133,20 @@ fn load_kernel(file: &[u8], tables: &mut paging::Tables) -> (u64, u64, u64) {
     (k.entry, base, vend - vstart)
 }
 
+/// Copies `\EFI\RELAY\system.img` into `LOADER_DATA` pages, which the
+/// kernel keeps (spec §4.3 of the user-space gate), and returns their
+/// physical address and the file's length; `(0, 0)` if the file cannot be
+/// read. An empty file gets a page, so the kernel can tell it from none.
+/// The kernel checks the contents.
+fn load_system_image() -> (u64, u64) {
+    let Some(file) = read_file(SYSTEM_PATH) else {
+        return (0, 0);
+    };
+    let base = alloc_pages(MemoryType::LOADER_DATA, file.len().div_ceil(4096).max(1));
+    unsafe { core::ptr::copy_nonoverlapping(file.as_ptr(), base, file.len()) };
+    (base as u64, file.len() as u64)
+}
+
 /// Switches to the new page tables and stack, then calls the kernel.
 /// Must be identity-mapped in the new tables.
 #[unsafe(naked)]
@@ -167,6 +183,8 @@ fn main() -> Status {
     let (entry, kernel_phys, kernel_len) = load_kernel(&kernel_file, &mut tables);
     mark(3);
     drop(kernel_file);
+    // Between squares 3 and 4: a stop at square 3 can be this read.
+    let (system_phys, system_len) = load_system_image();
 
     // Linear map of RAM (from the current memory map) and the framebuffer.
     let mmap = boot::memory_map(MemoryType::LOADER_DATA).expect("memory map");
@@ -236,6 +254,8 @@ fn main() -> Status {
         cmdline_len: n as u32,
         boot_partition_guid: guid.unwrap_or([0; 16]),
         has_boot_partition_guid: guid.is_some() as u32,
+        system_image_phys: system_phys,
+        system_image_len: system_len,
     };
     unsafe {
         core::ptr::write(info_phys as *mut BootInfo, info);
