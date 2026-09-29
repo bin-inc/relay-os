@@ -6,6 +6,7 @@ use crate::commands::{self, Script};
 use crate::ctx::Ctx;
 use crate::editor::{Feed, LineEditor};
 use crate::io::{Console, System};
+use crate::killed;
 use crate::parser::{self, HOME, Redirect};
 use crate::transcript::Transcript;
 use alloc::format;
@@ -23,8 +24,6 @@ pub const CANNOT_RUN: i32 = 126;
 pub const SYNTAX: i32 = 2;
 /// Exit status after Ctrl-C.
 pub const CANCELLED: i32 = 130;
-/// Exit status of a program that was killed (bash's for SIGKILL).
-pub const KILLED: i32 = 137;
 /// The most of `/etc/motd` shown at start.
 const MOTD_MAX: usize = 16 * 1024;
 
@@ -200,9 +199,10 @@ impl<'a> Shell<'a> {
         let mut message = String::new();
         let mut status = match ended {
             Ok(w) if w.how == relay_abi::wait::EXITED => w.code as i32,
-            Ok(_) => {
-                message = format!("{NAME}: {name}: killed\n");
-                KILLED
+            Ok(w) => {
+                let (what, status) = killed::killed(&w);
+                message = format!("{NAME}: {name}: {what}\n");
+                status
             }
             Err(e) => {
                 message = format!("{NAME}: {name}: {e}\n");
@@ -500,6 +500,22 @@ mod tests {
                 "[1] a\nt-args: note\n[2] b c\nrelay-sh: t-args: killed\n".into()
             )
         );
+        // A fault, redirected: the message goes to the screen.
+        h.system.programs[0].status = WaitStatus::fault(
+            relay_abi::wait::FAULT_PAGE,
+            relay_abi::wait::ACCESS_READ,
+            0,
+            0x40_1a2c,
+        );
+        assert_eq!(
+            h.run("t-args > /tmp/out"),
+            (
+                139,
+                "t-args: note\nrelay-sh: t-args: killed (page fault at 0x0, read, ip 0x401a2c)\n"
+                    .into()
+            )
+        );
+        assert_eq!(h.get("/tmp/out"), b"[1] a\n[2] b c\n");
     }
 
     #[test]

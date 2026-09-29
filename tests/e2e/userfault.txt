@@ -1,0 +1,34 @@
+# A fault in ring 3 ends the program, not the kernel (user-space gate
+# §11.1; milestone 2, plan 2): each kind of t-fault is killed with its
+# message, the kernel log names it, the shell carries on, and memory in
+# use is the same before and after. `sse` comes with plan 3's CR0.TS.
+timeout 30
+expect root@relay:~# $
+send t-args warm-up
+expect \n\[1\] warm-up\n
+send free
+expect-same mem \nMem:\s+\d+\s+(\d+)\s
+send t-fault null-read
+expect \nrelay-sh: t-fault: killed \(page fault at 0x0, read, ip 0x4[0-9a-f]+\)\n
+send t-fault null-write
+expect \nrelay-sh: t-fault: killed \(page fault at 0x0, write, ip 0x4[0-9a-f]+\)\n
+send t-fault write-code
+expect \nrelay-sh: t-fault: killed \(page fault at 0x4[0-9a-f]+, write, ip 0x4[0-9a-f]+\)\n
+send t-fault exec-data
+expect \nrelay-sh: t-fault: killed \(page fault at 0x4[0-9a-f]+, execute, ip 0x4[0-9a-f]+\)\n
+send t-fault ud
+expect \nrelay-sh: t-fault: killed \(invalid opcode, ip 0x4[0-9a-f]+\)\n
+send t-fault div0
+expect \nrelay-sh: t-fault: killed \(divide error, ip 0x4[0-9a-f]+\)\n
+send t-fault stack
+expect \nrelay-sh: t-fault: killed \(stack overflow at 0x7fffffeff[0-9a-f]{3}, ip 0x4[0-9a-f]+\)\n
+send t-fault kernel-read
+expect \nrelay-sh: t-fault: killed \(page fault at 0xffff800000000000, read, ip 0x4[0-9a-f]+\)\n
+send t-fault
+expect \nusage: t-fault null-read\|
+send dmesg
+expect \npid \d+ \(/bin/t-fault\): killed: page fault at 0x0, read, ip 0x4[0-9a-f]+\n
+send t-args still here
+expect \n\[1\] still\n\[2\] here\n
+send free
+expect-same mem \nMem:\s+\d+\s+(\d+)\s

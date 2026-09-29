@@ -23,6 +23,8 @@ use vfs::{Errno, FileType, Vfs};
 /// A program `spawn` loaded and nobody has waited for yet.
 struct Child {
     pid: u32,
+    /// Its path, for the kernel log.
+    name: String,
     space: AddressSpace,
     stack: KernelStack,
     entry: Entry,
@@ -32,9 +34,11 @@ static CHILD: Mutex<Option<Child>> = Mutex::new(None);
 /// Pids count from 1 and are not used again while the kernel runs.
 static NEXT_PID: AtomicU32 = AtomicU32::new(1);
 
-/// The child while it runs: what its system calls reach. Lives on
-/// `wait`'s stack; `RUNNING` points at it for that long.
+/// The child while it runs: what its system calls and faults reach. Lives
+/// on `wait`'s stack; `RUNNING` points at it for that long.
 struct Running<'a> {
+    pid: u32,
+    name: &'a str,
     space: &'a AddressSpace,
     out: &'a mut dyn FnMut(u32, &[u8]),
     /// The stack pointer `arch::user::enter` saved; `leave` goes back to it.
@@ -151,6 +155,7 @@ pub fn spawn(vfs: &mut dyn Vfs, path: &[u8], args: &[&[u8]]) -> Result<u32, Errn
     let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
     *child = Some(Child {
         pid,
+        name: name.into_owned(),
         space,
         stack,
         entry,
@@ -173,13 +178,15 @@ pub fn wait(pid: u32, out: &mut dyn FnMut(u32, &[u8])) -> Result<WaitStatus, Err
         }
     };
     let mut running = Running {
+        pid: child.pid,
+        name: &child.name,
         space: &child.space,
         out,
         waiter: 0,
         status: None,
     };
     // From here until `run` returns, `running` is reached only through
-    // this pointer: here, and in its system calls (`RUNNING`).
+    // this pointer: here, and in its system calls and faults (`RUNNING`).
     let r = &raw mut running;
     let e = child.entry;
     let entry = arch::user::UserEntry {
@@ -243,15 +250,28 @@ pub fn system_call(number: u64, args: [u64; 6]) -> u64 {
     }
 }
 
+/// The running child caused an exception (spec §11.1): it is killed, and
+/// the kernel log says how. A page fault in the stack's guard page is a
+/// stack overflow.
+pub fn fault(kind: u32, detail: u32, address: u64, ip: u64) -> ! {
+    use relay_abi::wait::{FAULT_PAGE, FAULT_STACK_OVERFLOW};
+    let kind = if kind == FAULT_PAGE && exec::in_guard_page(address) {
+        FAULT_STACK_OVERFLOW
+    } else {
+        kind
+    };
+    let status = WaitStatus::fault(kind, detail, address, ip);
+    // SAFETY: called on the child's kernel stack while it runs.
+    let r = unsafe { running() };
+    klogln!("pid {} ({}): killed: {status}", r.pid, r.name);
+    end(status)
+}
+
 /// A system call would return to a non-canonical address (spec §6.2):
-/// `sysret` would fault in ring 0, so the child is killed instead.
+/// `sysret` would fault in ring 0, so the child is killed as if the return
+/// itself had faulted.
 pub fn non_canonical_return(ip: u64) -> ! {
-    klogln!("pid killed: return to non-canonical address {ip:#x}");
-    end(WaitStatus {
-        how: relay_abi::wait::KILLED,
-        ip,
-        ..WaitStatus::default()
-    })
+    fault(relay_abi::wait::FAULT_GENERAL_PROTECTION, 0, 0, ip)
 }
 
 #[cfg(test)]
