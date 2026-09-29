@@ -115,8 +115,8 @@ fn mtools_target(target: &Path, p: Partition) -> String {
     format!("{}@@{}", target.display(), p.offset())
 }
 
-/// Writes the loader, kernel and cmdline into the ESP. With `format` the
-/// partition is first formatted as FAT32.
+/// Writes the loader, kernel, system archive and cmdline into the ESP.
+/// With `format` the partition is first formatted as FAT32.
 pub fn write_esp(
     target: &Path,
     esp: Partition,
@@ -144,6 +144,7 @@ pub fn write_esp(
     for (src, dst) in [
         (art.bootx64.as_path(), "::/EFI/BOOT/BOOTX64.EFI"),
         (art.kernel.as_path(), "::/EFI/RELAY/kernel.elf"),
+        (art.system_img.as_path(), "::/EFI/RELAY/system.img"),
         (cmdline_file.as_path(), "::/EFI/RELAY/cmdline"),
     ] {
         run(mtools("mcopy").args(["-o", "-i", &img]).arg(src).arg(dst))?;

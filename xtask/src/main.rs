@@ -12,6 +12,7 @@ mod image;
 mod keys;
 mod qemu;
 mod qmp;
+mod userland;
 mod util;
 
 use anyhow::Result;

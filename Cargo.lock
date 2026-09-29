@@ -506,8 +506,10 @@ dependencies = [
  "clap",
  "ext2",
  "regex",
+ "relay-abi",
  "serde_json",
  "shell",
+ "sysimg",
  "vfs",
 ]
 
