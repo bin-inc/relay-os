@@ -1163,3 +1163,136 @@ Each step ends with something that can be tested.
      empty ports as disconnected; the fixed 100 ms debounce) go to the
      roadmap for plan 6; M4 is decision 4. Plan 3's shell and ext2 minors
      stay with plan 6: the new scenarios do not depend on them.
+
+12. **Decisions made while planning plan 6** (hardening):
+   - **Scripts** (revises §7.3 and §14). Milestone 1 has no processes and
+     no ELF loading (§1.3), so no `bash` can run; what runs is relay-sh
+     reading commands from a file. The built-in `sh FILE` runs the file's
+     lines one by one through the same parser and commands as typed lines,
+     each shown first as `+ <line>` (like `set -x`), so a photo or a
+     transcript shows which command printed what. Blank and comment lines
+     are skipped; a failing command or a line that does not parse does not
+     stop the script; Ctrl-C does, and so does `reboot`/`poweroff` where
+     they return. Every line is synced as a typed command is. There are no
+     variables, arguments, loops, conditions or pipes, a script cannot run
+     another, and the output of `sh` cannot be redirected. A line runs
+     exactly as written (only its trace is trimmed). A script is at most
+     64 KiB of UTF-8 text, with a byte-order mark and CRLF line ends
+     accepted as Windows editors write them; its exit status is its last
+     command's. USB devices plugged in while a script runs are set up when
+     it ends, since that work runs from the prompt's idle loop.
+     Reason: the NUC's K120 is its only input, and commands cannot be
+     pasted into it, so every hardware check was typed by hand.
+   - **Transcripts.** Everything a script shows on the screen, errors
+     included (unlike a redirection file, §7.3), also goes into a
+     transcript next to it: `x.sh` becomes `x.log`, other names get `.log`
+     added. It is emptied when the script starts, and written and synced as
+     each line starts and ends, so a machine that hangs or restarts leaves
+     every line up to the one it stopped in, that one's `+` line included;
+     a command's output reaches it every 4 KiB, so a big `cat` is never held
+     on the heap. If the transcript cannot be created the script does not
+     run; if a write to it fails it ends there with a message, and the
+     script goes on.
+   - **Comments and double quotes** (§7.3; plan 3's final-review minor).
+     An unquoted `#` at the start of a word begins a comment that runs to
+     the end of the line, as in bash; inside a word, quoted or escaped it is
+     a character. Inside double quotes a `$` or `` ` `` is refused as
+     outside them (bash would expand it); `\$` and `` \` `` stand for the
+     character.
+   - **Check scripts** (§9.4). The NUC's check 3 is two scripts in
+     `rootfs/root/checks/` (`check3-a.sh` before the `reboot`,
+     `check3-b.sh` after it), which `image` and `flash --full` copy to
+     `/root/checks/`; `flash --kernel` still leaves the ext2 root alone,
+     scripts included. Under each command the script says what it must
+     print: `#> <regex>` one whole output line, in order; `#> ...` any
+     number of lines; `#nuc>` and `#qemu>` lines apply only to that
+     machine, so an output line that differs is written twice, `#qemu>`
+     then `#nuc>`; `#!> <regex>` must match no line; a command with no `#>`
+     line must print nothing. `cargo xtask verify-usb` checks every
+     transcript in `/root/checks` as written on the NUC and fails on a
+     mismatch, naming the script line, the command, the expectation that
+     failed and the line printed there, and on a script that was not run;
+     it shows when each transcript was written, since transcripts of an
+     earlier run stay on the stick after `flash --kernel`. A unit test
+     checks the real scripts against a QEMU transcript and one with the
+     NUC's recorded startup lines; the QEMU scenario
+     `checks` runs the same scripts, with a `reboot` between them, and
+     checks their transcripts on the disk (the e2e step
+     `check-script <path>`). A `dmesg` line in the script checks the
+     startup lines, so only the boot screen needs a look.
+   - **Version 0.2.0** marks milestone 1 as done (0.1.0 is Cargo's
+     default). `uname -a` takes the version from the crate's
+     `CARGO_PKG_VERSION`, so it cannot drift from `Cargo.toml` again.
+   - **The e2e runner** (§9.3). QMP listens on a socket file in the
+     scenario's run directory, which only its owner can enter, not in the
+     abstract namespace that every user of the machine can reach; QEMU
+     binds the bare name in that directory and xtask connects through the
+     directory's `/proc/self/fd` entry, so a deep checkout is no problem
+     (Unix socket addresses hold 108 bytes). The `reboot` step waits until
+     the serial reader has copied everything QEMU printed before it
+     matches the pattern and continues the log. New: the step `unplug`
+     (QMP `device_del` of the stick, id `stick-usb`, then QEMU's
+     `DEVICE_DELETED` event for that id), the scenario `unplug` (after the
+     stick is pulled, commands fail at once with `EIO` and `poweroff`
+     refuses to go on without a clean shutdown), and the step
+     `check-script`.
+   - **USB** (§6.2; plan 4's M5, M6, M7). A controller whose start times
+     out is halted before its memory is freed; if it does not halt, its
+     memory is kept (and logged), since it may still write it. The first
+     port scan reports only connected ports. A device is set up only after
+     its connection was stable for 100 ms (USB 2.0 7.1.7.3): the port is
+     looked at every 25 ms, a change of the connection or a connect change
+     starts the 100 ms again, and after 2 s of bouncing the attach gives
+     up. The disk-size rule of decision 3 of item 11 is one function,
+     `usb::host::Size`, computed exactly for every size.
+   - **ACPI** (§5.4). A table longer than 16 MiB is refused (the NUC's
+     biggest, its DSDT, is 469,477 bytes), so a corrupt length is never
+     mapped or summed; a FADT too short for its DSDT field has none.
+   - **Kernel heap** (§5.2). Free-list links are `Option<NonNull<…>>`, so
+     the compiler checks every list end; CodeQL's alerts 1–10 were false
+     positives on the old null pointers and close with this change.
+   - **Console input** (§7.2; plan 4's M1). A Ctrl-C always gets into the
+     input queue, even a full one, and drops what was typed before it; an
+     editing key's escape sequence goes in whole or not at all, from the
+     keyboard and from COM1, where a sequence waits until its last byte has
+     arrived (at most 8 bytes; Ctrl-C ends it).
+   - **Loader** (§4.2; plan 1's #7b and #11). The command line keeps at most
+     255 bytes, as §4.2 says (`BootInfo`'s field stays 256 bytes); the test
+     that bans exclusive protocol opens reads every loader file, without
+     comments.
+   - **Shell** (plan 3's minors). `rm -r` of a relative path works from
+     `/`, so removing a tree that holds the current directory removes all
+     of it, as GNU does; `cat` stops at the first write error; `cp` refuses
+     a source it cannot read (a symbolic link, which milestone 1 does not
+     follow) before it empties the destination.
+   - **Deferred findings ruled out of milestone 1**, with the reason:
+     - plan 1 #5 (the EDID from the first handle) and #6 (a `set_mode`
+       error ends the boot): loader glue only real firmware exercises;
+       with its one monitor the NUC keeps its native mode (check 1);
+     - plan 2: a failed `timer::init` leaves the PIC unmasked, but
+       interrupts are enabled only on success, so nothing fires; the
+       interrupt-storm count never resets and vectors 32–47 get no LAPIC
+       EOI, but nothing besides the timer is programmed to interrupt in
+       milestone 1; one failed ECAM window drops the others, but the NUC
+       and QEMU have one each and the failure is a visible `[FAIL] pci`;
+       `check=timer` blames the RTC after a timer failure that never
+       happens here; a 64-bit BAR in the last slot is shown as `mem32` only
+       on hardware that breaks the PCI rules; plan 2's text for
+       `timer::sleep` is a historical record (the code is the reference);
+       the XSDT's pointers are not checked against the memory map (the
+       length cap above bounds what a bad one costs), and a FADT without a
+       DSDT address makes the kernel look for one at address 0, which fails
+       its checksum and is logged;
+     - plan 3: `ls` and `rm -r` are quadratic in big directories and
+       `read_dir` holds a whole directory in memory: milestone 1 cannot
+       make thousands of files (scripts have no loops), and a directory
+       made elsewhere with 20,000 files still lists in 3 s;
+     - plan 5: a stick with a wrong residue (Linux's IGNORE_RESIDUE): the
+       Kingston reports none (check 3); the 5 s bulk timeout stays (§6.2):
+       the check scripts write an 8 MiB file on the Kingston, so the final
+       check shows whether it suffices; `/` is not mounted again after a
+       replug (item 11, decision 3); disks over 2^32 blocks (2 TiB); the
+       fakes' missing packet-level behaviour (plan 5's final review ruled
+       that no current command's data can be an exact multiple of the
+       packet size); plan 5's final-review minors are all fixed (the
+       reboot step, the size rule, the unplug scenario).
