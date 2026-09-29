@@ -2,7 +2,7 @@
 # §11.1; milestone 2, plan 2): each kind of t-fault is killed with its
 # message, the kernel log names it, the shell carries on, and memory in
 # use is the same before and after. A program's flags stay its own, after
-# an exit as after a fault. `sse` comes with plan 3's CR0.TS.
+# an exit as after a fault, and through the timer ticks of a spin.
 timeout 30
 expect root@relay:~# $
 send t-args warm-up
@@ -32,6 +32,10 @@ send t-fault flags-ud
 expect \nrelay-sh: t-fault: killed \(invalid opcode, ip 0x4[0-9a-f]+\)\n
 send t-args after-a-fault
 expect \n\[1\] after-a-fault\n
+send t-fault flags-ac
+expect \nrelay-sh: t-fault: killed \(invalid opcode, ip 0x4[0-9a-f]+\)\n
+send t-args after-ticks-with-ac
+expect \n\[1\] after-ticks-with-ac\n
 send t-fault
 expect \nusage: t-fault null-read\|
 send dmesg

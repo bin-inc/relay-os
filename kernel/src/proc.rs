@@ -547,7 +547,7 @@ fn end(status: WaitStatus) -> ! {
     if let Some(space) = space {
         // Off its page tables before they go; the kernel stack is in the
         // kernel's half, which every table maps.
-        context::use_kernel_tables(mm::kernel_pml4());
+        context::use_tables(mm::kernel_pml4());
         mm::with_user_memory(|mem, _| space.destroy(mem));
     }
     reschedule();

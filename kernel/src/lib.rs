@@ -53,6 +53,7 @@ pub fn kernel_main(info: &'static BootInfo) -> ! {
     arch::gdt::init();
     arch::idt::init();
     arch::user::init();
+    let protection = arch::cpu::init();
     let cmdline = Cmdline::parse(info.cmdline());
     serial::init();
     if cmdline.panic_test == Some(PanicTest::Early) {
@@ -67,6 +68,7 @@ pub fn kernel_main(info: &'static BootInfo) -> ! {
         fb.width, fb.height
     ));
     console::ok(format_args!("cpu tables"));
+    klogln!("cpu: {protection}");
 
     // SAFETY: built by relay-boot, lives forever.
     let map = unsafe { info.memory_map() };
@@ -176,6 +178,33 @@ fn trigger(t: PanicTest) {
         PanicTest::StackOverflow => {
             recurse(0);
         }
+        PanicTest::UserRead | PanicTest::UserExec => user_page(t),
+    }
+}
+
+/// `panic=user-read|user-exec`: the kernel reads a program's page, or runs
+/// the `ret` on it; SMAP or SMEP turns either into a page fault in ring 0,
+/// the panic screen. Without them it returns, and says so.
+fn user_page(t: PanicTest) {
+    use mm::paging::Perm;
+    const AT: u64 = elf::PROGRAM_BASE;
+    let space = mm::with_user_memory(|mem, kernel| {
+        let mut s = mm::space::AddressSpace::new(mem, kernel).ok()?;
+        s.map_zeroed(mem, AT, 1, Perm::ReadExec).ok()?;
+        s.fill(mem, AT, &[0xC3]).ok()?;
+        Some(s)
+    })
+    .expect("a page for the test");
+    arch::context::use_tables(space.pml4());
+    if t == PanicTest::UserRead {
+        // SAFETY: none; the point is that SMAP faults.
+        unsafe { core::ptr::read_volatile(AT as *const u8) };
+        kprintln!("relay: the kernel read a program's page: no SMAP");
+    } else {
+        // SAFETY: none; the point is that SMEP faults (it is a `ret`).
+        let f: extern "C" fn() = unsafe { core::mem::transmute(AT as usize) };
+        f();
+        kprintln!("relay: the kernel ran a program's code: no SMEP");
     }
 }
 

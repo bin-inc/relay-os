@@ -4,8 +4,10 @@
 //! `stack` (runs into the guard page below the stack) and `kernel-read`
 //! (reads an upper-half address). `flags-exit` and `flags-ud` set the
 //! nested-task, alignment-check and direction flags, then exit or fault:
-//! none of them may reach the kernel or the next program. Plan 3 adds
-//! `sse`, once CR0.TS makes SSE fault.
+//! none of them may reach the kernel or the next program. `flags-ac` sets
+//! them and spins through a few hundred timer ticks before it faults: the
+//! kernel's interrupt handlers must not run with them either (AC would
+//! switch SMAP off).
 #![no_std]
 #![no_main]
 
@@ -54,6 +56,18 @@ fn main(args: Args) -> u8 {
                 in("rdi") 0u64,
                 options(noreturn),
             ),
+            b"flags-ac" => asm!(
+                "pushfq",
+                "or qword ptr [rsp], {flags}",
+                "popfq",
+                "2:",
+                "dec rcx",
+                "jnz 2b",
+                "ud2",
+                flags = in(reg) FLAGS,
+                in("rcx") 1u64 << 30,
+                options(noreturn),
+            ),
             b"flags-ud" => asm!(
                 "pushfq",
                 "or qword ptr [rsp], {flags}",
@@ -65,7 +79,7 @@ fn main(args: Args) -> u8 {
             _ => {
                 let _ = sys::write_all(
                     2,
-                    b"usage: t-fault null-read|null-write|write-code|exec-data|ud|div0|stack|kernel-read|flags-exit|flags-ud\n",
+                    b"usage: t-fault null-read|null-write|write-code|exec-data|ud|div0|stack|kernel-read|flags-exit|flags-ud|flags-ac\n",
                 );
                 return 2;
             }

@@ -8,15 +8,19 @@ pub enum PanicTest {
     InvalidOpcode,
     Panic,
     StackOverflow,
+    /// The kernel reads a program's page (SMAP must stop it).
+    UserRead,
+    /// The kernel runs a program's code (SMEP must stop it).
+    UserExec,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Cmdline {
     /// `test=1`: running under the automated QEMU tests.
     pub test_mode: bool,
-    /// `panic=early|pagefault|ud|panic|stack`: deliberately crash (exercises
-    /// the panic screen in tests). `early` faults before the console starts,
-    /// the others after boot.
+    /// `panic=early|pagefault|ud|panic|stack|user-read|user-exec`:
+    /// deliberately crash (exercises the panic screen in tests). `early`
+    /// faults before the console starts, the others after boot.
     pub panic_test: Option<PanicTest>,
     /// `tsc=hpet`: measure the TSC against the HPET even when CPUID knows
     /// its frequency (exercises the QEMU path everywhere).
@@ -44,6 +48,8 @@ impl Cmdline {
                         "ud" => Some(PanicTest::InvalidOpcode),
                         "panic" => Some(PanicTest::Panic),
                         "stack" => Some(PanicTest::StackOverflow),
+                        "user-read" => Some(PanicTest::UserRead),
+                        "user-exec" => Some(PanicTest::UserExec),
                         _ => None,
                     }
                 }
@@ -61,6 +67,18 @@ mod tests {
     #[test]
     fn empty() {
         assert_eq!(Cmdline::parse(""), Cmdline::default());
+    }
+
+    #[test]
+    fn a_program_s_page_from_the_kernel() {
+        assert_eq!(
+            Cmdline::parse("panic=user-read").panic_test,
+            Some(PanicTest::UserRead)
+        );
+        assert_eq!(
+            Cmdline::parse("panic=user-exec").panic_test,
+            Some(PanicTest::UserExec)
+        );
     }
 
     #[test]
