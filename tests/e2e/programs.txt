@@ -1,0 +1,31 @@
+# Programs run in ring 3 (user-space gate §5, §6.2; milestone 2, plan 2):
+# the in-kernel shell runs a name it does not know from /bin, or a path as
+# given, and waits for it. What the program writes on fd 1 follows the
+# redirection; memory in use is the same before and after (once the first
+# program has made the kernel-stack area's page tables, which stay).
+timeout 30
+expect root@relay:~# $
+send t-args a 'b c' ''
+expect \n\[1\] a\n\[2\] b c\n\[3\] \nroot@relay:~# $
+send free
+expect-same mem \nMem:\s+\d+\s+(\d+)\s
+send /bin/t-args by-path
+expect \n\[1\] by-path\nroot@relay:~# $
+send cd /bin
+send ./t-args relative
+expect \n\[1\] relative\nroot@relay:/bin# $
+send cd
+send t-args one two > /root/args.txt
+send cat /root/args.txt
+expect \n\[1\] one\n\[2\] two\n
+send t-args
+expect t-args\nroot@relay:~# $
+send echo not a program > /root/text
+send /root/text
+expect \nrelay-sh: /root/text: Exec format error\n
+send /root/missing
+expect \nrelay-sh: /root/missing: No such file or directory\n
+send t-missing
+expect \nrelay-sh: t-missing: command not found\n
+send free
+expect-same mem \nMem:\s+\d+\s+(\d+)\s
