@@ -182,15 +182,18 @@ request.
      DataTraveler 3.0, 14.4 GiB`
    - `[ ok ] usb: 2 controllers, 4 devices`, `[ ok ] keyboard: 2 keyboards`
    - `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 14.3 GiB`
-   - `[ ok ] system: 1 program, ABI 1` (milestone 2: the programs of `/bin`
-     from `\EFI\RELAY\system.img`; the count grows as later plans add
-     programs)
+   - `[ ok ] system: 2 programs, ABI 1` (milestone 2: the programs of
+     `/bin` from `\EFI\RELAY\system.img`; the count grows as later plans
+     add programs)
    - the motd (`Welcome to Relay OS.`) and the prompt `root@relay:~# `.
 
    Photograph the screen.
 4. On the K120, type `sh checks/check3-a.sh`. It runs for about a minute:
    `uname -a`, `date`, `dmesg` (every startup line of checks 1-3, checked
-   later), `ls -l /bin` (the programs of the system archive), the `fileops`
+   later), `ls -l /bin` (the programs of the system archive),
+   `t-args a 'b c' ''` and `t-fault null-read` (programs in ring 3: three
+   arguments printed, then `relay-sh: t-fault: killed (page fault at 0x0,
+   read, ip …)` and the script goes on), the `fileops`
    scenario's operations on `/root/notes` (`mkdir -p`,
    `echo >`/`>>`, `cat`, `ls -l`, `cp`, `mv`, `rmdir` of a full directory,
    `rm -r`, `touch`, `stat`, `head`, `tail`, `wc`, the errors of `cat` and
@@ -206,7 +209,7 @@ request.
 7. Boot Mint and run `cargo xtask verify-usb`: `e2fsck: clean`, the tree
    lists `/root/notes/a`, `/root/notes/big` (8388608 bytes) and
    `/root/notes/t`, and the last lines are
-   `/root/checks/check3-a.sh: ok, 64 of 64 commands as expected (run <time>)`
+   `/root/checks/check3-a.sh: ok, 66 of 66 commands as expected (run <time>)`
    and `/root/checks/check3-b.sh: ok, 5 of 5 commands as expected (run
    <time>)`, with the UTC times of the two runs (after `flash --kernel` the
    transcripts of an earlier run stay on the stick, so check the times). A
@@ -224,6 +227,8 @@ request.
 | `mount /: warning: no disk has the boot partition …; using …` above `[ ok ] mount /` | The loader's boot GUID matches no partition, and the one disk with an ESP and a Linux partition was used | Note the GUID in the warning and the `boot info` line; the files are usable |
 | `[FAIL] system: no system.img` | The loader could not read `\EFI\RELAY\system.img` (it is missing, or the FAT is damaged) | `cargo xtask flash --kernel` writes it with the loader and the kernel |
 | `[FAIL] system: ABI N, kernel wants M` or `[FAIL] system: system.img: …` | The archive on the ESP is from another build, or damaged | `cargo xtask flash --kernel` from the same worktree as the kernel |
+| The panic screen just after `+ t-args` or `+ t-fault` | Entering ring 3, a system call or a fault in ring 3 goes wrong on this CPU, where QEMU's works | Photograph the panic screen: its vector, `rip`, `cr2` and registers say which |
+| `relay-sh: t-args: Exec format error` | The kernel refused the program; `dmesg` shows `spawn /bin/t-args: <reason>` | `cargo xtask flash --kernel` from the same worktree as the kernel |
 | `[FAIL] mount /: no disk with the boot partition` | No disk has the boot partition, and none has exactly one ESP and one Linux partition | `dmesg`: the `storage:` GPT lines list what each disk has |
 | `[FAIL] mount /: …; mounted read-only` | The stick refused a write (worn out or write-protected) | The files can be read; note the `usb: … write at block N:` line in `dmesg` |
 | `[FAIL] mount /: ext2 on 00:14.0 port 15 partition 2, 14.3 GiB: Invalid argument` | The ext2 root is not what `flash --full` writes | `dmesg` shows the `ext2:` reason; re-run `flash --full` |

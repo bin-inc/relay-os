@@ -64,6 +64,15 @@ ls -l /bin
 #> -rwxr-xr-x 1 root root +\d+ \w{3} [ \d]\d \d\d:\d\d t-args
 #> ...
 
+# Programs in ring 3 (milestone 2, plan 2): t-args prints its arguments,
+# and a fault ends t-fault, not the kernel.
+t-args a 'b c' ''
+#> \[1\] a
+#> \[2\] b c
+#> \[3\]\x20
+t-fault null-read
+#> relay-sh: t-fault: killed \(page fault at 0x0, read, ip 0x4[0-9a-f]+\)
+
 # The file operations of the fileops scenario.
 mkdir -p /root/notes/old
 echo remember me > /root/notes/a
