@@ -12,7 +12,7 @@
 //! handlers must never allocate (the heap lock is not interrupt-safe).
 
 use core::alloc::{GlobalAlloc, Layout};
-use core::ptr::{self, NonNull};
+use core::ptr::NonNull;
 use spin::Mutex;
 
 pub const SIZE_CLASSES: [usize; 8] = [16, 32, 64, 128, 256, 512, 1024, 2048];
@@ -22,8 +22,17 @@ const MIN_BLOCK: usize = 16;
 /// A free large block, stored in the free memory itself.
 struct FreeBlock {
     size: usize,
-    next: *mut FreeBlock,
+    next: Link<FreeBlock>,
 }
+
+/// A free small block: only the link to the next one of its class.
+struct SmallBlock {
+    next: Link<SmallBlock>,
+}
+
+/// A free-list link; `None` ends the list. Every block on a list is free
+/// heap memory, so a `Some` may be read and written.
+type Link<T> = Option<NonNull<T>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HeapStats {
@@ -38,12 +47,12 @@ pub struct HeapStats {
 pub struct Heap {
     start: usize,
     end: usize,
-    classes: [*mut u8; SIZE_CLASSES.len()],
-    large: *mut FreeBlock,
+    classes: [Link<SmallBlock>; SIZE_CLASSES.len()],
+    large: Link<FreeBlock>,
     used: usize,
 }
 
-// SAFETY: the raw pointers point into the heap region, which the Heap owns.
+// SAFETY: the links point into the heap region, which the Heap owns.
 unsafe impl Send for Heap {}
 
 fn class_of(layout: Layout) -> Option<usize> {
@@ -60,8 +69,8 @@ impl Heap {
         Heap {
             start: 0,
             end: 0,
-            classes: [ptr::null_mut(); SIZE_CLASSES.len()],
-            large: ptr::null_mut(),
+            classes: [None; SIZE_CLASSES.len()],
+            large: None,
             used: 0,
         }
     }
@@ -98,11 +107,16 @@ impl Heap {
         let addr = ptr.as_ptr() as usize;
         debug_assert!(self.start <= addr && addr < self.end, "foreign pointer");
         match class_of(layout) {
-            Some(c) => unsafe {
-                *(addr as *mut *mut u8) = self.classes[c];
-                self.classes[c] = addr as *mut u8;
+            Some(c) => {
+                let block = ptr.cast::<SmallBlock>();
+                unsafe {
+                    block.write(SmallBlock {
+                        next: self.classes[c],
+                    })
+                };
+                self.classes[c] = Some(block);
                 self.used -= SIZE_CLASSES[c];
-            },
+            }
             None => {
                 let size = large_size(layout);
                 unsafe { self.insert_free(addr, size) };
@@ -113,12 +127,12 @@ impl Heap {
 
     pub fn stats(&self) -> HeapStats {
         let (mut free_large, mut largest_free) = (0, 0);
-        let mut b = self.large;
-        while !b.is_null() {
-            let size = unsafe { (*b).size };
+        let mut link = self.large;
+        while let Some(b) = link {
+            let FreeBlock { size, next } = unsafe { b.read() };
             free_large += size;
             largest_free = largest_free.max(size);
-            b = unsafe { (*b).next };
+            link = next;
         }
         HeapStats {
             total: self.end - self.start,
@@ -129,37 +143,48 @@ impl Heap {
     }
 
     fn alloc_small(&mut self, c: usize) -> Option<usize> {
-        if self.classes[c].is_null() {
-            let slab = self.alloc_large(SLAB, SLAB)?;
-            let size = SIZE_CLASSES[c];
-            // Push the blocks in reverse so they are handed out in address
-            // order.
-            for block in (slab..slab + SLAB).step_by(size).rev() {
-                unsafe { *(block as *mut *mut u8) = self.classes[c] };
-                self.classes[c] = block as *mut u8;
-            }
-        }
-        let block = self.classes[c];
-        self.classes[c] = unsafe { *(block as *mut *mut u8) };
+        let block = match self.classes[c] {
+            Some(block) => block,
+            None => self.refill(c)?,
+        };
+        self.classes[c] = unsafe { block.read() }.next;
         self.used += SIZE_CLASSES[c];
-        Some(block as usize)
+        Some(block.as_ptr() as usize)
+    }
+
+    /// Carves a new slab into blocks of class `c` and returns the first.
+    fn refill(&mut self, c: usize) -> Option<NonNull<SmallBlock>> {
+        let slab = self.alloc_large(SLAB, SLAB)?;
+        let size = SIZE_CLASSES[c];
+        // Push the blocks in reverse so they are handed out in address
+        // order.
+        for addr in (slab..slab + SLAB).step_by(size).rev() {
+            let block = block_at::<SmallBlock>(addr);
+            unsafe {
+                block.write(SmallBlock {
+                    next: self.classes[c],
+                })
+            };
+            self.classes[c] = Some(block);
+        }
+        self.classes[c]
     }
 
     /// First fit: the lowest free block that holds `size` bytes at an
     /// `align`-aligned address. What is left before and after goes back on
     /// the free list.
     fn alloc_large(&mut self, size: usize, align: usize) -> Option<usize> {
-        let mut prev: *mut FreeBlock = ptr::null_mut();
-        let mut b = self.large;
-        while !b.is_null() {
-            let (start, bsize, next) = unsafe { (b as usize, (*b).size, (*b).next) };
+        let mut prev: Link<FreeBlock> = None;
+        let mut link = self.large;
+        while let Some(b) = link {
+            let FreeBlock { size: bsize, next } = unsafe { b.read() };
+            let start = b.as_ptr() as usize;
             let aligned = start.next_multiple_of(align);
             if aligned + size <= start + bsize {
                 // Unlink, then return the unused head and tail.
-                if prev.is_null() {
-                    self.large = next;
-                } else {
-                    unsafe { (*prev).next = next };
+                match prev {
+                    None => self.large = next,
+                    Some(mut p) => unsafe { p.as_mut().next = next },
                 }
                 unsafe {
                     if aligned > start {
@@ -172,8 +197,8 @@ impl Heap {
                 }
                 return Some(aligned);
             }
-            prev = b;
-            b = next;
+            prev = link;
+            link = next;
         }
         None
     }
@@ -185,29 +210,39 @@ impl Heap {
     /// The range must be free heap memory, 16-byte aligned, at least 16
     /// bytes long.
     unsafe fn insert_free(&mut self, addr: usize, size: usize) {
-        let mut prev: *mut FreeBlock = ptr::null_mut();
+        let mut prev: Link<FreeBlock> = None;
         let mut next = self.large;
-        while !next.is_null() && (next as usize) < addr {
+        while let Some(n) = next.filter(|n| (n.as_ptr() as usize) < addr) {
             prev = next;
-            next = unsafe { (*next).next };
+            next = unsafe { n.read() }.next;
         }
-        unsafe {
-            let block = addr as *mut FreeBlock;
-            block.write(FreeBlock { size, next });
-            if !next.is_null() && addr + size == next as usize {
-                (*block).size += (*next).size;
-                (*block).next = (*next).next;
-            }
-            if prev.is_null() {
-                self.large = block;
-            } else if prev as usize + (*prev).size == addr {
-                (*prev).size += (*block).size;
-                (*prev).next = (*block).next;
-            } else {
-                (*prev).next = block;
+        let mut block = block_at::<FreeBlock>(addr);
+        unsafe { block.write(FreeBlock { size, next }) };
+        let b = unsafe { block.as_mut() };
+        if let Some(n) = next.filter(|n| addr + size == n.as_ptr() as usize) {
+            let n = unsafe { n.read() };
+            b.size += n.size;
+            b.next = n.next;
+        }
+        match prev {
+            None => self.large = Some(block),
+            Some(mut p) => {
+                let p = unsafe { p.as_mut() };
+                if p as *mut FreeBlock as usize + p.size == addr {
+                    p.size += b.size;
+                    p.next = b.next;
+                } else {
+                    p.next = Some(block);
+                }
             }
         }
     }
+}
+
+/// The block at `addr`, a heap address (never 0: the heap is in the
+/// kernel's upper half).
+fn block_at<T>(addr: usize) -> NonNull<T> {
+    NonNull::new(addr as *mut T).expect("heap block at address 0")
 }
 
 /// The global allocator: a `Heap` behind a spin lock. Empty until `init`.

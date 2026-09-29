@@ -220,7 +220,7 @@ fn main() -> Status {
     core::mem::forget(final_map);
 
     let mut cmd = [0u8; CMDLINE_MAX];
-    let n = cmdline.len(); // normalize() guarantees n <= CMDLINE_MAX
+    let n = cmdline.len(); // normalize() keeps at most 255 bytes
     cmd[..n].copy_from_slice(cmdline.as_bytes());
     let info = BootInfo {
         magic: BOOT_INFO_MAGIC,

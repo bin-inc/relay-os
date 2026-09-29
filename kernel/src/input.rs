@@ -5,6 +5,7 @@
 //! keyboard from a serial line.
 
 use alloc::collections::VecDeque;
+use alloc::vec::Vec;
 use usb::hid::{Key, KeyEvent};
 
 /// Ctrl-C.
@@ -13,19 +14,58 @@ pub const INTERRUPT: u8 = 0x03;
 /// command must not fill the heap).
 pub const QUEUE_MAX: usize = 4096;
 
+/// The longest escape sequence kept while it arrives over serial; longer
+/// ones are garbage and dropped.
+const SEQUENCE_MAX: usize = 8;
+
 pub struct InputQueue {
     bytes: VecDeque<u8>,
+    /// An escape sequence arriving over serial, until it is complete.
+    sequence: Vec<u8>,
 }
 
 impl InputQueue {
     pub const fn new() -> InputQueue {
         InputQueue {
             bytes: VecDeque::new(),
+            sequence: Vec::new(),
         }
     }
 
-    /// Adds input; what does not fit is dropped.
+    /// Adds one byte from COM1. An escape sequence (`ESC` and one byte, or
+    /// `ESC [` up to its final byte) waits until it is complete and then
+    /// goes in whole or not at all, like a key's; Ctrl-C ends it.
+    pub fn push_serial(&mut self, b: u8) {
+        if b == INTERRUPT {
+            self.sequence.clear();
+            self.push(&[b]);
+        } else if self.sequence.is_empty() && b != 0x1B {
+            self.push(&[b]);
+        } else {
+            self.sequence.push(b);
+            let s = &self.sequence;
+            let done = s.len() == 2 && s[1] != b'[' || s.len() > 2 && (0x40..=0x7E).contains(&b);
+            if done {
+                let seq = core::mem::take(&mut self.sequence);
+                if self.bytes.len() + seq.len() <= QUEUE_MAX {
+                    self.push(&seq);
+                }
+            } else if s.len() >= SEQUENCE_MAX {
+                self.sequence.clear();
+            }
+        }
+    }
+
+    /// Adds input; what does not fit is dropped. A Ctrl-C always fits:
+    /// it drops what was typed before it, as `take_interrupt` would.
     pub fn push(&mut self, bytes: &[u8]) {
+        let bytes = match bytes.iter().rposition(|&b| b == INTERRUPT) {
+            Some(i) => {
+                self.bytes.clear();
+                &bytes[i..]
+            }
+            None => bytes,
+        };
         let room = QUEUE_MAX - self.bytes.len();
         self.bytes.extend(&bytes[..bytes.len().min(room)]);
     }
@@ -98,7 +138,10 @@ impl InputQueue {
             return;
         }
         if let Some(seq) = sequence(e.key) {
-            self.push(seq);
+            // Half a sequence would reach the shell as other keys.
+            if self.bytes.len() + seq.len() <= QUEUE_MAX {
+                self.push(seq);
+            }
         } else if let Some(b) = byte(e) {
             self.push(&[b]);
         }
@@ -200,6 +243,67 @@ mod tests {
             q.push_key(&press(key, false));
         }
         assert!(q.is_empty());
+    }
+
+    #[test]
+    fn a_ctrl_c_gets_in_when_the_queue_is_full() {
+        // A key held down during a long command fills the queue; Ctrl-C
+        // must still stop the command.
+        let mut q = InputQueue::new();
+        q.push(&[b'a'; QUEUE_MAX]);
+        q.push_key(&press(Key::Char(b'c'), true));
+        assert!(q.take_interrupt());
+        assert!(q.is_empty());
+        q.push(&[b'a'; QUEUE_MAX]);
+        q.push(b"x\x03y");
+        assert!(q.take_interrupt());
+        assert_eq!(drain(&mut q), b"y");
+    }
+
+    #[test]
+    fn a_key_sequence_goes_in_whole_or_not_at_all() {
+        let mut q = InputQueue::new();
+        q.push(&[b'a'; QUEUE_MAX - 2]);
+        q.push_key(&press(Key::Up, false));
+        assert_eq!(drain(&mut q), [b'a'; QUEUE_MAX - 2]);
+        q.push(&[b'a'; QUEUE_MAX - 3]);
+        q.push_key(&press(Key::Up, false));
+        assert!(drain(&mut q).ends_with(b"a\x1b[A"));
+    }
+
+    fn serial(q: &mut InputQueue, bytes: &[u8]) {
+        for &b in bytes {
+            q.push_serial(b);
+        }
+    }
+
+    #[test]
+    fn a_sequence_over_serial_goes_in_whole_or_not_at_all() {
+        // COM1 bytes arrive one at a time; the queue must not keep only
+        // the start of an arrow key.
+        let mut q = InputQueue::new();
+        q.push(&[b'a'; QUEUE_MAX - 2]);
+        serial(&mut q, b"\x1b[A");
+        assert_eq!(drain(&mut q), [b'a'; QUEUE_MAX - 2]);
+        q.push(&[b'a'; QUEUE_MAX - 3]);
+        serial(&mut q, b"\x1b[Ax");
+        assert!(drain(&mut q).ends_with(b"a\x1b[A"));
+        serial(&mut q, b"l\x1b[3~s\x1bx");
+        assert_eq!(drain(&mut q), b"l\x1b[3~s\x1bx");
+    }
+
+    #[test]
+    fn a_ctrl_c_over_serial_ends_a_sequence() {
+        let mut q = InputQueue::new();
+        serial(&mut q, b"ls\x1b[\x03pwd");
+        assert!(q.take_interrupt());
+        assert_eq!(drain(&mut q), b"pwd");
+        // A sequence that never ends is not kept for ever: its start is
+        // dropped and what follows is plain input again.
+        serial(&mut q, b"\x1b[11111111111111111111");
+        serial(&mut q, b"ok");
+        let got = drain(&mut q);
+        assert!(!got.contains(&0x1b) && got.ends_with(b"1ok"), "{got:?}");
     }
 
     #[test]
