@@ -1,12 +1,18 @@
-//! What the CPU enforces for the kernel (user-space gate §5.1): SMEP and
-//! SMAP, where CPUID reports them. The kernel copies a program's memory
-//! through the linear map (`UserSlice`), never at the program's own
-//! addresses, and runs none of a program's code, so with them on any
-//! access to a program's page from ring 0 is a kernel bug that faults (the
-//! panic screen) instead of passing silently.
+//! What the CPU enforces (user-space gate §5.1, §5.5): SMEP and SMAP, where
+//! CPUID reports them, and CR0.TS.
+//!
+//! - The kernel copies a program's memory through the linear map
+//!   (`UserSlice`), never at the program's own addresses, and runs none of
+//!   a program's code, so with SMEP and SMAP on any access to a program's
+//!   page from ring 0 is a kernel bug that faults (the panic screen)
+//!   instead of passing silently.
+//! - The kernel is built without floating point and saves no FPU state,
+//!   so CR0.TS stays set: any x87, MMX or SSE instruction (and `fwait`,
+//!   with MP) raises #NM, and a program that uses one is killed instead of
+//!   reading or corrupting another's registers.
 
 use core::fmt;
-use x86_64::registers::control::{Cr4, Cr4Flags};
+use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
 
 /// CPUID leaf 7's EBX bits.
 const SMEP: u32 = 1 << 7;
@@ -48,8 +54,16 @@ pub fn cr4_with(cr4: u64, p: Protection) -> u64 {
     cr4
 }
 
-/// Turns SMEP and SMAP on where the CPU has them.
+/// CR0 with TS (bit 3) and MP (bit 1) set and EM (bit 2) clear: FPU and
+/// SSE instructions raise #NM, not #UD.
+pub fn cr0_with(cr0: u64) -> u64 {
+    (cr0 | 1 << 3 | 1 << 1) & !(1 << 2)
+}
+
+/// Turns SMEP and SMAP on where the CPU has them, and sets CR0.TS.
 pub fn init() -> Protection {
+    // SAFETY: the kernel runs no FPU or SSE instruction.
+    unsafe { Cr0::write(Cr0Flags::from_bits_retain(cr0_with(Cr0::read_raw()))) };
     use core::arch::x86_64::{__cpuid, __cpuid_count};
     let max = __cpuid(0).eax;
     let ebx = if max >= 7 { __cpuid_count(7, 0).ebx } else { 0 };
@@ -102,6 +116,14 @@ mod tests {
             features(0, 0).to_string(),
             "SMEP not available, SMAP not available"
         );
+    }
+
+    #[test]
+    fn cr0_makes_fpu_and_sse_instructions_fault_with_nm() {
+        // PE, ET, NE, WP, PG as a UEFI loader leaves them, with EM set.
+        let firmware = 0x8005_0031 | 1 << 2;
+        assert_eq!(cr0_with(firmware), 0x8005_0031 | 1 << 3 | 1 << 1);
+        assert_eq!(cr0_with(0), 0b1010);
     }
 
     #[test]
