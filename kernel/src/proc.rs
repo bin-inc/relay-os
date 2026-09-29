@@ -21,11 +21,11 @@ use crate::mm::paging::MapError;
 use crate::mm::space::AddressSpace;
 use crate::mm::user::UserSlice;
 use crate::syscall::{self, Caller, Outcome};
-use crate::{arch, console, klogln, mm, mounts, tty, usb};
+use crate::{arch, console, klogln, mm, mounts, rtc, timer, tty, usb};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
-use relay_abi::WaitStatus;
+use relay_abi::{Time, WaitStatus};
 use spin::Mutex;
 use table::{Blocked, Table, Want};
 use vfs::{Cwd, Errno, FileType, Vfs};
@@ -123,7 +123,9 @@ fn block(why: Blocked) {
 }
 
 /// The idle task (spec §6.1): the context the kernel booted in, from the
-/// moment process 1 exists. Never returns.
+/// moment process 1 exists. It polls the console, services the USB hosts,
+/// wakes the sleepers whose time has come, and sleeps until the next tick
+/// when nothing is ready. Never returns.
 fn idle() -> ! {
     loop {
         tty::poll();
@@ -131,6 +133,7 @@ fn idle() -> ! {
             PROCS.lock().wake_all(Blocked::Console);
         }
         usb::service();
+        PROCS.lock().wake_sleepers(timer::ticks());
         if PROCS.lock().others_ready() {
             reschedule();
         } else {
@@ -417,6 +420,33 @@ impl Caller for Current {
             .and_then(|p| p.res.space.as_ref())
             .ok_or(Errno::EFAULT)?;
         mm::with_user_memory(|mem, _| slice.read(space, mem, offset, buf))
+    }
+
+    fn write(&mut self, slice: &UserSlice, offset: u64, bytes: &[u8]) -> Result<(), Errno> {
+        let t = PROCS.lock();
+        let space = t
+            .get(t.current())
+            .and_then(|p| p.res.space.as_ref())
+            .ok_or(Errno::EFAULT)?;
+        mm::with_user_memory(|mem, _| slice.write(space, mem, offset, bytes))
+    }
+
+    fn time(&self) -> Time {
+        let uptime = timer::tsc_time().unwrap_or_else(timer::uptime);
+        Time {
+            unix_seconds: rtc::now_unix().unwrap_or(0),
+            uptime_ns: u64::try_from(uptime.as_nanos()).unwrap_or(u64::MAX),
+        }
+    }
+
+    /// Without a ticking timer nothing would wake it, so it returns at once
+    /// (nothing waits for ever).
+    fn sleep(&mut self, ms: u64) {
+        if ms == 0 || !timer::is_ticking() {
+            return;
+        }
+        let until = timer::ticks().saturating_add(ms.saturating_mul(timer::TICK_HZ) / 1000);
+        block(Blocked::Sleep(until));
     }
 
     fn output(&mut self, fd: u32, bytes: &[u8]) {

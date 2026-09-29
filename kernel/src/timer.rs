@@ -9,7 +9,7 @@ use crate::arch::lapic::{self, Lapic, Mode};
 use crate::arch::{irq, pic};
 use crate::mm::{self, paging::Cache, paging::MapError};
 use core::fmt;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use core::time::Duration;
 
 pub const TICK_HZ: u64 = 1000;
@@ -166,6 +166,8 @@ fn calibrate_lapic(l: &mut Lapic, tsc_hz: u64) -> u64 {
 }
 
 static TSC_HZ: AtomicU64 = AtomicU64::new(0);
+/// Whether the 1 kHz tick runs.
+static TICKING: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug)]
 pub struct TimerInfo {
@@ -220,11 +222,17 @@ pub fn init(hpet: Option<u64>, force_hpet: bool) -> Result<TimerInfo, TimerError
         lapic::periodic_count(timer_hz, TICK_HZ),
     );
     x86_64::instructions::interrupts::enable();
+    TICKING.store(true, Ordering::Relaxed);
     Ok(TimerInfo {
         tsc_hz,
         source,
         lapic_mode: mode,
     })
+}
+
+/// Whether the 1 kHz tick runs (`init` succeeded).
+pub fn is_ticking() -> bool {
+    TICKING.load(Ordering::Relaxed)
 }
 
 /// Timer ticks since the timer started (1 per millisecond).
