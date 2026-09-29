@@ -304,8 +304,11 @@ pub fn with_cwd<R>(f: impl FnOnce(&mut Cwd) -> R) -> R {
     r
 }
 
-/// Where a new process's program starts: its first switch comes here.
+/// Where a new process's program starts: its first switch comes here, with
+/// no lock held.
 extern "C" fn first_run(_: u64) -> ! {
+    // Killed before it ever ran: none of its program runs either.
+    end_if_killed();
     let entry = {
         let mut t = PROCS.lock();
         let me = t.current();

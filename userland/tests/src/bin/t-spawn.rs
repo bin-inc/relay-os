@@ -5,6 +5,8 @@
 //! - `t-spawn kill` starts `t-spin`, kills it after a moment and prints how
 //!   it ended; then shows that process 1 cannot be killed and a pid nobody
 //!   has does not exist;
+//! - `t-spawn kill-new` starts `t-args` and kills it before it has run:
+//!   none of its code may run;
 //! - `t-spawn orphan` starts `t-spin 1` and ends without waiting for it,
 //!   so it passes to process 1;
 //! - `t-spawn child` exits at once (the children of `t-spawn N`).
@@ -34,6 +36,7 @@ fn main(args: Args) -> u8 {
     let r = match args.get(1) {
         Some(b"child") => return 0,
         Some(b"kill") => kill(),
+        Some(b"kill-new") => kill_new(),
         Some(b"orphan") => sys::spawn(b"/bin/t-spin", b"t-spin\x001\0", b"", &STD, 0).map(|_| ()),
         Some(n) => match parse(n) {
             Some(n) => many(n),
@@ -51,7 +54,7 @@ fn main(args: Args) -> u8 {
 }
 
 fn usage() -> u8 {
-    let _ = sys::write_all(2, b"usage: t-spawn N|kill|orphan\n");
+    let _ = sys::write_all(2, b"usage: t-spawn N|kill|kill-new|orphan\n");
     2
 }
 
@@ -102,6 +105,16 @@ fn kill() -> Result<(), u16> {
     }
     let me = sys::getpid();
     let _ = writeln!(Fd(1), "pid above 1: {}", me > 1);
+    Ok(())
+}
+
+/// Kills a child before it has run, and says how it ended.
+fn kill_new() -> Result<(), u16> {
+    let pid = sys::spawn(b"/bin/t-args", b"t-args\0SHOULD-NOT-PRINT\0", b"", &STD, 0)?;
+    sys::kill(i64::from(pid))?;
+    if let Some((_, w)) = sys::wait(i64::from(pid), false)? {
+        let _ = writeln!(Fd(1), "t-args: {w}");
+    }
     Ok(())
 }
 

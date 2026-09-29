@@ -18,6 +18,10 @@ send t-spawn kill
 expect \nt-spin: kill\nkill 1: EPERM\nkill 999999: ESRCH\npid above 1: true\n
 send dmesg
 expect \npid \d+ \(/bin/t-spin\): killed: kill\n
+# A program killed before it has run runs none of its code: the kernel log
+# line comes right after the command, with no output of t-args before it.
+send t-spawn kill-new
+expect t-spawn kill-new\npid \d+ \(/bin/t-args\): killed: kill\nt-args: kill\n
 # The orphan prints when its second is up, over the prompt.
 send t-spawn orphan
 expect # \d+ iterations\n
