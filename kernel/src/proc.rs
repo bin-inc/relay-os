@@ -395,12 +395,13 @@ fn memory_error(e: MapError) -> Errno {
 /// Starts the child `s` of the running process (spec §5.2-§5.4, §7.3): the
 /// program at its path, read through the mount table from the running
 /// process's current directory, with its arguments, fds, working directory
-/// and group. `EAGAIN` when the table is full; the fds and the working
-/// directory are checked before the program is read.
+/// and group. `EAGAIN` when the table is full or every pid has been
+/// used; the fds and the working directory are checked before the program
+/// is read.
 pub fn spawn(s: &Spawn) -> Result<u32, Errno> {
     let (fds, mut cwd) = {
         let t = PROCS.lock();
-        if t.len() >= table::MAX {
+        if !t.has_room() {
             return Err(Errno::EAGAIN);
         }
         let parent = t.get(t.current()).expect("a process spawns");
@@ -438,6 +439,15 @@ pub fn spawn(s: &Spawn) -> Result<u32, Errno> {
             return Err(e);
         }
     };
+    let mut t = PROCS.lock();
+    if !t.has_room() {
+        // Checked above, and nothing else ran since; but a refusal here
+        // must give back what was taken, not panic.
+        drop(t);
+        mm::free_kernel_stack(stack);
+        mm::with_user_memory(|mem, _| space.destroy(mem));
+        return Err(Errno::EAGAIN);
+    }
     prepare(&stack, first_run, 0);
     let res = Res {
         stack,
@@ -446,10 +456,9 @@ pub fn spawn(s: &Spawn) -> Result<u32, Errno> {
         fds,
         cwd: Some(cwd),
     };
-    let mut t = PROCS.lock();
     let me = t.current();
     t.insert(me, s.new_group, name.into_owned(), res)
-        .map_err(|e| unreachable!("room was checked, and nothing else runs: {e}"))
+        .map_err(|e| unreachable!("has_room was checked under this lock: {e}"))
 }
 
 /// A child of the running process that has ended, taken out of the table
