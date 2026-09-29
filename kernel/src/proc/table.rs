@@ -5,7 +5,9 @@
 //! payload `R`, so the rules are tested here with none.
 //!
 //! - Pids count from 1 and are not used again while the kernel runs; at
-//!   most [`MAX`] processes exist, zombies included (`EAGAIN` beyond).
+//!   most [`MAX`] processes exist, zombies included (`EAGAIN` beyond), and
+//!   once pid 2^32 − 1 has been used, no process starts any more (`EAGAIN`:
+//!   at the fastest rate QEMU manages, after more than a day).
 //! - Process 0 is the idle task: it has no entry, and runs when nothing is
 //!   ready.
 //! - A process that ends stays as a zombie until its parent `wait`s for it;
@@ -115,6 +117,7 @@ impl Queue {
 
 pub struct Table<R> {
     procs: Vec<Process<R>>,
+    /// The pid the next process gets; 0 once every pid has been used.
     next_pid: u32,
     ready: Queue,
     /// The running process; 0 while the idle task runs.
@@ -167,7 +170,8 @@ impl<R> Table<R> {
 
     /// Adds a ready process, a child of `ppid`, in its parent's group or,
     /// with `new_group` (or no parent), in a new group numbered with its
-    /// own pid; its pid. `EAGAIN` when [`MAX`] processes exist.
+    /// own pid; its pid. `EAGAIN` when [`MAX`] processes exist, or every
+    /// pid has been used.
     pub fn insert(
         &mut self,
         ppid: u32,
@@ -175,11 +179,11 @@ impl<R> Table<R> {
         name: String,
         res: R,
     ) -> Result<u32, Errno> {
-        if self.procs.len() >= MAX {
+        if self.procs.len() >= MAX || self.next_pid == 0 {
             return Err(Errno::EAGAIN);
         }
         let pid = self.next_pid;
-        self.next_pid += 1;
+        self.next_pid = pid.checked_add(1).unwrap_or(0);
         let pgid = match self.get(ppid) {
             Some(parent) if !new_group => parent.pgid,
             _ => pid,
@@ -407,6 +411,22 @@ mod tests {
         assert!(t.reap(1, Want::Pid(2)).unwrap().is_some());
         assert_eq!(add(&mut t, 1, true), 3, "2 is not used again");
         assert_eq!(t.len(), 2);
+    }
+
+    #[test]
+    fn when_every_pid_has_been_used_no_process_starts() {
+        let mut t = table();
+        t.next_pid = u32::MAX - 1;
+        assert_eq!(add(&mut t, 0, true), u32::MAX - 1);
+        assert_eq!(add(&mut t, 0, true), u32::MAX);
+        assert_eq!(
+            t.insert(0, true, String::from("x"), ()),
+            Err(Errno::EAGAIN),
+            "no pid is used twice, and none overflows"
+        );
+        t.end(u32::MAX, WaitStatus::exited(0));
+        assert!(t.reap(0, Want::Pid(u32::MAX)).unwrap().is_some());
+        assert_eq!(t.insert(0, true, String::from("x"), ()), Err(Errno::EAGAIN));
     }
 
     #[test]
