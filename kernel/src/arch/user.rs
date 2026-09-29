@@ -22,9 +22,17 @@
 //! would switch SMAP off), and `leave` loads the kernel's own flags, so
 //! nothing of the program's reaches the code that waited for it.
 //!
-//! The kernel uses `gs` only in `syscall_entry`. Because `exit` leaves
-//! from inside a call, before the stub's second `swapgs`, `run` sets both
-//! `gs` bases afresh before every program.
+//! **`gs` and the flags.** The kernel always runs with its own `gs` base
+//! (the per-CPU block) and the program's (always 0: nothing lets a program
+//! set one) in `KernelGsBase`: every way into the kernel from ring 3
+//! (`syscall`, and the interrupt and exception stubs when they interrupted
+//! ring 3) starts with `swapgs`, and every way back ends with one. So every
+//! kernel context has the same `gs`, whichever way it came in, and
+//! switching from one to another never mixes them. The same ways in leave
+//! the program's flags behind: `SFMASK` for `syscall`, and the stubs load
+//! the kernel's own (`push 2; popfq`), since an interrupt or trap gate
+//! clears only IF, TF, NT and RF, and AC would switch SMAP off. That works
+//! on every CPU, where `clac` exists only with SMAP.
 
 use super::gdt::{KERNEL_CODE, KERNEL_DATA, USER_CODE, USER_DATA};
 use core::arch::naked_asm;
@@ -117,7 +125,20 @@ pub fn is_canonical(addr: u64) -> bool {
     top == 0 || top == 0x1_FFFF
 }
 
-/// Turns on `syscall` and points it at `syscall_entry`.
+/// Whether `gs` is the kernel's (the per-CPU block), as it always must be
+/// while the kernel runs.
+pub fn gs_is_kernel() -> bool {
+    GsBase::read().as_u64() == &raw const PER_CPU as u64
+}
+
+/// Whether none of the flags a program may set and the kernel must never
+/// run with (TF, DF, AC, NT) is set.
+pub fn flags_are_kernel() -> bool {
+    !x86_64::registers::rflags::read().intersects(PROGRAM_FLAGS)
+}
+
+/// Turns on `syscall`, points it at `syscall_entry`, and gives the kernel
+/// its `gs` (the program's is 0).
 pub fn init() {
     // SAFETY: the GDT has the segments STAR names; the entry stub is
     // ready; the per-CPU block is 'static.
@@ -131,6 +152,8 @@ pub fn init() {
     .expect("the GDT's segments are in the order sysret needs");
     LStar::write(VirtAddr::new(syscall_entry as *const () as u64));
     SFMask::write(SFMASK);
+    GsBase::write(VirtAddr::new(&raw const PER_CPU as u64));
+    KernelGsBase::write(VirtAddr::new(0));
     // `sysenter` is legal in 64-bit mode on Intel CPUs: with a code segment
     // of 0 it is a general protection fault, whatever the firmware left.
     for msr in IA32_SYSENTER {
@@ -164,8 +187,6 @@ pub unsafe fn run(
     // current ones do (the upper half is shared).
     unsafe {
         PER_CPU.kernel_rsp = kernel_stack;
-        GsBase::write(VirtAddr::new(0));
-        KernelGsBase::write(VirtAddr::new(&raw const PER_CPU as u64));
         Cr3::write(
             PhysFrame::containing_address(PhysAddr::new(pml4)),
             Cr3Flags::empty(),
@@ -187,9 +208,9 @@ pub unsafe fn run(
 }
 
 /// Saves the callee-saved registers and the stack pointer in `*waiter`,
-/// then goes to ring 3 at `entry`: its stack, `rdi`, `rsi`, `rdx`,
-/// interrupts on, every other register zero. Returns when `leave(waiter)`
-/// runs.
+/// then goes to ring 3 at `entry` with the program's `gs`: its stack,
+/// `rdi`, `rsi`, `rdx`, interrupts on, every other register zero. Returns
+/// when `leave(waiter)` runs.
 #[unsafe(naked)]
 unsafe extern "C" fn enter(waiter: *mut u64, entry: *const UserEntry) {
     naked_asm!(
@@ -206,6 +227,7 @@ unsafe extern "C" fn enter(waiter: *mut u64, entry: *const UserEntry) {
         "xor eax, eax", "xor ebx, ebx", "xor ecx, ecx", "xor ebp, ebp",
         "xor r8d, r8d", "xor r9d, r9d", "xor r10d, r10d", "xor r11d, r11d",
         "xor r12d, r12d", "xor r13d, r13d", "xor r14d, r14d", "xor r15d, r15d",
+        "swapgs",
         "iretq",
         ss = const USER_DATA as u64,
         cs = const USER_CODE as u64,
@@ -336,5 +358,14 @@ mod tests {
         );
         assert_eq!(USER_RFLAGS, (1 << 9) | 2, "interrupts on, nothing else");
         assert_eq!(KERNEL_RFLAGS, 2, "leave: nothing of the program's");
+    }
+
+    #[test]
+    fn a_program_starts_with_its_own_gs() {
+        // SAFETY: reads the kernel's own code.
+        let code = unsafe { *(enter as *const [u8; 128]) };
+        // `swapgs; iretq`.
+        let last = [0x0F, 0x01, 0xF8, 0x48, 0xCF];
+        assert!(code.windows(5).any(|w| w == last));
     }
 }

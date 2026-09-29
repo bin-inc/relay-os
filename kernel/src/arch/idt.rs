@@ -181,10 +181,21 @@ const STUBS: [unsafe extern "C" fn(); 32] = [
 ];
 
 /// Saves the general registers (building an `ExceptionFrame` on the stack)
-/// and calls the Rust dispatcher. Never returns.
+/// and calls the Rust dispatcher. Never returns. An exception in ring 3
+/// swaps to the kernel's `gs` and loads the kernel's flags first (see
+/// `user`).
 #[unsafe(naked)]
 unsafe extern "C" fn exception_common() {
     naked_asm!(
+        // The interrupted CS, above the vector, the error code and RIP.
+        "test qword ptr [rsp + 24], 3",
+        "jz 2f",
+        "swapgs",
+        // The kernel's flags (bit 1 only): nothing the program set, AC
+        // above all (it would switch SMAP off), reaches the handler.
+        "push 2",
+        "popfq",
+        "2:",
         "push rax", "push rbx", "push rcx", "push rdx", "push rsi", "push rdi", "push rbp",
         "push r8", "push r9", "push r10", "push r11", "push r12", "push r13", "push r14", "push r15",
         "mov rdi, rsp",
@@ -198,6 +209,14 @@ unsafe extern "C" fn exception_common() {
 
 extern "C" fn exception_dispatch(frame: &ExceptionFrame) -> ! {
     if frame.cs & 3 == 3 {
+        debug_assert!(
+            super::user::gs_is_kernel(),
+            "an exception with the program's gs"
+        );
+        debug_assert!(
+            super::user::flags_are_kernel(),
+            "an exception with the program's flags"
+        );
         let cr2 = x86_64::registers::control::Cr2::read_raw();
         if let Some(f) = super::fault::classify(frame.vector, frame.error_code, cr2) {
             crate::proc::fault(f.kind, f.detail, f.address, frame.rip);
@@ -284,5 +303,18 @@ mod tests {
         assert_eq!(exception_name(14), "page fault");
         assert_eq!(exception_name(8), "double fault");
         assert_eq!(exception_name(99), "unknown");
+    }
+
+    #[test]
+    fn an_exception_in_ring_3_gets_the_kernel_s_gs_and_flags() {
+        // SAFETY: reads the kernel's own code.
+        let code = unsafe { *(exception_common as *const [u8; 17]) };
+        // `test qword ptr [rsp + 24], 3; jz +6; swapgs; push 2; popfq`:
+        // from ring 3, to the kernel's `gs` and flags.
+        let swap = [
+            0x48, 0xF7, 0x44, 0x24, 0x18, 0x03, 0x00, 0x00, 0x00, 0x74, 0x06, 0x0F, 0x01, 0xF8,
+            0x6A, 0x02, 0x9D,
+        ];
+        assert_eq!(code, swap, "first thing");
     }
 }

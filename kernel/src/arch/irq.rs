@@ -68,6 +68,14 @@ pub fn note_unexpected(counts: &[AtomicU32; 256], vector: u8) -> bool {
 }
 
 extern "C" fn dispatch(frame: &ExceptionFrame) {
+    debug_assert!(
+        super::user::gs_is_kernel(),
+        "an interrupt with the program's gs"
+    );
+    debug_assert!(
+        super::user::flags_are_kernel(),
+        "an interrupt with the program's flags"
+    );
     match classify(frame.vector as u8) {
         Action::Timer => {
             TICKS.fetch_add(1, Ordering::Relaxed);
@@ -136,10 +144,22 @@ pub fn stub(vector: u8) -> u64 {
 
 /// Saves the registers in `ExceptionFrame` layout (the stub pushed a zero
 /// error code and the vector), calls `dispatch` on a 16-byte aligned stack,
-/// restores everything and returns from the interrupt.
+/// restores everything and returns from the interrupt. An interrupt of
+/// ring 3 swaps to the kernel's `gs` and loads the kernel's flags first,
+/// and swaps back last (see `user`); `iretq` gives the program its flags
+/// back.
 #[unsafe(naked)]
 unsafe extern "C" fn irq_common() {
     naked_asm!(
+        // The interrupted CS, above the vector, the error code and RIP.
+        "test qword ptr [rsp + 24], 3",
+        "jz 2f",
+        "swapgs",
+        // The kernel's flags (bit 1 only): nothing the program set, AC
+        // above all (it would switch SMAP off), reaches the handler.
+        "push 2",
+        "popfq",
+        "2:",
         "push rax", "push rbx", "push rcx", "push rdx", "push rsi", "push rdi", "push rbp",
         "push r8", "push r9", "push r10", "push r11", "push r12", "push r13", "push r14", "push r15",
         "mov rdi, rsp",
@@ -151,6 +171,10 @@ unsafe extern "C" fn irq_common() {
         "pop r15", "pop r14", "pop r13", "pop r12", "pop r11", "pop r10", "pop r9", "pop r8",
         "pop rbp", "pop rdi", "pop rsi", "pop rdx", "pop rcx", "pop rbx", "pop rax",
         "add rsp, 16",
+        "test qword ptr [rsp + 8], 3",
+        "jz 3f",
+        "swapgs",
+        "3:",
         "iretq",
         dispatch = sym dispatch,
     )
@@ -213,5 +237,25 @@ mod tests {
         }
         assert!(note_unexpected(&counts, 100));
         assert!(!note_unexpected(&counts, 101), "counted per vector");
+    }
+
+    /// `test qword ptr [rsp + 24], 3; jz +6; swapgs; push 2; popfq`: from
+    /// ring 3, to the kernel's `gs` and flags.
+    const FROM_RING_3: [u8; 17] = [
+        0x48, 0xF7, 0x44, 0x24, 0x18, 0x03, 0x00, 0x00, 0x00, 0x74, 0x06, 0x0F, 0x01, 0xF8, 0x6A,
+        0x02, 0x9D,
+    ];
+
+    #[test]
+    fn an_interrupt_of_ring_3_gets_the_kernel_s_gs_and_flags() {
+        // SAFETY: reads the kernel's own code.
+        let code = unsafe { *(irq_common as *const [u8; 128]) };
+        assert_eq!(code[..17], FROM_RING_3, "first thing");
+        // Before `iretq`: `test qword ptr [rsp + 8], 3; jz +3; swapgs`.
+        let back = [
+            0x48, 0xF7, 0x44, 0x24, 0x08, 0x03, 0x00, 0x00, 0x00, 0x74, 0x03, 0x0F, 0x01, 0xF8,
+            0x48, 0xCF,
+        ];
+        assert!(code.windows(back.len()).any(|w| w == back), "last thing");
     }
 }
