@@ -54,6 +54,10 @@ impl PhysMem for LinearMem<'_> {
         unsafe { core::ptr::write_bytes((PHYS_OFFSET + p) as *mut u8, 0, PAGE as usize) };
         Some(p)
     }
+
+    fn free_frame(&mut self, phys: u64) {
+        self.0.free(phys, 1);
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
