@@ -6,11 +6,11 @@
 
 use crate::mm::{self, MemStats, frame::FRAME_SIZE};
 use crate::mounts::KernelVfs;
-use crate::{arch, console, klog, klogln, power, proc, rtc, tty, usb};
+use crate::{arch, console, klog, klogln, power, proc, rtc, tty};
 use alloc::vec::Vec;
 use relay_abi::WaitStatus;
 use shell::{Console, MemInfo, Shell, System};
-use vfs::{Cwd, Env, Errno, Vfs};
+use vfs::{Env, Errno, Vfs};
 
 /// The screen and serial for output; the USB keyboards and COM1 for input.
 #[derive(Default)]
@@ -23,11 +23,8 @@ impl Console for KernelConsole {
             if let Some(b) = tty::pop() {
                 return Some(b);
             }
-            // Nothing typed: time for the work that may wait (a keyboard
-            // plugged in, the Caps Lock LED), then sleep until the next
-            // tick.
-            usb::service();
-            arch::wait_for_interrupt();
+            // Nothing typed: the idle task polls until something is.
+            proc::wait_for_input();
         }
     }
 
@@ -109,13 +106,15 @@ impl Env for KernelEnv {
     }
 }
 
-/// Runs the shell over the kernel's mount table (the root at `/`, the
-/// programs at `/bin`), starting in `cwd` (spec §4.4 step 11). Never
-/// returns.
-pub fn run_shell(cwd: Cwd, test_mode: bool) -> ! {
-    let mut vfs = KernelVfs::new(cwd);
+/// Process 1 (spec §4.4 step 11): the shell over the kernel's mount table
+/// (the root at `/`, the programs at `/bin`); `test_mode` is 1 for
+/// `test=1`. Never returns.
+pub extern "C" fn shell(test_mode: u64) -> ! {
+    let mut vfs = KernelVfs;
     let mut console = KernelConsole;
-    let mut system = KernelSystem { test_mode };
+    let mut system = KernelSystem {
+        test_mode: test_mode != 0,
+    };
     Shell::new(&mut vfs, &mut console, &mut system).run();
     // `run` returns only if `reboot` or `poweroff` do, which they do not.
     arch::halt_forever()

@@ -93,6 +93,12 @@ pub fn set_kernel_stack(top: u64) {
     unsafe { TSS.privilege_stack_table[0] = VirtAddr::new(top) };
 }
 
+/// TSS `rsp0`, as `set_kernel_stack` left it.
+pub fn kernel_stack() -> u64 {
+    // SAFETY: a plain read on one CPU.
+    unsafe { TSS.privilege_stack_table[0].as_u64() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

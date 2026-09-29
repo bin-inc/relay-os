@@ -1,7 +1,7 @@
 //! The console's input (user-space gate §6.3): one queue for every source,
 //! the USB keyboards and COM1, filled by `poll`. `poll` never waits, so it
-//! can run wherever the kernel holds nothing: in the console's idle loop
-//! and whenever a command asks whether Ctrl-C was pressed.
+//! can run wherever the kernel holds nothing: in the idle task, and
+//! whenever the in-kernel shell reads or asks whether Ctrl-C was pressed.
 
 use crate::input::InputQueue;
 use crate::{serial, usb};
@@ -27,6 +27,11 @@ pub fn poll() {
 /// The oldest byte typed.
 pub fn pop() -> Option<u8> {
     INPUT.lock().pop()
+}
+
+/// Whether anything typed waits to be read.
+pub fn has_input() -> bool {
+    !INPUT.lock().is_empty()
 }
 
 /// Whether a Ctrl-C is waiting; if so, it and what was typed before it are

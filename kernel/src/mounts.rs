@@ -42,30 +42,19 @@ pub fn is_locked() -> bool {
     MOUNTS.is_locked()
 }
 
-/// The mount table as the in-kernel shell's `Vfs`, with the shell's own
-/// current directory.
-pub struct KernelVfs {
-    cwd: Cwd,
-}
+/// The mount table as the in-kernel shell's `Vfs`, with the current
+/// directory of the process it works for.
+pub struct KernelVfs;
 
 impl KernelVfs {
-    pub fn new(cwd: Cwd) -> KernelVfs {
-        KernelVfs { cwd }
-    }
-
-    /// Its current directory, for a program it starts.
-    pub fn current(&self) -> &Cwd {
-        &self.cwd
-    }
-
     fn with<R>(&mut self, f: impl FnOnce(&mut MountTable) -> R) -> R {
-        with(&mut self.cwd, f)
+        crate::proc::with_cwd(|cwd| with(cwd, f))
     }
 }
 
 impl Vfs for KernelVfs {
     fn cwd(&self) -> Vec<u8> {
-        with(&mut self.cwd.clone(), |t| t.cwd())
+        crate::proc::with_cwd(|cwd| with(cwd, |t| t.cwd()))
     }
     fn chdir(&mut self, path: &[u8]) -> Result<(), Errno> {
         self.with(|t| t.chdir(path))

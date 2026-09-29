@@ -146,7 +146,7 @@ pub fn kernel_main(info: &'static BootInfo) -> ! {
     let mut vfs = vfs::MountTable::new(root);
     system::mount(info, &mut vfs);
     let root = mounts::init(vfs);
-    session::run_shell(root, cmdline.test_mode)
+    proc::start(session::shell, u64::from(cmdline.test_mode), root)
 }
 
 /// `check=timer`: the 1 kHz tick measured against the RTC's seconds.

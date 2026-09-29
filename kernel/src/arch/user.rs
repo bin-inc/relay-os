@@ -1,5 +1,5 @@
-//! Ring 3 on x86_64 (user-space gate §5.3, §6.2): the `syscall` entry, going
-//! into a program and coming back out of it.
+//! Ring 3 on x86_64 (user-space gate §5.3, §6.2): the `syscall` entry, and
+//! going into a program the first time.
 //!
 //! - **`syscall`** jumps to `syscall_entry` with interrupts, direction,
 //!   trap and alignment-check flags cleared (`SFMASK`). The stub reaches
@@ -10,17 +10,16 @@
 //!   returns with `sysret`, but only to a canonical address: on Intel CPUs
 //!   `sysret` to a non-canonical `rcx` faults in ring 0 with the program's
 //!   stack pointer, so such a program is killed instead.
-//! - **`enter`** saves the kernel's callee-saved registers and stack pointer
-//!   (the waiting kernel code), then goes to ring 3 with `iretq`; **`leave`**
-//!   goes back to that kernel code from the program's kernel stack, which
-//!   is abandoned, with the kernel's flags. `exit` and a program's fault
-//!   end that way.
+//! - **`enter`** goes to ring 3 at a program's entry point with `iretq`,
+//!   the first time the program runs (a new process's first frame calls it,
+//!   see `context`). After that a program leaves the kernel only the way
+//!   it came in: returning from a system call or an interrupt.
 //!
 //! A program sets the flags it likes (`popfq`), and neither `syscall` nor
 //! an exception clears all of them: `SFMASK` clears the ones the kernel
 //! must not run with (NT would make the next `iretq` fault in ring 0; AC
-//! would switch SMAP off), and `leave` loads the kernel's own flags, so
-//! nothing of the program's reaches the code that waited for it.
+//! would switch SMAP off), and every switch between processes checks that
+//! none of them reached the kernel (`context`).
 //!
 //! **`gs` and the flags.** The kernel always runs with its own `gs` base
 //! (the per-CPU block) and the program's (always 0: nothing lets a program
@@ -35,16 +34,14 @@
 //! on every CPU, where `clac` exists only with SMAP.
 
 use super::gdt::{KERNEL_CODE, KERNEL_DATA, USER_CODE, USER_DATA};
+use crate::exec::Entry;
 use core::arch::naked_asm;
-use x86_64::instructions::interrupts;
-use x86_64::registers::control::{Cr3, Cr3Flags};
+use x86_64::VirtAddr;
 use x86_64::registers::model_specific::{
     Efer, EferFlags, GsBase, KernelGsBase, LStar, Msr, SFMask, Star,
 };
 use x86_64::registers::rflags::RFlags;
 use x86_64::structures::gdt::SegmentSelector;
-use x86_64::structures::paging::PhysFrame;
-use x86_64::{PhysAddr, VirtAddr};
 
 /// The flags `syscall` clears (spec §6.2): no interrupts until the stub is
 /// on the kernel stack, and the direction, trap, alignment-check and
@@ -54,9 +51,6 @@ pub const SFMASK: RFlags = RFlags::INTERRUPT_FLAG
     .union(RFlags::TRAP_FLAG)
     .union(RFlags::ALIGNMENT_CHECK)
     .union(RFlags::NESTED_TASK);
-
-/// The kernel's flags when `leave` goes back: only bit 1, always set.
-const KERNEL_RFLAGS: u64 = 0x2;
 
 /// Flags a program may set that the kernel must never run with.
 const PROGRAM_FLAGS: RFlags = RFlags::TRAP_FLAG
@@ -108,17 +102,6 @@ pub struct SyscallFrame {
     pub rsp: u64,
 }
 
-/// Where a program starts (spec §5.3), in the order `enter` reads it.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct UserEntry {
-    pub ip: u64,
-    pub sp: u64,
-    pub rdi: u64,
-    pub rsi: u64,
-    pub rdx: u64,
-}
-
 /// Whether `addr` is canonical: bits 63-47 all equal.
 pub fn is_canonical(addr: u64) -> bool {
     let top = addr >> 47;
@@ -163,67 +146,44 @@ pub fn init() {
     }
 }
 
-/// Runs a program: `entry` in the address space whose PML4 is at `pml4`,
-/// with `kernel_stack` (its top) for its system calls, interrupts and
-/// faults. Returns once something calls `leave(waiter)`, with the kernel's
-/// own tables (`kernel_pml4`) back in CR3 and interrupts as they were.
-/// `waiter` is where `enter` saves the stack pointer to go back to.
-///
-/// # Safety
-/// `waiter` must stay valid until `run` returns, and only this program's
-/// `leave` may use it; `pml4` must map the kernel as the current tables do.
-pub unsafe fn run(
-    entry: &UserEntry,
-    kernel_stack: u64,
-    pml4: u64,
-    kernel_pml4: u64,
-    waiter: *mut u64,
-) {
-    let enabled = interrupts::are_enabled();
-    interrupts::disable();
-    super::gdt::set_kernel_stack(kernel_stack);
-    // SAFETY: interrupts are off and no system call is running, so nothing
-    // reads the per-CPU block now. The page tables map the kernel as the
-    // current ones do (the upper half is shared).
-    unsafe {
-        PER_CPU.kernel_rsp = kernel_stack;
-        Cr3::write(
-            PhysFrame::containing_address(PhysAddr::new(pml4)),
-            Cr3Flags::empty(),
-        );
-        enter(waiter, entry);
-        Cr3::write(
-            PhysFrame::containing_address(PhysAddr::new(kernel_pml4)),
-            Cr3Flags::empty(),
-        );
-    }
-    // A kernel bug if the program's flags came back with it.
-    debug_assert!(
-        !x86_64::registers::rflags::read().intersects(PROGRAM_FLAGS),
-        "a program's flags reached the kernel"
-    );
-    if enabled {
-        interrupts::enable();
-    }
+/// Points the CPU at `top` as the kernel stack for the next process's
+/// system calls (the per-CPU block) and for its interrupts and exceptions
+/// (TSS `rsp0`).
+pub fn set_kernel_stack(top: u64) {
+    // SAFETY: interrupts are off during a switch and no system call is
+    // running, so nothing reads the per-CPU block now.
+    unsafe { PER_CPU.kernel_rsp = top };
+    super::gdt::set_kernel_stack(top);
 }
 
-/// Saves the callee-saved registers and the stack pointer in `*waiter`,
-/// then goes to ring 3 at `entry` with the program's `gs`: its stack,
-/// `rdi`, `rsi`, `rdx`, interrupts on, every other register zero. Returns
-/// when `leave(waiter)` runs.
+/// Whether `syscall` and interrupts from ring 3 would land on the same
+/// kernel stack.
+pub fn kernel_stacks_agree() -> bool {
+    // SAFETY: a plain read, as above.
+    unsafe { PER_CPU.kernel_rsp == super::gdt::kernel_stack() }
+}
+
+/// Goes to ring 3 at `entry` (spec §5.3) with the program's `gs`: its
+/// stack, `rdi` = the arguments' address, `rsi` their length, `rdx` their
+/// count, interrupts on, every other register zero. The kernel stack this
+/// is called on is where the program's system calls, interrupts and
+/// faults arrive from now on.
+///
+/// # Safety
+/// The program's address space is in CR3 and its kernel stack is set
+/// (`set_kernel_stack`).
 #[unsafe(naked)]
-unsafe extern "C" fn enter(waiter: *mut u64, entry: *const UserEntry) {
+pub unsafe extern "C" fn enter(entry: *const Entry) -> ! {
     naked_asm!(
-        "push rbp", "push rbx", "push r12", "push r13", "push r14", "push r15",
-        "mov [rdi], rsp",
+        "cli",
         "push {ss}",
-        "push qword ptr [rsi + 8]",
+        "push qword ptr [rdi + {sp}]",
         "push {rflags}",
         "push {cs}",
-        "push qword ptr [rsi]",
-        "mov rdi, [rsi + 16]",
-        "mov rdx, [rsi + 32]",
-        "mov rsi, [rsi + 24]",
+        "push qword ptr [rdi + {ip}]",
+        "mov rsi, [rdi + {len}]",
+        "mov rdx, [rdi + {argc}]",
+        "mov rdi, [rdi + {args}]",
         "xor eax, eax", "xor ebx, ebx", "xor ecx, ecx", "xor ebp, ebp",
         "xor r8d, r8d", "xor r9d, r9d", "xor r10d, r10d", "xor r11d, r11d",
         "xor r12d, r12d", "xor r13d, r13d", "xor r14d, r14d", "xor r15d, r15d",
@@ -232,31 +192,11 @@ unsafe extern "C" fn enter(waiter: *mut u64, entry: *const UserEntry) {
         ss = const USER_DATA as u64,
         cs = const USER_CODE as u64,
         rflags = const USER_RFLAGS,
-    )
-}
-
-/// Goes back to the kernel code waiting in `enter(waiter, _)`, on its
-/// stack, with interrupts off and the kernel's flags. The stack this runs
-/// on is abandoned.
-///
-/// # Safety
-/// `waiter` must be what `enter` saved, and that `enter` must not have
-/// returned yet.
-#[unsafe(naked)]
-pub unsafe extern "C" fn leave(waiter: *mut u64) -> ! {
-    naked_asm!(
-        "cli",
-        "mov rsp, [rdi]",
-        "pop r15",
-        "pop r14",
-        "pop r13",
-        "pop r12",
-        "pop rbx",
-        "pop rbp",
-        "push {rflags}",
-        "popfq",
-        "ret",
-        rflags = const KERNEL_RFLAGS,
+        ip = const core::mem::offset_of!(Entry, ip),
+        sp = const core::mem::offset_of!(Entry, sp),
+        args = const core::mem::offset_of!(Entry, args),
+        len = const core::mem::offset_of!(Entry, args_len),
+        argc = const core::mem::offset_of!(Entry, argc),
     )
 }
 
@@ -318,12 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_reads_the_entry_at_these_offsets() {
-        assert_eq!(offset_of!(UserEntry, ip), 0);
-        assert_eq!(offset_of!(UserEntry, sp), 8);
-        assert_eq!(offset_of!(UserEntry, rdi), 16);
-        assert_eq!(offset_of!(UserEntry, rsi), 24);
-        assert_eq!(offset_of!(UserEntry, rdx), 32);
+    fn the_per_cpu_block_is_where_syscall_entry_looks() {
         assert_eq!(offset_of!(PerCpu, kernel_rsp), 0);
         assert_eq!(offset_of!(PerCpu, user_rsp), 8);
     }
@@ -357,7 +292,6 @@ mod tests {
             (1 << 9) | (1 << 10) | (1 << 8) | (1 << 18) | (1 << 14)
         );
         assert_eq!(USER_RFLAGS, (1 << 9) | 2, "interrupts on, nothing else");
-        assert_eq!(KERNEL_RFLAGS, 2, "leave: nothing of the program's");
     }
 
     #[test]

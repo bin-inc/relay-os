@@ -28,7 +28,9 @@ pub const ARGS_MAX: usize = 64 * 1024;
 
 /// Where a program starts: its first instruction, its stack pointer (16-byte
 /// aligned, below the arguments), and its arguments' address, length and
-/// count (spec §5.3).
+/// count (spec §5.3). `arch::user::enter` reads it (`repr(C)`) and puts
+/// each where its architecture says.
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Entry {
     pub ip: u64,

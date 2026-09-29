@@ -1,6 +1,7 @@
-//! x86_64-specific setup: segmentation, interrupt table, CPU control, and
-//! ring 3.
+//! x86_64-specific setup: segmentation, interrupt table, CPU control, ring
+//! 3 and the context switch.
 
+pub mod context;
 pub mod fault;
 pub mod gdt;
 pub mod idt;
