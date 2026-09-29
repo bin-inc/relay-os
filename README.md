@@ -2,7 +2,9 @@
 
 A small operating system written from scratch in Rust. Milestone 1 boots
 from a USB stick on an Intel NUC 12 Pro, shows a terminal over HDMI and
-stores files on the stick's ext2 root filesystem.
+stores files on the stick's ext2 root filesystem. Milestone 2 runs programs
+from `/bin` in ring 3, each in its own address space: the shell runs a
+name it does not know (`t-args a b`) as a program.
 
 Design: `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`
 (milestone 1) and `docs/superpowers/specs/2026-09-29-user-space-gate-design.md`
@@ -82,11 +84,12 @@ the `e2e-logs` artefact. Hardware checks on the NUC stay manual
 | `crates/usb` | xHCI host controller driver, HID boot keyboard and USB mass storage (BOT, SCSI), over a `Hal` trait |
 | `crates/heap` | The heap allocator of the kernel (and, later, of user programs) |
 | `crates/crc32` | CRC-32, for GPT and `system.img` |
-| `crates/relay-abi` | The system-call ABI: version, call numbers, error numbers, result encoding |
+| `crates/relay-abi` | The system-call ABI: version, call numbers, error numbers, result encoding, `WaitStatus` |
 | `crates/relay-rt` | The runtime of user programs: entry, arguments, system calls, panic handler, ABI note, linker script |
 | `crates/sysimg` | The `system.img` archive: format, writer, reader, and `SysImgFs`, mounted at `/bin` |
+| `crates/elf` | The rules a program's ELF file must follow; the kernel's `spawn` and xtask's build both check them |
 | `userland/` | User programs: `tests/` holds the `t-*` test programs |
-| `xtask/` | Build, image, QEMU, test and flash tool; it builds `userland/`, checks each program with `readelf` and packs `system.img` |
+| `xtask/` | Build, image, QEMU, test and flash tool; it builds `userland/`, checks each program with `readelf` and the kernel's rules, and packs `system.img` |
 | `rootfs/` | Files copied into `/`, among them the NUC check scripts in `root/checks/` |
 | `tests/e2e/` | QEMU end-to-end scenarios |
 | `docs/hardware-test.md` | Manual checklist for the NUC |

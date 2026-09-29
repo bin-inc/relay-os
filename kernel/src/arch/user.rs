@@ -13,8 +13,14 @@
 //! - **`enter`** saves the kernel's callee-saved registers and stack pointer
 //!   (the waiting kernel code), then goes to ring 3 with `iretq`; **`leave`**
 //!   goes back to that kernel code from the program's kernel stack, which
-//!   is abandoned. `exit` and (with plan 2's faults) a program's fault end
-//!   that way.
+//!   is abandoned, with the kernel's flags. `exit` and a program's fault
+//!   end that way.
+//!
+//! A program sets the flags it likes (`popfq`), and neither `syscall` nor
+//! an exception clears all of them: `SFMASK` clears the ones the kernel
+//! must not run with (NT would make the next `iretq` fault in ring 0; AC
+//! would switch SMAP off), and `leave` loads the kernel's own flags, so
+//! nothing of the program's reaches the code that waited for it.
 //!
 //! The kernel uses `gs` only in `syscall_entry`. Because `exit` leaves
 //! from inside a call, before the stub's second `swapgs`, `run` sets both
@@ -25,7 +31,7 @@ use core::arch::naked_asm;
 use x86_64::instructions::interrupts;
 use x86_64::registers::control::{Cr3, Cr3Flags};
 use x86_64::registers::model_specific::{
-    Efer, EferFlags, GsBase, KernelGsBase, LStar, SFMask, Star,
+    Efer, EferFlags, GsBase, KernelGsBase, LStar, Msr, SFMask, Star,
 };
 use x86_64::registers::rflags::RFlags;
 use x86_64::structures::gdt::SegmentSelector;
@@ -33,12 +39,25 @@ use x86_64::structures::paging::PhysFrame;
 use x86_64::{PhysAddr, VirtAddr};
 
 /// The flags `syscall` clears (spec §6.2): no interrupts until the stub is
-/// on the kernel stack, and the direction, trap and alignment-check flags
-/// in their kernel state.
+/// on the kernel stack, and the direction, trap, alignment-check and
+/// nested-task flags in their kernel state.
 pub const SFMASK: RFlags = RFlags::INTERRUPT_FLAG
     .union(RFlags::DIRECTION_FLAG)
     .union(RFlags::TRAP_FLAG)
-    .union(RFlags::ALIGNMENT_CHECK);
+    .union(RFlags::ALIGNMENT_CHECK)
+    .union(RFlags::NESTED_TASK);
+
+/// The kernel's flags when `leave` goes back: only bit 1, always set.
+const KERNEL_RFLAGS: u64 = 0x2;
+
+/// Flags a program may set that the kernel must never run with.
+const PROGRAM_FLAGS: RFlags = RFlags::TRAP_FLAG
+    .union(RFlags::DIRECTION_FLAG)
+    .union(RFlags::ALIGNMENT_CHECK)
+    .union(RFlags::NESTED_TASK);
+
+/// `sysenter`'s code segment, stack and entry MSRs.
+const IA32_SYSENTER: [u32; 3] = [0x174, 0x175, 0x176];
 
 /// A program starts with only the interrupt flag (and bit 1, always set).
 const USER_RFLAGS: u64 = 0x202;
@@ -112,6 +131,13 @@ pub fn init() {
     .expect("the GDT's segments are in the order sysret needs");
     LStar::write(VirtAddr::new(syscall_entry as *const () as u64));
     SFMask::write(SFMASK);
+    // `sysenter` is legal in 64-bit mode on Intel CPUs: with a code segment
+    // of 0 it is a general protection fault, whatever the firmware left.
+    for msr in IA32_SYSENTER {
+        // SAFETY: these MSRs exist on every x86_64 CPU; zero disables
+        // `sysenter`.
+        unsafe { Msr::new(msr).write(0) };
+    }
 }
 
 /// Runs a program: `entry` in the address space whose PML4 is at `pml4`,
@@ -150,6 +176,11 @@ pub unsafe fn run(
             Cr3Flags::empty(),
         );
     }
+    // A kernel bug if the program's flags came back with it.
+    debug_assert!(
+        !x86_64::registers::rflags::read().intersects(PROGRAM_FLAGS),
+        "a program's flags reached the kernel"
+    );
     if enabled {
         interrupts::enable();
     }
@@ -183,7 +214,8 @@ unsafe extern "C" fn enter(waiter: *mut u64, entry: *const UserEntry) {
 }
 
 /// Goes back to the kernel code waiting in `enter(waiter, _)`, on its
-/// stack, with interrupts off. The stack this runs on is abandoned.
+/// stack, with interrupts off and the kernel's flags. The stack this runs
+/// on is abandoned.
 ///
 /// # Safety
 /// `waiter` must be what `enter` saved, and that `enter` must not have
@@ -199,7 +231,10 @@ pub unsafe extern "C" fn leave(waiter: *mut u64) -> ! {
         "pop r12",
         "pop rbx",
         "pop rbp",
+        "push {rflags}",
+        "popfq",
         "ret",
+        rflags = const KERNEL_RFLAGS,
     )
 }
 
@@ -294,7 +329,12 @@ mod tests {
 
     #[test]
     fn syscall_clears_the_flags_the_kernel_needs_clear() {
-        assert_eq!(SFMASK.bits(), (1 << 9) | (1 << 10) | (1 << 8) | (1 << 18));
+        // IF, DF, TF, AC and NT.
+        assert_eq!(
+            SFMASK.bits(),
+            (1 << 9) | (1 << 10) | (1 << 8) | (1 << 18) | (1 << 14)
+        );
         assert_eq!(USER_RFLAGS, (1 << 9) | 2, "interrupts on, nothing else");
+        assert_eq!(KERNEL_RFLAGS, 2, "leave: nothing of the program's");
     }
 }

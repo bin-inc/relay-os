@@ -17,6 +17,12 @@ pub const STACK_TOP: u64 = 0x7FFF_FFFF_F000;
 pub const STACK_PAGES: u64 = 255;
 /// The lowest address of the stack; the page below it is the guard page.
 pub const STACK_BOTTOM: u64 = STACK_TOP - STACK_PAGES * PAGE;
+/// Whether `address` is in the stack's guard page: a page fault there is
+/// a stack overflow.
+pub fn in_guard_page(address: u64) -> bool {
+    (STACK_BOTTOM - PAGE..STACK_BOTTOM).contains(&address)
+}
+
 /// The most argument bytes a program gets (spec §5.3).
 pub const ARGS_MAX: usize = 64 * 1024;
 
@@ -198,6 +204,15 @@ mod tests {
         assert_eq!(s.user_page(&mut m, STACK_BOTTOM - 1), None, "guard page");
         assert_eq!(s.user_page(&mut m, STACK_TOP), None, "the top page");
         s.destroy(&mut m);
+    }
+
+    #[test]
+    fn only_the_guard_page_is_an_overflow() {
+        assert!(in_guard_page(STACK_BOTTOM - 8));
+        assert!(in_guard_page(STACK_BOTTOM - PAGE));
+        assert!(!in_guard_page(STACK_BOTTOM));
+        assert!(!in_guard_page(STACK_BOTTOM - PAGE - 1));
+        assert!(!in_guard_page(0));
     }
 
     #[test]

@@ -57,6 +57,12 @@ storage: root on 00:02.0 port 2, the disk with the boot partition 52454C41-5900-
 + ls -l /bin
 total 20
 -rwxr-xr-x 1 root root 19688 Sep 29 08:34 t-args
++ t-args a 'b c' ''
+[1] a
+[2] b c
+[3] 
++ t-fault null-read
+relay-sh: t-fault: killed (page fault at 0x0, read, ip 0x400205)
 + mkdir -p /root/notes/old
 + echo remember me > /root/notes/a
 + echo and me >> /root/notes/a

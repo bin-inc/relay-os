@@ -803,10 +803,17 @@ does. Facts found before the spec was first merged are already in its body.
      clears NT, which would otherwise make the next `iretq` into a program
      fault in ring 0 once an `exit` carried it back to the kernel, as Linux
      found in 2014; the way back to the waiting kernel (`leave`) loads the
-     kernel's own flags, so a program's AC never reaches ring 0 (it would
-     switch SMAP off in plan 3); and a debug assertion checks that no TF,
-     DF, AC or NT came back. The `sysenter` MSRs are zeroed, so `sysenter`
+     kernel's own flags, so none of a program's flags reach the code that
+     waited for it; and a debug assertion checks that no TF, DF, AC or NT
+     came back. Interrupts and exceptions taken in ring 3 still run their
+     handlers with the program's AC (their gates clear only IF, TF, NT and
+     RF, and the stubs clear DF): harmless without SMAP, but when plan 3
+     turns SMAP on, AC would switch it off in those handlers, so each
+     entry stub must then clear AC first (`clac`, only on a CPU that has
+     SMAP, where it exists). The `sysenter` MSRs are zeroed, so `sysenter`
      is a general protection fault whatever the firmware left in them.
+     (Corrected after the final review: the plan's decision said a
+     program's AC never reaches ring 0.)
    - **A return to a non-canonical address** (§6.2). A system call whose
      return address is not canonical kills the program as a general
      protection fault at that address, instead of returning with `iretq`:

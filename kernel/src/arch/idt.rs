@@ -1,7 +1,7 @@
-//! Interrupt descriptor table. Every CPU exception is fatal in milestone 1:
-//! the entry stubs save all registers and call `exception_dispatch`, which
-//! draws the panic screen. Hardware interrupts have their own, returning
-//! stubs in `irq`.
+//! Interrupt descriptor table. The entry stubs save all registers and call
+//! `exception_dispatch`. An exception in ring 3 ends the program that
+//! caused it (user-space gate §11.1); any other draws the panic screen.
+//! Hardware interrupts have their own, returning stubs in `irq`.
 //!
 //! Entry stubs are naked functions (stable Rust), not the nightly-only
 //! `x86-interrupt` ABI.
@@ -197,6 +197,12 @@ unsafe extern "C" fn exception_common() {
 }
 
 extern "C" fn exception_dispatch(frame: &ExceptionFrame) -> ! {
+    if frame.cs & 3 == 3 {
+        let cr2 = x86_64::registers::control::Cr2::read_raw();
+        if let Some(f) = super::fault::classify(frame.vector, frame.error_code, cr2) {
+            crate::proc::fault(f.kind, f.detail, f.address, frame.rip);
+        }
+    }
     crate::panic_screen::exception(frame)
 }
 
