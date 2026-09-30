@@ -6,7 +6,7 @@
 
 use alloc::vec::Vec;
 use spin::Mutex;
-use vfs::{Cwd, DirEntry, Errno, MountTable, Node, Stat, StatFs, Vfs};
+use vfs::{Cwd, DirEntry, Errno, FileType, MountTable, Node, Stat, StatFs, Vfs};
 
 /// The table behind its lock.
 struct Mounts(Option<MountTable>);
@@ -67,6 +67,9 @@ impl Vfs for KernelVfs {
     }
     fn read_dir(&mut self, node: Node) -> Result<Vec<DirEntry>, Errno> {
         self.with(|t| t.read_dir(node))
+    }
+    fn entry_kind(&mut self, dir: Node, entry: &DirEntry) -> Result<FileType, Errno> {
+        self.with(|t| t.entry_kind(dir, entry))
     }
     fn read_link(&mut self, node: Node) -> Result<Vec<u8>, Errno> {
         self.with(|t| t.read_link(node))

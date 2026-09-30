@@ -33,6 +33,9 @@ pub trait Vfs {
     fn lookup(&mut self, path: &[u8]) -> Result<Node, Errno>;
     fn stat(&mut self, node: Node) -> Result<Stat, Errno>;
     fn read_dir(&mut self, node: Node) -> Result<Vec<DirEntry>, Errno>;
+    /// What kind of file `entry`, one of `dir`'s entries, is. A name
+    /// something is mounted on, `.` and `..` are directories.
+    fn entry_kind(&mut self, dir: Node, entry: &DirEntry) -> Result<FileType, Errno>;
     fn read_link(&mut self, node: Node) -> Result<Vec<u8>, Errno>;
     fn read_at(&mut self, node: Node, offset: u64, buf: &mut [u8]) -> Result<usize, Errno>;
     fn write_at(&mut self, node: Node, offset: u64, buf: &[u8]) -> Result<usize, Errno>;
@@ -434,6 +437,20 @@ impl Vfs for MountTable {
             }
         }
         Ok(entries)
+    }
+
+    fn entry_kind(&mut self, dir: Node, entry: &DirEntry) -> Result<FileType, Errno> {
+        if entry.name == b"." || entry.name == b".." {
+            return Ok(FileType::Directory);
+        }
+        if self.mounted_at_name(dir, &entry.name).is_some() {
+            return Ok(FileType::Directory);
+        }
+        let node = Node {
+            mount: dir.mount,
+            ino: entry.ino,
+        };
+        Ok(self.stat(node)?.kind)
     }
 
     fn read_link(&mut self, node: Node) -> Result<Vec<u8>, Errno> {
@@ -997,6 +1014,155 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    /// An empty read-only filesystem whose root is inode 7, as ext2's is 2:
+    /// the number means something else in the filesystem it is mounted in.
+    struct Seven;
+
+    impl FileSystem for Seven {
+        fn root(&self) -> Ino {
+            7
+        }
+        fn stat(&mut self, ino: Ino) -> Result<Stat, Errno> {
+            if ino != 7 {
+                return Err(Errno::ENOENT);
+            }
+            Ok(Stat {
+                ino,
+                kind: FileType::Directory,
+                perm: 0o755,
+                nlink: 2,
+                uid: 0,
+                gid: 0,
+                size: 0,
+                blocks: 0,
+                block_size: 4096,
+                atime: 0,
+                mtime: 0,
+                ctime: 0,
+            })
+        }
+        fn lookup(&mut self, _: Ino, name: &[u8]) -> Result<Ino, Errno> {
+            match name {
+                b"." | b".." => Ok(7),
+                _ => Err(Errno::ENOENT),
+            }
+        }
+        fn read_dir(&mut self, _: Ino) -> Result<Vec<DirEntry>, Errno> {
+            Ok(alloc::vec![
+                DirEntry {
+                    name: b".".to_vec(),
+                    ino: 7
+                },
+                DirEntry {
+                    name: b"..".to_vec(),
+                    ino: 7
+                },
+            ])
+        }
+        fn read_link(&mut self, _: Ino) -> Result<Vec<u8>, Errno> {
+            Err(Errno::EINVAL)
+        }
+        fn read_at(&mut self, _: Ino, _: u64, _: &mut [u8]) -> Result<usize, Errno> {
+            Err(Errno::EISDIR)
+        }
+        fn write_at(&mut self, _: Ino, _: u64, _: &[u8]) -> Result<usize, Errno> {
+            Err(Errno::EROFS)
+        }
+        fn truncate(&mut self, _: Ino, _: u64) -> Result<(), Errno> {
+            Err(Errno::EROFS)
+        }
+        fn touch(&mut self, _: Ino) -> Result<(), Errno> {
+            Err(Errno::EROFS)
+        }
+        fn create(&mut self, _: Ino, _: &[u8]) -> Result<Ino, Errno> {
+            Err(Errno::EROFS)
+        }
+        fn mkdir(&mut self, _: Ino, _: &[u8]) -> Result<Ino, Errno> {
+            Err(Errno::EROFS)
+        }
+        fn unlink(&mut self, _: Ino, _: &[u8]) -> Result<(), Errno> {
+            Err(Errno::EROFS)
+        }
+        fn rmdir(&mut self, _: Ino, _: &[u8]) -> Result<(), Errno> {
+            Err(Errno::EROFS)
+        }
+        fn rename(&mut self, _: Ino, _: &[u8], _: Ino, _: &[u8]) -> Result<(), Errno> {
+            Err(Errno::EROFS)
+        }
+        fn statfs(&mut self) -> Result<StatFs, Errno> {
+            Err(Errno::EINVAL)
+        }
+        fn sync(&mut self) -> Result<(), Errno> {
+            Ok(())
+        }
+        fn shutdown(&mut self) -> Result<(), Errno> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_mount_on_a_name_is_a_directory_whatever_its_number_means_below() {
+        let mut t = table();
+        // Inode 7 of the table's own MemFs is a file.
+        let root = t.lookup(b"/").unwrap();
+        let mut n = 0;
+        while n < 10 && t.stat(Node { mount: 0, ino: 7 }).is_err() {
+            t.create(format!("/f{n}").as_bytes()).unwrap();
+            n += 1;
+        }
+        assert_eq!(
+            t.stat(Node { mount: 0, ino: 7 }).unwrap().kind,
+            FileType::Regular
+        );
+        t.mount(b"/seven", Box::new(Seven)).unwrap();
+        let entry = t
+            .read_dir(root)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.name == b"seven")
+            .unwrap();
+        assert_eq!(entry.ino, 7);
+        assert_eq!(t.entry_kind(root, &entry), Ok(FileType::Directory));
+    }
+
+    #[test]
+    fn entry_kinds_come_from_the_entries_and_the_mounts() {
+        let mut t = table();
+        t.mount(b"/bin", Box::new(programs())).unwrap();
+        let root = t.lookup(b"/").unwrap();
+        let kinds: Vec<(Vec<u8>, FileType)> = t
+            .read_dir(root)
+            .unwrap()
+            .iter()
+            .map(|e| (e.name.clone(), t.entry_kind(root, e).unwrap()))
+            .collect();
+        for (name, kind) in [
+            (&b"."[..], FileType::Directory),
+            (b"..", FileType::Directory),
+            (b"etc", FileType::Directory),
+            (b"bin", FileType::Directory),
+        ] {
+            assert!(kinds.contains(&(name.to_vec(), kind)), "{name:?}");
+        }
+        let home = t.lookup(b"/root").unwrap();
+        let link = DirEntry {
+            name: b"link".to_vec(),
+            ino: t.lookup(b"/root/link").unwrap().ino,
+        };
+        assert_eq!(t.entry_kind(home, &link), Ok(FileType::Symlink));
+        let etc = t.lookup(b"/etc").unwrap();
+        let motd = DirEntry {
+            name: b"motd".to_vec(),
+            ino: t.lookup(b"/etc/motd").unwrap().ino,
+        };
+        assert_eq!(t.entry_kind(etc, &motd), Ok(FileType::Regular));
+        let bad = DirEntry {
+            name: b"x".to_vec(),
+            ino: 999,
+        };
+        assert_eq!(t.entry_kind(etc, &bad), Err(Errno::ENOENT));
     }
 
     #[test]

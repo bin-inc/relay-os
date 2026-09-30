@@ -1,9 +1,10 @@
 //! A process's file descriptors (user-space gate §5.4): 32 slots, each a
 //! shared reference to an open file, so a child `spawn` hands an fd to
-//! uses the same file as its parent. Plan 3a's files are the console and
-//! the in-kernel shell's output; plan 3b adds files of the VFS, milestone 3
-//! pipe ends.
+//! uses the same file as its parent, offset and all. The files are the
+//! console, the in-kernel shell's output and files of the VFS; milestone 3
+//! adds pipe ends.
 
+use crate::file::OpenFile;
 use alloc::sync::Arc;
 use relay_abi::FdMap;
 use relay_abi::spawn::SPAWN_FDS;
@@ -22,6 +23,8 @@ pub enum File {
     /// line says (a redirection, the screen, a script's transcript). Plan 4
     /// replaces the in-kernel shell and this with it.
     ShellOutput(u32),
+    /// A file of the VFS.
+    Vfs(OpenFile),
 }
 
 pub struct FdTable {
@@ -55,6 +58,33 @@ impl FdTable {
     /// Opens `file` as `fd` (below 32), closing what was there.
     pub fn set(&mut self, fd: usize, file: Arc<File>) {
         self.slots[fd] = Some(file);
+    }
+
+    /// Opens `file` as the lowest fd that is free; `EMFILE` if all 32 are
+    /// in use (spec §11.1).
+    pub fn insert(&mut self, file: Arc<File>) -> Result<u32, Errno> {
+        let fd = self
+            .slots
+            .iter()
+            .position(Option::is_none)
+            .ok_or(Errno::EMFILE)?;
+        self.slots[fd] = Some(file);
+        Ok(fd as u32)
+    }
+
+    /// Closes `fd`; the file, which lives on while anything else has it.
+    /// `EBADF` if `fd` is not open.
+    pub fn remove(&mut self, fd: u64) -> Result<Arc<File>, Errno> {
+        usize::try_from(fd)
+            .ok()
+            .and_then(|i| self.slots.get_mut(i))
+            .and_then(Option::take)
+            .ok_or(Errno::EBADF)
+    }
+
+    /// Every open file.
+    pub fn files(&self) -> impl Iterator<Item = &Arc<File>> {
+        self.slots.iter().flatten()
     }
 
     /// The file open as `fd`; `EBADF` if none is.
@@ -139,6 +169,27 @@ mod tests {
         assert!(!Arc::ptr_eq(before.get(1).unwrap(), after.get(1).unwrap()));
         assert!(Arc::ptr_eq(after.get(1).unwrap(), shell.get(1).unwrap()));
         assert_eq!(**before.get(1).unwrap(), File::ShellOutput(1));
+    }
+
+    #[test]
+    fn a_file_opened_takes_the_lowest_free_fd_up_to_32() {
+        let mut t = FdTable::shell();
+        let console = || Arc::new(File::Console);
+        assert_eq!(t.insert(console()), Ok(3));
+        assert_eq!(t.remove(1).map(|f| *f == File::ShellOutput(1)), Ok(true));
+        assert_eq!(t.insert(console()), Ok(1), "the lowest free one");
+        for fd in 4..32 {
+            assert_eq!(t.insert(console()), Ok(fd));
+        }
+        assert_eq!(t.insert(console()), Err(Errno::EMFILE));
+        assert_eq!(t.open(), 32);
+        assert_eq!(t.files().count(), 32);
+        assert!(t.remove(31).is_ok());
+        assert_eq!(t.remove(31).err(), Some(Errno::EBADF), "closed already");
+        for fd in [32, 1 << 32, u64::MAX] {
+            assert_eq!(t.remove(fd).err(), Some(Errno::EBADF), "{fd}");
+        }
+        assert_eq!(t.insert(console()), Ok(31));
     }
 
     #[test]

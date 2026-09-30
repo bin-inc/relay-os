@@ -12,6 +12,7 @@ pub mod cmdline;
 pub mod console;
 pub mod exec;
 pub mod fd;
+pub mod file;
 pub mod input;
 pub mod klog;
 pub mod line;

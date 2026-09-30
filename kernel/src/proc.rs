@@ -626,6 +626,7 @@ impl Caller for Current {
                     return unsafe { (*out.cast::<Out<'_>>())(n, bytes) };
                 }
             }
+            File::Vfs(ref open) => return open.write_all(&mut KernelVfs, bytes),
         }
         Ok(())
     }
