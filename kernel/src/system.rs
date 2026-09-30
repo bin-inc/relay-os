@@ -1,7 +1,7 @@
 //! The system archive (spec §4.3 of the user-space gate): the programs the
 //! loader read from `\EFI\RELAY\system.img`, checked and mounted read-only
 //! at `/bin`. Startup step 10 reports how that went, as `[ ok ] system:
-//! 33 programs, ABI 2` or `[FAIL] system: <reason>`; without an archive the
+//! 34 programs, ABI 2` or `[FAIL] system: <reason>`; without an archive the
 //! shell runs on, with nothing in `/bin`.
 
 use crate::console;

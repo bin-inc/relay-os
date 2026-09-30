@@ -210,10 +210,19 @@ pub fn write(fd: u32, bytes: &[u8]) -> Result<usize, u16> {
 }
 
 /// Writes all of `bytes` to `fd`, however many calls that takes.
-pub fn write_all(fd: u32, mut bytes: &[u8]) -> Result<(), u16> {
+pub fn write_all(fd: u32, bytes: &[u8]) -> Result<(), u16> {
+    write_all_by(|b| write(fd, b), bytes)
+}
+
+/// Writes all of `bytes` through `write`; a write that takes nothing is
+/// `ENOSPC`, as gnulib's `full_write` says of one (and `shell::Stdout`).
+fn write_all_by(
+    mut write: impl FnMut(&[u8]) -> Result<usize, u16>,
+    mut bytes: &[u8],
+) -> Result<(), u16> {
     while !bytes.is_empty() {
-        match write(fd, bytes)? {
-            0 => return Err(relay_abi::errno::EIO),
+        match write(bytes)? {
+            0 => return Err(relay_abi::errno::ENOSPC),
             n => bytes = &bytes[n.min(bytes.len())..],
         }
     }
@@ -337,5 +346,36 @@ pub struct Fd(pub u32);
 impl fmt::Write for Fd {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         write_all(self.0, s.as_bytes()).map_err(|_| fmt::Error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec::Vec;
+    use relay_abi::errno::{EIO, ENOSPC};
+
+    #[test]
+    fn a_write_that_takes_nothing_is_enospc() {
+        let mut got = Vec::new();
+        let mut room = 5;
+        let r = write_all_by(
+            |b| {
+                let n = b.len().min(room).min(3);
+                room -= n;
+                got.extend_from_slice(&b[..n]);
+                Ok(n)
+            },
+            b"abcdefgh",
+        );
+        assert_eq!(r, Err(ENOSPC));
+        assert_eq!(got, b"abcde", "everything that fitted, in pieces");
+        assert_eq!(
+            write_all_by(|_| Err(EIO), b"x"),
+            Err(EIO),
+            "the call's own error"
+        );
+        assert_eq!(write_all_by(|b| Ok(b.len()), b"all"), Ok(()));
+        assert_eq!(write_all_by(|_| Ok(0), b""), Ok(()), "nothing to write");
     }
 }

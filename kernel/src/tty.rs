@@ -117,12 +117,18 @@ pub fn sync_tees() {
 /// open for writing (`EBADF` otherwise, `EINVAL` for the console or the
 /// shell's outputs); `EBUSY` if 4 are pushed.
 pub fn push_tee(owner: u32, file: Arc<File>) -> Result<(), Errno> {
-    match &*file {
-        File::Vfs(open) if open.is_writable() => {}
-        File::Vfs(_) => return Err(Errno::EBADF),
-        File::Console | File::ShellOutput(_) => return Err(Errno::EINVAL),
-    }
+    tee_target(&file)?;
     TEES.lock().push(owner, file)
+}
+
+/// Whether `file` can be a tee: a file of the VFS open for writing
+/// (`EBADF` otherwise), not the console or the shell's outputs (`EINVAL`).
+fn tee_target(file: &File) -> Result<(), Errno> {
+    match file {
+        File::Vfs(open) if open.is_writable() => Ok(()),
+        File::Vfs(_) => Err(Errno::EBADF),
+        File::Console | File::ShellOutput(_) => Err(Errno::EINVAL),
+    }
 }
 
 /// Pops `owner`'s newest tee after writing what waits for it; the error of
@@ -205,4 +211,36 @@ pub fn take_interrupt() -> bool {
 /// lock is held across a switch).
 pub fn is_locked() -> bool {
     INPUT.is_locked()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::file;
+    use alloc::boxed::Box;
+    use relay_abi::file::{OPEN_CREATE, OPEN_READ, OPEN_WRITE};
+    use vfs::{Env, MemFs, MountTable};
+
+    struct Clock;
+
+    impl Env for Clock {
+        fn now(&self) -> u64 {
+            0
+        }
+        fn log(&self, _: &str) {}
+    }
+
+    #[test]
+    fn a_tee_is_a_file_open_for_writing() {
+        let mut t = MountTable::new(Box::new(MemFs::new(Box::new(Clock))));
+        let open = |t: &mut MountTable, flags| File::Vfs(file::open(t, b"/log", flags).unwrap());
+        let written = open(&mut t, OPEN_WRITE | OPEN_CREATE);
+        let read_write = open(&mut t, OPEN_READ | OPEN_WRITE);
+        let read_only = open(&mut t, OPEN_READ);
+        assert_eq!(tee_target(&written), Ok(()));
+        assert_eq!(tee_target(&read_write), Ok(()));
+        assert_eq!(tee_target(&read_only), Err(Errno::EBADF));
+        assert_eq!(tee_target(&File::Console), Err(Errno::EINVAL));
+        assert_eq!(tee_target(&File::ShellOutput(1)), Err(Errno::EINVAL));
+    }
 }

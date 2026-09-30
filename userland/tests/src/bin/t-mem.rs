@@ -11,6 +11,10 @@
 //!   size, each checked, which `relay-rt` maps as it grows.
 //! - `t-mem oom`: starts `t-mem hog`, which takes heap until there is
 //!   none (`t-mem: out of memory`), and says how it ended: status 134.
+//! - `t-mem churn`: maps and gives back nearly all free memory over and
+//!   over for at most 20 s, so that it spends its time in the kernel,
+//!   zeroing and freeing pages, and almost never in ring 3; then `churn:
+//!   not stopped`. Ctrl-C must stop it all the same.
 #![no_std]
 #![no_main]
 
@@ -39,6 +43,7 @@ fn main(args: Args) -> u8 {
         },
         Some(b"oom") => oom(),
         Some(b"hog") => hog(),
+        Some(b"churn") => churn(),
         _ => return usage(),
     };
     match r {
@@ -127,7 +132,10 @@ fn unmapped(pages: usize) -> Result<(), u16> {
 }
 
 fn usage() -> u8 {
-    let _ = sys::write_all(2, b"usage: t-mem map|unmapped|unmapped-many|grow N|oom\n");
+    let _ = sys::write_all(
+        2,
+        b"usage: t-mem map|unmapped|unmapped-many|grow N|oom|churn\n",
+    );
     2
 }
 
@@ -182,6 +190,28 @@ fn oom() -> Result<(), u16> {
     if let Some((_, w)) = sys::wait(i64::from(pid), false)? {
         let _ = writeln!(Fd(1), "the hog: {w}");
     }
+    Ok(())
+}
+
+/// How long `churn` goes on if nothing stops it.
+const CHURN_NS: u64 = 20_000_000_000;
+
+fn churn() -> Result<(), u16> {
+    // As much as leaves 16 MiB (8 MiB above the kernel's reserve), at most
+    // 1 GiB: each call zeroes or frees it all, for tens of milliseconds.
+    let len = (free()? * 4096).saturating_sub(16 << 20).min(1 << 30) as usize & !(PAGE - 1);
+    let start = sys::time()?.uptime_ns;
+    loop {
+        for _ in 0..16 {
+            let a = sys::mem_map(len)?;
+            // SAFETY: nothing uses it.
+            unsafe { sys::mem_unmap(a, len)? };
+        }
+        if sys::time()?.uptime_ns - start >= CHURN_NS {
+            break;
+        }
+    }
+    let _ = writeln!(Fd(1), "churn: not stopped");
     Ok(())
 }
 

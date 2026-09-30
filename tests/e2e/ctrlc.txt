@@ -20,6 +20,17 @@ key {ctrl-c}
 expect \n\^C\nroot@relay:~# 
 send dmesg
 expect \npid \d+ \(/bin/t-spin\): killed: Ctrl-C\n
+# A program that spends its time in system calls, where a tick only
+# counts, is polled on its way back to ring 3 after a tick passed: Ctrl-C
+# stops it too, although a tick almost never finds it in ring 3.
+send t-mem churn
+alive 1
+key {ctrl-c}
+timeout 3
+expect \n\^C\nroot@relay:~# 
+timeout 30
+send dmesg
+expect \npid \d+ \(/bin/t-mem\): killed: Ctrl-C\n
 # A Ctrl-C typed before the command has even started is the command's too:
 # it ends at once, whichever comes first.
 send t-spin

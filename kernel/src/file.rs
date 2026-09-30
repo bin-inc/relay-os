@@ -78,7 +78,8 @@ pub fn open(vfs: &mut dyn Vfs, path: &[u8], flags: u32) -> Result<OpenFile, Errn
         Err(e) => return Err(e),
     };
     let dir = !created && vfs.stat(node)?.kind == FileType::Directory;
-    if dir && has(OPEN_WRITE) {
+    // Linux's rule: a directory is neither written nor created by `open`.
+    if dir && (has(OPEN_WRITE) || has(OPEN_CREATE)) {
         return Err(Errno::EISDIR);
     }
     if !dir && has(OPEN_DIRECTORY) {
@@ -370,6 +371,12 @@ mod tests {
         );
         assert_eq!(
             open(&mut t, b"/root", OPEN_WRITE).err(),
+            Some(Errno::EISDIR)
+        );
+        // A directory is never created by `open`, so asking for that of one
+        // is refused as Linux refuses it.
+        assert_eq!(
+            open(&mut t, b"/root", OPEN_READ | OPEN_CREATE).err(),
             Some(Errno::EISDIR)
         );
         assert_eq!(
