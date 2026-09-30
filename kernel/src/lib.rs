@@ -14,6 +14,7 @@ pub mod exec;
 pub mod fd;
 pub mod input;
 pub mod klog;
+pub mod line;
 pub mod mm;
 pub mod mounts;
 pub mod panic_screen;
