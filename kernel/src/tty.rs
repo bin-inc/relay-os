@@ -7,21 +7,30 @@
 //! The console has a foreground process group and a mode (spec §6.4). In
 //! raw mode a Ctrl-C is input like any other byte (the shell's line editor
 //! cancels its line); in line mode it is for the foreground group, which
-//! the process table kills (`ctrl_c`). Plan 3b adds reading in line mode.
+//! the process table kills (`ctrl_c`), and what is typed goes through the
+//! line discipline, which echoes it as it comes (`input`).
 
 use crate::input::InputQueue;
-use crate::{serial, timer, usb};
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use crate::{console, serial, timer, usb};
+use core::sync::atomic::{AtomicU32, Ordering};
 use spin::Mutex;
 
-/// Line mode (true) or raw mode.
-static LINE_MODE: AtomicBool = AtomicBool::new(false);
 /// The foreground process group; process 1's at first.
 static FOREGROUND: AtomicU32 = AtomicU32::new(1);
 
 /// The console's mode: raw (`false`) or line (`true`); the previous one.
+/// What the switch hands the line discipline is echoed.
 pub fn set_line_mode(line: bool) -> bool {
-    LINE_MODE.swap(line, Ordering::Relaxed)
+    let (was, echo) = {
+        let mut input = INPUT.lock();
+        (input.set_line_mode(line), input.take_echo())
+    };
+    output(&echo);
+    was
+}
+
+pub fn is_line_mode() -> bool {
+    INPUT.lock().is_line_mode()
 }
 
 /// Makes `pgid` the console's foreground group.
@@ -29,13 +38,31 @@ pub fn set_foreground(pgid: u32) {
     FOREGROUND.store(pgid, Ordering::Relaxed);
 }
 
-/// The foreground group a Ctrl-C typed in line mode is for, if one is
-/// waiting: it and what was typed before it are dropped (spec §6.4).
+/// The group that reads the console (spec §6.4).
+pub fn foreground() -> u32 {
+    FOREGROUND.load(Ordering::Relaxed)
+}
+
+/// The foreground group a Ctrl-C typed in line mode is for, if one was
+/// typed: what was typed before it is dropped (spec §6.4).
 pub fn ctrl_c() -> Option<u32> {
-    if !LINE_MODE.load(Ordering::Relaxed) {
-        return None;
+    INPUT
+        .lock()
+        .take_line_interrupt()
+        .then(|| FOREGROUND.load(Ordering::Relaxed))
+}
+
+/// What a program reads (spec §6.5): in line mode the next line, in raw
+/// mode what was typed, up to `buf`'s length; `None` if nothing waits.
+pub fn read(buf: &mut [u8]) -> Option<usize> {
+    INPUT.lock().read(buf)
+}
+
+/// The line discipline's echo, to the screen.
+fn output(echo: &[u8]) {
+    if !echo.is_empty() {
+        console::write_output(echo);
     }
-    take_interrupt().then(|| FOREGROUND.load(Ordering::Relaxed))
 }
 
 /// Bytes read from COM1 per poll at most, so a flood cannot starve the rest.
@@ -55,6 +82,9 @@ pub fn poll() {
         }
     }
     input.expire(now);
+    let echo = input.take_echo();
+    drop(input);
+    output(&echo);
 }
 
 /// Milliseconds since the machine started, for serial escape sequences:
@@ -69,7 +99,7 @@ pub fn pop() -> Option<u8> {
     INPUT.lock().pop()
 }
 
-/// Whether anything typed waits to be read.
+/// Whether anything typed waits to be read: raw input, or a line.
 pub fn has_input() -> bool {
     !INPUT.lock().is_empty()
 }

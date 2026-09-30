@@ -92,8 +92,10 @@ pub enum Step {
         pattern: String,
     },
     Send(String),
-    /// Text typed on the emulated USB keyboard.
+    /// Text typed on the emulated USB keyboard, then Enter.
     Key(String),
+    /// Text typed on the emulated USB keyboard, and nothing after it.
+    Type(String),
     ScreenshotNonblank,
     /// QEMU must still be running after this many seconds (for example after
     /// a loader error, which must not power the machine off).
@@ -225,6 +227,10 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
             "key" => {
                 keys::presses(rest).with_context(|| format!("{name}:{line_no}"))?;
                 Step::Key(rest.to_string())
+            }
+            "type" => {
+                keys::typed(rest).with_context(|| format!("{name}:{line_no}"))?;
+                Step::Type(rest.to_string())
             }
             "screenshot-nonblank" => Step::ScreenshotNonblank,
             "screenshot-pixel" => {
@@ -644,8 +650,12 @@ fn run_step(
             r.stdin.write_all(b"\r")?;
             r.stdin.flush()?;
         }
-        Step::Key(text) => {
-            let presses = keys::presses(text)?;
+        Step::Key(_) | Step::Type(_) => {
+            let presses = match step {
+                Step::Key(text) => keys::presses(text)?,
+                Step::Type(text) => keys::typed(text)?,
+                _ => unreachable!(),
+            };
             for press in &presses {
                 let keys: Vec<_> = press
                     .iter()
@@ -949,6 +959,9 @@ mod tests {
         let s = parse_scenario("x", "key echo {up}").unwrap();
         assert_eq!(s.steps, vec![(1, Step::Key("echo {up}".into()))]);
         assert!(parse_scenario("x", "key {bogus}").is_err());
+        let s = parse_scenario("x", "type {ctrl-d}").unwrap();
+        assert_eq!(s.steps, vec![(1, Step::Type("{ctrl-d}".into()))]);
+        assert!(parse_scenario("x", "type {bogus}").is_err());
     }
 
     #[test]

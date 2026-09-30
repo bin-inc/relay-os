@@ -71,6 +71,16 @@ pub trait Caller {
     fn mem_unmap(&mut self, addr: u64, pages: u64) -> Result<(), Errno>;
     /// Writes `bytes` to the screen.
     fn console_write(&mut self, bytes: &[u8]);
+    /// Reads the console into `buf` (spec §6.4, §6.5), waiting for input:
+    /// 0 at once for a process outside the foreground group, and at end of
+    /// input; `EINTR` if the program was killed while it waited.
+    fn console_read(&mut self, buf: &mut [u8]) -> Result<usize, Errno>;
+    /// Line mode (`true`) or raw mode; the previous one.
+    fn console_mode(&mut self, line: bool) -> bool;
+    /// The console's columns and rows.
+    fn console_size(&self) -> (u32, u32);
+    /// Makes `pgid` the foreground group; `ESRCH` if no process is in it.
+    fn console_foreground(&mut self, pgid: u32) -> Result<(), Errno>;
     /// Writes `bytes` to `file`, output `n` of the in-kernel shell (1 or
     /// 2), which sends them where the command line says; its error, if any.
     fn shell_output(&mut self, file: &Arc<File>, n: u32, bytes: &[u8]) -> Result<(), Errno>;
@@ -128,6 +138,17 @@ pub fn dispatch(caller: &mut impl Caller, number: u64, args: [u64; 6]) -> Outcom
         Some(Call::Sync) => caller.with_vfs(|v| v.sync()).map(|()| 0),
         Some(Call::Chdir) => files::on_path(caller, args[0], args[1], |v, p| v.chdir(p)),
         Some(Call::Getcwd) => files::getcwd(caller, args[0], args[1]),
+        Some(Call::ConsoleMode) => console_mode(caller, args[0]),
+        Some(Call::ConsoleSize) => {
+            let (columns, rows) = caller.console_size();
+            Ok(relay_abi::console::size_result(columns, rows))
+        }
+        Some(Call::ConsoleForeground) => {
+            let pgid = u32::try_from(args[0]).ok().filter(|&g| g != 0);
+            pgid.ok_or(Errno::ESRCH)
+                .and_then(|g| caller.console_foreground(g))
+                .map(|()| 0)
+        }
         Some(Call::Time) => time(caller, args[0]),
         Some(Call::Sleep) => {
             caller.sleep(args[0]);
@@ -258,6 +279,18 @@ fn write_to(caller: &mut impl Caller, file: &Arc<File>, bytes: &[u8]) -> Result<
         File::ShellOutput(n) => caller.shell_output(file, *n, bytes).map(|()| bytes.len()),
         File::Vfs(open) => caller.with_vfs(|v| open.write(v, bytes)),
     }
+}
+
+/// `console_mode(mode)` (spec §7.3): the previous mode.
+fn console_mode(caller: &mut impl Caller, mode: u64) -> Result<u64, Errno> {
+    use relay_abi::console::{MODE_LINE, MODE_RAW};
+    let line = match u32::try_from(mode) {
+        Ok(MODE_RAW) => false,
+        Ok(MODE_LINE) => true,
+        _ => return Err(Errno::EINVAL),
+    };
+    let was = caller.console_mode(line);
+    Ok(u64::from(if was { MODE_LINE } else { MODE_RAW }))
 }
 
 /// `mem_map(length)` (spec §7.3): fresh zeroed read-write pages, the
@@ -725,6 +758,42 @@ mod tests {
     }
 
     #[test]
+    fn the_console_s_mode_size_and_foreground() {
+        use relay_abi::console::{MODE_LINE, MODE_RAW, size_of_result};
+        let mut f = fake();
+        let line = u64::from(MODE_LINE);
+        assert_eq!(
+            call(&mut f, Call::ConsoleMode, [line, 0, 0]),
+            Ok(u64::from(MODE_RAW))
+        );
+        assert!(f.line_mode);
+        assert_eq!(
+            call(&mut f, Call::ConsoleMode, [0, 0, 0]),
+            Ok(line),
+            "the previous one"
+        );
+        assert!(!f.line_mode);
+        for bad in [2, 1 << 32, u64::MAX] {
+            assert_eq!(
+                call(&mut f, Call::ConsoleMode, [bad, 0, 0]),
+                Err(errno::EINVAL)
+            );
+        }
+        let size = call(&mut f, Call::ConsoleSize, [0, 0, 0]).unwrap();
+        assert_eq!(size_of_result(size), (120, 33));
+        assert_eq!(call(&mut f, Call::ConsoleForeground, [42, 0, 0]), Ok(0));
+        assert_eq!(f.foreground, 42);
+        for bad in [0, 7, 1 << 32 | 42, u64::MAX] {
+            assert_eq!(
+                call(&mut f, Call::ConsoleForeground, [bad, 0, 0]),
+                Err(errno::ESRCH),
+                "{bad}"
+            );
+        }
+        assert_eq!(f.foreground, 42);
+    }
+
+    #[test]
     fn every_other_call_is_enosys() {
         let mut f = fake();
         let served = [
@@ -754,6 +823,9 @@ mod tests {
             Call::Sync,
             Call::Chdir,
             Call::Getcwd,
+            Call::ConsoleMode,
+            Call::ConsoleSize,
+            Call::ConsoleForeground,
             Call::Time,
             Call::Sleep,
             Call::SysInfo,

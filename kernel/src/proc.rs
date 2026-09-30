@@ -659,6 +659,49 @@ impl Caller for Current {
         console::write_output(bytes);
     }
 
+    fn console_read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+        loop {
+            {
+                let t = PROCS.lock();
+                let p = t.get(t.current()).expect("a process reads");
+                if p.killed.is_some() {
+                    return Err(Errno::EINTR);
+                }
+                if p.pgid != tty::foreground() {
+                    return Ok(0);
+                }
+            }
+            tty::poll();
+            if let Some(n) = tty::read(buf) {
+                return Ok(n);
+            }
+            // Typing, a kill, or a change of foreground group or mode wakes
+            // it.
+            block(Blocked::Console);
+        }
+    }
+
+    fn console_mode(&mut self, line: bool) -> bool {
+        let was = tty::set_line_mode(line);
+        PROCS.lock().wake_all(Blocked::Console);
+        was
+    }
+
+    fn console_size(&self) -> (u32, u32) {
+        let (columns, rows) = console::size().unwrap_or((80, 25));
+        (columns as u32, rows as u32)
+    }
+
+    fn console_foreground(&mut self, pgid: u32) -> Result<(), Errno> {
+        let mut t = PROCS.lock();
+        if !t.iter().any(|p| p.pgid == pgid) {
+            return Err(Errno::ESRCH);
+        }
+        tty::set_foreground(pgid);
+        t.wake_all(Blocked::Console);
+        Ok(())
+    }
+
     fn shell_output(&mut self, file: &Arc<File>, n: u32, bytes: &[u8]) -> Result<(), Errno> {
         let out = SHELL_OUT.load(Ordering::Acquire);
         if out.is_null() || !shell_output_now(file, n) {

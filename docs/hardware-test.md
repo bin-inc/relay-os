@@ -185,7 +185,7 @@ request.
      root is 2 GiB since milestone 2's plan 2; a stick written by an older
      `flash --full` still shows `14.3 GiB`, which the check scripts refuse:
      run `flash --full` again)
-   - `[ ok ] system: 6 programs, ABI 1` (milestone 2: the programs of
+   - `[ ok ] system: 7 programs, ABI 1` (milestone 2: the programs of
      `/bin` from `\EFI\RELAY\system.img`; the count grows as later plans
      add programs)
    - the motd (`Welcome to Relay OS.`) and the prompt `root@relay:~# `.
@@ -213,8 +213,11 @@ request.
    if it touched a program's page.
 5. Two steps by hand (milestone 2, plan 3a; a script cannot type):
    - `t-spin 5`, and while it spins type `echo typed` and Enter on the
-     K120. After five seconds its `… iterations` line comes, then `typed`:
-     the keyboard is polled on every tick that interrupts a program.
+     K120: the line shows as it is typed (milestone 2, plan 3b: the line
+     discipline echoes it). After five seconds its `… iterations` line
+     comes, then the prompt with `echo typed` again, then `typed`: the
+     keyboard is polled on every tick that interrupts a program, and what
+     the program did not read is the shell's, as in bash.
    - `t-spin`, then Ctrl-C: `^C` and the prompt come back at once, and
      `dmesg` ends with `pid <n> (/bin/t-spin): killed: Ctrl-C`.
 

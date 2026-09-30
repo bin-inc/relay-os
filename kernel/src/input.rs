@@ -3,7 +3,13 @@
 //! command runs is kept, as on a Linux terminal; a Ctrl-C drops it. Key
 //! events become the bytes a terminal sends, so the shell cannot tell the
 //! keyboard from a serial line.
+//!
+//! In line mode (user-space gate §6.5) every key goes to the line
+//! discipline as it is typed, which echoes it at once; a program reads
+//! the lines. Back in raw mode what was typed and not read is raw input
+//! again, as a Linux terminal's is.
 
+use crate::line::LineDiscipline;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use usb::hid::{Key, KeyEvent};
@@ -24,11 +30,19 @@ const SEQUENCE_MAX: usize = 8;
 pub const ESC_TIMEOUT_MS: u64 = 50;
 
 pub struct InputQueue {
+    /// Raw input.
     bytes: VecDeque<u8>,
     /// An escape sequence arriving over serial, until it is complete.
     sequence: Vec<u8>,
     /// When its `ESC` came, in milliseconds.
     sequence_since: u64,
+    /// Line mode: keys go to `line`.
+    line_mode: bool,
+    line: LineDiscipline,
+    /// What the line discipline echoed, for the screen.
+    echo: Vec<u8>,
+    /// A Ctrl-C typed in line mode, for the foreground group.
+    interrupted: bool,
 }
 
 impl InputQueue {
@@ -37,7 +51,64 @@ impl InputQueue {
             bytes: VecDeque::new(),
             sequence: Vec::new(),
             sequence_since: 0,
+            line_mode: false,
+            line: LineDiscipline::new(),
+            echo: Vec::new(),
+            interrupted: false,
         }
+    }
+
+    /// Line mode (`true`) or raw mode; the previous one. Going to line mode
+    /// hands what was typed ahead to the line discipline (a Ctrl-C in it is
+    /// for the new foreground group); going back hands what was typed and
+    /// not read back as raw input, and a Ctrl-C nobody took as a raw one.
+    pub fn set_line_mode(&mut self, line: bool) -> bool {
+        let was = core::mem::replace(&mut self.line_mode, line);
+        if line && !was {
+            let ahead: Vec<u8> = self.bytes.drain(..).collect();
+            self.push(&ahead);
+        } else if !line && was {
+            let typed = self.line.take_all();
+            if core::mem::take(&mut self.interrupted) {
+                self.push(&[INTERRUPT]);
+            }
+            self.push(&typed);
+        }
+        was
+    }
+
+    pub fn is_line_mode(&self) -> bool {
+        self.line_mode
+    }
+
+    /// Whether a Ctrl-C was typed in line mode since the last call.
+    pub fn take_line_interrupt(&mut self) -> bool {
+        core::mem::take(&mut self.interrupted)
+    }
+
+    /// What the line discipline echoed since the last call.
+    pub fn take_echo(&mut self) -> Vec<u8> {
+        core::mem::take(&mut self.echo)
+    }
+
+    /// In line mode, the next line (`LineDiscipline::read`); in raw mode as
+    /// many bytes as there are, up to `buf`'s length. `None` if nothing
+    /// waits.
+    pub fn read(&mut self, buf: &mut [u8]) -> Option<usize> {
+        if self.line_mode {
+            return self.line.read(buf);
+        }
+        if buf.is_empty() {
+            return Some(0);
+        }
+        if self.bytes.is_empty() {
+            return None;
+        }
+        let n = buf.len().min(self.bytes.len());
+        for (b, x) in buf.iter_mut().zip(self.bytes.drain(..n)) {
+            *b = x;
+        }
+        Some(n)
     }
 
     /// Adds one byte from COM1 that came at `now` (milliseconds). An escape
@@ -82,6 +153,15 @@ impl InputQueue {
     /// it drops what was typed before it, as `take_interrupt` would, and a
     /// half-arrived serial sequence, wherever the Ctrl-C came from.
     pub fn push(&mut self, bytes: &[u8]) {
+        if self.line_mode {
+            if bytes.contains(&INTERRUPT) {
+                self.sequence.clear();
+            }
+            for key in keys(bytes) {
+                self.interrupted |= self.line.input(key, &mut self.echo);
+            }
+            return;
+        }
         let bytes = match bytes.iter().rposition(|&b| b == INTERRUPT) {
             Some(i) => {
                 self.bytes.clear();
@@ -99,8 +179,9 @@ impl InputQueue {
         self.bytes.pop_front()
     }
 
+    /// Whether nothing waits to be read: no raw input, and no line.
     pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
+        self.bytes.is_empty() && !self.line.has_line()
     }
 
     /// Whether a Ctrl-C is waiting. If one is, it and everything typed
@@ -115,6 +196,28 @@ impl InputQueue {
             None => false,
         }
     }
+}
+
+/// `bytes` cut into keys: an escape sequence (`ESC` and one byte, or
+/// `ESC [` up to its final byte) is one, every other byte is one.
+fn keys(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let mut rest = bytes;
+    core::iter::from_fn(move || {
+        let n = match rest {
+            [] => return None,
+            [0x1B, b'[', tail @ ..] => {
+                2 + tail
+                    .iter()
+                    .position(|b| (0x40..=0x7E).contains(b))
+                    .map_or(tail.len(), |i| i + 1)
+            }
+            [0x1B, _, ..] => 2,
+            _ => 1,
+        };
+        let (key, after) = rest.split_at(n);
+        rest = after;
+        Some(key)
+    })
 }
 
 /// The escape sequence an editing key sends, as a Linux terminal does.
@@ -368,6 +471,115 @@ mod tests {
         serial(&mut q, b"A");
         assert!(q.take_interrupt());
         assert_eq!(drain(&mut q), b"A");
+    }
+
+    /// A queue in line mode.
+    fn line_mode() -> InputQueue {
+        let mut q = InputQueue::new();
+        q.set_line_mode(true);
+        q
+    }
+
+    fn read(q: &mut InputQueue, n: usize) -> Option<Vec<u8>> {
+        let mut buf = vec![0; n];
+        q.read(&mut buf).map(|k| buf[..k].to_vec())
+    }
+
+    #[test]
+    fn in_line_mode_keys_are_echoed_and_read_a_line_at_a_time() {
+        let mut q = line_mode();
+        assert!(q.is_line_mode());
+        q.push_key(&press(Key::Char(b'h'), false));
+        serial(&mut q, b"i\x7f\x7fok");
+        assert_eq!(read(&mut q, 10), None, "no line yet");
+        assert!(q.is_empty());
+        q.push_key(&press(Key::Enter, false));
+        assert_eq!(q.take_echo(), b"hi\x08 \x08\x08 \x08ok\n");
+        assert!(q.take_echo().is_empty(), "taken");
+        assert!(!q.is_empty());
+        assert_eq!(read(&mut q, 10).unwrap(), b"ok\n");
+        assert_eq!(q.pop(), None, "nothing raw");
+    }
+
+    #[test]
+    fn an_escape_sequence_is_one_key_in_line_mode() {
+        let mut q = line_mode();
+        q.push_key(&press(Key::Up, false));
+        serial(&mut q, b"a\x1b[3~b\x1bxc\r");
+        q.push(b"d\x1b[1;5Ce\r");
+        assert_eq!(
+            read(&mut q, 10).unwrap(),
+            b"abc\n",
+            "Delete and Alt-x do nothing"
+        );
+        assert_eq!(read(&mut q, 10).unwrap(), b"de\n");
+        assert_eq!(q.take_echo(), b"abc\nde\n");
+    }
+
+    #[test]
+    fn a_ctrl_c_in_line_mode_is_for_the_foreground_group() {
+        let mut q = line_mode();
+        q.push(b"one\rtw");
+        assert!(!q.take_line_interrupt());
+        serial(&mut q, b"\x1b[");
+        q.push_key(&press(Key::Char(b'c'), true));
+        assert!(q.take_line_interrupt());
+        assert!(!q.take_line_interrupt(), "taken");
+        assert!(q.is_empty(), "what was typed is dropped");
+        serial(&mut q, b"A\r");
+        assert_eq!(read(&mut q, 10).unwrap(), b"A\n", "and the half sequence");
+        assert!(!q.take_interrupt(), "not a raw Ctrl-C");
+    }
+
+    #[test]
+    fn what_was_typed_ahead_goes_to_the_line_discipline_and_back() {
+        let mut q = InputQueue::new();
+        q.push(b"ls\r\x1b[Ap");
+        assert!(!q.set_line_mode(true), "it was raw");
+        assert_eq!(q.take_echo(), b"ls\np", "echoed when it goes in");
+        assert_eq!(read(&mut q, 10).unwrap(), b"ls\n");
+        q.push(b"wd\rec");
+        assert_eq!(q.take_echo(), b"wd\nec");
+        assert!(q.set_line_mode(false));
+        assert_eq!(drain(&mut q), b"pwd\nec", "unread lines and the line typed");
+        assert!(!q.set_line_mode(false), "already raw: nothing moves");
+        // A Ctrl-C typed ahead kills the group the console goes to.
+        q.push(b"x\x03y");
+        q.set_line_mode(true);
+        assert!(q.take_line_interrupt());
+        assert_eq!(q.take_echo(), b"y");
+    }
+
+    #[test]
+    fn a_ctrl_c_nobody_took_is_raw_input_again() {
+        // Typed the moment a command ended: the shell's line editor and a
+        // script see it, instead of nobody.
+        let mut q = line_mode();
+        q.push(b"abc\x03de");
+        q.set_line_mode(false);
+        assert!(q.take_interrupt());
+        assert_eq!(drain(&mut q), b"de");
+    }
+
+    #[test]
+    fn a_raw_read_takes_what_there_is() {
+        let mut q = InputQueue::new();
+        assert_eq!(read(&mut q, 10), None);
+        q.push(b"abc\x1b[A");
+        assert_eq!(read(&mut q, 2).unwrap(), b"ab");
+        assert_eq!(read(&mut q, 0).unwrap(), b"");
+        assert_eq!(read(&mut q, 10).unwrap(), b"c\x1b[A");
+        assert!(q.is_empty());
+    }
+
+    #[test]
+    fn keys_are_cut_where_a_terminal_sends_them() {
+        let got: Vec<&[u8]> = keys(b"a\x1b[1;5Cb\x1bxc\x1b[").collect();
+        assert_eq!(
+            got,
+            [&b"a"[..], b"\x1b[1;5C", b"b", b"\x1bx", b"c", b"\x1b["]
+        );
+        assert_eq!(keys(b"\x1b").collect::<Vec<_>>(), [&b"\x1b"[..]]);
     }
 
     #[test]

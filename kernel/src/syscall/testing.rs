@@ -49,6 +49,14 @@ pub struct Fake {
     pub room: u64,
     /// What `mem_unmap` gave back (and the kernel would flush).
     pub unmapped: Vec<(u64, u64)>,
+    /// What each console read gets, then end of input; the lengths asked;
+    /// whether a read ends in a kill.
+    pub typed: alloc::collections::VecDeque<Vec<u8>>,
+    pub asked: Vec<usize>,
+    pub killed_while_reading: bool,
+    /// The console's mode and foreground group (groups 1 and 42 exist).
+    pub line_mode: bool,
+    pub foreground: u32,
     pub written: Vec<(u64, Vec<u8>)>,
     pub slept: Vec<u64>,
     pub spawned: Vec<Spawn>,
@@ -93,6 +101,31 @@ impl Caller for Fake {
     }
     fn console_write(&mut self, bytes: &[u8]) {
         self.written.push((0, bytes.to_vec()));
+    }
+    fn console_read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+        if self.killed_while_reading {
+            return Err(Errno::EINTR);
+        }
+        self.asked.push(buf.len());
+        let Some(line) = self.typed.pop_front() else {
+            return Ok(0);
+        };
+        let n = line.len().min(buf.len());
+        buf[..n].copy_from_slice(&line[..n]);
+        Ok(n)
+    }
+    fn console_mode(&mut self, line: bool) -> bool {
+        core::mem::replace(&mut self.line_mode, line)
+    }
+    fn console_size(&self) -> (u32, u32) {
+        (120, 33)
+    }
+    fn console_foreground(&mut self, pgid: u32) -> Result<(), Errno> {
+        if ![1, 42].contains(&pgid) {
+            return Err(Errno::ESRCH);
+        }
+        self.foreground = pgid;
+        Ok(())
     }
     fn shell_output(&mut self, _: &Arc<File>, n: u32, bytes: &[u8]) -> Result<(), Errno> {
         if u64::from(n) == FULL {
@@ -160,6 +193,11 @@ pub fn fake() -> Fake {
         heap_room: usize::MAX,
         room: u64::MAX,
         unmapped: Vec::new(),
+        typed: alloc::collections::VecDeque::new(),
+        asked: Vec::new(),
+        killed_while_reading: false,
+        line_mode: false,
+        foreground: 1,
         written: Vec::new(),
         slept: Vec::new(),
         spawned: Vec::new(),

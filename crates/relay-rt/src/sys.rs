@@ -21,6 +21,22 @@ fn call(c: Call, args: &[u64]) -> Result<u64, u16> {
     decode(unsafe { syscall(c, a) })
 }
 
+/// Sets the console's mode (`relay_abi::console`'s `MODE_RAW` or
+/// `MODE_LINE`); the previous one.
+pub fn console_mode(mode: u32) -> Result<u32, u16> {
+    call(Call::ConsoleMode, &[u64::from(mode)]).map(|m| m as u32)
+}
+
+/// The console's columns and rows.
+pub fn console_size() -> (u32, u32) {
+    relay_abi::console::size_of_result(call(Call::ConsoleSize, &[]).unwrap_or(0))
+}
+
+/// Gives the console to process group `pgid`.
+pub fn console_foreground(pgid: u32) -> Result<(), u16> {
+    call(Call::ConsoleForeground, &[u64::from(pgid)]).map(|_| ())
+}
+
 /// Maps `len` bytes (rounded up to pages) of fresh zeroed memory; its
 /// address.
 pub fn mem_map(len: usize) -> Result<usize, u16> {

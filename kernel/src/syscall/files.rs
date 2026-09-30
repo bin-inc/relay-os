@@ -4,6 +4,7 @@
 use super::{Caller, PATH_MAX, file};
 use crate::fd::{FDS, File};
 use crate::file as open_file;
+use crate::line::LINE_MAX;
 use crate::mm::paging::PAGE;
 use crate::mm::user::{UserSlice, UserStr};
 use alloc::sync::Arc;
@@ -50,8 +51,7 @@ pub(super) fn read(caller: &mut impl Caller, fd: u64, addr: u64, len: u64) -> Re
     let open = match &*file {
         File::Vfs(open) if open.is_readable() => open,
         File::Vfs(_) | File::ShellOutput(_) => return Err(Errno::EBADF),
-        // The console's reads come with its line discipline.
-        File::Console => return Err(Errno::ENOSYS),
+        File::Console => return console_read(caller, addr, len),
     };
     let slice = UserSlice::new(addr, len)?;
     let mut buf = [0u8; PAGE as usize];
@@ -75,6 +75,18 @@ pub(super) fn read(caller: &mut impl Caller, fd: u64, addr: u64, len: u64) -> Re
         }
     }
     Ok(done)
+}
+
+/// A console read: at most one line (or what was typed, in raw mode), into
+/// a buffer checked writable before anything is taken from the console.
+fn console_read(caller: &mut impl Caller, addr: u64, len: u64) -> Result<u64, Errno> {
+    let len = len.min(LINE_MAX as u64);
+    let slice = UserSlice::new(addr, len)?;
+    caller.writable(&slice)?;
+    let mut buf = [0u8; LINE_MAX];
+    let n = caller.console_read(&mut buf[..len as usize])?;
+    caller.write(&slice, 0, &buf[..n])?;
+    Ok(n as u64)
 }
 
 /// `seek(fd, offset, whence)`: the new offset. The console and the shell's
@@ -687,8 +699,27 @@ mod tests {
     }
 
     #[test]
-    fn reading_the_console_waits_for_its_line_discipline() {
+    fn a_console_read_copies_out_what_the_console_gives() {
         let mut f = fake();
-        assert_eq!(call(&mut f, Call::Read, [0, W, 1]), Err(errno::ENOSYS));
+        f.typed.push_back(b"hello\n".to_vec());
+        assert_eq!(call(&mut f, Call::Read, [0, W, 100]), Ok(6));
+        assert_eq!(get(&mut f, W, 6), b"hello\n");
+        assert_eq!(f.asked, [100], "the length it asked for");
+        // A bad buffer takes nothing from the console.
+        f.typed.push_back(b"kept\n".to_vec());
+        assert_eq!(call(&mut f, Call::Read, [0, U, 10]), Err(errno::EFAULT));
+        assert_eq!(
+            call(&mut f, Call::Read, [0, W + PAGE - 2, 10]),
+            Err(errno::EFAULT)
+        );
+        assert_eq!(f.typed.len(), 1, "still there");
+        // At most a line's worth is asked for, and checked, whatever the
+        // buffer's length.
+        assert_eq!(call(&mut f, Call::Read, [0, W, 1 << 40]), Ok(5));
+        assert_eq!(f.asked, [100, crate::line::LINE_MAX]);
+        // Nothing more: end of input.
+        assert_eq!(call(&mut f, Call::Read, [0, W, 10]), Ok(0));
+        f.killed_while_reading = true;
+        assert_eq!(call(&mut f, Call::Read, [0, W, 10]), Err(errno::EINTR));
     }
 }

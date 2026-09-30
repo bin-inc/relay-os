@@ -1,0 +1,35 @@
+# Programs read the console (user-space gate §6.4, §6.5; milestone 2, plan
+# 3b): in line mode a line at a time, echoed as it is typed, with
+# Backspace, and Ctrl-D for end of input; in raw mode bytes as typed; a
+# process outside the foreground group gets end of input at once.
+timeout 60
+expect root@relay:~# $
+send t-read size
+expect \nconsole: \d+x\d+\nmode 7: EINVAL\nforeground 999999: ESRCH\nforeground of my own group: ok\n
+# Over COM1 and on the USB keyboard.
+send t-read
+alive 1
+send hello
+expect \nhello\n\[6\] hello\\n\n
+key wrold{backspace}{backspace}{backspace}{backspace}orld
+expect wrold(\x08 \x08){4}orld\n\[6\] world\\n\n
+# Ctrl-D hands over a line without its newline; on an empty line it ends
+# the input.
+type abc{ctrl-d}
+expect abc\[3\] abc\n
+type {ctrl-d}
+expect end of input\nroot@relay:~# $
+# Typed while a program does not read: echoed at once, and the shell's
+# afterwards, as in bash.
+send t-spin 2
+alive 1
+send echo typed
+expect echo typed\n\d+ iterations\nroot@relay:~# echo typed\ntyped\nroot@relay:~# $
+# Raw mode: no echo, bytes as they come, until q.
+send t-read raw
+expect was line mode: true\n
+send xyq
+expect \[\d+\] xy
+expect root@relay:~# $
+send t-read apart
+expect \nend of input\nroot@relay:~# $
