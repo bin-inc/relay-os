@@ -3,7 +3,7 @@
 //! (spec §7.3, §8.3; user-space gate §8.2).
 
 use crate::commands::{self, Script};
-use crate::ctx::Ctx;
+use crate::ctx::{Ctx, quote_if_needed};
 use crate::editor::{Feed, LineEditor};
 use crate::io::{Console, Programs, Stdout, System};
 use crate::parser::{self, HOME};
@@ -252,7 +252,7 @@ impl<'a> Shell<'a> {
         };
         let log = script.transcript_name;
         if let Err(e) = programs.tee_push(log.as_bytes()) {
-            let shown = path::display(log.as_bytes());
+            let shown = quote_if_needed(&path::display(log.as_bytes()));
             let message = format!("sh: cannot write the transcript {shown}: {e}\n");
             self.console.write(message.as_bytes());
             return 1;
@@ -660,6 +660,15 @@ mod tests {
             )
         );
         assert!(h.programs.spawned.is_empty());
+        // Quoted as `sh` quotes it when it cannot empty the transcript.
+        h.put("/tmp/my s.sh", b"t-args\n");
+        assert_eq!(
+            h.sh(&["/tmp/my s.sh"], &mut out),
+            (
+                1,
+                "sh: cannot write the transcript '/tmp/my s.log': Device or resource busy\n".into()
+            )
+        );
     }
 
     #[test]
