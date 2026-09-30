@@ -1,11 +1,12 @@
 //! What the shell needs from its surroundings besides files (spec §7.3).
-//! The kernel implements both traits over its console, clock, memory
-//! manager, log, ACPI and programs; `xtask host-shell` over the host
-//! terminal; the tests over buffers.
+//! The kernel implements `Console` and `System` over its console, clock,
+//! memory manager, log, ACPI and programs; `xtask host-shell` over the
+//! host terminal; `relay-rt` over system calls; the tests over buffers.
+//! `Programs` is `/bin/sh`'s way to its commands.
 
 use alloc::vec::Vec;
 use relay_abi::WaitStatus;
-use vfs::{Errno, Vfs};
+use vfs::{Errno, Node, Vfs};
 
 /// Where a program's output goes (`System::wait`): what it writes, on fd
 /// 1 or 2, and the write's error, if any.
@@ -46,12 +47,14 @@ pub trait System {
     fn memory(&self) -> Option<MemInfo>;
     /// The kernel log, for `dmesg`.
     fn kernel_log(&self) -> Vec<u8>;
-    /// Restarts the machine. Returns only where it cannot (on the host, in
-    /// tests); the shell then stops.
-    fn reboot(&mut self);
-    /// Turns the machine off. Returns only where it cannot; the shell then
-    /// stops.
-    fn poweroff(&mut self);
+    /// Restarts the machine, going ahead with `force` when the filesystems
+    /// cannot be shut down cleanly. Returns only where it cannot (on the
+    /// host, in tests), and the shell then stops; or with the error that
+    /// kept the machine up (a program's `power` call, which shuts the
+    /// filesystems down itself).
+    fn reboot(&mut self, force: bool) -> Result<(), Errno>;
+    /// Turns the machine off, as `reboot` restarts it.
+    fn poweroff(&mut self, force: bool) -> Result<(), Errno>;
     /// Starts the program at `path`, read through `vfs`, with `args`
     /// (argument 0 is the path); its pid. `None` where programs cannot run
     /// (on the host). The in-kernel shell's way to programs until the shell
@@ -70,4 +73,47 @@ pub trait System {
     fn wait(&mut self, _pid: u32, _out: &mut Output<'_>) -> Result<WaitStatus, Errno> {
         Err(Errno::ECHILD)
     }
+}
+
+/// A program's standard output, fd 1 (user-space gate §8.1): the console
+/// or a file the shell opened for it.
+pub trait Stdout {
+    /// Writes all of `bytes`; the error that stopped it (`ENOSPC` for a
+    /// write that took nothing).
+    fn write(&mut self, bytes: &[u8]) -> Result<(), Errno>;
+    /// Whether it is the console (`ls` lays out columns then).
+    fn is_tty(&self) -> bool;
+    /// The file it is, as the `Vfs` names files (`cat f >> f` must not
+    /// read its own output).
+    fn node(&self) -> Option<Node>;
+}
+
+/// Programs, for a shell that runs its commands as programs (`/bin/sh`,
+/// user-space gate §8.2): `relay-rt`'s system calls there, a fake in the
+/// tests.
+pub trait Programs {
+    /// Opens a redirection target for writing: created if missing, emptied
+    /// or, with `append`, written at its end. Its fd.
+    fn open_output(&mut self, path: &[u8], append: bool) -> Result<u32, Errno>;
+    fn close(&mut self, fd: u32);
+    /// Starts the program at `path` with `args` (argument 0 first); its
+    /// pid. It gets the shell's fds 0 and 2, and `stdout` (or the shell's
+    /// fd 1) as its fd 1. With `foreground` it runs in a process group of
+    /// its own, which gets the console (an interactive shell's command,
+    /// spec §6.4); otherwise in the shell's group (a script's).
+    fn spawn(
+        &mut self,
+        path: &[u8],
+        args: &[&[u8]],
+        stdout: Option<u32>,
+        foreground: bool,
+    ) -> Result<u32, Errno>;
+    /// Waits for the child `pid` to end.
+    fn wait(&mut self, pid: u32) -> Result<WaitStatus, Errno>;
+    /// Copies the console into the file at `path` from now on (a script's
+    /// transcript, spec §6.5), written at its end.
+    fn tee_push(&mut self, path: &[u8]) -> Result<(), Errno>;
+    /// Stops the copy `tee_push` started; the error of a write that failed
+    /// meanwhile, which ended the copying there.
+    fn tee_pop(&mut self) -> Result<(), Errno>;
 }

@@ -1,4 +1,4 @@
-//! `cd`, `pwd`, `echo`, `clear`, `help` and `uname`.
+//! `cd`, `exit`, `pwd`, `echo`, `clear`, `help` and `uname`.
 
 use super::COMMANDS;
 use crate::ctx::{Ctx, getopt, outln};
@@ -29,6 +29,46 @@ pub fn cd(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
         Ok(()) => 0,
         Err(e) => ctx.fail(NAME, format_args!("cd: {dir}: {e}")),
     }
+}
+
+/// `exit [code]`: the shell stops with `code` (modulo 256), or the last
+/// command's status. As in bash, a code that is not a 64-bit number is
+/// status 2 and the shell still stops; more than one argument stops
+/// nothing; `--` before the code is dropped.
+pub fn exit(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
+    let args = match args {
+        [dashes, rest @ ..] if dashes == "--" => rest,
+        _ => args,
+    };
+    let status = match args {
+        [] => ctx.status,
+        [code] => match parse_code(code) {
+            Some(n) => n,
+            None => {
+                ctx.fail(
+                    NAME,
+                    format_args!("exit: {code}: numeric argument required"),
+                );
+                2
+            }
+        },
+        _ => return ctx.fail(NAME, format_args!("exit: too many arguments")),
+    };
+    ctx.exit = true;
+    ctx.exited = true;
+    status
+}
+
+/// A decimal number with an optional sign and blanks around it, as bash
+/// takes it: one that fits in 64 bits, modulo 256.
+fn parse_code(code: &str) -> Option<i32> {
+    let code = code.trim_matches([' ', '\t']);
+    let digits = code.strip_prefix(['-', '+']).unwrap_or(code);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n: i64 = code.parse().ok()?;
+    Some(n.rem_euclid(256) as i32)
 }
 
 /// `pwd`: arguments are ignored, as in bash.
@@ -125,6 +165,80 @@ mod tests {
             (2, "relay-sh: cd: -P: invalid option\n".into())
         );
         assert_eq!(h.run("pwd").1, "/\n", "nothing changed the directory");
+    }
+
+    #[test]
+    fn exit_stops_the_shell_with_its_code() {
+        let mut h = Harness::new();
+        h.console.type_in(b"exit 3\recho never\r");
+        let mut shell = crate::Shell::new(&mut h.vfs, &mut h.console, &mut h.system);
+        shell.run();
+        assert_eq!(shell.status(), 3);
+        assert_eq!(h.console.take(), "root@relay:/# exit 3\n");
+        // Modulo 256, as in bash, and a sign may come first.
+        for (code, status) in [
+            ("256", 0),
+            ("257", 1),
+            ("-1", 255),
+            ("+7", 7),
+            ("1000", 232),
+            ("' 5 '", 5),
+            ("010", 10),
+            ("9223372036854775807", 255),
+            ("-9223372036854775808", 0),
+            ("-- 3", 3),
+        ] {
+            let line = alloc::format!("exit {code}");
+            assert_eq!(h.run(&line), (status, "".into()), "{code}");
+        }
+    }
+
+    #[test]
+    fn exit_without_a_code_keeps_the_last_status() {
+        let mut h = Harness::new();
+        h.console.type_in(b"nope\rexit\r");
+        let mut shell = crate::Shell::new(&mut h.vfs, &mut h.console, &mut h.system);
+        shell.run();
+        assert_eq!(shell.status(), 127);
+    }
+
+    #[test]
+    fn exit_errors() {
+        let mut h = Harness::new();
+        // Not a number: status 2, and the shell stops anyway.
+        h.console.type_in(b"exit abc\recho never\r");
+        let mut shell = crate::Shell::new(&mut h.vfs, &mut h.console, &mut h.system);
+        shell.run();
+        assert_eq!(shell.status(), 2);
+        assert_eq!(
+            h.console.take(),
+            "root@relay:/# exit abc\nrelay-sh: exit: abc: numeric argument required\n"
+        );
+        // Past what bash's 64-bit number holds, or not a number at all.
+        for code in [
+            "9223372036854775808",
+            "99999999999999999999",
+            "''",
+            "-",
+            "0x10",
+        ] {
+            let line = alloc::format!("exit {code}");
+            assert_eq!(h.run(&line).0, 2, "{code}");
+        }
+        // `--` ends the options, as for any command.
+        h.console.type_in(b"nope\rexit --\r");
+        let mut shell = crate::Shell::new(&mut h.vfs, &mut h.console, &mut h.system);
+        shell.run();
+        assert_eq!(shell.status(), 127);
+        h.console.take();
+        // Too many: nothing stops.
+        h.console.type_in(b"exit 1 2\recho still\r");
+        crate::Shell::new(&mut h.vfs, &mut h.console, &mut h.system).run();
+        assert!(
+            h.console
+                .take()
+                .contains("relay-sh: exit: too many arguments\nroot@relay:/# echo still\nstill\n")
+        );
     }
 
     #[test]

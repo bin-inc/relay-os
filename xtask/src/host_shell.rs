@@ -107,8 +107,12 @@ impl System for HostSystem {
     fn kernel_log(&self) -> Vec<u8> {
         self.0.contents()
     }
-    fn reboot(&mut self) {}
-    fn poweroff(&mut self) {}
+    fn reboot(&mut self, _force: bool) -> Result<(), vfs::Errno> {
+        Ok(())
+    }
+    fn poweroff(&mut self, _force: bool) -> Result<(), vfs::Errno> {
+        Ok(())
+    }
 }
 
 /// Standard input and output.
@@ -229,14 +233,16 @@ pub fn session(img: &Path, console: &mut dyn Console) -> Result<()> {
     console.write(&log.contents());
     let mut vfs = MountTable::new(Box::new(fs));
     let mut system = HostSystem(log);
-    Shell::new(&mut vfs, console, &mut system).run();
+    let mut shell = Shell::new(&mut vfs, console, &mut system);
+    shell.greet();
+    shell.run();
     vfs.shutdown()
         .map_err(|e| anyhow!("cannot unmount {} cleanly: {e}", img.display()))
 }
 
 pub fn run(img: &Path) -> Result<()> {
     eprintln!(
-        "host-shell: {} (ext2 root partition). Type `poweroff` to leave.",
+        "host-shell: {} (ext2 root partition). Type `exit` to leave.",
         img.display()
     );
     let mut terminal = Terminal {

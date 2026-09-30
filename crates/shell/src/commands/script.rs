@@ -6,7 +6,11 @@
 //! stop the script; Ctrl-C does. Everything the script shows on the screen,
 //! errors included, also goes into a transcript next to it (`x.sh` →
 //! `x.log`), written and synced as each line starts and ends, so it can be
-//! checked afterwards (`cargo xtask verify-usb`).
+//! checked afterwards (`cargo xtask verify-usb`). Under `/bin/sh` the
+//! transcript is a console tee, and a script may run another. A command of
+//! the script that redirects into the script's own transcript garbles it,
+//! as it would under bash: the redirection writes from the file's start,
+//! the transcript goes on where it was.
 
 use crate::ctx::{Ctx, getopt, quote, quote_if_needed};
 use alloc::format;
@@ -231,6 +235,23 @@ mod tests {
         assert_eq!(
             h.run("sh /tmp/s.sh"),
             (130, "+ cat /tmp/big > /tmp/copy\n^C\n".into())
+        );
+    }
+
+    #[test]
+    fn exit_ends_the_script_not_the_shell() {
+        let mut h = Harness::new();
+        h.put("/tmp/s.sh", b"exit 4\necho after\n");
+        assert_eq!(h.run("sh /tmp/s.sh"), (4, "+ exit 4\n".into()));
+        // The shell reads on, as when /bin/sh ran the script as its child.
+        h.console.type_in(b"sh /tmp/s.sh\recho still\r");
+        let mut shell = crate::Shell::new(&mut h.vfs, &mut h.console, &mut h.system);
+        shell.run();
+        assert_eq!(shell.status(), 0);
+        assert!(
+            h.console
+                .text()
+                .ends_with("+ exit 4\nroot@relay:/# echo still\nstill\nroot@relay:/# ")
         );
     }
 

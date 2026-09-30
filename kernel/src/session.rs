@@ -7,7 +7,7 @@
 use crate::mm::{self, MemStats, frame::FRAME_SIZE};
 use crate::mounts::KernelVfs;
 use crate::syscall::Spawn;
-use crate::{arch, console, exec, klog, klogln, power, proc, rtc, tty};
+use crate::{console, exec, klog, klogln, power, proc, rtc, tty};
 use alloc::vec::Vec;
 use relay_abi::{FdMap, WaitStatus};
 use shell::{Console, MemInfo, Output, Shell, System};
@@ -75,12 +75,13 @@ impl System for KernelSystem {
         klog::KLOG.lock().to_vec()
     }
 
-    // The shell has shut the filesystems down before these.
-    fn reboot(&mut self) {
+    // The shell has shut the filesystems down before these (or `-f` goes
+    // ahead without).
+    fn reboot(&mut self, _force: bool) -> Result<(), Errno> {
         power::reboot()
     }
 
-    fn poweroff(&mut self) {
+    fn poweroff(&mut self, _force: bool) -> Result<(), Errno> {
         power::poweroff(self.test_mode)
     }
 
@@ -147,9 +148,13 @@ pub extern "C" fn shell(test_mode: u64) -> ! {
     let mut system = KernelSystem {
         test_mode: test_mode != 0,
     };
-    Shell::new(&mut vfs, &mut console, &mut system).run();
-    // `run` returns only if `reboot` or `poweroff` do, which they do not.
-    arch::halt_forever()
+    let mut shell = Shell::new(&mut vfs, &mut console, &mut system);
+    shell.greet();
+    // `run` returns after `exit` (or if `reboot` or `poweroff` did, which
+    // they do not): the in-kernel shell reads on at a new prompt.
+    loop {
+        shell.run();
+    }
 }
 
 #[cfg(test)]

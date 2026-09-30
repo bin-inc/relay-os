@@ -9,20 +9,28 @@ mod change;
 mod ls;
 mod script;
 mod stat;
-
-pub(crate) use script::Script;
-pub use script::transcript_name;
 mod system;
 mod text;
+
+pub use basic::{clear, echo, pwd, uname};
+pub use change::{cp, mkdir, mv, rm, rmdir, touch};
+pub use ls::ls;
+pub(crate) use script::Script;
+pub use script::transcript_name;
+pub use stat::stat;
+pub use system::{date, df, dmesg, free, poweroff, reboot, sync};
+pub use text::{cat, head, tail, wc};
+
+/// A command function: runs the command with its arguments (without the
+/// name); returns the exit status.
+pub type Run = fn(&mut Ctx<'_>, &[String]) -> i32;
 
 /// One built-in command.
 pub struct Builtin {
     pub name: &'static str,
     /// One line for `help`.
     pub help: &'static str,
-    /// Runs the command with its arguments (without the name); returns the
-    /// exit status.
-    pub run: fn(&mut Ctx<'_>, &[String]) -> i32,
+    pub run: Run,
 }
 
 /// Every command, sorted by name.
@@ -66,6 +74,11 @@ pub const COMMANDS: &[Builtin] = &[
         name: "echo",
         help: "print the arguments",
         run: basic::echo,
+    },
+    Builtin {
+        name: "exit",
+        help: "leave the shell",
+        run: basic::exit,
     },
     Builtin {
         name: "free",
@@ -159,8 +172,17 @@ pub const COMMANDS: &[Builtin] = &[
     },
 ];
 
+/// The shell's own commands (user-space gate §8.3); every other one is a
+/// program of its own in `/bin`.
+pub const BUILTINS: &[&str] = &["cd", "exit", "help"];
+
 pub fn find(name: &str) -> Option<&'static Builtin> {
     COMMANDS.iter().find(|b| b.name == name)
+}
+
+/// One of the shell's own commands.
+pub fn builtin(name: &str) -> Option<&'static Builtin> {
+    find(name).filter(|b| BUILTINS.contains(&b.name))
 }
 
 #[cfg(test)]
@@ -179,5 +201,16 @@ mod tests {
         }
         assert!(find("cd").is_some());
         assert!(find("CD").is_none());
+    }
+
+    #[test]
+    fn the_shell_s_own_commands_are_cd_exit_and_help() {
+        let own: alloc::vec::Vec<_> = COMMANDS
+            .iter()
+            .filter(|b| builtin(b.name).is_some())
+            .map(|b| b.name)
+            .collect();
+        assert_eq!(own, ["cd", "exit", "help"]);
+        assert!(builtin("cat").is_none() && builtin("sh").is_none());
     }
 }

@@ -3,7 +3,7 @@
 #![cfg(test)]
 
 use crate::Shell;
-use crate::io::{Console, MemInfo, Output, System};
+use crate::io::{Console, MemInfo, Output, Programs, Stdout, System};
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
@@ -11,7 +11,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::Cell;
 use relay_abi::WaitStatus;
-use vfs::{DirEntry, Env, Errno, FileSystem, FileType, Ino, MemFs, MountTable, Stat, StatFs, Vfs};
+use vfs::{
+    DirEntry, Env, Errno, FileSystem, FileType, Ino, MemFs, MountTable, Node, Stat, StatFs, Vfs,
+};
 
 /// The time every test runs at: Sat Sep 26 12:00:00 UTC 2026.
 pub const NOW: u64 = 1_790_424_000;
@@ -99,6 +101,21 @@ pub struct TestSystem {
     pub answers: Vec<Result<(), Errno>>,
     /// The program started and not yet waited for.
     child: Option<usize>,
+    /// What `reboot` and `poweroff` say, unforced, as a program's `power`
+    /// call does when the filesystems cannot be shut down.
+    pub power_error: Option<Errno>,
+    /// Whether each `reboot` and `poweroff` was forced.
+    pub forced: Vec<bool>,
+}
+
+impl TestSystem {
+    fn power(&mut self, force: bool) -> Result<(), Errno> {
+        self.forced.push(force);
+        match self.power_error {
+            Some(e) if !force => Err(e),
+            _ => Ok(()),
+        }
+    }
 }
 
 impl TestSystem {
@@ -114,6 +131,8 @@ impl TestSystem {
             spawned: Vec::new(),
             answers: Vec::new(),
             child: None,
+            power_error: None,
+            forced: Vec::new(),
         }
     }
 }
@@ -128,11 +147,15 @@ impl System for TestSystem {
     fn kernel_log(&self) -> Vec<u8> {
         self.log.clone()
     }
-    fn reboot(&mut self) {
+    fn reboot(&mut self, force: bool) -> Result<(), Errno> {
+        self.power(force)?;
         self.reboots += 1;
+        Ok(())
     }
-    fn poweroff(&mut self) {
+    fn poweroff(&mut self, force: bool) -> Result<(), Errno> {
+        self.power(force)?;
         self.poweroffs += 1;
+        Ok(())
     }
     /// As the kernel does: the file must exist and be a program.
     fn spawn(
@@ -170,6 +193,181 @@ impl System for TestSystem {
             self.answers.push(out(*fd, bytes));
         }
         Ok(p.status)
+    }
+}
+
+/// What a spawning shell asked `FakePrograms` to start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Spawned {
+    pub path: String,
+    pub args: Vec<String>,
+    /// The redirection's fd, as fd 1.
+    pub stdout: Option<u32>,
+    pub foreground: bool,
+}
+
+/// `/bin/sh`'s system calls, for the spawning runner: redirection files
+/// are opened by path (and recorded, not created), and a program is known
+/// by its path.
+pub struct FakePrograms {
+    /// The programs `spawn` starts, by path, and how each ends.
+    pub known: Vec<(&'static str, WaitStatus)>,
+    /// What `spawn` says of a path it does not know (default `ENOENT`).
+    pub refusals: Vec<(&'static str, Errno)>,
+    /// Every redirection opened: its path, whether it appends, its fd.
+    pub opened: Vec<(String, bool, u32)>,
+    /// What `open_output` fails with, if anything.
+    pub open_error: Option<Errno>,
+    pub closed: Vec<u32>,
+    pub spawned: Vec<Spawned>,
+    /// The children started and not yet waited for, by pid.
+    children: Vec<(u32, WaitStatus)>,
+    /// The tees pushed and not popped, by path.
+    pub tees: Vec<String>,
+    /// Every tee pushed.
+    pub pushed: Vec<String>,
+    /// What `tee_push` fails with, if anything.
+    pub push_error: Option<Errno>,
+    /// What the next `tee_pop` returns, as a failed write would.
+    pub pop_error: Option<Errno>,
+    next_fd: u32,
+    next_pid: u32,
+}
+
+impl FakePrograms {
+    pub fn new() -> FakePrograms {
+        FakePrograms {
+            known: Vec::new(),
+            refusals: Vec::new(),
+            opened: Vec::new(),
+            open_error: None,
+            closed: Vec::new(),
+            spawned: Vec::new(),
+            children: Vec::new(),
+            tees: Vec::new(),
+            pushed: Vec::new(),
+            push_error: None,
+            pop_error: None,
+            next_fd: 3,
+            next_pid: 100,
+        }
+    }
+}
+
+impl Programs for FakePrograms {
+    fn open_output(&mut self, path: &[u8], append: bool) -> Result<u32, Errno> {
+        if let Some(e) = self.open_error {
+            return Err(e);
+        }
+        self.next_fd += 1;
+        let path = String::from_utf8_lossy(path).into_owned();
+        self.opened.push((path, append, self.next_fd));
+        Ok(self.next_fd)
+    }
+    fn close(&mut self, fd: u32) {
+        self.closed.push(fd);
+    }
+    fn spawn(
+        &mut self,
+        path: &[u8],
+        args: &[&[u8]],
+        stdout: Option<u32>,
+        foreground: bool,
+    ) -> Result<u32, Errno> {
+        let path = String::from_utf8_lossy(path).into_owned();
+        let Some(&(_, status)) = self.known.iter().find(|(p, _)| *p == path) else {
+            let refusal = self.refusals.iter().find(|(p, _)| *p == path);
+            return Err(refusal.map_or(Errno::ENOENT, |r| r.1));
+        };
+        self.spawned.push(Spawned {
+            path,
+            args: args
+                .iter()
+                .map(|a| String::from_utf8_lossy(a).into_owned())
+                .collect(),
+            stdout,
+            foreground,
+        });
+        self.next_pid += 1;
+        self.children.push((self.next_pid, status));
+        Ok(self.next_pid)
+    }
+    fn wait(&mut self, pid: u32) -> Result<WaitStatus, Errno> {
+        let i = self
+            .children
+            .iter()
+            .position(|c| c.0 == pid)
+            .ok_or(Errno::ECHILD)?;
+        Ok(self.children.remove(i).1)
+    }
+    fn tee_push(&mut self, path: &[u8]) -> Result<(), Errno> {
+        if let Some(e) = self.push_error {
+            return Err(e);
+        }
+        let path = String::from_utf8_lossy(path).into_owned();
+        self.pushed.push(path.clone());
+        self.tees.push(path);
+        Ok(())
+    }
+    fn tee_pop(&mut self) -> Result<(), Errno> {
+        self.tees.pop().ok_or(Errno::EINVAL)?;
+        self.pop_error.take().map_or(Ok(()), Err)
+    }
+}
+
+/// A program's fd 1: the console or a file, keeping every write whole.
+pub struct FakeStdout {
+    pub tty: bool,
+    pub node: Option<Node>,
+    pub writes: Vec<Vec<u8>>,
+    /// Writes fail with this once this many bytes were written.
+    pub fail_after: Option<(usize, Errno)>,
+}
+
+impl FakeStdout {
+    pub fn console() -> FakeStdout {
+        FakeStdout {
+            tty: true,
+            node: None,
+            writes: Vec::new(),
+            fail_after: None,
+        }
+    }
+
+    pub fn file(node: Option<Node>) -> FakeStdout {
+        FakeStdout {
+            tty: false,
+            ..FakeStdout::console()
+        }
+        .with_node(node)
+    }
+
+    fn with_node(mut self, node: Option<Node>) -> FakeStdout {
+        self.node = node;
+        self
+    }
+
+    /// Everything written.
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.writes.concat()).into_owned()
+    }
+}
+
+impl Stdout for FakeStdout {
+    fn write(&mut self, bytes: &[u8]) -> Result<(), Errno> {
+        if let Some((limit, e)) = self.fail_after
+            && self.writes.iter().map(Vec::len).sum::<usize>() + bytes.len() > limit
+        {
+            return Err(e);
+        }
+        self.writes.push(bytes.to_vec());
+        Ok(())
+    }
+    fn is_tty(&self) -> bool {
+        self.tty
+    }
+    fn node(&self) -> Option<Node> {
+        self.node
     }
 }
 
@@ -306,6 +504,7 @@ pub struct Harness {
     pub vfs: MountTable,
     pub console: TestConsole,
     pub system: TestSystem,
+    pub programs: FakePrograms,
     pub spy: Rc<SpyState>,
 }
 
@@ -331,6 +530,7 @@ impl Harness {
             vfs: MountTable::new(Box::new(fs)),
             console: TestConsole::new(),
             system: TestSystem::new(),
+            programs: FakePrograms::new(),
             spy: state,
         }
     }
@@ -342,6 +542,7 @@ impl Harness {
             vfs,
             console: TestConsole::new(),
             system: TestSystem::new(),
+            programs: FakePrograms::new(),
             spy,
         }
     }
@@ -349,6 +550,50 @@ impl Harness {
     /// Runs one command line; its exit status and everything it printed.
     pub fn run(&mut self, line: &str) -> (i32, String) {
         let status = Shell::new(&mut self.vfs, &mut self.console, &mut self.system).execute(line);
+        (status, self.console.take())
+    }
+
+    /// Runs one command line in a spawning shell (`/bin/sh`'s); its exit
+    /// status and what the shell printed.
+    pub fn spawning(&mut self, line: &str) -> (i32, String) {
+        let status = Shell::spawning(
+            &mut self.vfs,
+            &mut self.console,
+            &mut self.system,
+            &mut self.programs,
+        )
+        .execute(line);
+        (status, self.console.take())
+    }
+
+    /// Runs `line` as the program named by its first word does, standard
+    /// output going to `stdout`; its status and what it said on the
+    /// console.
+    pub fn program(&mut self, line: &str, stdout: &mut FakeStdout) -> (i32, String) {
+        let words = crate::parser::parse(line).unwrap().words;
+        let status = crate::run_command(
+            &words[0],
+            crate::commands::find(&words[0]).unwrap().run,
+            &words[1..],
+            &mut self.vfs,
+            &mut self.console,
+            &mut self.system,
+            stdout,
+        );
+        (status, self.console.take())
+    }
+
+    /// Runs `/bin/sh` with `args` (after argument 0), as a spawning shell
+    /// does, its fd 1 `stdout`; its status and what it printed.
+    pub fn sh(&mut self, args: &[&str], stdout: &mut FakeStdout) -> (i32, String) {
+        let args: Vec<String> = args.iter().map(|a| String::from(*a)).collect();
+        let status = Shell::spawning(
+            &mut self.vfs,
+            &mut self.console,
+            &mut self.system,
+            &mut self.programs,
+        )
+        .run_file(&args, stdout);
         (status, self.console.take())
     }
 

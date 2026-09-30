@@ -1,9 +1,9 @@
 //! What a command gets to work with: the filesystem, the system, standard
-//! output (the screen or a redirection file) and the screen for errors;
-//! plus the helpers every command shares for options and GNU-style
-//! messages.
+//! output (the screen, a redirection file, or a program's fd 1) and the
+//! screen for errors; plus the helpers every command shares for options
+//! and GNU-style messages.
 
-use crate::io::{Console, System};
+use crate::io::{Console, Stdout, System};
 use crate::transcript::Transcript;
 use alloc::format;
 use alloc::string::String;
@@ -19,8 +19,9 @@ pub struct Ctx<'a> {
     pub vfs: &'a mut dyn Vfs,
     pub system: &'a mut dyn System,
     console: &'a mut dyn Console,
-    out: Output,
-    /// Set by `reboot` and `poweroff` when the machine did not go away.
+    out: Output<'a>,
+    /// Set by `exit`, and by `reboot` and `poweroff` when the machine did
+    /// not go away: the shell stops.
     pub(crate) exit: bool,
     /// Ctrl-C stopped the command.
     pub(crate) cancelled: bool,
@@ -30,15 +31,29 @@ pub struct Ctx<'a> {
     pub(crate) in_script: bool,
     /// A running script's transcript, which gets what the screen gets.
     pub(crate) transcript: Option<Transcript>,
+    /// The last command's exit status, for `exit`.
+    pub(crate) status: i32,
+    /// Set by `exit`: in a script the shell runs itself, only the script
+    /// stops.
+    pub(crate) exited: bool,
 }
 
-enum Output {
+enum Output<'a> {
     Console,
     File {
         node: Node,
         offset: u64,
         buf: Vec<u8>,
         /// The first write error; later output is dropped.
+        error: Option<Errno>,
+    },
+    /// A program's standard output (user-space gate §8.1): written at once
+    /// when it is the console, so that it keeps its place among the
+    /// errors, and in pieces of 4 KiB when it is a file.
+    Program {
+        stdout: &'a mut dyn Stdout,
+        tty: bool,
+        buf: Vec<u8>,
         error: Option<Errno>,
     },
 }
@@ -60,6 +75,33 @@ impl<'a> Ctx<'a> {
             },
             None => Output::Console,
         };
+        Ctx::with_output(vfs, system, console, out)
+    }
+
+    /// A command run as a program: standard output is `stdout`, errors go
+    /// to `console`.
+    pub(crate) fn program(
+        vfs: &'a mut dyn Vfs,
+        system: &'a mut dyn System,
+        console: &'a mut dyn Console,
+        stdout: &'a mut dyn Stdout,
+    ) -> Ctx<'a> {
+        let tty = stdout.is_tty();
+        let out = Output::Program {
+            stdout,
+            tty,
+            buf: Vec::new(),
+            error: None,
+        };
+        Ctx::with_output(vfs, system, console, out)
+    }
+
+    fn with_output(
+        vfs: &'a mut dyn Vfs,
+        system: &'a mut dyn System,
+        console: &'a mut dyn Console,
+        out: Output<'a>,
+    ) -> Ctx<'a> {
         Ctx {
             vfs,
             system,
@@ -70,11 +112,13 @@ impl<'a> Ctx<'a> {
             script: None,
             in_script: false,
             transcript: None,
+            status: 0,
+            exited: false,
         }
     }
 
     /// Where output goes, borrowed apart from the system.
-    fn streams(&mut self) -> Streams<'_> {
+    fn streams(&mut self) -> Streams<'_, 'a> {
         Streams {
             vfs: &mut *self.vfs,
             console: &mut *self.console,
@@ -132,19 +176,27 @@ impl<'a> Ctx<'a> {
 
     /// Whether standard output is the screen (`ls` then lays out columns).
     pub fn is_tty(&self) -> bool {
-        matches!(self.out, Output::Console)
+        match self.out {
+            Output::Console => true,
+            Output::File { .. } => false,
+            Output::Program { tty, .. } => tty,
+        }
     }
 
     /// Whether writing standard output to its file has failed; later output
     /// is dropped, so a command may as well stop.
     pub fn out_failed(&self) -> bool {
-        matches!(self.out, Output::File { error: Some(_), .. })
+        matches!(
+            self.out,
+            Output::File { error: Some(_), .. } | Output::Program { error: Some(_), .. }
+        )
     }
 
     /// The file standard output goes to, if any.
     pub fn output_node(&self) -> Option<Node> {
-        match self.out {
-            Output::File { node, .. } => Some(node),
+        match &self.out {
+            Output::File { node, .. } => Some(*node),
+            Output::Program { stdout, .. } => stdout.node(),
             Output::Console => None,
         }
     }
@@ -153,7 +205,7 @@ impl<'a> Ctx<'a> {
     pub(crate) fn finish(&mut self) -> Result<(), Errno> {
         self.streams().flush();
         match self.out {
-            Output::File { error: Some(e), .. } => Err(e),
+            Output::File { error: Some(e), .. } | Output::Program { error: Some(e), .. } => Err(e),
             _ => Ok(()),
         }
     }
@@ -166,19 +218,31 @@ impl<'a> Ctx<'a> {
 }
 
 /// A command's standard output, the screen and a script's transcript.
-struct Streams<'s> {
+struct Streams<'s, 'a> {
     vfs: &'s mut dyn Vfs,
     console: &'s mut dyn Console,
-    out: &'s mut Output,
+    out: &'s mut Output<'a>,
     transcript: &'s mut Option<Transcript>,
 }
 
-impl Streams<'_> {
+impl Streams<'_, '_> {
     /// Standard output; the file's first write error, once there is one.
     fn out(&mut self, bytes: &[u8]) -> Result<(), Errno> {
         match &mut *self.out {
             Output::Console => self.screen(bytes),
-            Output::File { buf, error, .. } => {
+            Output::Program {
+                stdout,
+                tty: true,
+                error,
+                ..
+            } => {
+                if error.is_none()
+                    && let Err(e) = stdout.write(bytes)
+                {
+                    *error = Some(e);
+                }
+            }
+            Output::File { buf, error, .. } | Output::Program { buf, error, .. } => {
                 if let Some(e) = error {
                     return Err(*e);
                 }
@@ -189,7 +253,7 @@ impl Streams<'_> {
             }
         }
         match &*self.out {
-            Output::File { error: Some(e), .. } => Err(*e),
+            Output::File { error: Some(e), .. } | Output::Program { error: Some(e), .. } => Err(*e),
             _ => Ok(()),
         }
     }
@@ -206,29 +270,41 @@ impl Streams<'_> {
     }
 
     fn flush(&mut self) {
-        let Output::File {
-            node,
-            offset,
-            buf,
-            error,
-        } = &mut *self.out
-        else {
-            return;
-        };
-        let mut done = 0;
-        while error.is_none() && done < buf.len() {
-            match self.vfs.write_at(*node, *offset, &buf[done..]) {
-                // Nothing written would loop forever; the contract says
-                // that is ENOSPC.
-                Ok(0) => *error = Some(Errno::ENOSPC),
-                Ok(n) => {
-                    done += n;
-                    *offset += n as u64;
+        match &mut *self.out {
+            Output::File {
+                node,
+                offset,
+                buf,
+                error,
+            } => {
+                let mut done = 0;
+                while error.is_none() && done < buf.len() {
+                    match self.vfs.write_at(*node, *offset, &buf[done..]) {
+                        // Nothing written would loop forever; the contract
+                        // says that is ENOSPC.
+                        Ok(0) => *error = Some(Errno::ENOSPC),
+                        Ok(n) => {
+                            done += n;
+                            *offset += n as u64;
+                        }
+                        Err(e) => *error = Some(e),
+                    }
                 }
-                Err(e) => *error = Some(e),
+                buf.clear();
             }
+            Output::Program {
+                stdout, buf, error, ..
+            } => {
+                if error.is_none()
+                    && !buf.is_empty()
+                    && let Err(e) = stdout.write(buf)
+                {
+                    *error = Some(e);
+                }
+                buf.clear();
+            }
+            Output::Console => {}
         }
-        buf.clear();
     }
 }
 

@@ -143,25 +143,38 @@ pub fn poweroff(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
 
 /// `reboot`/`poweroff [-f]`: shuts the filesystems down cleanly first
 /// (spec §7.4). If that fails the machine stays up, so nothing is lost
-/// silently; `-f` goes ahead anyway.
+/// silently; `-f` goes ahead anyway. (A program's filesystems are shut down
+/// by the kernel's `power`, which returns the error instead.)
 fn restart(ctx: &mut Ctx<'_>, name: &str, args: &[String]) -> i32 {
     let opts = match no_operands(ctx, name, args, "f") {
         Ok(o) => o,
         Err(status) => return status,
     };
-    if let Err(e) = ctx.vfs.shutdown() {
+    let force = opts.has('f');
+    let unclean = |ctx: &mut Ctx<'_>, e| {
         ctx.fail(
             name,
             format_args!("cannot shut the filesystems down cleanly: {e}"),
         );
-        if !opts.has('f') {
-            return ctx.fail(name, format_args!("use '{name} -f' to go ahead anyway"));
+        if force {
+            1
+        } else {
+            ctx.fail(name, format_args!("use '{name} -f' to go ahead anyway"))
+        }
+    };
+    if let Err(e) = ctx.vfs.shutdown() {
+        let status = unclean(ctx, e);
+        if !force {
+            return status;
         }
     }
-    if name == "reboot" {
-        ctx.system.reboot();
+    let went = if name == "reboot" {
+        ctx.system.reboot(force)
     } else {
-        ctx.system.poweroff();
+        ctx.system.poweroff(force)
+    };
+    if let Err(e) = went {
+        return unclean(ctx, e);
     }
     ctx.exit = true;
     0
@@ -247,10 +260,7 @@ mod tests {
         Shell::new(&mut h.vfs, &mut h.console, &mut h.system).run();
         assert_eq!(h.spy.shutdowns.get(), 1);
         assert_eq!(h.system.reboots, 1);
-        assert_eq!(
-            h.console.take(),
-            "Welcome to Relay OS.\nroot@relay:~# reboot\n"
-        );
+        assert_eq!(h.console.take(), "root@relay:/# reboot\n");
         assert_eq!(h.run("poweroff"), (0, "".into()));
         assert_eq!(h.system.poweroffs, 1);
     }
