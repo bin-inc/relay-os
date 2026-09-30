@@ -1,10 +1,15 @@
-# Without \EFI\RELAY\system.img the startup line says so and the shell
-# runs on, with nothing in /bin (user-space gate spec §4.3).
+# Without \EFI\RELAY\system.img the startup line says so, and with no
+# /bin/sh to run the machine shows the error screen (user-space gate spec
+# §4.3, §11.2): the reason and the kernel log's last lines; it waits, a key
+# restarts it, and it comes back to the same screen.
 esp-delete /EFI/RELAY/system.img
 timeout 30
 expect \[ ok \] mount /: ext2 on .*
 expect \[FAIL\] system: no system\.img
-expect root@relay:~# $
-send ls /bin
-send echo done
-expect \ndone\n
+expect \*\*\* Relay OS cannot run its shell \*\*\*\n\nsystem: no system\.img\n\n--- last kernel log lines ---\n
+expect \[FAIL\] system: no system\.img\n\nPress any key to reboot\.\n
+# It waits for the key, however long that takes.
+alive 2
+reset
+expect Relay OS \d+\.\d+\.\d+
+expect \nsystem: no system\.img\n

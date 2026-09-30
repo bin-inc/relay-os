@@ -1,8 +1,8 @@
 //! The system archive (spec §4.3 of the user-space gate): the programs the
 //! loader read from `\EFI\RELAY\system.img`, checked and mounted read-only
 //! at `/bin`. Startup step 10 reports how that went, as `[ ok ] system:
-//! 34 programs, ABI 2` or `[FAIL] system: <reason>`; without an archive the
-//! shell runs on, with nothing in `/bin`.
+//! 34 programs, ABI 2` or `[FAIL] system: <reason>`; without an archive
+//! there is no shell to run, and init shows the error screen (§11.2).
 
 use crate::console;
 use alloc::boxed::Box;
@@ -90,8 +90,8 @@ pub fn mount_into(vfs: &mut MountTable, bytes: &'static [u8]) -> Result<String, 
 }
 
 /// Startup step 10: mounts the loader's archive at `/bin` and prints the
-/// `system` line.
-pub fn mount(info: &BootInfo, vfs: &mut MountTable) {
+/// `system` line; why it could not.
+pub fn mount(info: &BootInfo, vfs: &mut MountTable) -> Result<(), SystemError> {
     let result = (|| {
         let (phys, len) = info.system_image().ok_or(SystemError::Missing)?;
         // SAFETY: built by relay-boot, lives forever.
@@ -106,8 +106,14 @@ pub fn mount(info: &BootInfo, vfs: &mut MountTable) {
         mount_into(vfs, bytes)
     })();
     match result {
-        Ok(text) => console::ok(format_args!("system: {text}")),
-        Err(e) => console::fail("system", format_args!("{e}")),
+        Ok(text) => {
+            console::ok(format_args!("system: {text}"));
+            Ok(())
+        }
+        Err(e) => {
+            console::fail("system", format_args!("{e}"));
+            Err(e)
+        }
     }
 }
 

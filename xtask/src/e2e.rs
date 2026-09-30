@@ -27,10 +27,17 @@
 //! reboot [<regex>]                 (types `reboot`; QEMU must exit as after a
 //!                                   reset, having printed <regex> first, then
 //!                                   starts again on the same disk)
-//! poweroff                         (types `poweroff`; QEMU must exit through
-//!                                   isa-debug-exit, test mode's power-off)
+//! reset [<text>]                   (types <text> + Enter over serial, or Enter
+//!                                   alone: a key at the error screen; QEMU
+//!                                   must exit as after a reset, then starts
+//!                                   again on the same disk)
+//! poweroff [<command>]             (types `poweroff`, or <command>; QEMU must
+//!                                   exit through isa-debug-exit, test mode's
+//!                                   power-off; an `expect` after it reads
+//!                                   what the machine printed before)
 //! unplug                           (pulls the USB stick out: QMP device_del,
-//!                                   then QEMU's DEVICE_DELETED event)
+//!                                   then QEMU's DEVICE_DELETED event; the
+//!                                   root need not be clean after it)
 //! check-script /root/checks/a.sh   (after poweroff: the script's transcript,
 //!                                   read with debugfs, shows what the script
 //!                                   expects on QEMU; see checks.rs)
@@ -112,6 +119,9 @@ pub enum Step {
     /// Restart the machine and boot again on the same disk; the pattern
     /// must appear in what the machine printed before it went down.
     Reboot(Option<String>),
+    /// Type this text (or nothing) and Enter over the serial console, and
+    /// the machine restarts as with `Reboot` (a key at the error screen).
+    Reset(String),
     /// Switch the machine off with a command (`poweroff` if none is
     /// given); no later step talks to it.
     Poweroff(String),
@@ -243,6 +253,7 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
             }
             "alive" => Step::Alive(rest.parse().with_context(|| format!("{name}:{line_no}"))?),
             "reboot" if rest.is_empty() => Step::Reboot(None),
+            "reset" => Step::Reset(rest.to_string()),
             "reboot" => {
                 Regex::new(rest).with_context(|| format!("{name}:{line_no}: bad regex"))?;
                 Step::Reboot(Some(rest.to_string()))
@@ -388,6 +399,9 @@ struct Running {
     consumed: usize,
     /// The machine switched itself off.
     off: bool,
+    /// The stick was pulled out: the disk keeps what it had then, so its
+    /// clean flag says nothing about how the machine went down.
+    unplugged: bool,
 }
 
 impl Running {
@@ -470,6 +484,7 @@ fn launch(q: Qemu, root: Partition, run_dir: &Path, log: fs::File) -> Result<Run
         qmp,
         consumed: 0,
         off: false,
+        unplugged: false,
     })
 }
 
@@ -495,7 +510,7 @@ fn read_serial(
 
 /// Types `command` and waits (up to `timeout`) for QEMU to exit with
 /// `status`; the shell shut the filesystem down first, so it must be marked
-/// clean. Returns the serial log once everything QEMU printed is in it.
+/// clean, unless the stick was pulled out. Returns the serial log once everything QEMU printed is in it.
 fn exit_with(r: &mut Running, command: &str, status: i32, timeout: Duration) -> Result<fs::File> {
     r.stdin.write_all(command.as_bytes())?;
     r.stdin.write_all(b"\r")?;
@@ -515,7 +530,7 @@ fn exit_with(r: &mut Running, command: &str, status: i32, timeout: Duration) -> 
                 bail!("QEMU exited with {s} after `{command}`, expected exit status {status}");
             }
             let state = image::ext2_state(&r.qemu.disk, r.root)?;
-            if state != "clean" {
+            if state != "clean" && !r.unplugged {
                 bail!("after `{command}` the root filesystem is `{state}`, not `clean`");
             }
             return Ok(log);
@@ -527,11 +542,11 @@ fn exit_with(r: &mut Running, command: &str, status: i32, timeout: Duration) -> 
     }
 }
 
-/// `reboot`: the machine resets, and QEMU (`-no-reboot`) exits, after
-/// printing `last` if given; then the same disk boots again, with the serial
-/// log continued.
-fn reboot(r: &mut Running, last: Option<&str>, timeout: Duration) -> Result<()> {
-    let mut log = exit_with(r, "reboot", EXIT_RESET, timeout)?;
+/// `reboot` (or `reset`): after `command`, the machine resets, and QEMU
+/// (`-no-reboot`) exits, after printing `last` if given; then the same disk
+/// boots again, with the serial log continued.
+fn reboot(r: &mut Running, command: &str, last: Option<&str>, timeout: Duration) -> Result<()> {
+    let mut log = exit_with(r, command, EXIT_RESET, timeout)?;
     if let Some(pattern) = last {
         let text = r.text();
         if !Regex::new(pattern)?.is_match(&text[r.consumed.min(text.len())..]) {
@@ -637,7 +652,7 @@ fn run_step(
 ) -> Result<()> {
     let offline = matches!(
         step,
-        Step::Timeout(_) | Step::FileLines { .. } | Step::CheckScript(_)
+        Step::Timeout(_) | Step::Expect(_) | Step::FileLines { .. } | Step::CheckScript(_)
     );
     if r.off && !offline {
         bail!("the machine was switched off by an earlier step");
@@ -708,7 +723,8 @@ fn run_step(
                 );
             }
         }
-        Step::Reboot(last) => reboot(r, last.as_deref(), *timeout)?,
+        Step::Reboot(last) => reboot(r, "reboot", last.as_deref(), *timeout)?,
+        Step::Reset(text) => reboot(r, text, None, *timeout)?,
         Step::FileLines { path, bytes, line } => {
             if !r.off {
                 bail!("file-lines reads the disk: switch the machine off first (poweroff)");
@@ -755,6 +771,7 @@ fn run_step(
                 |d| d["device"] == qemu::STICK_DEVICE,
                 *timeout,
             )?;
+            r.unplugged = true;
         }
         Step::ScreenshotNonblank => {
             let file = run_dir.join("screen.ppm");
@@ -987,7 +1004,7 @@ mod tests {
     fn parses_reboot_and_poweroff_steps() {
         let s = parse_scenario(
             "x",
-            "reboot\nreboot relay: restarting\npoweroff\npoweroff t-sys poweroff",
+            "reboot\nreboot relay: restarting\npoweroff\npoweroff t-sys poweroff\nreset\nreset reboot -f",
         )
         .unwrap();
         assert_eq!(
@@ -996,7 +1013,9 @@ mod tests {
                 (1, Step::Reboot(None)),
                 (2, Step::Reboot(Some("relay: restarting".into()))),
                 (3, Step::Poweroff("poweroff".into())),
-                (4, Step::Poweroff("t-sys poweroff".into()))
+                (4, Step::Poweroff("t-sys poweroff".into())),
+                (5, Step::Reset(String::new())),
+                (6, Step::Reset("reboot -f".into()))
             ]
         );
         assert!(parse_scenario("x", "reboot (").is_err());

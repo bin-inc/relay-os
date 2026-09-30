@@ -1,0 +1,24 @@
+# Process 1 is init (user-space gate §6.6, §11.2, §16 item 6): it prints
+# the motd once, starts /bin/sh in /root as its child (pid 2), and when the
+# shell ends it says how and starts another, in /root again, with no motd.
+# The third end within 10 s reaches the error screen, which waits for a
+# key typed after it came (not the LF of a terminal's CR LF before it),
+# and a key restarts the machine.
+timeout 30
+expect \nWelcome to Relay OS\.\n
+expect root@relay:~# $
+send cd /
+send exit
+expect \ninit: /bin/sh \(pid 2\) exited with 0; starting it again\nroot@relay:~# $
+send echo alive
+expect \nalive\n
+send exit 3
+expect \ninit: /bin/sh \(pid \d+\) exited with 3; starting it again\nroot@relay:~# $
+send-crlf exit
+expect \ninit: /bin/sh \(pid \d+\) exited with 0\n
+expect \*\*\* Relay OS cannot run its shell \*\*\*\n\n/bin/sh ended 3 times within 10 s\n\n--- last kernel log lines ---\n
+expect \nPress any key to reboot\.\n
+alive 2
+reset
+expect Relay OS \d+\.\d+\.\d+
+expect root@relay:~# $

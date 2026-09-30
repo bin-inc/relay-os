@@ -10,9 +10,11 @@ pub mod arch;
 pub mod block;
 pub mod cmdline;
 pub mod console;
+pub mod error_screen;
 pub mod exec;
 pub mod fd;
 pub mod file;
+pub mod init;
 pub mod input;
 pub mod klog;
 pub mod line;
@@ -149,9 +151,13 @@ pub fn kernel_main(info: &'static BootInfo) -> ! {
     usb::init(cmdline.debug_usb);
     let root = storage::mount_root(info.boot_partition_guid());
     let mut vfs = vfs::MountTable::new(root);
-    system::mount(info, &mut vfs);
+    if let Err(e) = system::mount(info, &mut vfs) {
+        init::system_failed(e);
+    }
     let root = mounts::init(vfs);
-    proc::start(session::shell, u64::from(cmdline.test_mode), root)
+    // `test=1`: `poweroff` makes QEMU exit, whoever asks for it (spec §7.4).
+    power::set_test_mode(cmdline.test_mode);
+    proc::start(init::run, 0, root)
 }
 
 /// `check=timer`: the 1 kHz tick measured against the RTC's seconds.

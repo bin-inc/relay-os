@@ -1,11 +1,9 @@
-# One program per command (user-space gate §8.4; milestone 2, plan 4a):
-# each /bin program prints exactly what the in-kernel shell's command of
-# the same name prints, run here by path, since the in-kernel shell's own
-# commands come first. Output follows a redirection, errors stay on the
-# screen, and memory in use is the same before and after. (Under the
-# in-kernel shell a program's standard output is the shell's own output
-# hook, never a file, so what depends on writing into one is in the `sh`
-# scenario, under /bin/sh.)
+# One program per command (user-space gate §8.4; milestone 2, plans 4a
+# and 4b): each /bin program prints exactly what milestone 1's command of
+# the same name printed, run here by path, as a bare name runs it too.
+# Output follows a redirection, into which a program writes lines and
+# which it never reads back; errors stay on the screen, and memory in use
+# is the same before and after.
 timeout 30
 expect root@relay:~# $
 send free
@@ -23,6 +21,11 @@ send /bin/cp /root/a/f /root/a/g
 send /bin/mv /root/a/g /root/a/b/h
 send /bin/ls /root/a /root/a/b
 expect \n/root/a:\nb  f\n\n/root/a/b:\nc  h\n
+send /bin/ls /root/a > /root/list
+send /bin/cat /root/list
+expect \nb\nf\n
+send /bin/cat /root/list >> /root/list
+expect \ncat: /root/list: input file is output file\n
 send /bin/rmdir /root/a/b
 expect \nrmdir: failed to remove '/root/a/b': Directory not empty\n
 send /bin/rm -r /root/a/b
@@ -46,7 +49,7 @@ expect \n  File: /root/out\n  Size: 0 .*regular empty file\n
 # of two filesystems with one inode number are two files).
 send /bin/cp /bin/t-args /root/t
 expect /bin/cp /bin/t-args /root/t\nroot@relay:~# $
-send /bin/rm /root/a/f /root/t /root/out
+send /bin/rm /root/a/f /root/t /root/out /root/list
 send /bin/rmdir /root/a
 send /bin/ls
 expect \nREADME  checks\n

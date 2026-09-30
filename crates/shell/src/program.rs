@@ -116,16 +116,27 @@ mod tests {
             )
         );
         assert_eq!(h.system.reboots, 0);
-        // -f goes ahead: the kernel's `power` shuts down what it can.
-        assert_eq!(h.program("poweroff -f", &mut out), (0, String::new()));
+        // -f goes ahead, having said why the filesystems were not shut down
+        // cleanly, as milestone 1's did: `power` is asked without it first.
+        assert_eq!(
+            h.program("poweroff -f", &mut out),
+            (
+                0,
+                "poweroff: cannot shut the filesystems down cleanly: Input/output error\n".into()
+            )
+        );
         assert_eq!(
             (h.system.poweroffs, &h.system.forced[..]),
-            (1, &[false, true][..])
+            (1, &[false, false, true][..])
         );
         assert_eq!(
             h.spy.shutdowns.get(),
             2,
             "the Vfs's own shutdown comes first"
         );
+        // When they can be, -f changes nothing.
+        let mut h = Harness::new();
+        assert_eq!(h.program("reboot -f", &mut out), (0, String::new()));
+        assert_eq!((h.system.reboots, &h.system.forced[..]), (1, &[false][..]));
     }
 }

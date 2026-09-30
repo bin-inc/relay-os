@@ -1,0 +1,14 @@
+# Init starts each shell in /root, or in / when there is none (user-space
+# gate §6.6, §16 item 6): with /root removed, the next shell starts in /,
+# not in the removed directory. (The empty read-only root of mount_fail has
+# no /root either, but init is already in / there.)
+timeout 30
+expect root@relay:~# $
+send cd /
+send rm -r /root
+send exit
+expect \ninit: /bin/sh \(pid 2\) exited with 0; starting it again\nroot@relay:/# $
+send pwd
+expect \n/\n
+send ls /
+expect \nbin  dev  etc  home  lost\+found  tmp  usr  var\n

@@ -12,7 +12,10 @@ typed, and copy what the console shows into files (tees). Every command
 is also a program of its own in `/bin` (`/bin/ls`), which prints what the
 shell's command prints, and the shell itself is one too: `/bin/sh` runs
 every command but `cd`, `exit` and `help` as a program, and its scripts
-may run scripts.
+may run scripts. Process 1 is the kernel's init: it starts `/bin/sh` at
+boot and again whenever it ends, and a machine that cannot run its shell
+(no `system.img`, or a shell that keeps ending) shows an error screen and
+restarts at a key.
 
 Design: `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`
 (milestone 1) and `docs/superpowers/specs/2026-09-29-user-space-gate-design.md`
