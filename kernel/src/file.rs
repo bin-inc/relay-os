@@ -133,10 +133,11 @@ pub fn stat_of(s: &vfs::Stat) -> relay_abi::Stat {
 }
 
 /// How much bigger than a directory's size its entries may be in memory
-/// (an ext2 entry of 12 bytes becomes about 48): `read_dir` refuses a
-/// directory the heap has no room for, since the kernel's heap panics when
-/// it runs out.
-const DIR_MEMORY_FACTOR: u64 = 4;
+/// (an ext2 entry of 12 bytes becomes up to three `vfs::DirEntry` slots of
+/// 32 bytes while the list grows, and a name of at least 16): `read_dir`
+/// refuses a directory the heap has no room for, since the kernel's heap
+/// panics when it runs out.
+const DIR_MEMORY_FACTOR: u64 = 10;
 
 impl OpenFile {
     pub fn node(&self) -> Node {
@@ -663,6 +664,21 @@ mod tests {
             Err(Errno::ENOMEM)
         );
         assert!(d.read_dir(&mut t, &mut [0; 64], need).unwrap() > 0);
+    }
+
+    #[test]
+    fn the_heap_check_covers_a_directory_of_the_smallest_entries() {
+        // Found by the prototype's review: ext2's smallest entry is 12
+        // bytes on disk (a name of up to 4). In memory it is a
+        // `vfs::DirEntry` in a `Vec` that doubles as it grows, so the old
+        // and the new buffer hold three slots an entry at the peak, and its
+        // name takes a heap block of at least 16 bytes (7.7 times the
+        // directory's size was measured, 8.7 with the heap's rounding).
+        let per_entry = 3 * core::mem::size_of::<vfs::DirEntry>() as u64 + 16;
+        assert!(
+            DIR_MEMORY_FACTOR * 12 >= per_entry,
+            "{DIR_MEMORY_FACTOR} x 12 bytes < {per_entry}"
+        );
     }
 
     #[test]
