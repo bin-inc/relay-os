@@ -1047,5 +1047,5 @@ does. Facts found before the spec was first merged are already in its body.
    - **Check scripts** (§12.4). `check3-a.sh` runs `t-spin 1`,
      `t-spawn 100`, `t-spawn kill`, `t-fault sse`, `flags-ac` and `gsbase`,
      and expects the `cpu:` line; two steps follow by hand (typing during
-     `t-spin 5`, and Ctrl-C of `t-spin`). The recorded transcripts get
-     those lines by hand until plan 3a's NUC check records real ones.
+     `t-spin 5`, and Ctrl-C of `t-spin`). The recorded NUC transcripts
+     are those of plan 3a's NUC check.
