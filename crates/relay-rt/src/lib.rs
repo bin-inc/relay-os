@@ -17,6 +17,8 @@
 //! `_start`) are in `arch`, built only for Relay OS; the rest is host-tested.
 #![cfg_attr(not(test), no_std)]
 
+extern crate alloc;
+
 mod allocator;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod arch;
@@ -27,9 +29,12 @@ mod note;
 #[cfg_attr(not(target_os = "none"), allow(dead_code))]
 mod start;
 pub mod sys;
+pub mod sysvfs;
+mod testing;
 
 pub use args::Args;
 pub use start::name;
+pub use sysvfs::SysVfs;
 
 /// Names the program's `fn main(args: Args) -> u8`; its result is the exit
 /// status.
