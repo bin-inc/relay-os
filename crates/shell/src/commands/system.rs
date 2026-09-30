@@ -143,8 +143,10 @@ pub fn poweroff(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
 
 /// `reboot`/`poweroff [-f]`: shuts the filesystems down cleanly first
 /// (spec §7.4). If that fails the machine stays up, so nothing is lost
-/// silently; `-f` goes ahead anyway. (A program's filesystems are shut down
-/// by the kernel's `power`, which returns the error instead.)
+/// silently; `-f` goes ahead anyway, after saying so. (A program's
+/// filesystems are shut down by the kernel's `power`, which returns the
+/// error instead: it is asked without `-f` first, so that `-f` says the
+/// same.)
 fn restart(ctx: &mut Ctx<'_>, name: &str, args: &[String]) -> i32 {
     let opts = match no_operands(ctx, name, args, "f") {
         Ok(o) => o,
@@ -168,13 +170,22 @@ fn restart(ctx: &mut Ctx<'_>, name: &str, args: &[String]) -> i32 {
             return status;
         }
     }
-    let went = if name == "reboot" {
-        ctx.system.reboot(force)
-    } else {
-        ctx.system.poweroff(force)
+    let go = |ctx: &mut Ctx<'_>, force| {
+        if name == "reboot" {
+            ctx.system.reboot(force)
+        } else {
+            ctx.system.poweroff(force)
+        }
     };
-    if let Err(e) = went {
-        return unclean(ctx, e);
+    match go(ctx, false) {
+        Ok(()) => {}
+        Err(e) if force => {
+            unclean(ctx, e);
+            if go(ctx, true).is_err() {
+                return 1;
+            }
+        }
+        Err(e) => return unclean(ctx, e),
     }
     ctx.exit = true;
     0
