@@ -16,6 +16,9 @@
 //!   directory and file, which may get their inodes; the child finds its
 //!   directory gone and its file too (`ENOENT`), and the new ones keep
 //!   what they hold.
+//! - `t-files full`, on a full disk: writes to standard output (redirected
+//!   by the shell into a file) and to a file it opens itself until each
+//!   refuses, and says with what, on standard error.
 //! - `t-files child`: reads 7 bytes from fd 3 and prints them (the child
 //!   of `basic`); `t-files pwd` prints its working directory (the children
 //!   of `cwd`).
@@ -45,8 +48,9 @@ fn main(args: Args) -> u8 {
         Some(b"pwd") => pwd("my working directory"),
         Some(b"gone") => gone(),
         Some(b"gone-child") => gone_child(),
+        Some(b"full") => full(),
         _ => {
-            let _ = sys::write_all(2, b"usage: t-files basic|dir|cwd|gone\n");
+            let _ = sys::write_all(2, b"usage: t-files basic|dir|cwd|gone|full\n");
             return 2;
         }
     };
@@ -345,4 +349,24 @@ fn gone_child() -> Result<(), u16> {
     show("the child reads its file", sys::read(3, &mut [0; 4]));
     show("the child writes its file", sys::write(3, b"child"));
     Ok(())
+}
+
+/// Writes 1 KiB at a time to `fd` until a write fails; its error, after
+/// at most 64 MiB.
+fn fill(fd: u32) -> Result<(), u16> {
+    let chunk = [b'x'; 1024];
+    for _ in 0..64 * 1024 {
+        sys::write_all(fd, &chunk)?;
+    }
+    Ok(())
+}
+
+fn full() -> Result<(), u16> {
+    let said = fill(1).err().map_or("nothing", name);
+    let _ = writeln!(Fd(2), "writing standard output: {said}");
+    let fd = sys::open(b"t-files.full", OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE)?;
+    let said = fill(fd).err().map_or("nothing", name);
+    let _ = writeln!(Fd(2), "writing a file of its own: {said}");
+    sys::close(fd)?;
+    sys::unlink(b"t-files.full")
 }
