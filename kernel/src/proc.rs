@@ -558,18 +558,32 @@ pub fn collect_orphans() {
 }
 
 /// The in-kernel shell waits for its child `pid`, giving what its children
-/// write to fds 1 and 2 to `out` meanwhile (plan 2's hook); then it
-/// collects the orphans that have ended. `ECHILD` if `pid` is not its
-/// child.
+/// write to fds 1 and 2 to `out` meanwhile (plan 2's hook). The orphans
+/// that pass to it end while it waits too (a script `/bin/sh` runs leaves
+/// its command's zombie when Ctrl-C kills them both), and it collects each
+/// as it ends, so their zombies never fill the table while a long command
+/// runs. `ECHILD` if `pid` is not its child.
 pub fn wait(pid: u32, out: &mut shell::Output<'_>) -> Result<WaitStatus, Errno> {
     let mut out: Out<'_> = out;
     SHELL_OUT.store((&raw mut out).cast(), Ordering::Release);
-    let ended = collect(Child::Pid(pid), false);
+    let ended = wait_collecting(pid);
     SHELL_OUT.store(core::ptr::null_mut(), Ordering::Release);
-    collect_orphans();
-    match ended? {
-        Some((_, status)) => Ok(status),
-        None => unreachable!("wait without nohang collects a child"),
+    ended
+}
+
+/// Waits for the child `pid`, collecting any other child that ends
+/// meanwhile.
+fn wait_collecting(pid: u32) -> Result<WaitStatus, Errno> {
+    // `ECHILD` before anything else is collected.
+    if let Some((_, status)) = collect(Child::Pid(pid), true)? {
+        return Ok(status);
+    }
+    loop {
+        match collect(Child::Any, false)? {
+            Some((ended, status)) if ended == pid => return Ok(status),
+            Some(_) => {}
+            None => unreachable!("wait without nohang collects a child"),
+        }
     }
 }
 
