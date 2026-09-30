@@ -92,6 +92,9 @@ pub enum Step {
         pattern: String,
     },
     Send(String),
+    /// Text sent over the serial console with CR LF after it, as some
+    /// terminals send Enter.
+    SendCrLf(String),
     /// Text typed on the emulated USB keyboard, then Enter.
     Key(String),
     /// Text typed on the emulated USB keyboard, and nothing after it.
@@ -224,6 +227,7 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
                 parse_expect_same(rest).with_context(|| format!("{name}:{line_no}"))?
             }
             "send" => Step::Send(rest.to_string()),
+            "send-crlf" => Step::SendCrLf(rest.to_string()),
             "key" => {
                 keys::presses(rest).with_context(|| format!("{name}:{line_no}"))?;
                 Step::Key(rest.to_string())
@@ -650,6 +654,11 @@ fn run_step(
             r.stdin.write_all(b"\r")?;
             r.stdin.flush()?;
         }
+        Step::SendCrLf(text) => {
+            r.stdin.write_all(text.as_bytes())?;
+            r.stdin.write_all(b"\r\n")?;
+            r.stdin.flush()?;
+        }
         Step::Key(_) | Step::Type(_) => {
             let presses = match step {
                 Step::Key(text) => keys::presses(text)?,
@@ -959,6 +968,8 @@ mod tests {
         let s = parse_scenario("x", "key echo {up}").unwrap();
         assert_eq!(s.steps, vec![(1, Step::Key("echo {up}".into()))]);
         assert!(parse_scenario("x", "key {bogus}").is_err());
+        let s = parse_scenario("x", "send-crlf ls").unwrap();
+        assert_eq!(s.steps, vec![(1, Step::SendCrLf("ls".into()))]);
         let s = parse_scenario("x", "type {ctrl-d}").unwrap();
         assert_eq!(s.steps, vec![(1, Step::Type("{ctrl-d}".into()))]);
         assert!(parse_scenario("x", "type {bogus}").is_err());

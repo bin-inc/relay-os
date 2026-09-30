@@ -32,6 +32,8 @@ pub const ESC_TIMEOUT_MS: u64 = 50;
 pub struct InputQueue {
     /// Raw input.
     bytes: VecDeque<u8>,
+    /// The last raw byte taken was a CR: a LF after it is the same Enter.
+    taken_cr: bool,
     /// How many of `bytes`, from the first, the line discipline echoed
     /// already (typed in line mode and handed back): they go through it
     /// again without being echoed again.
@@ -53,6 +55,7 @@ impl InputQueue {
     pub const fn new() -> InputQueue {
         InputQueue {
             bytes: VecDeque::new(),
+            taken_cr: false,
             echoed: 0,
             sequence: Vec::new(),
             sequence_since: 0,
@@ -71,6 +74,7 @@ impl InputQueue {
         let was = core::mem::replace(&mut self.line_mode, line);
         if line && !was {
             let ahead: Vec<u8> = self.bytes.drain(..).collect();
+            self.line.after_cr(core::mem::take(&mut self.taken_cr));
             let quiet = core::mem::take(&mut self.echoed).min(ahead.len());
             let mut shown = Vec::new();
             for key in keys(&ahead[..quiet]) {
@@ -119,6 +123,7 @@ impl InputQueue {
         for (b, x) in buf.iter_mut().zip(self.bytes.drain(..n)) {
             *b = x;
         }
+        self.taken_cr = buf[n - 1] == b'\r';
         self.echoed = self.echoed.saturating_sub(n);
         Some(n)
     }
@@ -190,6 +195,7 @@ impl InputQueue {
     /// The oldest byte.
     pub fn pop(&mut self) -> Option<u8> {
         let b = self.bytes.pop_front()?;
+        self.taken_cr = b == b'\r';
         self.echoed = self.echoed.saturating_sub(1);
         Some(b)
     }
@@ -609,6 +615,54 @@ mod tests {
         assert_eq!(q.take_echo(), b"e");
         q.push(b"\r");
         assert_eq!(read(&mut q, 10).unwrap(), b"cde\n");
+    }
+
+    #[test]
+    fn the_lf_of_a_cr_lf_the_shell_read_is_not_a_line() {
+        // Found by the prototype's review: over a terminal that sends CR
+        // LF, the shell's editor read up to the CR, and the LF became an
+        // empty line for the command, whether it was there at the switch
+        // to line mode or came after it.
+        for lf_later in [false, true] {
+            let mut q = InputQueue::new();
+            serial(&mut q, b"t-read\r");
+            if !lf_later {
+                serial(&mut q, b"\n");
+            }
+            let mut line = Vec::new();
+            while let Some(b) = q.pop() {
+                line.push(b);
+                if b == b'\r' {
+                    break;
+                }
+            }
+            assert_eq!(line, b"t-read\r");
+            q.set_line_mode(true);
+            if lf_later {
+                serial(&mut q, b"\n");
+            }
+            assert!(q.is_empty(), "no line (LF {lf_later})");
+            assert_eq!(q.take_echo(), b"");
+            serial(&mut q, b"hello\r\n");
+            assert_eq!(read(&mut q, 10).unwrap(), b"hello\n");
+            assert_eq!(read(&mut q, 10), None);
+        }
+        // The same after a program's raw read that ended in a CR.
+        let mut q = InputQueue::new();
+        serial(&mut q, b"y\r");
+        assert_eq!(read(&mut q, 10).unwrap(), b"y\r");
+        q.set_line_mode(true);
+        serial(&mut q, b"\n");
+        assert!(q.is_empty());
+        // A LF alone after the shell's line is still an Enter.
+        let mut q = InputQueue::new();
+        q.push(b"ls\n\n");
+        assert_eq!(
+            (q.pop(), q.pop(), q.pop()),
+            (Some(b'l'), Some(b's'), Some(b'\n'))
+        );
+        q.set_line_mode(true);
+        assert_eq!(read(&mut q, 10).unwrap(), b"\n");
     }
 
     #[test]

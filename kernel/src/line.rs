@@ -111,6 +111,12 @@ impl LineDiscipline {
         self.ready.push_back(Some(core::mem::take(&mut self.line)));
     }
 
+    /// The key before the next one was a CR (read raw by the shell, whose
+    /// line it ended): a LF right after it is the same Enter.
+    pub fn after_cr(&mut self, cr: bool) {
+        self.after_cr = cr;
+    }
+
     /// Whether a line, or end of input, waits to be read.
     pub fn has_line(&self) -> bool {
         !self.ready.is_empty()

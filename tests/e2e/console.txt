@@ -33,6 +33,12 @@ expect \[\d+\] xy
 expect root@relay:~# $
 send t-read apart
 expect \nend of input\nroot@relay:~# $
+# A terminal that sends CR LF for Enter: the LF after the shell's line
+# is not an empty line for the command.
+send-crlf t-read
+alive 1
+type {ctrl-d}
+expect t-read\nend of input\nroot@relay:~# $
 # What is typed during a script is echoed once, as it is typed, not again
 # at every later command; the shell's line editor shows it at the prompt.
 send echo t-spin 2 > s.sh
