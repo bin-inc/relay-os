@@ -16,6 +16,10 @@
 //! #> ...
 //! #!> \[FAIL\].*          no output line may match
 //! mkdir /root/x           nothing expected: it must print nothing
+//! free
+//! #same> used Mem: +\d+ +(\d+).*
+//!                         a line as `#>`, whose group must capture what the
+//!                         first `#same>` named `used` captured
 //! ```
 //!
 //! A command whose only expectations are `#!>` lines may print anything
@@ -41,6 +45,9 @@ enum Expect {
     Any,
     /// No output line matches.
     Never(Regex),
+    /// One whole output line, whose first group must be what the first
+    /// `Same` of this name captured, in this command or an earlier one.
+    Same { name: String, re: Regex },
 }
 
 /// One command of a script and what it must print.
@@ -75,7 +82,7 @@ pub fn parse(script: &str, machine: Machine) -> Result<Vec<Command>> {
             continue;
         };
         let (on, never) = match tag {
-            "" => (true, false),
+            "" | "same" => (true, false),
             "!" => (true, true),
             "nuc" => (machine == Machine::Nuc, false),
             "qemu" => (machine == Machine::Qemu, false),
@@ -93,9 +100,25 @@ pub fn parse(script: &str, machine: Machine) -> Result<Vec<Command>> {
             continue;
         }
         let pattern = pattern.strip_prefix(' ').unwrap_or(pattern);
-        let whole = || {
+        let whole = |pattern: &str| {
             Regex::new(&format!("^(?:{pattern})$")).with_context(|| format!("line {n}: bad regex"))
         };
+        if tag == "same" {
+            let (name, pattern) = pattern
+                .split_once(' ')
+                .filter(|(name, _)| !name.contains(['(', '\\', '[']))
+                .with_context(|| format!("line {n}: `#same>` needs a name and a regex"))?;
+            let re = whole(pattern)?;
+            if re.captures_len() < 2 {
+                bail!("line {n}: `#same>`'s regex needs a group to compare");
+            }
+            command.expect.push(Expect::Same {
+                name: name.to_string(),
+                re,
+            });
+            continue;
+        }
+        let whole = || whole(pattern);
         command.expect.push(match (never, pattern) {
             (false, "...") => Expect::Any,
             (false, _) => Expect::Line(whole()?),
@@ -134,6 +157,8 @@ pub fn check(commands: &[Command], transcript: &str) -> Report {
         failures: Vec::new(),
     };
     let mut at = 0;
+    // What each `#same>` name captured first.
+    let mut seen: Vec<(&str, String)> = Vec::new();
     for (i, cmd) in commands.iter().enumerate() {
         let trace = format!("+ {}", cmd.text);
         match lines.get(at) {
@@ -156,7 +181,9 @@ pub fn check(commands: &[Command], transcript: &str) -> Report {
             .as_ref()
             .and_then(|n| lines[at..].iter().position(|l| l == n));
         let end = found.map_or(lines.len(), |k| at + k);
-        match mismatch(&cmd.expect, &lines[at..end]) {
+        match mismatch(&cmd.expect, &lines[at..end])
+            .or_else(|| not_the_same(&cmd.expect, &lines[at..end], &mut seen))
+        {
             None => report.passed += 1,
             Some(why) => report
                 .failures
@@ -199,6 +226,36 @@ fn mismatch(expect: &[Expect], output: &[&str]) -> Option<String> {
     line_mismatch(&lines, output)
 }
 
+/// For each `#same>` of a command whose lines matched: the value its group
+/// captures on the first line it matches, if that is not what the name
+/// captured the first time.
+fn not_the_same<'s>(
+    expect: &'s [Expect],
+    output: &[&str],
+    seen: &mut Vec<(&'s str, String)>,
+) -> Option<String> {
+    for e in expect {
+        let Expect::Same { name, re } = e else {
+            continue;
+        };
+        let value = output
+            .iter()
+            .find_map(|l| re.captures(l))
+            .and_then(|c| c.get(1))
+            .map_or("", |m| m.as_str());
+        match seen.iter().find(|(n, _)| n == name) {
+            Some((_, first)) if first != value => {
+                return Some(format!(
+                    "`{name}` is {value}, but it was {first} the first time"
+                ));
+            }
+            Some(_) => {}
+            None => seen.push((name.as_str(), value.to_string())),
+        }
+    }
+    None
+}
+
 /// The pattern as written in the script.
 fn show(re: &Regex) -> &str {
     let s = re.as_str();
@@ -223,14 +280,14 @@ fn line_mismatch(patterns: &[&Expect], output: &[&str]) -> Option<String> {
                     next[j] = reached;
                 }
             }
-            Expect::Line(re) => {
+            Expect::Line(re) | Expect::Same { re, .. } => {
                 for j in 0..output.len() {
                     next[j + 1] = ok[j] && re.is_match(output[j]);
                 }
             }
             Expect::Never(_) => next = ok.clone(),
         }
-        if let Expect::Line(re) = p
+        if let Expect::Line(re) | Expect::Same { re, .. } = p
             && !next.contains(&true)
         {
             // The lines where this pattern could have matched.
@@ -385,6 +442,47 @@ bin  etc
             run(Machine::Qemu, "+ mkdir /root/n\n").failures,
             ["line 2: expected `+ mkdir -p /root/n` in the transcript, found `+ mkdir /root/n`"]
         );
+    }
+
+    #[test]
+    fn a_value_must_be_what_it_was_the_first_time() {
+        let script = "\
+free
+#> \\s+total\\s+used
+#same> used Mem:\\s+\\d+\\s+(\\d+)
+t-fault null-read
+#> .*killed.*
+free
+#> \\s+total\\s+used
+#same> used Mem:\\s+\\d+\\s+(\\d+)
+";
+        let c = parse(script, Machine::Qemu).unwrap();
+        let log = |after: &str| {
+            format!(
+                "+ free\n  total  used\nMem: 100 40\n+ t-fault null-read\nkilled\n\
+                 + free\n  total  used\nMem: 100 {after}\n"
+            )
+        };
+        let r = check(&c, &log("40"));
+        assert!(r.ok(), "{:?}", r.failures);
+        assert_eq!(r.passed, 3);
+        let r = check(&c, &log("44"));
+        assert_eq!(r.passed, 2);
+        assert_eq!(
+            r.failures,
+            ["line 6: `free`: `used` is 44, but it was 40 the first time"]
+        );
+        // As a line, it must match as `#>` does.
+        let r = check(&c, &log("x"));
+        assert_eq!(
+            r.failures,
+            ["line 6: `free`: expected /Mem:\\s+\\d+\\s+(\\d+)/, printed `Mem: 100 x` (line 2)"]
+        );
+        // Its regex needs a group to compare, and the name comes first.
+        let e = parse("free\n#same> used Mem: \\d+\n", Machine::Qemu).unwrap_err();
+        assert!(e.to_string().contains("needs a group"), "{e}");
+        let e = parse("free\n#same> (\\d+)\n", Machine::Qemu).unwrap_err();
+        assert!(e.to_string().contains("a name and a regex"), "{e}");
     }
 
     #[test]
