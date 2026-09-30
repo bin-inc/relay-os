@@ -1,7 +1,7 @@
 # Relay OS — User-Space Gate Design: programs, not built-ins (milestones 2 and 3)
 
 - **Date:** 2026-09-29
-- **Status:** Approved 2026-09-29; revised while planning milestone 2's plans 1, 2, 3a, 3b and 4a (see §16)
+- **Status:** Approved 2026-09-29; revised while planning milestone 2's plans 1, 2, 3a, 3b, 4a and 4b (see §16)
 - **Builds on:** milestone 1 (version 0.2.0,
   `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`,
   cited below as "M1 §n")
@@ -160,7 +160,7 @@ mode, its length, and the archive's build time as the file times.
 - **The kernel** keeps those frames reserved, checks the archive (§4.2) and
   its ABI version, and mounts `SysImgFs` at `/bin`. New startup step 10,
   before the shell (M1 §4.4 step 10 becomes step 11):
-  `[ ok ] system: 33 programs, ABI 2` or `[FAIL] system: <reason>`
+  `[ ok ] system: 34 programs, ABI 2` or `[FAIL] system: <reason>`
   (§11.2).
 
 ### 4.4 Mounting `/bin`
@@ -362,11 +362,13 @@ runs. §14 covers its cost.
 
 ### 6.6 Process 1
 
-Process 1 is the kernel's own ("init", §16 item 5). It prints `/etc/motd`
-(M1 §4.4 step 10) and starts `/bin/sh` in `/root` as its child. If the
-shell ends, init logs how and starts it again. If it ended three times
-within 10 s, or cannot be started at all, the kernel shows the error screen
-of §11.2 instead. Init collects every orphan as it ends.
+Process 1 is the kernel's own ("init", §16 items 5 and 6). It prints
+`/etc/motd` once (M1 §4.4 step 10) and starts `/bin/sh` in `/root` (or `/`
+without one) as its child, in a process group of its own that gets the
+console. If the shell ends, init says how, on the screen and in the kernel
+log, and starts it again. If it ended three times within 10 s, or cannot be
+started at all, init shows the error screen of §11.2 instead. Init collects
+every orphan as it ends.
 
 ## 7. The Relay system-call ABI (`crates/relay-abi`)
 
@@ -518,7 +520,7 @@ Shipped in every `system.img`, because the NUC checks use them too:
 | `t-abi` | a program whose ELF note has the wrong ABI version (built by xtask) |
 | `t-args` | prints its arguments one per line, as `[n] <arg>` |
 | `t-files KIND` | the file calls: `basic` (`open`'s flags, `read`, `write`, `seek`, `fstat`, `close`, an offset shared with a child, 32 fds), `dir` (the calls on paths and `read_dir`), `cwd` (`chdir`, `getcwd`, a child's working directory), `gone` (another process removes its working directory and open file), `full` (write errors on a full disk) |
-| `t-mem KIND` | memory: `map` (`mem_map` and `mem_unmap`), `unmapped` and `unmapped-many` (a page read after it was given back is killed), `grow N` (N MiB of heap), `oom` (a child takes memory until there is none) |
+| `t-mem KIND` | memory: `map` (`mem_map` and `mem_unmap`), `unmapped` and `unmapped-many` (a page read after it was given back is killed), `grow N` (N MiB of heap), `oom` (a child takes memory until there is none), `churn` (maps and gives back nearly all free memory over and over, in the kernel almost all the time) |
 | `t-read [KIND]` | reads the console and prints each read: in line mode, `raw`, `apart` (outside the foreground group), `size` (and the console calls' refusals), `leave` (leaves the console in line mode behind) |
 | `t-tee KIND` | console tees: `basic`, `end` (left by a process that ends), `gone` (its file removed), `typed` (a reader's), `full` (on a full disk) |
 | `t-sys KIND` | `sys_info`'s names (`uname`) and kernel log (`log`), and `power` (`poweroff`, `reboot`, with `-f`) |
@@ -627,8 +629,9 @@ The e2e runner (M1 §9.3) gains the steps it needs for the scenarios of
 A missing, corrupt or wrong-ABI `system.img`, a `/bin/sh` that cannot be
 started, or a shell that died three times within 10 s leads to an error
 screen: the reason, the last lines of the kernel log, and
-`Press any key to reboot.` The kernel then syncs and reboots through the
-ACPI path of M1 §7.4. There is no in-kernel fallback shell.
+`Press any key to reboot.` Init shows it, in its own context (§16 item 6).
+The kernel then syncs and reboots through the ACPI path of M1 §7.4. There
+is no in-kernel fallback shell.
 
 ### 11.3 Storage
 
@@ -692,7 +695,8 @@ New ones:
   space.
 - `check4.sh` (milestone 2): the `t-fault` kinds, `t-spawn`, `free` before
   and after, `t-args`, and a script that runs another. One manual step
-  follows: run `t-spin` and press Ctrl-C (a script cannot type).
+  follows: `exit` at the prompt, which init answers with a new shell
+  (§16 item 6; `t-spin` and Ctrl-C are one of check 3's steps by hand).
 - `check5.sh` (milestone 3): pipes, a background job and `kill`, script
   arguments and variables.
 - `cargo xtask verify-usb` checks their transcripts, as in M1 §15 item 12.
@@ -747,7 +751,7 @@ exists then. The expected plans:
 | Building `no_std` user programs with our own linker script and ELF note on stable Rust turns out awkward | Plan 1 builds `t-args` and checks it with `readelf` before anything depends on it; plan 2 runs it first |
 | `sysret` with a non-canonical return address faults in ring 0 (Intel) | The check of §6.2; `t-fault` covers it indirectly, a unit test covers the check |
 | SMAP makes a forgotten user access fault in the kernel | That is the point: it shows up as a panic in a scenario instead of silently. `UserSlice` is the only path. |
-| Polling input on every ring-3 tick costs too much | Measured on the NUC in check 4 (`t-spin` loop count with and without); if needed, poll every 4th tick |
+| Polling input on every ring-3 tick costs too much | `t-spin`'s loop count on the NUC, in check 3's and check 4's transcripts; a count without the poll needs a kernel without it, which plan 5 builds if those counts call for it (§16 item 6); if needed, poll every 4th tick |
 | QEMU TCG lacks SMEP/SMAP, so a SMAP bug shows only with KVM | CI's e2e job runs with KVM, as today; `RELAY_QEMU_ACCEL=tcg` stays a local convenience. (Plan 3a found that TCG with the runner's `-cpu max` has both; the `panic_smap` and `panic_smep` scenarios pass under either.) |
 | The gate does not fit two months | Background jobs are the cut line (§1.2); the other milestone 3 items do not depend on them |
 | Programs with floating point are wanted later | CR0.TS kills them clearly today (§5.5); XSAVE support is a contained later change |
@@ -1341,3 +1345,122 @@ does. Facts found before the spec was first merged are already in its body.
      `FakePrograms`, `run_command` against `FakeStdout`, and `SysVfs`
      against the file calls over a `MountTable`, where every command prints
      what it prints over the table itself.
+6. **Decisions made while planning milestone 2's plan 4b** (process 1):
+   - **Plan 4b is one plan** (§13), in five pull requests: this plan; the
+     kernel's findings carried forward and `t-abi`; process 1 as init, the
+     error screen, and every scenario under `/bin/sh`; the kernel and the
+     shell crate without the in-kernel shell's glue; `check4.sh` with NUC
+     check 4.
+   - **Process 1 is init** (§5.4, §6.6; `kernel/src/init.rs`). A process of
+     the kernel's own, without a program. It prints `/etc/motd` once, at
+     boot, and starts `/bin/sh` with no argument (argument 0 its path) in
+     `/root`, or in `/` without one, chosen again at each start; in a new
+     process group that gets the console (`NEW_GROUP | FOREGROUND`, so the
+     next shell takes the console back whatever the last one left it in),
+     its fds 0-2 the console. The shell is pid 2, then whatever pid is
+     next. Init waits for it, collecting every orphan that ends meanwhile.
+     When the shell ends init says how, on the screen and in the kernel log
+     (`init: /bin/sh (pid 2) exited with 0; starting it again`, or
+     `killed: <how>`), and starts another; the third end within 10 s (by
+     the TSC's clock, the tick's without one) reaches the error screen, as
+     does a shell that cannot be started. The rule is host-tested over a
+     clock; `kill` still refuses process 1. Test mode (`test=1`, power-off
+     exits QEMU) is set at startup, before process 1. The `noroot`
+     scenario removes `/root` and sees the next shell start in `/`.
+   - **The error screen** (§11.2; `kernel/src/error_screen.rs`). Init shows
+     it, in its own context with interrupts on, so the idle task polls the
+     keyboards and COM1 while it waits: it is no kernel bug, and not the red
+     panic screen. The screen is cleared and shows `*** Relay OS cannot run
+     its shell ***`, the reason (`system: <the startup line's reason>`,
+     `/bin/sh cannot start: <error>` or `/bin/sh ended 3 times within
+     10 s`), the kernel log's last 20 lines (27 of the NUC's 33 rows in
+     all when none wraps; of those, the newest that fit the console's rows,
+     a line wider than it taking more than one and the cursor's row after
+     the last counting too, so the heading never scrolls away: the
+     prototype's review found the NUC's real lines wrapping), and `Press
+     any key to reboot.` What was typed before it came (the
+     LF of a terminal's CR LF after the last `exit`) is dropped; then it
+     waits for a key as long as it takes, since a restart on its own would
+     come back to it. After the key it syncs, shuts the filesystems down (a
+     failure does not keep the machine up: nothing can be fixed here) and
+     restarts through the ACPI path (M1 §7.4). A `system.img` that cannot
+     be mounted (startup step 10) is recorded, and init takes the record
+     out before it shows the screen for it, starting nothing (the review
+     found it held the record's lock across the wait; the switch's check
+     now covers that lock); `mount_fail`'s empty root still reaches a
+     prompt, in `/`, without a motd. The screen takes the console back (raw
+     mode, init's group) and wakes its readers, which no test shows: in
+     milestone 2 the console is init's or the last shell's, in raw mode,
+     whenever the screen comes, since nothing a person can run ends the
+     shell while a command has the console (ruled; milestone 3's `kill`
+     can, and its plan tests it).
+   - **The kernel without the shell** (§1.4 item 3, §8.2). `relay-kernel`
+     no longer depends on `shell`, even through another crate, which a test
+     checks by walking `cargo metadata`'s resolved graph (the review found
+     one that looked at direct dependencies only).
+     `session.rs` goes (its `KernelEnv`, the filesystems' clock and log,
+     moves to `storage.rs`), and with it `File::ShellOutput`,
+     `FdTable::shell`, the output hook (`SHELL_OUT`, `proc::wait`),
+     `renew_outputs`, `collect_orphans` and `give_console`; process 1's fds
+     are the console. `take_console` stays, for the error screen, and wakes
+     the console's readers, which plan 3b found it did not; both callers of
+     `KernelVfs::shutdown` (`power` and the error screen) write the tees
+     first. The shell
+     crate's `System::spawn`, `System::wait`, `Output`, `run_program` and
+     `Ctx::wait_program` go: the in-process runner (`host-shell`, the tests)
+     runs no programs, and names it does not know are `command not found`.
+   - **Milestone 1's scenarios under `/bin/sh`** (§1.4 item 1, §12.3). A
+     prototype of init starting `/bin/sh` ran every scenario first: all of
+     milestone 1's passed unchanged. What changed is later plans':
+     `diskfull` expected a program's redirection write error to be reported
+     by the in-kernel shell (`t-files: write error: …`), and under
+     `/bin/sh` a program reports its own, as under bash; `t-spawn fill`
+     finds room for 61 children, 60 under a nested shell, since the shell
+     is a process now (`sh`, `spawn`); `sh` runs by path from the shell
+     init started, and `utils` sees a program write lines into a file and
+     refuse `cat f >> f`.
+   - **`t-abi`** (§8.5, §12.3). xtask makes it from `t-args`, its note
+     saying ABI 1, and checks that the build's checks and the kernel's
+     refuse it for that alone (`built for ABI 1`); it is in `/bin`, so
+     `system: 34 programs, ABI 2`. `stale_program` runs it from `/bin` and
+     copied to `/root` (`relay-sh: …: Exec format error`, `spawn …: built
+     for ABI 1` in the kernel log).
+   - **Findings carried forward** (plans 3a, 3b, 4a). A program that spends
+     its time in system calls has the console polled on its way back to
+     ring 3 when a tick passed during the call (`t-mem churn` maps and gives
+     back nearly all free memory over and over, and Ctrl-C must stop it
+     within 3 s: without the poll it did not, in three runs of three);
+     `console_foreground` of a group whose members are all zombies is
+     `ESRCH`; `open` with `CREATE` of a directory is `EISDIR`, as on Linux;
+     what a tee may be has a host test; a write that takes nothing is
+     `ENOSPC` in `relay-rt`, as gnulib's `full_write` says (and
+     `shell::Stdout`). `reboot -f` and `poweroff -f` ask `power` without
+     `POWER_FORCE` first, so they say milestone 1's `cannot shut the
+     filesystems down cleanly: …` before going ahead (plan 4a's final
+     review), and `unplug` runs both to the end.
+   - **The e2e runner** (§10). `reset [TEXT]` types the text and Enter (a
+     key at the error screen, `reboot -f`), and the machine must restart as
+     after `reboot`; after `unplug` the root's clean flag is not checked,
+     since the disk keeps what it had when it was pulled out; an `expect`
+     after `poweroff` reads what the machine printed before it went away.
+   - **Check scripts** (§12.4). `#same> NAME REGEX` is a line whose group
+     must capture what it captured the first time (`free` before and
+     after). `check4.sh` (33 commands) runs after `check3-b.sh`: `t-spawn
+     fill` and `1000`, `free`, every `t-fault` kind, `t-spawn kill-new` and
+     `orphan`, `t-args`, `t-abi`, `ls /bin` into a file and `cat` of a file
+     into itself, a script that runs another, and `free` again; then `exit`
+     by hand, which restarts the shell, and `poweroff`. `check3-a.sh` and
+     `check3-b.sh` run under `/bin/sh` unchanged, their transcripts tees.
+     The recorded NUC transcript of `check4.sh` is QEMU's until NUC check 4
+     records the NUC's. §14's measurement of the tick poll's cost "with and
+     without" is not check 4's (§12.4 and §14, corrected in their bodies):
+     `t-spin`'s count with the poll is in check 3's and check 4's
+     transcripts, and a count without it needs a kernel without it, which
+     plan 5 builds if those counts call for it.
+   - **Left to plan 5**: the NUC check's fixes, the tick poll's cost without
+     the poll if the NUC's counts call for it, `flush_pages` outside
+     `arch/`, the guest tests' unbounded loops, `read_dir`'s heap
+     measurement, and milestone 1's plan-5 findings (roadmap). A `/bin/sh`
+     that cannot be started reaches the error screen only in a host test
+     (no scenario builds an archive without it). The console calls refusing
+     a caller outside the foreground group wait for milestone 3.
