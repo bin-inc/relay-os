@@ -186,9 +186,23 @@ pub fn user_tick() {
 
 /// On the way back to ring 3 from a system call: the ticks the call took
 /// are counted, the program gives up the CPU if its slice is used up, and
-/// it ends if it was killed meanwhile.
+/// it ends if it was killed meanwhile. If a tick passed during the call,
+/// the console is polled as that tick would have polled it in ring 3: a
+/// program that spends its time in system calls (`cat`, `cp`) is almost
+/// never interrupted in ring 3, and a keyboard with one transfer
+/// outstanding could lose a key meanwhile (plan 3a's finding).
 pub fn before_user() {
-    let used_up = settle_ticks(&mut PROCS.lock(), 0);
+    let ticked = KERNEL_TICKS.load(Ordering::Relaxed) != 0;
+    if ticked {
+        tty::poll();
+    }
+    let used_up = {
+        let mut t = PROCS.lock();
+        if ticked {
+            console_input(&mut t);
+        }
+        settle_ticks(&mut t, 0)
+    };
     if used_up {
         reschedule();
     }
