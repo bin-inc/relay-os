@@ -3,7 +3,7 @@
 
 use core::fmt;
 use relay_abi::spawn::{SPAWN_FDS, WAIT_NOHANG};
-use relay_abi::{Call, FdMap, MemInfo, SpawnArgs, WaitStatus, decode};
+use relay_abi::{Call, FdMap, MemInfo, SpawnArgs, Stat, StatFs, WaitStatus, decode};
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 use crate::arch::syscall;
@@ -12,6 +12,145 @@ use crate::arch::syscall;
 #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
 unsafe fn syscall(_call: Call, _args: [u64; 6]) -> u64 {
     unimplemented!("system calls exist only on Relay OS")
+}
+
+/// Makes call `c` with `args` (the rest zero): its value or error.
+fn call(c: Call, args: &[u64]) -> Result<u64, u16> {
+    let mut a = [0; 6];
+    a[..args.len()].copy_from_slice(args);
+    decode(unsafe { syscall(c, a) })
+}
+
+/// Opens `path` with `relay_abi::file`'s `OPEN_*` flags: the new fd.
+pub fn open(path: &[u8], flags: u32) -> Result<u32, u16> {
+    call(
+        Call::Open,
+        &[path.as_ptr() as u64, path.len() as u64, u64::from(flags)],
+    )
+    .map(|fd| fd as u32)
+}
+
+/// Closes `fd`.
+pub fn close(fd: u32) -> Result<(), u16> {
+    call(Call::Close, &[u64::from(fd)]).map(|_| ())
+}
+
+/// Reads some of `fd` into `buf`; returns how many bytes, 0 at the end.
+pub fn read(fd: u32, buf: &mut [u8]) -> Result<usize, u16> {
+    call(
+        Call::Read,
+        &[u64::from(fd), buf.as_mut_ptr() as u64, buf.len() as u64],
+    )
+    .map(|n| n as usize)
+}
+
+/// Moves `fd`'s offset (`relay_abi::file`'s `SEEK_*`); the new offset.
+pub fn seek(fd: u32, offset: i64, whence: u32) -> Result<u64, u16> {
+    call(
+        Call::Seek,
+        &[u64::from(fd), offset as u64, u64::from(whence)],
+    )
+}
+
+/// What `fd` is.
+pub fn fstat(fd: u32) -> Result<Stat, u16> {
+    let mut st = Stat::default();
+    call(Call::Fstat, &[u64::from(fd), &raw mut st as u64])?;
+    Ok(st)
+}
+
+/// What `path` is (`relay_abi::file::STAT_NOFOLLOW` in `flags`: a link's
+/// own status; links are never followed anyway).
+pub fn stat(path: &[u8], flags: u32) -> Result<Stat, u16> {
+    let mut st = Stat::default();
+    let args = [
+        path.as_ptr() as u64,
+        path.len() as u64,
+        u64::from(flags),
+        &raw mut st as u64,
+    ];
+    call(Call::Stat, &args)?;
+    Ok(st)
+}
+
+/// The directory `fd`'s next entries into `buf`, as `relay_abi::file`
+/// records (`dir_entries` reads them); 0 after the last.
+pub fn read_dir(fd: u32, buf: &mut [u8]) -> Result<usize, u16> {
+    call(
+        Call::ReadDir,
+        &[u64::from(fd), buf.as_mut_ptr() as u64, buf.len() as u64],
+    )
+    .map(|n| n as usize)
+}
+
+/// A call on one path.
+fn on_path(c: Call, path: &[u8], rest: &[u64]) -> Result<u64, u16> {
+    let mut a = [path.as_ptr() as u64, path.len() as u64, 0, 0];
+    a[2..2 + rest.len()].copy_from_slice(rest);
+    call(c, &a)
+}
+
+pub fn mkdir(path: &[u8]) -> Result<(), u16> {
+    on_path(Call::Mkdir, path, &[]).map(|_| ())
+}
+
+pub fn rmdir(path: &[u8]) -> Result<(), u16> {
+    on_path(Call::Rmdir, path, &[]).map(|_| ())
+}
+
+pub fn unlink(path: &[u8]) -> Result<(), u16> {
+    on_path(Call::Unlink, path, &[]).map(|_| ())
+}
+
+/// Sets the file's times to now; it must exist.
+pub fn touch(path: &[u8]) -> Result<(), u16> {
+    on_path(Call::Touch, path, &[]).map(|_| ())
+}
+
+pub fn truncate(path: &[u8], size: u64) -> Result<(), u16> {
+    on_path(Call::Truncate, path, &[size]).map(|_| ())
+}
+
+/// A symbolic link's target into `buf`, cut at its length; how many bytes.
+pub fn readlink(path: &[u8], buf: &mut [u8]) -> Result<usize, u16> {
+    on_path(
+        Call::Readlink,
+        path,
+        &[buf.as_mut_ptr() as u64, buf.len() as u64],
+    )
+    .map(|n| n as usize)
+}
+
+pub fn rename(from: &[u8], to: &[u8]) -> Result<(), u16> {
+    let args = [
+        from.as_ptr() as u64,
+        from.len() as u64,
+        to.as_ptr() as u64,
+        to.len() as u64,
+    ];
+    call(Call::Rename, &args).map(|_| ())
+}
+
+/// The figures of the filesystem holding `path`.
+pub fn statfs(path: &[u8]) -> Result<StatFs, u16> {
+    let mut f = StatFs::default();
+    on_path(Call::Statfs, path, &[&raw mut f as u64])?;
+    Ok(f)
+}
+
+/// Makes every change to every filesystem durable.
+pub fn sync() -> Result<(), u16> {
+    call(Call::Sync, &[]).map(|_| ())
+}
+
+pub fn chdir(path: &[u8]) -> Result<(), u16> {
+    on_path(Call::Chdir, path, &[]).map(|_| ())
+}
+
+/// The current directory's path into `buf`; how many bytes (`ERANGE` if
+/// it does not fit).
+pub fn getcwd(buf: &mut [u8]) -> Result<usize, u16> {
+    call(Call::Getcwd, &[buf.as_mut_ptr() as u64, buf.len() as u64]).map(|n| n as usize)
 }
 
 /// Writes some of `bytes` to `fd`; returns how many.

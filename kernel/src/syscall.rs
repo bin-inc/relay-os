@@ -3,18 +3,23 @@
 //! and it answers with the result register's value or with the program's
 //! exit. It checks and copies what the program passes (`UserSlice`,
 //! `UserStr`) and leaves the rest to the `Caller`, the kernel's side of
-//! the process. Plan 3a serves `exit`, `spawn`, `wait`, `kill`, `getpid`,
-//! `write`, `time`, `sleep` and `sys_info`'s memory figures; every other
-//! call is `ENOSYS` until the plan that brings it.
+//! the process. The file calls are in `files`; `proc_list` and `pipe` are
+//! `ENOSYS` until milestone 3.
 
 use crate::exec::ARGS_MAX;
+use crate::fd::{FdTable, File};
 use crate::mm::paging::PAGE;
 use crate::mm::user::{UserSlice, UserStr};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use relay_abi::info::INFO_MEMORY;
 use relay_abi::spawn::{NEW_GROUP, SPAWN_FDS, WAIT_ANY, WAIT_NOHANG};
 use relay_abi::{Call, FdMap, MemInfo, SpawnArgs, Time, WaitStatus, encode};
-use vfs::Errno;
+use vfs::{Errno, Vfs};
+
+mod files;
+#[cfg(test)]
+mod testing;
 
 /// The longest path a program may pass (Linux's `PATH_MAX`).
 pub const PATH_MAX: usize = 4096;
@@ -54,11 +59,17 @@ pub trait Caller {
     fn writable(&mut self, slice: &UserSlice) -> Result<(), Errno>;
     /// A byte string of the program's, copied in.
     fn read_str(&mut self, s: &UserStr) -> Result<Vec<u8>, Errno>;
-    /// `EBADF` unless `fd` is open for writing.
-    fn writable_fd(&mut self, fd: u64) -> Result<(), Errno>;
-    /// Writes `bytes` to `fd` (checked with `writable_fd`); the file's
-    /// error, if any.
-    fn output(&mut self, fd: u64, bytes: &[u8]) -> Result<(), Errno>;
+    /// Runs `f` with the program's fds. `f` must not block.
+    fn with_fds<R>(&mut self, f: impl FnOnce(&mut FdTable) -> R) -> R;
+    /// Runs `f` with the files, from the program's current directory.
+    fn with_vfs<R>(&mut self, f: impl FnOnce(&mut dyn Vfs) -> R) -> R;
+    /// The most bytes the kernel's heap may give one allocation now.
+    fn heap_room(&self) -> usize;
+    /// Writes `bytes` to the screen.
+    fn console_write(&mut self, bytes: &[u8]);
+    /// Writes `bytes` to `file`, output `n` of the in-kernel shell (1 or
+    /// 2), which sends them where the command line says; its error, if any.
+    fn shell_output(&mut self, file: &Arc<File>, n: u32, bytes: &[u8]) -> Result<(), Errno>;
     /// Starts a child; its pid.
     fn spawn(&mut self, s: &Spawn) -> Result<u32, Errno>;
     /// A child that has ended, with how; `None` if `nohang` and none has.
@@ -92,7 +103,25 @@ pub fn dispatch(caller: &mut impl Caller, number: u64, args: [u64; 6]) -> Outcom
         Some(Call::Wait) => wait(caller, args[0] as i64, args[1], args[2]),
         Some(Call::Kill) => caller.kill(args[0] as i64).map(|()| 0),
         Some(Call::Getpid) => Ok(u64::from(caller.pid())),
+        Some(Call::Open) => files::open(caller, args[0], args[1], args[2]),
+        Some(Call::Close) => files::close(caller, args[0]),
+        Some(Call::Read) => files::read(caller, args[0], args[1], args[2]),
         Some(Call::Write) => write(caller, args[0], args[1], args[2]),
+        Some(Call::Seek) => files::seek(caller, args[0], args[1] as i64, args[2]),
+        Some(Call::Fstat) => files::fstat(caller, args[0], args[1]),
+        Some(Call::Stat) => files::stat(caller, args[0], args[1], args[2], args[3]),
+        Some(Call::ReadDir) => files::read_dir(caller, args[0], args[1], args[2]),
+        Some(Call::Mkdir) => files::on_path(caller, args[0], args[1], |v, p| v.mkdir(p)),
+        Some(Call::Rmdir) => files::on_path(caller, args[0], args[1], |v, p| v.rmdir(p)),
+        Some(Call::Unlink) => files::on_path(caller, args[0], args[1], |v, p| v.unlink(p)),
+        Some(Call::Truncate) => files::truncate(caller, args[0], args[1], args[2]),
+        Some(Call::Touch) => files::on_path(caller, args[0], args[1], files::touch),
+        Some(Call::Readlink) => files::readlink(caller, args[0], args[1], args[2], args[3]),
+        Some(Call::Rename) => files::rename(caller, [args[0], args[1], args[2], args[3]]),
+        Some(Call::Statfs) => files::statfs(caller, args[0], args[1], args[2]),
+        Some(Call::Sync) => caller.with_vfs(|v| v.sync()).map(|()| 0),
+        Some(Call::Chdir) => files::on_path(caller, args[0], args[1], |v, p| v.chdir(p)),
+        Some(Call::Getcwd) => files::getcwd(caller, args[0], args[1]),
         Some(Call::Time) => time(caller, args[0]),
         Some(Call::Sleep) => {
             caller.sleep(args[0]);
@@ -178,11 +207,22 @@ fn wait(caller: &mut impl Caller, pid: i64, flags: u64, addr: u64) -> Result<u64
     Ok(u64::from(pid))
 }
 
-/// `write(fd, buffer, length)`. Copies the buffer out a page at a time; a
+/// The file open as `fd`.
+fn file(caller: &mut impl Caller, fd: u64) -> Result<Arc<File>, Errno> {
+    caller.with_fds(|t| t.get(fd).cloned())
+}
+
+/// `write(fd, buffer, length)`. Copies the buffer in a page at a time; a
 /// page that is not the program's, or the file's error, ends the call with
-/// the bytes written before it, or with the error if there were none.
+/// the bytes written before it, or with the error if there were none (a
+/// full disk takes what fits, then says `ENOSPC`).
 fn write(caller: &mut impl Caller, fd: u64, addr: u64, len: u64) -> Result<u64, Errno> {
-    caller.writable_fd(fd)?;
+    let file = file(caller, fd)?;
+    if let File::Vfs(open) = &*file
+        && !open.is_writable()
+    {
+        return Err(Errno::EBADF);
+    }
     let slice = UserSlice::new(addr, len)?;
     let mut buf = [0u8; PAGE as usize];
     let mut done = 0;
@@ -192,13 +232,26 @@ fn write(caller: &mut impl Caller, fd: u64, addr: u64, len: u64) -> Result<u64, 
         let n = (len - done).min(PAGE - (addr + done) % PAGE) as usize;
         let written = caller
             .read(&slice, done, &mut buf[..n])
-            .and_then(|()| caller.output(fd, &buf[..n]));
-        if let Err(e) = written {
-            return if done > 0 { Ok(done) } else { Err(e) };
+            .and_then(|()| write_to(caller, &file, &buf[..n]));
+        match written {
+            Ok(k) => done += k as u64,
+            Err(e) if done == 0 => return Err(e),
+            Err(_) => break,
         }
-        done += n as u64;
     }
     Ok(done)
+}
+
+/// Writes `bytes` to `file`: how many it took.
+fn write_to(caller: &mut impl Caller, file: &Arc<File>, bytes: &[u8]) -> Result<usize, Errno> {
+    match &**file {
+        File::Console => {
+            caller.console_write(bytes);
+            Ok(bytes.len())
+        }
+        File::ShellOutput(n) => caller.shell_output(file, *n, bytes).map(|()| bytes.len()),
+        File::Vfs(open) => caller.with_vfs(|v| open.write(v, bytes)),
+    }
 }
 
 /// `time(&mut Time)` (spec §7.3).
@@ -235,170 +288,11 @@ fn sys_info(caller: &mut impl Caller, kind: u64, addr: u64, len: u64) -> Result<
 
 #[cfg(test)]
 mod tests {
+    use super::testing::*;
     use super::*;
-    use crate::mm::paging::{PAGE, PageTables, Perm};
-    use crate::mm::space::AddressSpace;
-    use crate::mm::testing::FakeMem;
+    use crate::mm::paging::PAGE;
+    use relay_abi::errno;
     use relay_abi::wait::{ACCESS_READ, FAULT_PAGE};
-    use relay_abi::{decode, errno};
-
-    const U: u64 = 0x40_0000;
-    /// The writable page.
-    const W: u64 = U + 3 * PAGE;
-    /// An fd whose file fails every write (a full disk).
-    const FULL: u64 = 7;
-
-    /// What the fake clock says.
-    const NOW: Time = Time {
-        unix_seconds: 1_790_000_000,
-        uptime_ns: 12_345_678_901,
-    };
-
-    const MEM: MemInfo = MemInfo {
-        ram_total: 16 << 30,
-        ram_free: 15 << 30,
-        heap_total: 32 << 20,
-        heap_used: 1 << 20,
-    };
-
-    /// A program with three readable pages at `U` holding a pattern, a
-    /// writable page after them and nothing after that; fds 0-2 and a full
-    /// disk as `FULL`; what it wrote, started, killed, and how long it
-    /// slept.
-    struct Fake {
-        mem: FakeMem,
-        space: AddressSpace,
-        written: Vec<(u64, Vec<u8>)>,
-        slept: Vec<u64>,
-        spawned: Vec<Spawn>,
-        /// Children that have ended, and whether any still runs.
-        ended: Vec<(u32, WaitStatus)>,
-        running: bool,
-        killed: Vec<i64>,
-    }
-
-    impl Caller for Fake {
-        fn read(&mut self, slice: &UserSlice, offset: u64, buf: &mut [u8]) -> Result<(), Errno> {
-            slice.read(&self.space, &mut self.mem, offset, buf)
-        }
-        fn write(&mut self, slice: &UserSlice, offset: u64, bytes: &[u8]) -> Result<(), Errno> {
-            slice.write(&self.space, &mut self.mem, offset, bytes)
-        }
-        fn writable(&mut self, slice: &UserSlice) -> Result<(), Errno> {
-            // Writing what is there already writes nothing new.
-            let mut old = alloc::vec![0; slice.len() as usize];
-            slice.read(&self.space, &mut self.mem, 0, &mut old)?;
-            slice.write(&self.space, &mut self.mem, 0, &old)
-        }
-        fn read_str(&mut self, s: &UserStr) -> Result<Vec<u8>, Errno> {
-            s.read(&self.space, &mut self.mem)
-        }
-        fn writable_fd(&mut self, fd: u64) -> Result<(), Errno> {
-            match fd {
-                0..=2 | FULL => Ok(()),
-                _ => Err(Errno::EBADF),
-            }
-        }
-        fn output(&mut self, fd: u64, bytes: &[u8]) -> Result<(), Errno> {
-            if fd == FULL {
-                return Err(Errno::ENOSPC);
-            }
-            self.written.push((fd, bytes.to_vec()));
-            Ok(())
-        }
-        fn spawn(&mut self, s: &Spawn) -> Result<u32, Errno> {
-            if s.path == b"missing" {
-                return Err(Errno::ENOENT);
-            }
-            self.spawned.push(s.clone());
-            Ok(100 + self.spawned.len() as u32)
-        }
-        fn wait(&mut self, child: Child, nohang: bool) -> Result<Option<(u32, WaitStatus)>, Errno> {
-            let at = self
-                .ended
-                .iter()
-                .position(|&(pid, _)| child == Child::Any || child == Child::Pid(pid));
-            match at {
-                Some(i) => Ok(Some(self.ended.remove(i))),
-                None if self.running && nohang => Ok(None),
-                None => Err(Errno::ECHILD),
-            }
-        }
-        fn kill(&mut self, target: i64) -> Result<(), Errno> {
-            self.killed.push(target);
-            if target == 1 {
-                Err(Errno::EPERM)
-            } else {
-                Ok(())
-            }
-        }
-        fn pid(&self) -> u32 {
-            42
-        }
-        fn memory(&self) -> MemInfo {
-            MEM
-        }
-        fn time(&self) -> Time {
-            NOW
-        }
-        fn sleep(&mut self, ms: u64) {
-            self.slept.push(ms);
-        }
-    }
-
-    fn fake() -> Fake {
-        let mut mem = FakeMem::new();
-        let mut k = PageTables::new(&mut mem).unwrap();
-        k.fill_upper_half(&mut mem).unwrap();
-        let mut space = AddressSpace::new(&mut mem, &k).unwrap();
-        space.map_zeroed(&mut mem, U, 3, Perm::Read).unwrap();
-        let pattern: Vec<u8> = (0..3 * PAGE).map(|i| (i % 251) as u8).collect();
-        space.fill(&mut mem, U, &pattern).unwrap();
-        space.map_zeroed(&mut mem, W, 1, Perm::ReadWrite).unwrap();
-        Fake {
-            mem,
-            space,
-            written: Vec::new(),
-            slept: Vec::new(),
-            spawned: Vec::new(),
-            ended: Vec::new(),
-            running: false,
-            killed: Vec::new(),
-        }
-    }
-
-    fn call(f: &mut Fake, c: Call, args: [u64; 3]) -> Result<u64, u16> {
-        match dispatch(f, c.number(), [args[0], args[1], args[2], 0, 0, 0]) {
-            Outcome::Return(r) => decode(r),
-            Outcome::Exit(code) => panic!("exited with {code}"),
-        }
-    }
-
-    /// Everything written, joined, per fd.
-    fn text(f: &Fake, fd: u64) -> Vec<u8> {
-        f.written
-            .iter()
-            .filter(|(d, _)| *d == fd)
-            .flat_map(|(_, b)| b.clone())
-            .collect()
-    }
-
-    /// Puts `bytes` into the writable page at `at`, as the program would.
-    fn put(f: &mut Fake, at: u64, bytes: &[u8]) {
-        UserSlice::new(at, bytes.len() as u64)
-            .unwrap()
-            .write(&f.space, &mut f.mem, 0, bytes)
-            .unwrap();
-    }
-
-    fn get(f: &mut Fake, at: u64, len: usize) -> Vec<u8> {
-        let mut buf = alloc::vec![0; len];
-        UserSlice::new(at, len as u64)
-            .unwrap()
-            .read(&f.space, &mut f.mem, 0, &mut buf)
-            .unwrap();
-        buf
-    }
 
     /// A `SpawnArgs` at `W` naming a path, arguments and a working
     /// directory stored after it; `edit` changes it first.
@@ -763,7 +657,25 @@ mod tests {
             Call::Wait,
             Call::Kill,
             Call::Getpid,
+            Call::Open,
+            Call::Close,
+            Call::Read,
             Call::Write,
+            Call::Seek,
+            Call::Fstat,
+            Call::Stat,
+            Call::ReadDir,
+            Call::Mkdir,
+            Call::Rmdir,
+            Call::Unlink,
+            Call::Truncate,
+            Call::Touch,
+            Call::Readlink,
+            Call::Rename,
+            Call::Statfs,
+            Call::Sync,
+            Call::Chdir,
+            Call::Getcwd,
             Call::Time,
             Call::Sleep,
             Call::SysInfo,

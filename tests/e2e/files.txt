@@ -1,0 +1,36 @@
+# Programs open, read, write and close files (user-space gate §7.3,
+# milestone 2, plan 3b): open's flags and their errors, an offset shared
+# with a child that got the fd, and 32 fds at most. On the ext2 root.
+timeout 60
+expect root@relay:~# $
+send t-files basic
+expect \ncreate: 3\nexclusive: EEXIST\nno flags: EINVAL\nmissing: ENOENT\n
+expect write: 13\nread a write-only fd: EBADF\nseek: 7\noverwrite: 6\nclose: ok\nclose again: EBADF\n
+expect read: "hello"\nfstat: 13 bytes, regular true\nseek to the end: 13\nread at the end: 0\n
+expect append: 5\nread what was appended: "more\\n"\nseek before the start: EINVAL\nseek the screen: EINVAL\n
+expect the child read: "hello, "\nread after the child: "files"\nfds up to 31, then EMFILE\nroot@relay:~# $
+send cat t-files.tmp
+expect \nhello, files\nmore\nroot@relay:~# $
+# Directories and names: mkdir, read_dir a record at a time (in
+# name order, `/` after a directory), stat, truncate, touch, rename,
+# readlink, statfs, sync, unlink and rmdir.
+send t-files dir
+expect \nmkdir: ok\nmkdir again: EEXIST\nentries: \./ \.\./ a b sub/ \(5 calls\)\n
+expect read_dir at the end: 0\nread_dir of a file: ENOTDIR\nstat size: 3\ntruncate: ok\nstat size: 10\n
+expect touch: ok\ntouch a missing file: ENOENT\nrename: ok\nstat the old name: ENOENT\nreadlink of a file: EINVAL\n
+expect rmdir a full directory: ENOTEMPTY\nunlink a directory: EISDIR\nstatfs: some blocks, free ones among them true\n
+expect sync: ok\nrmdir: ok\nstat it: ENOENT\nroot@relay:~# $
+# A working directory of its own: chdir and getcwd, and a child's.
+send t-files cwd
+expect \ngetcwd: /root\ngetcwd into 3 bytes: ERANGE\nchdir: ok\ngetcwd: /root/t-files.c\nstat it from above: 4\n
+expect chdir to a file: ENOTDIR\nchdir to nothing: ENOENT\nmy working directory: /root/t-files.c\nmy working directory: /root\ngetcwd: /root\n
+send pwd
+expect \n/root\nroot@relay:~# $
+send ls t-files.c
+expect \nls: cannot access 't-files.c': No such file or directory\n
+# Another process removes a program's working directory and an open file
+# (spec §16 item 4): both are gone for it, and the new directory and file,
+# which may get their inodes, keep what they hold.
+send t-files gone
+expect \nread the removed file: ENOENT\nthe child's working directory: /root/t-files.g\nthe child creates x: ENOENT\n
+expect the child reads its file: ENOENT\nthe child writes its file: ENOENT\nthe new file holds: "new"\nthe new directory holds x: ENOENT\nroot@relay:~# $

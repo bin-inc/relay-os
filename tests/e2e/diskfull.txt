@@ -39,6 +39,11 @@ send df
 expect \n/dev/root\s+\d+\s+\d+\s+0 100% /\n
 send echo more > more
 expect \necho: write error: No space left on device\n
+# A program sees the write error too, through the kernel: on its
+# standard output, which the shell redirected, and on a file it opened.
+send t-files full > more
+expect \nwriting standard output: ENOSPC\n
+expect writing a file of its own: ENOSPC\nt-files: write error: No space left on device\n
 send rm t
 send echo more > more
 send cat more

@@ -29,6 +29,40 @@ pub const ENAMETOOLONG: u16 = 36;
 pub const ENOSYS: u16 = 38;
 pub const ENOTEMPTY: u16 = 39;
 
+/// The name of error number `n` (`ENOENT`), for test programs and logs.
+pub const fn name(n: u16) -> Option<&'static str> {
+    Some(match n {
+        EPERM => "EPERM",
+        ENOENT => "ENOENT",
+        ESRCH => "ESRCH",
+        EINTR => "EINTR",
+        EIO => "EIO",
+        E2BIG => "E2BIG",
+        ENOEXEC => "ENOEXEC",
+        EBADF => "EBADF",
+        ECHILD => "ECHILD",
+        EAGAIN => "EAGAIN",
+        ENOMEM => "ENOMEM",
+        EFAULT => "EFAULT",
+        EBUSY => "EBUSY",
+        EEXIST => "EEXIST",
+        EXDEV => "EXDEV",
+        ENOTDIR => "ENOTDIR",
+        EISDIR => "EISDIR",
+        EINVAL => "EINVAL",
+        EMFILE => "EMFILE",
+        EFBIG => "EFBIG",
+        ENOSPC => "ENOSPC",
+        EROFS => "EROFS",
+        EPIPE => "EPIPE",
+        ERANGE => "ERANGE",
+        ENAMETOOLONG => "ENAMETOOLONG",
+        ENOSYS => "ENOSYS",
+        ENOTEMPTY => "ENOTEMPTY",
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,6 +122,9 @@ mod tests {
         ];
         for (name, n) in ours {
             assert_eq!(linux.get(name), Some(&n), "{name}");
+            assert_eq!(super::name(n), Some(name));
         }
+        assert_eq!(super::name(0), None);
+        assert_eq!(super::name(6), None, "ENXIO is not ours");
     }
 }
