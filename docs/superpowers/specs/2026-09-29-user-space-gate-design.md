@@ -1,7 +1,7 @@
 # Relay OS — User-Space Gate Design: programs, not built-ins (milestones 2 and 3)
 
 - **Date:** 2026-09-29
-- **Status:** Approved 2026-09-29; revised while planning milestone 2's plans 1, 2, 3a, 3b, 4a and 4b (see §16)
+- **Status:** Approved 2026-09-29; revised while planning milestone 2's plans 1, 2, 3a, 3b, 4a, 4b and 5 (see §16)
 - **Builds on:** milestone 1 (version 0.2.0,
   `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`,
   cited below as "M1 §n")
@@ -523,7 +523,10 @@ Shipped in every `system.img`, because the NUC checks use them too:
 | `t-mem KIND` | memory: `map` (`mem_map` and `mem_unmap`), `unmapped` and `unmapped-many` (a page read after it was given back is killed), `grow N` (N MiB of heap), `oom` (a child takes memory until there is none), `churn` (maps and gives back nearly all free memory over and over, in the kernel almost all the time) |
 | `t-read [KIND]` | reads the console and prints each read: in line mode, `raw`, `apart` (outside the foreground group), `size` (and the console calls' refusals), `leave` (leaves the console in line mode behind) |
 | `t-tee KIND` | console tees: `basic`, `end` (left by a process that ends), `gone` (its file removed), `typed` (a reader's), `full` (on a full disk) |
-| `t-sys KIND` | `sys_info`'s names (`uname`) and kernel log (`log`), and `power` (`poweroff`, `reboot`, with `-f`) |
+| `t-sys KIND` | `sys_info`'s names (`uname`) and kernel log (`log`), and the `power` call (`poweroff` and `reboot`, each with or without `-f`) |
+
+The kinds a program runs its own children with (`t-files child`, `pwd` and
+`gone-child`, `t-mem hog`, `t-read leave-child`) are left out.
 
 ## 9. Milestone 3: pipes, jobs, `ps`/`kill`, script variables
 
@@ -629,9 +632,10 @@ The e2e runner (M1 §9.3) gains the steps it needs for the scenarios of
 A missing, corrupt or wrong-ABI `system.img`, a `/bin/sh` that cannot be
 started, or a shell that died three times within 10 s leads to an error
 screen: the reason, the last lines of the kernel log, and
-`Press any key to reboot.` Init shows it, in its own context (§16 item 6).
-The kernel then syncs and reboots through the ACPI path of M1 §7.4. There
-is no in-kernel fallback shell.
+`Press any key to reboot.` Init shows it, in its own context (§16 item 6),
+after ending every other process, so that nothing writes over it (§16
+item 7). The kernel then syncs and reboots through the ACPI path of M1
+§7.4. There is no in-kernel fallback shell.
 
 ### 11.3 Storage
 
@@ -682,6 +686,7 @@ New ones:
 | 2 | `system_empty` | an empty `system.img`: `system.img: only 0 bytes`, not `no system.img` |
 | 2 | `stale_program` | `t-abi` copied to `/root`: running it prints `Exec format error` |
 | 2 | `respawn` | `exit` restarts the shell with a log line; three quick exits reach the error screen |
+| 2 | `system_nosh` | a `system.img` without `sh`: the error screen says `/bin/sh cannot start` (§16 item 7) |
 | 2 | `utils` | every program of `/bin` prints what the shell's command of its name prints (§16 item 5) |
 | 2 | `sh` | `/bin/sh` runs its commands as programs, redirections into files, nested scripts with their transcripts (§16 item 5) |
 | 3 | `pipes` | `cat` of the 8 MiB file through `wc -c` gives the exact size; `cat big \| head -n 1` ends at once; `seq 5 \| grep -c .` prints 5 |
@@ -694,9 +699,11 @@ New ones:
   startup line in their `dmesg` expectations, now with every command in user
   space.
 - `check4.sh` (milestone 2): the `t-fault` kinds, `t-spawn`, `free` before
-  and after, `t-args`, and a script that runs another. One manual step
-  follows: `exit` at the prompt, which init answers with a new shell
-  (§16 item 6; `t-spin` and Ctrl-C are one of check 3's steps by hand).
+  and after, `t-args`, and a script that runs another. Two manual steps
+  follow: `exit` at the prompt, which init answers with a new shell
+  (§16 item 6; `t-spin` and Ctrl-C are one of check 3's steps by hand),
+  and, after a `reboot`, three quick `exit`s, which reach the error screen,
+  where a key on the K120 restarts the machine (§16 item 7).
 - `check5.sh` (milestone 3): pipes, a background job and `kill`, script
   arguments and variables.
 - `cargo xtask verify-usb` checks their transcripts, as in M1 §15 item 12.
@@ -751,7 +758,7 @@ exists then. The expected plans:
 | Building `no_std` user programs with our own linker script and ELF note on stable Rust turns out awkward | Plan 1 builds `t-args` and checks it with `readelf` before anything depends on it; plan 2 runs it first |
 | `sysret` with a non-canonical return address faults in ring 0 (Intel) | The check of §6.2; `t-fault` covers it indirectly, a unit test covers the check |
 | SMAP makes a forgotten user access fault in the kernel | That is the point: it shows up as a panic in a scenario instead of silently. `UserSlice` is the only path. |
-| Polling input on every ring-3 tick costs too much | `t-spin`'s loop count on the NUC, in check 3's and check 4's transcripts; a count without the poll needs a kernel without it, which plan 5 builds if those counts call for it (§16 item 6); if needed, poll every 4th tick |
+| Polling input on every ring-3 tick costs too much | `t-spin`'s loop count on the NUC, in check 3's and check 4's transcripts, and plan 5's count with a kernel built without the poll: 4594860032 iterations in 1 s with the poll, 4677697536 without it (1.8 %, about 18 µs a tick), so the poll stays on every tick (§16 item 7); if needed, poll every 4th tick |
 | QEMU TCG lacks SMEP/SMAP, so a SMAP bug shows only with KVM | CI's e2e job runs with KVM, as today; `RELAY_QEMU_ACCEL=tcg` stays a local convenience. (Plan 3a found that TCG with the runner's `-cpu max` has both; the `panic_smap` and `panic_smep` scenarios pass under either.) |
 | The gate does not fit two months | Background jobs are the cut line (§1.2); the other milestone 3 items do not depend on them |
 | Programs with floating point are wanted later | CR0.TS kills them clearly today (§5.5); XSAVE support is a contained later change |
@@ -1464,3 +1471,112 @@ does. Facts found before the spec was first merged are already in its body.
      that cannot be started reaches the error screen only in a host test
      (no scenario builds an archive without it). The console calls refusing
      a caller outside the foreground group wait for milestone 3.
+7. **Decisions made while planning milestone 2's plan 5** (hardening and
+   0.3.0):
+   - **Plan 5 is one plan** (§13), in four pull requests: this plan; the
+     kernel's fixes and the guest tests' bounds; xtask's fixes and the
+     runner's new steps; version 0.3.0, with NUC checks 3 and 4 on a stick
+     written by `flash --full`. No item waits for milestone 3.
+   - **The error screen ends every other process first** (§11.2,
+     corrected in its body). Before it draws, init kills every process
+     but itself, as `kill` does: each ends before it runs another
+     instruction of its program, and says so in the kernel log only
+     (`pid <n> (<path>): killed: kill`), so nothing writes over the screen
+     or scrolls its heading away (plan 4b's final review found an orphan's
+     `t-spin` line under `Press any key to reboot.`). Killing them, rather
+     than dropping their output, also keeps a spinning program from sharing
+     the CPU with the wait; their zombies stay, since the machine
+     restarts. `respawn` leaves a `t-spin 1` orphan running at the third
+     `exit`.
+   - **The error screen counts rows as the terminal moves** (§11.2). A
+     line's rows come from `term`'s own parser and the terminal's cursor
+     rules: a tab moves to the next multiple of 8 but never past the last
+     column, a carriage return to the first, a backspace one back, and a
+     character after the last column starts a row. A test checks each kind
+     of line against `term::Terminal` itself at the NUC's 120×33. An escape
+     that is not a colour, which a program's bytes can leave in the kernel
+     log (`ESC c` resets the terminal), is shown as `?`, not obeyed; and the
+     screen's clear starts with CAN, so an escape a program left unfinished
+     cannot swallow the reset of its colours (the prototype's review drew
+     the screen black on black after a lone ESC).
+   - **What nothing uses goes** (§16 item 6). `exec::arg_bytes` (a test
+     helper now), `InputQueue::take_interrupt` (its tests check the queue's
+     bytes instead), `tty::is_line_mode` and `InputQueue::is_line_mode`;
+     a scan for `pub` functions with test callers only also found
+     `OpenFile::is_dir` (since plan 3b) and `arch::idle_forever` (since
+     milestone 1's shell ended the boot), and the prototype's review
+     `PageTables::translate`, which only tests use (`#[cfg(test)]` now).
+   - **`read_dir`'s heap** (§16 item 4). The room it allows the
+     directory's list leaves out its own buffer, up to 64 KiB of the same
+     heap.
+   - **The TLB is `arch`'s** (§3.1). `mm` flushes it through `arch::tlb`,
+     and a host test walks the kernel's sources and fails if a file outside
+     `arch/` names a `tlb` path other than `arch::tlb`, however imported, or
+     `invlpg` (the prototype's review fooled a first test, which looked for
+     `instructions::tlb` only, with an import in braces). `mm::init`'s CR3 and PAT setup and
+     milestone 1's port I/O stay where they are, for the aarch64 port's
+     architecture layer after the gate (§15).
+   - **Every loop in a guest test is bounded** (§8.5). `t-files`' opens
+     (64) and `read_dir` calls (64), `t-tee`'s reads (64 KiB) and pushes
+     (16): a kernel that never says stop makes the scenario fail at once
+     (`and no end`), instead of a program looping on (plan 3b's finding).
+   - **Milestone 1's plan-5 findings** (M1 §15 item 12). A connection that
+     is still bouncing when the debounce gives up after 2 s is
+     `UsbError::Unstable` (`connection not stable`), which the host does not
+     try again (it cost 3 × 2 s); a QMP message cut at a wait's deadline is
+     kept and read whole later, and the wait sets the timeout on the
+     reader's own socket; the loader-rules test finds comments outside
+     string and character literals only; `verify-usb` fails a transcript
+     older than the `system.img` on the stick's ESP (`the transcript is
+     older than the system on the stick (system.img built …): run the
+     script again`), since it shows what an older kernel and programs did:
+     `flash --kernel` keeps the transcripts, and `flash --full` erases them
+     (the prototype compared with the script, which the review found could
+     only fail when the NUC's clock runs behind; it is UTC, as the stick's
+     times show); `parse_fadt` reads the 32-bit DSDT field once.
+   - **The e2e runner** (§10, §12.3). `system-drop NAME` is a before-boot
+     step (`system.img` without that program), and the scenario
+     `system_nosh` sees the error screen say `/bin/sh cannot start: No such
+     file or directory`: §16 item 6 said a host test covered it, but only
+     the reason's text was. `reset-key` leaves the error screen with Enter
+     on the USB keyboard, as a person does on the NUC; `system_missing`
+     uses it.
+   - **The tick poll's cost** (§14, corrected in its body). On the NUC,
+     `t-spin 1` makes 4594860032 iterations with the console polled on
+     every tick that interrupts ring 3 (as in plans 3b and 4b), and
+     4677697536 with a throwaway kernel built without that poll (never
+     merged): the poll takes 1.8 % of a spinning program's time, about
+     18 µs of each 1 ms tick. That is not too much for milestone 2, so the
+     poll stays on every tick; §14's fallback, every 4th tick, would save
+     about 1.3 % and poll the keyboards a quarter as often, and waits for a
+     workload that calls for it.
+   - **Version 0.3.0** (§1.4, §2). The workspace's version, `uname -a` in
+     `shell` (milestone 1's scenario, changed only by the version, as
+     milestone 1's own bump did) and in `check3-a.sh`, and the recorded
+     transcripts. A spike bumped the version first: nothing else depends
+     on it. Milestone 2 ends with NUC checks 3 and 4 on a stick written by
+     `flash --full`; check 4 gains the error screen by hand (§12.4,
+     corrected in its body): after a `reboot`, so that the kernel log's
+     last lines are the boot's and one of them is wider than the screen
+     (right after `check4.sh` none is, the prototype's review found), three
+     quick `exit`s, and a key on the K120 restarts the machine. The stick's
+     `/root/README` no longer says milestone 1.
+   - **Milestone 2's definition of done** (§1.4). Item 1: `cargo xtask ci`
+     runs 41 scenarios, milestone 1's unchanged but for the startup lines
+     and `shell`'s version. Item 2: NUC checks 3 and 4, in plan 5's last
+     pull request. Item 3: an xtask test walks `cargo metadata`'s resolved
+     graph (since plan 4b), and every command but `cd`, `exit` and `help`
+     runs from `/bin`. Nothing is unmet.
+   - **Earlier deferred findings, settled.** Plan 3a's: orphans piling up
+     (plans 4a and 4b); §5.1's `stac`/`clac` (its body says no copy needs
+     them) and §8.5's table (corrected in its body: `t-sys`'s kinds, and
+     the kinds a program's children run are left out); a program seeing
+     its redirection's write error end to end (`diskfull`'s `t-files full
+     > more` under `/bin/sh`). Plan 3b's: `EISDIR`, zombie groups,
+     `POWER_FORCE`, the tees before a shutdown and the readers woken (plan
+     4b); `flush_pages`, the guest loops and `read_dir` (above). Plan 4a's
+     `ENOSPC` for a write that takes nothing (plan 4b). Left for milestone
+     3: the console calls refusing a caller outside the foreground group,
+     and a test of the error screen taking the console back, which only
+     milestone 3's `kill` can reach; milestone 1's "still out of the gate"
+     list stays out (§15).
