@@ -40,6 +40,13 @@ send hello
 expect \nhello\n\[6\] hello\\n\n
 type {ctrl-d}
 expect end of input\nroot@relay:~# $
+# t-read had the console in line mode; the prompt takes it back raw:
+# what is typed is echoed once, by the shell, and Ctrl-C only cancels the
+# line.
+send echo once
+expect \Aecho once\nonce\nroot@relay:~# $
+type echo no{ctrl-c}
+expect \Aecho no\^C\nroot@relay:~# $
 send t-spin
 alive 1
 key {ctrl-c}
