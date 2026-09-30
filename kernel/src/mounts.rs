@@ -1,5 +1,5 @@
 //! The mount table (user-space gate §7.3): one for the whole kernel,
-//! shared by the in-kernel shell and every process's calls, with each
+//! shared by init, `spawn` and every process's calls, with each
 //! caller's current directory put in while the kernel works for it
 //! (§5.4). The lock is held only for one operation, never while anything
 //! waits, so a process that blocks never holds it.
@@ -57,8 +57,9 @@ pub fn is_locked() -> bool {
     MOUNTS.is_locked()
 }
 
-/// The mount table as the in-kernel shell's `Vfs`, with the current
-/// directory of the process it works for.
+/// The mount table as a `Vfs` (for init, `spawn` reading a program, and
+/// the calls on files), with the current directory of the process it
+/// works for.
 pub struct KernelVfs;
 
 impl KernelVfs {

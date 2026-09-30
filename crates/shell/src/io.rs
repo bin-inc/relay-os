@@ -1,16 +1,11 @@
 //! What the shell needs from its surroundings besides files (spec §7.3).
-//! The kernel implements `Console` and `System` over its console, clock,
-//! memory manager, log, ACPI and programs; `xtask host-shell` over the
-//! host terminal; `relay-rt` over system calls; the tests over buffers.
-//! `Programs` is `/bin/sh`'s way to its commands.
+//! `relay-rt` implements `Console` and `System` over system calls; `xtask
+//! host-shell` over the host terminal; the tests over buffers. `Programs`
+//! is `/bin/sh`'s way to its commands.
 
 use alloc::vec::Vec;
 use relay_abi::WaitStatus;
-use vfs::{Errno, Node, Vfs};
-
-/// Where a program's output goes (`System::wait`): what it writes, on fd
-/// 1 or 2, and the write's error, if any.
-pub type Output<'a> = dyn FnMut(u32, &[u8]) -> Result<(), Errno> + 'a;
+use vfs::{Errno, Node};
 
 /// The screen and keyboard.
 pub trait Console {
@@ -55,24 +50,6 @@ pub trait System {
     fn reboot(&mut self, force: bool) -> Result<(), Errno>;
     /// Turns the machine off, as `reboot` restarts it.
     fn poweroff(&mut self, force: bool) -> Result<(), Errno>;
-    /// Starts the program at `path`, read through `vfs`, with `args`
-    /// (argument 0 is the path); its pid. `None` where programs cannot run
-    /// (on the host). The in-kernel shell's way to programs until the shell
-    /// itself becomes one (user-space gate plan 4).
-    fn spawn(
-        &mut self,
-        _vfs: &mut dyn Vfs,
-        _path: &[u8],
-        _args: &[&[u8]],
-    ) -> Option<Result<u32, Errno>> {
-        None
-    }
-    /// Runs the program `spawn` started until it ends, giving what it
-    /// writes to fds 1 and 2 to `out`, whose answer (a redirection file's
-    /// write error) is the program's, and says how it ended.
-    fn wait(&mut self, _pid: u32, _out: &mut Output<'_>) -> Result<WaitStatus, Errno> {
-        Err(Errno::ECHILD)
-    }
 }
 
 /// A program's standard output, fd 1 (user-space gate §8.1): the console

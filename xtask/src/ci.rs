@@ -216,4 +216,60 @@ mod tests {
         assert!(workflow.contains("run: cargo xtask lint"));
         assert!(workflow.contains("run: cargo xtask unit"));
     }
+
+    /// The user-space gate's definition of done (§1.4 item 3): every
+    /// command the user types runs as a program, so the kernel does not
+    /// link the shell, not even through another crate (`relay-rt` depends
+    /// on it): the resolved graph is walked from the kernel over its normal
+    /// and build dependencies.
+    #[test]
+    fn the_kernel_does_not_depend_on_the_shell() {
+        let out = crate::util::cargo()
+            .args(["metadata", "--format-version", "1", "--offline"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let meta: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let name = |id: &serde_json::Value| {
+            meta["packages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["id"] == *id)
+                .map(|p| p["name"].as_str().unwrap().to_string())
+                .unwrap()
+        };
+        let nodes = meta["resolve"]["nodes"].as_array().unwrap();
+        let kernel = nodes
+            .iter()
+            .find(|n| name(&n["id"]) == "relay-kernel")
+            .expect("the kernel is a package");
+        let (mut todo, mut seen) = (vec![kernel], Vec::new());
+        while let Some(node) = todo.pop() {
+            for dep in node["deps"].as_array().unwrap() {
+                let linked = dep["dep_kinds"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|k| k["kind"].is_null() || k["kind"] == "build");
+                if linked && !seen.contains(&dep["pkg"]) {
+                    seen.push(dep["pkg"].clone());
+                    todo.push(nodes.iter().find(|n| n["id"] == dep["pkg"]).unwrap());
+                }
+            }
+        }
+        let deps: Vec<String> = seen.iter().map(name).collect();
+        assert!(
+            deps.contains(&"vfs".into()),
+            "the kernel's dependencies: {deps:?}"
+        );
+        assert!(
+            !deps.contains(&"shell".into()),
+            "the kernel's dependencies: {deps:?}"
+        );
+    }
 }

@@ -25,7 +25,7 @@ use crate::{arch, console, klogln, mm, mounts, rtc, timer, tty, usb};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 use relay_abi::{MemInfo, Time, WaitStatus};
 use spin::Mutex;
 use table::{Blocked, Table, Want};
@@ -35,8 +35,8 @@ use x86_64::instructions::interrupts;
 /// What a process owns besides its entry in the table.
 struct Res {
     stack: KernelStack,
-    /// Its program's memory; `None` for the in-kernel shell, and once the
-    /// process has ended.
+    /// Its program's memory; `None` for init, and once the process has
+    /// ended.
     space: Option<AddressSpace>,
     /// Where its program starts, until it first runs.
     entry: Option<Entry>,
@@ -53,12 +53,6 @@ static PROCS: Mutex<Table<Res>> = Mutex::new(Table::new());
 static SAVED: [AtomicU64; kstack::SLOTS] = [const { AtomicU64::new(0) }; kstack::SLOTS];
 /// The idle task's.
 static IDLE: AtomicU64 = AtomicU64::new(0);
-
-/// The in-kernel shell's output while it waits for a command (plan 2's
-/// hook, `System::wait`): what its children write to fds 1 and 2, and the
-/// answer to each write (a redirection file's error).
-type Out<'a> = &'a mut shell::Output<'a>;
-static SHELL_OUT: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Where the running context is saved when it gives up the CPU.
 fn save_slot(t: &Table<Res>) -> *mut u64 {
@@ -228,17 +222,6 @@ fn end_if_killed() {
     }
 }
 
-/// Gives the console to the process group of the running process's child
-/// `pid`, in line mode, while the in-kernel shell waits for it (spec
-/// §6.4). A Ctrl-C typed before the command started waits in the input
-/// queue, and the next poll in line mode finds it: it is the command's.
-pub fn give_console(pid: u32) {
-    if let Some(p) = PROCS.lock().get(pid) {
-        tty::set_foreground(p.pgid);
-        tty::set_line_mode(true);
-    }
-}
-
 /// Gives the console back to process 1: its own group, raw mode. A reader
 /// of another group that is still blocked wakes, to find it has lost it.
 pub fn take_console() {
@@ -281,8 +264,8 @@ fn prepare(stack: &KernelStack, f: extern "C" fn(u64) -> !, arg: u64) {
     SAVED[stack.slot()].store(at, Ordering::Relaxed);
 }
 
-/// The running process (the in-kernel shell) waits until something is
-/// typed.
+/// The running process (init, at the error screen) waits until something
+/// is typed.
 pub fn wait_for_input() {
     block(Blocked::Console);
 }
@@ -542,53 +525,10 @@ fn collect(child: Child, nohang: bool) -> Result<Option<(u32, WaitStatus)>, Errn
     }
 }
 
-/// Gives the in-kernel shell fresh standard output and error for the
-/// command it starts next: its hook answers only what that command and its
-/// descendants write (they inherit these files), so an orphan of an
-/// earlier command, which holds that command's, writes to the screen.
-pub fn renew_outputs() {
-    let mut t = PROCS.lock();
-    let me = t.current();
-    if let Some(p) = t.get_mut(me) {
-        p.res.fds.set(1, Arc::new(File::ShellOutput(1)));
-        p.res.fds.set(2, Arc::new(File::ShellOutput(2)));
-    }
-}
-
-/// Whether `file` is one of the in-kernel shell's outputs now, the ones its
-/// current command has.
-fn shell_output_now(file: &Arc<File>, fd: u32) -> bool {
-    let t = PROCS.lock();
-    t.get(table::INIT)
-        .and_then(|p| p.res.fds.get(u64::from(fd)).ok())
-        .is_some_and(|now| Arc::ptr_eq(now, file))
-}
-
-/// Collects the running process's children that have ended: for the
-/// in-kernel shell, process 1, the orphans that passed to it. It does so
-/// before each command it starts and after each it waited for, so their
-/// zombies never fill the table (plan 4's `/bin/sh` does it before every
-/// prompt).
-pub fn collect_orphans() {
-    while let Ok(Some(_)) = collect(Child::Any, true) {}
-}
-
-/// The in-kernel shell waits for its child `pid`, giving what its children
-/// write to fds 1 and 2 to `out` meanwhile (plan 2's hook). The orphans
-/// that pass to it end while it waits too (a script `/bin/sh` runs leaves
-/// its command's zombie when Ctrl-C kills them both), and it collects each
-/// as it ends, so their zombies never fill the table while a long command
-/// runs. `ECHILD` if `pid` is not its child.
-pub fn wait(pid: u32, out: &mut shell::Output<'_>) -> Result<WaitStatus, Errno> {
-    let mut out: Out<'_> = out;
-    SHELL_OUT.store((&raw mut out).cast(), Ordering::Release);
-    let ended = wait_collecting(pid);
-    SHELL_OUT.store(core::ptr::null_mut(), Ordering::Release);
-    ended
-}
-
 /// Waits for the child `pid`, collecting any other child that ends
-/// meanwhile: for process 1, the orphans that pass to it.
+/// meanwhile: for process 1, the orphans that pass to it, so their
+/// zombies never fill the table while the shell runs. `ECHILD` if `pid` is
+/// not a child of the running process.
 pub fn wait_collecting(pid: u32) -> Result<WaitStatus, Errno> {
     // `ECHILD` before anything else is collected.
     if let Some((_, status)) = collect(Child::Pid(pid), true)? {
@@ -780,20 +720,6 @@ impl Caller for Current {
         tty::set_foreground(pgid);
         t.wake_all(Blocked::Console);
         Ok(())
-    }
-
-    fn shell_output(&mut self, file: &Arc<File>, n: u32, bytes: &[u8]) -> Result<(), Errno> {
-        let out = SHELL_OUT.load(Ordering::Acquire);
-        if out.is_null() || !shell_output_now(file, n) {
-            // The shell waits for nobody, or for another command: this
-            // goes to the screen.
-            tty::write(bytes);
-            return Ok(());
-        }
-        // SAFETY: set by the in-kernel shell's `wait`, which is blocked
-        // until its child has ended and clears it before it returns;
-        // nothing else calls it meanwhile.
-        unsafe { (*out.cast::<Out<'_>>())(n, bytes) }
     }
 
     fn spawn(&mut self, s: &Spawn) -> Result<u32, Errno> {

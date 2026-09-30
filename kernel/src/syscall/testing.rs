@@ -13,9 +13,6 @@ use vfs::{Env, FileSystem, MemFs, MountTable};
 pub const U: u64 = 0x40_0000;
 /// The writable page.
 pub const W: u64 = U + 3 * PAGE;
-/// An fd whose file fails every write (the shell's output redirected to a
-/// full disk).
-pub const FULL: u64 = 7;
 /// What the fake kernel log holds.
 pub const FAKE_LOG: &[u8] = b"Relay OS 0.2.0\n[ ok ] everything\n";
 /// How much file data `/full` holds.
@@ -35,11 +32,10 @@ pub const MEM: MemInfo = MemInfo {
 };
 
 /// A program with three readable pages at `U` holding a pattern, a
-/// writable page after them and nothing after that; the console as fd 0,
-/// the in-kernel shell's outputs as fds 1 and 2 and one to a full disk as
-/// `FULL`; the files `/root/f` ("hello", `/root` its current directory)
-/// and `/full` (8 KiB of room); what it wrote to the console (as fd 0) or
-/// the outputs (as 1 and 2), started, killed, and how long it slept.
+/// writable page after them and nothing after that; the console as fds 0,
+/// 1 and 2; the files `/root/f` ("hello", `/root` its current directory)
+/// and `/full` (8 KiB of room); what it wrote to the console, started,
+/// killed, and how long it slept.
 pub struct Fake {
     pub mem: FakeMem,
     pub space: AddressSpace,
@@ -64,7 +60,8 @@ pub struct Fake {
     pub syncs: u32,
     /// The `power` calls: (reboot, force).
     pub powered: Vec<(bool, bool)>,
-    pub written: Vec<(u64, Vec<u8>)>,
+    /// Each write to the console.
+    pub written: Vec<Vec<u8>>,
     pub slept: Vec<u64>,
     pub spawned: Vec<Spawn>,
     /// Children that have ended, and whether any still runs.
@@ -107,7 +104,7 @@ impl Caller for Fake {
         Ok(())
     }
     fn console_write(&mut self, bytes: &[u8]) {
-        self.written.push((0, bytes.to_vec()));
+        self.written.push(bytes.to_vec());
     }
     fn console_read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
         if self.killed_while_reading {
@@ -152,13 +149,6 @@ impl Caller for Fake {
             return Err(Errno::ESRCH);
         }
         self.foreground = pgid;
-        Ok(())
-    }
-    fn shell_output(&mut self, _: &Arc<File>, n: u32, bytes: &[u8]) -> Result<(), Errno> {
-        if u64::from(n) == FULL {
-            return Err(Errno::ENOSPC);
-        }
-        self.written.push((u64::from(n), bytes.to_vec()));
         Ok(())
     }
     fn spawn(&mut self, s: &Spawn) -> Result<u32, Errno> {
@@ -210,12 +200,10 @@ pub fn fake() -> Fake {
     let pattern: Vec<u8> = (0..3 * PAGE).map(|i| (i % 251) as u8).collect();
     space.fill(&mut mem, U, &pattern).unwrap();
     space.map_zeroed(&mut mem, W, 1, Perm::ReadWrite).unwrap();
-    let mut fds = FdTable::shell();
-    fds.set(FULL as usize, Arc::new(File::ShellOutput(FULL as u32)));
     Fake {
         mem,
         space,
-        fds,
+        fds: FdTable::console(),
         vfs: files(),
         heap_room: usize::MAX,
         room: u64::MAX,
@@ -244,13 +232,9 @@ pub fn call(f: &mut Fake, c: Call, args: [u64; 3]) -> Result<u64, u16> {
     }
 }
 
-/// Everything written, joined, per fd.
-pub fn text(f: &Fake, fd: u64) -> Vec<u8> {
-    f.written
-        .iter()
-        .filter(|(d, _)| *d == fd)
-        .flat_map(|(_, b)| b.clone())
-        .collect()
+/// Everything written to the console, joined.
+pub fn text(f: &Fake) -> Vec<u8> {
+    f.written.concat()
 }
 
 /// Puts `bytes` into the writable page at `at`, as the program would.

@@ -1,6 +1,7 @@
 //! Restarting and switching off (spec §7.4), through the registers the
-//! FADT describes and the `\_S5` values of the DSDT. The shell has already
-//! shut the filesystems down when these run. Which registers to write, and
+//! FADT describes and the `\_S5` values of the DSDT. The filesystems are
+//! shut down before these run (by the `power` call, and by the error
+//! screen). Which registers to write, and
 //! what, is worked out here and tested on the host; the writes themselves
 //! are thin glue.
 

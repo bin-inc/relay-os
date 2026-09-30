@@ -95,9 +95,6 @@ pub trait Caller {
     /// switches the machine off; returns only the shutdown's error, unless
     /// `force` goes ahead anyway (spec §7.3).
     fn power(&mut self, reboot: bool, force: bool) -> Errno;
-    /// Writes `bytes` to `file`, output `n` of the in-kernel shell (1 or
-    /// 2), which sends them where the command line says; its error, if any.
-    fn shell_output(&mut self, file: &Arc<File>, n: u32, bytes: &[u8]) -> Result<(), Errno>;
     /// Starts a child; its pid.
     fn spawn(&mut self, s: &Spawn) -> Result<u32, Errno>;
     /// A child that has ended, with how; `None` if `nohang` and none has.
@@ -300,7 +297,6 @@ fn write_to(caller: &mut impl Caller, file: &Arc<File>, bytes: &[u8]) -> Result<
             caller.console_write(bytes);
             Ok(bytes.len())
         }
-        File::ShellOutput(n) => caller.shell_output(file, *n, bytes).map(|()| bytes.len()),
         File::Vfs(open) => caller.with_vfs(|v| open.write(v, bytes)),
     }
 }
@@ -464,15 +460,14 @@ mod tests {
         let mut f = fake();
         assert_eq!(call(&mut f, Call::Write, [1, U + 10, 5]), Ok(5));
         assert_eq!(call(&mut f, Call::Write, [2, U, 3]), Ok(3));
-        assert_eq!(call(&mut f, Call::Write, [0, U, 1]), Ok(1), "the console");
-        assert_eq!(text(&f, 1), [10, 11, 12, 13, 14]);
-        assert_eq!(text(&f, 2), [0, 1, 2]);
+        assert_eq!(call(&mut f, Call::Write, [0, U, 1]), Ok(1), "fd 0 too");
+        assert_eq!(text(&f), [10, 11, 12, 13, 14, 0, 1, 2, 0], "the console");
         // Across pages, in pieces of at most 4 KiB.
         f.written.clear();
         assert_eq!(call(&mut f, Call::Write, [1, U + 100, 10_000]), Ok(10_000));
         let want: Vec<u8> = (100..10_100).map(|i| (i % 251) as u8).collect();
-        assert_eq!(text(&f, 1), want);
-        assert!(f.written.iter().all(|(_, b)| b.len() <= 4096));
+        assert_eq!(text(&f), want);
+        assert!(f.written.iter().all(|b| b.len() <= 4096));
         assert_eq!(
             call(&mut f, Call::Write, [1, 0, 0]),
             Ok(0),
@@ -496,12 +491,6 @@ mod tests {
             );
         }
         assert!(f.written.is_empty());
-    }
-
-    #[test]
-    fn a_file_s_error_reaches_the_program() {
-        let mut f = fake();
-        assert_eq!(call(&mut f, Call::Write, [FULL, U, 10]), Err(errno::ENOSPC));
     }
 
     #[test]
@@ -530,14 +519,14 @@ mod tests {
             .map(|i| (i % 251) as u8)
             .chain([0; PAGE as usize])
             .collect();
-        assert_eq!(text(&f, 1), want);
+        assert_eq!(text(&f), want);
         f.written.clear();
         assert_eq!(
             call(&mut f, Call::Write, [1, end - 904, 2000]),
             Ok(904),
             "less than a page before the hole"
         );
-        assert_eq!(text(&f, 1).len(), 904);
+        assert_eq!(text(&f).len(), 904);
     }
 
     #[test]

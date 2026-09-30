@@ -1,8 +1,8 @@
 //! The console's input (user-space gate §6.3–§6.5): one queue for every
 //! source, the USB keyboards and COM1, filled by `poll`. `poll` never waits,
 //! so it can run wherever the kernel holds nothing: in the idle task, on
-//! every tick that interrupts a program, and whenever the in-kernel shell
-//! reads or asks whether Ctrl-C was pressed.
+//! every tick that interrupts a program or ends a system call during which
+//! a tick passed, in a program's console read, and at the error screen.
 //!
 //! The console has a foreground process group and a mode (spec §6.4). In
 //! raw mode a Ctrl-C is input like any other byte (the shell's line editor
@@ -81,7 +81,7 @@ pub fn flush_due_tees() {
 /// The console's tees (spec §6.5).
 static TEES: Mutex<TeeStack<Arc<File>>> = Mutex::new(TeeStack::new());
 
-/// Writes what a process or the in-kernel shell gives the console: the
+/// Writes what a process or init gives the console: the
 /// screen, and a copy for every tee, written once 4 KiB of it waits.
 pub fn write(bytes: &[u8]) {
     console::write_output(bytes);
@@ -104,7 +104,7 @@ fn flush(tees: &mut TeeStack<Arc<File>>, all: bool) {
 fn write_tee(file: &Arc<File>, bytes: &[u8]) -> Result<(), Errno> {
     match &**file {
         File::Vfs(open) => mounts::with_nodes(|t| open.write_all(t, bytes)),
-        File::Console | File::ShellOutput(_) => Err(Errno::EINVAL),
+        File::Console => Err(Errno::EINVAL),
     }
 }
 
@@ -114,20 +114,20 @@ pub fn sync_tees() {
 }
 
 /// Pushes `file` as a tee of process `owner`: a file of the VFS it has
-/// open for writing (`EBADF` otherwise, `EINVAL` for the console or the
-/// shell's outputs); `EBUSY` if 4 are pushed.
+/// open for writing (`EBADF` otherwise, `EINVAL` for the console);
+/// `EBUSY` if 4 are pushed.
 pub fn push_tee(owner: u32, file: Arc<File>) -> Result<(), Errno> {
     tee_target(&file)?;
     TEES.lock().push(owner, file)
 }
 
 /// Whether `file` can be a tee: a file of the VFS open for writing
-/// (`EBADF` otherwise), not the console or the shell's outputs (`EINVAL`).
+/// (`EBADF` otherwise), not the console (`EINVAL`).
 fn tee_target(file: &File) -> Result<(), Errno> {
     match file {
         File::Vfs(open) if open.is_writable() => Ok(()),
         File::Vfs(_) => Err(Errno::EBADF),
-        File::Console | File::ShellOutput(_) => Err(Errno::EINVAL),
+        File::Console => Err(Errno::EINVAL),
     }
 }
 
@@ -201,12 +201,6 @@ pub fn has_input() -> bool {
     !INPUT.lock().is_empty()
 }
 
-/// Whether a Ctrl-C is waiting; if so, it and what was typed before it are
-/// dropped (`InputQueue::take_interrupt`).
-pub fn take_interrupt() -> bool {
-    INPUT.lock().take_interrupt()
-}
-
 /// Whether the input queue is locked now (for the kernel's checks that no
 /// lock is held across a switch).
 pub fn is_locked() -> bool {
@@ -241,6 +235,5 @@ mod tests {
         assert_eq!(tee_target(&read_write), Ok(()));
         assert_eq!(tee_target(&read_only), Err(Errno::EBADF));
         assert_eq!(tee_target(&File::Console), Err(Errno::EINVAL));
-        assert_eq!(tee_target(&File::ShellOutput(1)), Err(Errno::EINVAL));
     }
 }
