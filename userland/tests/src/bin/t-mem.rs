@@ -7,9 +7,16 @@
 //! - `t-mem unmapped`: reads a page after giving it back, which must kill
 //!   it (`killed (page fault at 0x100000000000, read, …)`); `t-mem
 //!   unmapped-many` the last of 256 pages given back together.
+//! - `t-mem grow N`: `N` MiB on the heap (spec §8.1) in blocks of every
+//!   size, each checked, which `relay-rt` maps as it grows.
+//! - `t-mem oom`: starts `t-mem hog`, which takes heap until there is
+//!   none (`t-mem: out of memory`), and says how it ended: status 134.
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
 use core::fmt::Write;
 use relay_abi::errno;
 use relay_rt::Args;
@@ -26,10 +33,13 @@ fn main(args: Args) -> u8 {
         Some(b"map") => map(),
         Some(b"unmapped") => unmapped(1),
         Some(b"unmapped-many") => unmapped(256),
-        _ => {
-            let _ = sys::write_all(2, b"usage: t-mem map|unmapped|unmapped-many\n");
-            return 2;
-        }
+        Some(b"grow") => match args.get(2).and_then(parse) {
+            Some(n) => grow(n),
+            None => return usage(),
+        },
+        Some(b"oom") => oom(),
+        Some(b"hog") => hog(),
+        _ => return usage(),
     };
     match r {
         Ok(()) => 0,
@@ -114,4 +124,71 @@ fn unmapped(pages: usize) -> Result<(), u16> {
         let _ = writeln!(Fd(1), "read an unmapped page: {b}");
     }
     Ok(())
+}
+
+fn usage() -> u8 {
+    let _ = sys::write_all(2, b"usage: t-mem map|unmapped|unmapped-many|grow N|oom\n");
+    2
+}
+
+/// A decimal number.
+fn parse(s: &[u8]) -> Option<usize> {
+    if s.is_empty() {
+        return None;
+    }
+    s.iter().try_fold(0usize, |n, &c| {
+        let d = c.checked_sub(b'0').filter(|d| *d <= 9)?;
+        n.checked_mul(10)?.checked_add(usize::from(d))
+    })
+}
+
+/// `mib` MiB in blocks of 16 bytes to 256 KiB, each filled with its own
+/// byte and checked once all are there.
+fn grow(mib: usize) -> Result<(), u16> {
+    let mut blocks: Vec<Vec<u8>> = Vec::new();
+    let mut total = 0;
+    let mut size = 16;
+    while total < mib << 20 {
+        let tag = blocks.len() as u8;
+        blocks.push(alloc::vec![tag; size]);
+        total += size;
+        size = if size >= 256 << 10 { 16 } else { size * 2 };
+    }
+    let all_there = blocks
+        .iter()
+        .enumerate()
+        .all(|(i, b)| b.iter().all(|&x| x == i as u8));
+    let _ = writeln!(
+        Fd(1),
+        "{} blocks, {} MiB, all there: {all_there}",
+        blocks.len(),
+        total >> 20
+    );
+    Ok(())
+}
+
+fn oom() -> Result<(), u16> {
+    let fds = [
+        relay_abi::FdMap {
+            child: 1,
+            parent: 1,
+        },
+        relay_abi::FdMap {
+            child: 2,
+            parent: 2,
+        },
+    ];
+    let pid = sys::spawn(b"/bin/t-mem", b"t-mem\0hog\0", b"", &fds, 0)?;
+    if let Some((_, w)) = sys::wait(i64::from(pid), false)? {
+        let _ = writeln!(Fd(1), "the hog: {w}");
+    }
+    Ok(())
+}
+
+/// Takes the heap a mebibyte at a time until `relay-rt` says it is out.
+fn hog() -> Result<(), u16> {
+    let mut blocks: Vec<Vec<u8>> = Vec::new();
+    loop {
+        blocks.push(alloc::vec![1; 1 << 20]);
+    }
 }

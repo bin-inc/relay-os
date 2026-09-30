@@ -302,7 +302,9 @@ dependencies = [
 name = "relay-rt"
 version = "0.2.0"
 dependencies = [
+ "heap",
  "relay-abi",
+ "spin",
 ]
 
 [[package]]
