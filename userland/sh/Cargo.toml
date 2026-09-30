@@ -1,0 +1,15 @@
+[package]
+name = "relay-sh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "/bin/sh, the shell as a program (spec §8.3)"
+build = "build.rs"
+
+[[bin]]
+name = "sh"
+path = "src/main.rs"
+
+[dependencies]
+relay-rt.workspace = true
+shell.workspace = true

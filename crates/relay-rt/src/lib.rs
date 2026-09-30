@@ -36,7 +36,7 @@ mod testing;
 
 pub use args::Args;
 pub use start::name;
-pub use sysio::{SysConsole, SysStdout, SysSystem};
+pub use sysio::{SysConsole, SysPrograms, SysStdout, SysSystem};
 pub use sysvfs::SysVfs;
 
 /// Names the program's `fn main(args: Args) -> u8`; its result is the exit

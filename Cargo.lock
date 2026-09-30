@@ -310,6 +310,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "relay-sh"
+version = "0.2.0"
+dependencies = [
+ "relay-rt",
+ "shell",
+]
+
+[[package]]
 name = "relay-tests"
 version = "0.2.0"
 dependencies = [

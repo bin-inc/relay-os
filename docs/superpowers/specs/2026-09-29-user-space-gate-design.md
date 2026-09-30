@@ -1280,7 +1280,9 @@ does. Facts found before the spec was first merged are already in its body.
      script's group) takes back only raw mode and runs its commands in
      that group, without `FOREGROUND`, so the console never leaves it (the
      prototype's review found such a shell reading end of input after its
-     first command).
+     first command); it gives each command line mode itself, as
+     `FOREGROUND` does, so that Ctrl-C ends the command, with the shell and
+     the script around it (the final review found them impossible to stop).
      `Console::interrupted` is false, since Ctrl-C kills. `SysSystem` has
      `time`, `sys_info`'s memory figures and log, and `power`:
      `System::reboot` and `System::poweroff` take `-f` (`POWER_FORCE`) and

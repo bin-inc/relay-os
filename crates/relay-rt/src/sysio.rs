@@ -8,33 +8,45 @@ use crate::sysvfs::{SysVfs, node_of};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use relay_abi::console::MODE_RAW;
-use relay_abi::file::KIND_CHAR_DEVICE;
+use relay_abi::console::{MODE_LINE, MODE_RAW};
+use relay_abi::file::{KIND_CHAR_DEVICE, OPEN_APPEND, OPEN_CREATE, OPEN_TRUNCATE, OPEN_WRITE};
 use relay_abi::info::LOG_MAX;
 use relay_abi::power::{POWER_FORCE, POWER_POWEROFF, POWER_REBOOT};
-use shell::{Console, MemInfo, Stdout, System};
+use relay_abi::spawn::{FOREGROUND, NEW_GROUP};
+use relay_abi::{FdMap, WaitStatus};
+use shell::{Console, MemInfo, Programs, Stdout, System};
 use vfs::{Errno, Node};
 
 /// The console: what is typed on fd 0, and the screen on fd 2 (a
 /// program's errors, and the shell's prompt and messages, as bash writes
 /// them).
 pub struct SysConsole {
-    /// The process group that takes the console before every read (an
-    /// interactive shell's own, spec §6.4).
-    owner: Option<u32>,
+    /// An interactive shell's: it takes the console back, in raw mode,
+    /// before every read.
+    interactive: bool,
+    /// The process group that takes it (the shell's own, spec §6.4).
+    group: Option<u32>,
 }
 
 impl SysConsole {
     /// The console of a program that does not read it.
     pub fn new() -> SysConsole {
-        SysConsole { owner: None }
+        SysConsole {
+            interactive: false,
+            group: None,
+        }
     }
 
-    /// The console of an interactive shell, whose process group `pgid`
-    /// takes it back, in raw mode, before every read, whatever a program
-    /// left it in (spec §6.4, §16 item 4).
-    pub fn owned_by(pgid: u32) -> SysConsole {
-        SysConsole { owner: Some(pgid) }
+    /// The console of an interactive shell, which takes it back, in raw
+    /// mode, before every read, whatever a program left it in (spec §6.4,
+    /// §16 item 4): for its process group `group` when it leads one, which
+    /// its commands' groups had; otherwise it shares a group, a script's,
+    /// with its commands, which never take the console from it.
+    pub fn interactive(group: Option<u32>) -> SysConsole {
+        SysConsole {
+            interactive: true,
+            group,
+        }
     }
 }
 
@@ -46,8 +58,10 @@ impl Default for SysConsole {
 
 impl Console for SysConsole {
     fn read_byte(&mut self) -> Option<u8> {
-        if let Some(pgid) = self.owner {
+        if self.interactive {
             let _ = sys::console_mode(MODE_RAW);
+        }
+        if let Some(pgid) = self.group {
             let _ = sys::console_foreground(pgid);
         }
         let mut byte = [0];
@@ -152,6 +166,95 @@ impl Stdout for SysStdout {
     }
 }
 
+/// `/bin/sh`'s way to its commands (user-space gate §8.2, §8.3): `spawn`,
+/// `wait`, and the tees of a script's transcript. A command always starts
+/// with the console in line mode, which `FOREGROUND` sets for one in a
+/// group of its own.
+pub struct SysPrograms {
+    /// The shell leads a process group of its own, so a command at its
+    /// prompt may have one too, with the console; a shell in a script's
+    /// group keeps its commands there (and the console with them).
+    own_group: bool,
+}
+
+impl SysPrograms {
+    pub fn new(own_group: bool) -> SysPrograms {
+        SysPrograms { own_group }
+    }
+}
+
+/// `open`'s flags for a redirection: `>` empties the file, `>>` writes at
+/// its end.
+pub fn output_flags(append: bool) -> u32 {
+    OPEN_WRITE | OPEN_CREATE | if append { OPEN_APPEND } else { OPEN_TRUNCATE }
+}
+
+/// `spawn`'s arguments: each followed by a NUL.
+pub fn arg_bytes(args: &[&[u8]]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for a in args {
+        bytes.extend_from_slice(a);
+        bytes.push(0);
+    }
+    bytes
+}
+
+/// A command's fds: the shell's 0 and 2, and `stdout` or the shell's 1.
+pub fn command_fds(stdout: Option<u32>) -> [FdMap; 3] {
+    [(0, 0), (1, stdout.unwrap_or(1)), (2, 2)].map(|(child, parent)| FdMap { child, parent })
+}
+
+impl Programs for SysPrograms {
+    fn open_output(&mut self, path: &[u8], append: bool) -> Result<u32, Errno> {
+        sys::open(path, output_flags(append)).map_err(Errno::from_number)
+    }
+
+    fn close(&mut self, fd: u32) {
+        let _ = sys::close(fd);
+    }
+
+    fn spawn(
+        &mut self,
+        path: &[u8],
+        args: &[&[u8]],
+        stdout: Option<u32>,
+        foreground: bool,
+    ) -> Result<u32, Errno> {
+        let flags = if foreground && self.own_group {
+            NEW_GROUP | FOREGROUND
+        } else {
+            // A command in the shell's own group reads the console in line
+            // mode too, which is also where Ctrl-C ends it (and the group):
+            // an interactive shell that leads no group left it raw at its
+            // prompt.
+            let _ = sys::console_mode(MODE_LINE);
+            0
+        };
+        sys::spawn(path, &arg_bytes(args), b"", &command_fds(stdout), flags)
+            .map_err(Errno::from_number)
+    }
+
+    fn wait(&mut self, pid: u32) -> Result<WaitStatus, Errno> {
+        match sys::wait(i64::from(pid), false) {
+            Ok(Some((_, status))) => Ok(status),
+            Ok(None) => Err(Errno::ECHILD),
+            Err(e) => Err(Errno::from_number(e)),
+        }
+    }
+
+    /// The tee holds the open file (spec §16 item 4), so the fd goes.
+    fn tee_push(&mut self, path: &[u8]) -> Result<(), Errno> {
+        let fd = sys::open(path, OPEN_WRITE).map_err(Errno::from_number)?;
+        let pushed = sys::console_tee_push(fd).map_err(Errno::from_number);
+        let _ = sys::close(fd);
+        pushed
+    }
+
+    fn tee_pop(&mut self) -> Result<(), Errno> {
+        sys::console_tee_pop().map_err(Errno::from_number)
+    }
+}
+
 /// A program's arguments after argument 0, as the command functions take
 /// them (bytes that are not UTF-8 are replaced, as they could not be typed
 /// at the shell's prompt).
@@ -205,6 +308,23 @@ mod tests {
     fn dash_f_is_power_force() {
         assert_eq!(power_flags(true), POWER_FORCE);
         assert_eq!(power_flags(false), 0);
+    }
+
+    #[test]
+    fn a_redirection_is_created_and_emptied_or_appended_to() {
+        assert_eq!(
+            output_flags(false),
+            OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE
+        );
+        assert_eq!(output_flags(true), OPEN_WRITE | OPEN_CREATE | OPEN_APPEND);
+    }
+
+    #[test]
+    fn a_command_gets_the_shell_s_fds_but_its_redirection() {
+        let pairs = |fds: [FdMap; 3]| fds.map(|f| (f.child, f.parent));
+        assert_eq!(pairs(command_fds(None)), [(0, 0), (1, 1), (2, 2)]);
+        assert_eq!(pairs(command_fds(Some(5))), [(0, 0), (1, 5), (2, 2)]);
+        assert_eq!(arg_bytes(&[b"ls", b"", b"a b"]), b"ls\0\0a b\0");
     }
 
     #[test]

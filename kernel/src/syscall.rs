@@ -13,7 +13,7 @@ use crate::mm::user::{UserSlice, UserStr};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use relay_abi::info::INFO_MEMORY;
-use relay_abi::spawn::{NEW_GROUP, SPAWN_FDS, WAIT_ANY, WAIT_NOHANG};
+use relay_abi::spawn::{FOREGROUND, NEW_GROUP, SPAWN_FDS, WAIT_ANY, WAIT_NOHANG};
 use relay_abi::{Call, FdMap, MemInfo, SpawnArgs, Time, WaitStatus, encode};
 use vfs::{Errno, Vfs};
 
@@ -36,6 +36,8 @@ pub struct Spawn {
     pub cwd: Vec<u8>,
     pub fds: Vec<FdMap>,
     pub new_group: bool,
+    /// The new group gets the console (`FOREGROUND`).
+    pub foreground: bool,
 }
 
 /// Which child `wait` waits for.
@@ -184,7 +186,11 @@ fn spawn(caller: &mut impl Caller, addr: u64) -> Result<u64, Errno> {
     let mut raw = [0u8; SpawnArgs::SIZE];
     caller.read(&UserSlice::new(addr, raw.len() as u64)?, 0, &mut raw)?;
     let a = SpawnArgs::from_bytes(&raw);
-    if a.flags & !NEW_GROUP != 0 || a.fd_count as usize > SPAWN_FDS {
+    let foreground = a.flags & FOREGROUND != 0;
+    if a.flags & !(NEW_GROUP | FOREGROUND) != 0
+        || (foreground && a.flags & NEW_GROUP == 0)
+        || a.fd_count as usize > SPAWN_FDS
+    {
         return Err(Errno::EINVAL);
     }
     let path = caller.read_str(&UserStr::new(
@@ -212,6 +218,7 @@ fn spawn(caller: &mut impl Caller, addr: u64) -> Result<u64, Errno> {
         cwd,
         fds: a.fds[..a.fd_count as usize].to_vec(),
         new_group: a.flags & NEW_GROUP != 0,
+        foreground,
     };
     caller.spawn(&s).map(u64::from)
 }
@@ -556,6 +563,7 @@ mod tests {
                     }
                 ],
                 new_group: true,
+                foreground: false,
             }]
         );
         let a = spawn_args(&mut f, b"x\0", |a| {
@@ -567,6 +575,10 @@ mod tests {
         let s = &f.spawned[1];
         assert!(!s.new_group && s.cwd.is_empty() && s.fds.is_empty());
         assert_eq!(s.argc, 1);
+        // A group of its own that gets the console.
+        let a = spawn_args(&mut f, b"x\0", |a| a.flags = NEW_GROUP | FOREGROUND);
+        assert_eq!(call(&mut f, Call::Spawn, [a, 0, 0]), Ok(103));
+        assert!(f.spawned[2].new_group && f.spawned[2].foreground);
         // The caller's refusal.
         let a = spawn_args(&mut f, b"x\0", |a| a.path_len = 7);
         put(&mut f, W + 200, b"missing");
@@ -586,7 +598,12 @@ mod tests {
             Err(errno::EINVAL),
             "no argument 0"
         );
-        assert_eq!(refused(&mut f, b"x\0", |a| a.flags = 2), Err(errno::EINVAL));
+        assert_eq!(
+            refused(&mut f, b"x\0", |a| a.flags = FOREGROUND),
+            Err(errno::EINVAL),
+            "the console goes to a group of the child's own"
+        );
+        assert_eq!(refused(&mut f, b"x\0", |a| a.flags = 4), Err(errno::EINVAL));
         assert_eq!(
             refused(&mut f, b"x\0", |a| a.fd_count = 9),
             Err(errno::EINVAL)
