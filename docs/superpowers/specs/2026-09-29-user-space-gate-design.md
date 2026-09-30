@@ -1,7 +1,7 @@
 # Relay OS — User-Space Gate Design: programs, not built-ins (milestones 2 and 3)
 
 - **Date:** 2026-09-29
-- **Status:** Approved 2026-09-29; revised while planning milestone 2's plans 1, 2 and 3a (see §16)
+- **Status:** Approved 2026-09-29; revised while planning milestone 2's plans 1, 2, 3a and 3b (see §16)
 - **Builds on:** milestone 1 (version 0.2.0,
   `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`,
   cited below as "M1 §n")
@@ -201,8 +201,10 @@ after the kernel has set up its memory (§16 item 2).
   data read-only NX, data read-write NX. A segment that is both writable and
   executable is refused. The stack and `mem_map` memory are read-write NX.
 - SMEP and SMAP are enabled when CPUID reports them (the i7-1260P does;
-  QEMU with KVM passes them through, TCG may not). The kernel touches user
-  memory only inside `UserSlice` copies, between `stac` and `clac`.
+  QEMU with KVM passes them through; TCG with `-cpu max` has them too). The
+  kernel never touches a program's addresses: `UserSlice` and `UserStr` copy
+  through the linear map, from the frames the program's page tables name
+  (§16 item 2), so no copy needs `stac` and `clac`.
 - `kernel/src/mm/paging.rs` gains a user bit, the permissions above,
   `unmap`, and freeing a whole lower half with its page tables and frames.
   Its host tests (fake `PhysMem`) check that tearing down an address space
@@ -509,11 +511,16 @@ Shipped in every `system.img`, because the NUC checks use them too:
 
 | Program | Does |
 |---|---|
-| `t-fault KIND` | faults on purpose: `null-read`, `null-write`, `write-code`, `exec-data`, `ud`, `div0`, `stack`, `kernel-read` (reads a kernel address), `sse` |
+| `t-fault KIND` | faults on purpose: `null-read`, `null-write`, `write-code`, `exec-data`, `ud`, `div0`, `stack`, `kernel-read` (reads a kernel address), `sse`; and `flags-exit`, `flags-ud`, `flags-ac`, `flags-tf` (the flags a program sets never reach the kernel) and `gsbase` (a program cannot set its own `gs` base) |
 | `t-spin [secs]` | spins without system calls, forever or for `secs` seconds (reading the clock only every 2^20 iterations), then prints how many iterations it made |
-| `t-spawn N` | starts N children that exit at once and waits for each; prints the free frames before and after |
+| `t-spawn N` | starts N children that exit at once and waits for each; prints the free frames before and after, and how many were lost. Also `kill` (kills a spinning child while it sleeps), `kill-new` (kills one before it has run), `orphan`, `fill` (fills the process table with napping orphans) and `sleepers` (a group blocked in `wait` and `sleep`, for Ctrl-C) |
 | `t-abi` | a program whose ELF note has the wrong ABI version (built by xtask) |
 | `t-args` | prints its arguments one per line, as `[n] <arg>` |
+| `t-files KIND` | the file calls: `basic` (`open`'s flags, `read`, `write`, `seek`, `fstat`, `close`, an offset shared with a child, 32 fds), `dir` (the calls on paths and `read_dir`), `cwd` (`chdir`, `getcwd`, a child's working directory), `gone` (another process removes its working directory and open file), `full` (write errors on a full disk) |
+| `t-mem KIND` | memory: `map` (`mem_map` and `mem_unmap`), `unmapped` and `unmapped-many` (a page read after it was given back is killed), `grow N` (N MiB of heap), `oom` (a child takes memory until there is none) |
+| `t-read [KIND]` | reads the console and prints each read: in line mode, `raw`, `apart` (outside the foreground group), `size` (and the console calls' refusals), `leave` (leaves the console in line mode behind) |
+| `t-tee KIND` | console tees: `basic`, `end` (left by a process that ends), `gone` (its file removed), `typed` (a reader's), `full` (on a full disk) |
+| `t-sys KIND` | `sys_info`'s names (`uname`) and kernel log (`log`), and `power` (`poweroff`, `reboot`, with `-f`) |
 
 ## 9. Milestone 3: pipes, jobs, `ps`/`kill`, script variables
 
@@ -1049,3 +1056,150 @@ does. Facts found before the spec was first merged are already in its body.
      and expects the `cpu:` line; two steps follow by hand (typing during
      `t-spin 5`, and Ctrl-C of `t-spin`). The recorded NUC transcripts
      are those of plan 3a's NUC check.
+4. **Decisions made while planning milestone 2's plan 3b** (files, memory
+   and the console):
+   - **Plan 3b is one plan** (§13), in five pull requests: this plan; the
+     parts, host-tested and not used yet; the file calls; memory; the console,
+     tees, `sys_info` and `power`, with a NUC check.
+   - **Open files** (§5.4, §7.3). A file of the VFS open in the fd table is its
+     node, what it was opened for and an offset, shared by the fds that share
+     the open file (the ones `spawn` hands a child); each `open` makes its own,
+     as on Linux. `open` takes the lowest free fd, and is `EMFILE` when all 32
+     are in use, before anything is opened or created. Its flags' errors are
+     Linux's where they apply: neither `READ` nor `WRITE`, `TRUNCATE` or
+     `APPEND` without `WRITE`, `EXCLUSIVE` without `CREATE`, or `DIRECTORY`
+     with `CREATE`, is `EINVAL`; `CREATE` with `EXCLUSIVE` of what exists is
+     `EEXIST`; a directory opened for writing, or a name to create that ends in
+     `/`, is `EISDIR`; `DIRECTORY` of anything else is `ENOTDIR`; a read-only
+     filesystem says `EROFS` when something would change. Reading or writing
+     what an fd was not opened for is `EBADF`, reading a directory `EISDIR`.
+     Symbolic links are never followed (milestone 1): one can be opened, and
+     reading it is the filesystem's `EINVAL`.
+   - **`seek`** may go past the end (a write there leaves a hole); before the
+     start, past 2^63 − 1 or with an unknown whence it is `EINVAL`, and so it
+     is on the console and the in-kernel shell's outputs (§7.3). A directory
+     only goes back to its start, where `read_dir` begins again.
+   - **`read_dir`** (§7.3) writes records of a 16-byte header (inode `u64`, the
+     record's length `u16`, the name's length `u16`, the kind `u8`, 3 bytes
+     reserved) and the name, padded to 8 bytes, which `relay_abi::file` writes
+     and reads for the kernel and the programs alike. Entries come sorted by
+     name, and the continuation token is the last name given, kept in the open
+     file: an entry that is there throughout comes exactly once however the
+     directory changes between calls. `EINVAL` if not even the next record
+     fits, 0 after the last; `ENOMEM` for a directory whose size, ten times
+     over, is more than the kernel's heap has room for (its heap panics when it
+     runs out; an ext2 entry of 12 bytes takes up to 112 in memory while the
+     list grows); at most 64 KiB of the buffer is used per call. The kind comes
+     from `Vfs::entry_kind`: a name something is mounted on, `.` and `..` are
+     directories.
+   - **The other calls on files** (§7.3). `stat` never follows a link, so
+     `NOFOLLOW` changes nothing; `touch` sets the times of a file that exists
+     (programs create files with `open`); `readlink` cuts the target at the
+     buffer's length, as Linux does; `getcwd` is `ERANGE` for a buffer that is
+     too short and gives a removed directory the path it had, as the in-kernel
+     shell's `pwd` does. `read` and `write` copy a page at a time: a read
+     checks each page writable before it reads into it, so the offset never
+     moves past what the program got, and stops at the end of the file; a write
+     stops where the filesystem is full, and the next piece's `ENOSPC` ends it.
+     A call is not preempted (§6.1), so a big read holds the CPU while it runs.
+   - **A removal reaches every process** (§5.4; the roadmap's note from plan
+     3a). An inode a removal frees may go to the next file at once. The mount
+     table records what each removal and move did (`vfs::Change`: a directory,
+     or a file's last name, removed; a directory moved), and after every
+     operation the kernel applies it: every other process's working directory
+     follows (a removed one resolves nothing, a moved one takes its new path),
+     and every open file and tee of a freed inode is gone, so everything but
+     closing it is `ENOENT`, what the filesystem says of an inode it has freed.
+     The prototype showed the danger: without it, a program wrote into the new
+     file that got its removed file's inode.
+   - **`mem_map` and `mem_unmap`** (§5.1, §7.3). Fresh zeroed read-write NX
+     pages, the length rounded up to pages, first fit from `0x1000_0000_0000`
+     to `0x7000_0000_0000`; regions that meet are one, and a process has at
+     most 1024 (`ENOMEM` beyond, for an unmap that would cut one in two as
+     well), so its list cannot fill the kernel's heap. A length of 0 is
+     `EINVAL`; more than the frames above the 8 MiB reserve is `ENOMEM` before
+     anything is mapped, and running out midway leaves nothing mapped.
+     `mem_unmap` takes an aligned address and whole pages of one region
+     (`EINVAL` otherwise) and flushes their TLB entries, all of them for more
+     than 64 pages.
+   - **The heap of `relay-rt`** (§8.1). `crates/heap` gains regions
+     (`Heap::add`; regions that meet are one block). The allocator grows by the
+     block's size, alignment and a slab, rounded up to whole mebibytes; when
+     `mem_map` refuses, the allocator itself prints `<name>: out of memory` and
+     exits with 134 (not the panic handler, whose status is 101). Nothing is
+     given back to the kernel before the program ends.
+   - **Reading the console** (§6.4, §6.5). Only the foreground group reads; any
+     other process gets end of input at once, and a reader killed while it
+     waits gets `EINTR`. In line mode the line discipline runs as keys come in
+     (on the ticks that poll, in the idle task, and in reads), so what is typed
+     is echoed at once, to the screen and the tees, even while no program
+     reads. It works on keys: an escape sequence (`ESC [` up to its final byte)
+     is one key and does nothing; `ESC` and any other byte are the Escape key
+     and that key (nothing here sends Alt). Backspace erases a whole UTF-8
+     character (`\b \b`); Enter is CR, LF or CR LF; Ctrl-D on an empty line is
+     end of input and on another hands the line over without its `\n`, as Linux
+     does; other control characters do nothing; the lines waiting and the one
+     typed hold 4096 bytes together, and Enter always fits. A read gets at most
+     one line. In raw mode a read gets what was typed. Going to line mode hands
+     the discipline what was typed ahead, without echoing again what it echoed
+     before; going back to raw mode hands back what was typed and not read, as
+     bash sees it, and a Ctrl-C nobody took as a raw Ctrl-C, which the shell's
+     line editor and a running script see (plan 3a's ruling that such a Ctrl-C
+     was swallowed no longer holds). A LF right after the CR that ended the
+     shell's line is part of that Enter, for a terminal that sends CR LF.
+   - **The console calls** (§7.3). `console_mode` takes raw (0) or line (1),
+     `EINVAL` otherwise, and returns the previous one; `console_size` returns
+     the columns in the low and the rows in the high 32 bits (80×25 without a
+     console); `console_foreground` takes a group some process is in (`ESRCH`
+     otherwise, 0 too). Any process may call them (single user, §1.3); a change
+     wakes the blocked readers.
+   - **Tees** (§6.5). `console_tee_push` takes an fd of a VFS file open for
+     writing (`EBADF` otherwise, `EINVAL` for the console and the in-kernel
+     shell's outputs); the tee holds the open file, so closing the fd keeps it.
+     At most 4 (`EBUSY`). A tee gets what programs and the in-kernel shell
+     write to the console and the line discipline's echo, not the kernel's own
+     messages. Its copies are written once 4 KiB wait, in a process's context
+     (a write or a read of the console), at every `sync` (the call's and the
+     in-kernel shell's after each command) and when it is popped; the echo a
+     tick makes only waits, 16 KiB at most, beyond which it is dropped, as a
+     terminal drops what nobody reads. A failed write removes the tee from the
+     copying and is logged; the owner's next pop returns that write's error
+     (`ENOSPC`, `EIO`, `ENOENT`), not always `EIO` as §6.5 says, so the shell
+     reports the real reason. A pop with no tee is `EINVAL`. A process's tees
+     stop at its end and are written at the next flush, since a process may end
+     in a fault or a tick, with interrupts off, where no file can be written.
+   - **`sys_info`** (§7.3). `INFO_UNAME` fills `relay_abi::Uname`, four fields
+     of 64 bytes padded with NULs (`Relay`, `relay`, the kernel's version,
+     `x86_64`), `EINVAL` for a shorter buffer; `INFO_LOG` gives the newest
+     bytes of the kernel log that fit (it holds at most `LOG_MAX`, 64 KiB).
+   - **`power`** (§7.3) takes reboot (1) or poweroff (2) and the flag
+     `POWER_FORCE` (added: milestone 1's `reboot -f` and `poweroff -f` go ahead
+     when the filesystems cannot be shut down cleanly). It writes the tees,
+     shuts the filesystems down and restarts or switches off; if the shutdown
+     fails it returns the error, unless forced, and the machine stays up, as
+     milestone 1's `unplug` scenario requires. In test mode poweroff makes QEMU
+     exit, as the shell's does.
+   - **The in-kernel shell until plan 4** (§16 item 3). It keeps its own
+     `Transcript` and its outputs (`File::ShellOutput`); its commands get the
+     console as fd 0, in line mode while it waits for them. At its prompt it
+     reads raw bytes from the input queue itself, taking the console back (raw
+     mode, its own group) before each one, whatever mode a program left it in.
+     Its redirection files and transcripts are nodes, not open files, so a
+     removal does not reach them; plan 4's `/bin/sh` holds them as fds, which
+     it does.
+   - **Milestone 1's serial findings.** An `ESC` over COM1 with nothing after
+     it for 50 ms (TSC time) goes in as the Escape key; any Ctrl-C, from the
+     keyboard too, ends a half-arrived serial sequence.
+   - **Error numbers** (§7.2). `vfs::Errno` gains `EMFILE` and `ERANGE` (34,
+     for `getcwd`); `relay_abi::errno::name` names each number for test
+     programs.
+   - **Tests** (§8.5, §12). Test programs `t-files`, `t-mem`, `t-read`, `t-tee`
+     and `t-sys`; scenarios `files`, `memory`, `console`, `tees` and `sysinfo`;
+     `diskfull` and `unplug` gain a program's write errors, a tee on a full
+     disk and `power` on an unplugged stick. The e2e runner gains `type TEXT`
+     (keys without Enter, for Ctrl-D), `send-crlf TEXT` and `poweroff COMMAND`.
+   - **Check scripts** (§12.4). `check3-a.sh` runs `t-files basic`, `dir`,
+     `cwd` and `gone`, `t-mem map` and `grow 64`, `t-tee end`, `t-sys uname`
+     and `t-read apart` (84 commands); a third step by hand types into `t-read`
+     on the K120, with Backspace and Ctrl-D. The recorded transcripts get those
+     lines by hand until plan 3b's NUC check records real ones.
