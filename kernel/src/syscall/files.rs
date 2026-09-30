@@ -50,7 +50,7 @@ pub(super) fn read(caller: &mut impl Caller, fd: u64, addr: u64, len: u64) -> Re
     let file = file(caller, fd)?;
     let open = match &*file {
         File::Vfs(open) if open.is_readable() => open,
-        File::Vfs(_) | File::ShellOutput(_) => return Err(Errno::EBADF),
+        File::Vfs(_) => return Err(Errno::EBADF),
         File::Console => return console_read(caller, addr, len),
     };
     let slice = UserSlice::new(addr, len)?;
@@ -89,8 +89,8 @@ fn console_read(caller: &mut impl Caller, addr: u64, len: u64) -> Result<u64, Er
     Ok(n as u64)
 }
 
-/// `seek(fd, offset, whence)`: the new offset. The console and the shell's
-/// outputs have none (`EINVAL`).
+/// `seek(fd, offset, whence)`: the new offset. The console has none
+/// (`EINVAL`).
 pub(super) fn seek(
     caller: &mut impl Caller,
     fd: u64,
@@ -105,14 +105,14 @@ pub(super) fn seek(
     caller.with_vfs(|v| open.seek(v, offset, whence))
 }
 
-/// `fstat(fd, &mut Stat)`. The console and the shell's outputs are
-/// character devices, with nothing else to say.
+/// `fstat(fd, &mut Stat)`. The console is a character device, with
+/// nothing else to say.
 pub(super) fn fstat(caller: &mut impl Caller, fd: u64, addr: u64) -> Result<u64, Errno> {
     let file = file(caller, fd)?;
     let slice = UserSlice::new(addr, Stat::SIZE as u64)?;
     let stat = match &*file {
         File::Vfs(open) => caller.with_vfs(|v| open.stat(v))?,
-        File::Console | File::ShellOutput(_) => Stat {
+        File::Console => Stat {
             kind: u32::from(KIND_CHAR_DEVICE),
             ..Stat::default()
         },
@@ -248,7 +248,7 @@ pub(super) fn statfs(
 
 /// `getcwd(buffer, length)`: the current directory's path, the bytes
 /// written; `ERANGE` if the buffer is too short. A directory that was
-/// removed keeps the path it had, as the in-kernel shell's `pwd` shows it.
+/// removed keeps the path it had, as milestone 1's `pwd` showed it.
 pub(super) fn getcwd(caller: &mut impl Caller, addr: u64, len: u64) -> Result<u64, Errno> {
     let slice = UserSlice::new(addr, len)?;
     let cwd = caller.with_vfs(|v| v.cwd());
@@ -299,8 +299,8 @@ mod tests {
                 "{fd}"
             );
         }
-        // Up to 32 (7 is `FULL`); the 33rd creates nothing.
-        for fd in (5..32).filter(|&fd| fd != FULL) {
+        // Up to 32; the 33rd creates nothing.
+        for fd in 5..32 {
             assert_eq!(open(&mut f, b"/root/f", OPEN_READ), Ok(fd));
         }
         assert_eq!(
@@ -423,11 +423,6 @@ mod tests {
             "before the buffer"
         );
         assert_eq!(call(&mut f, Call::Read, [w, W, 1]), Err(errno::EBADF));
-        assert_eq!(
-            call(&mut f, Call::Read, [1, W, 1]),
-            Err(errno::EBADF),
-            "an output"
-        );
         assert_eq!(
             call(&mut f, Call::Read, [9, W, 1]),
             Err(errno::EBADF),

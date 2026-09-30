@@ -8,9 +8,8 @@
 use crate::block::gpt::{self, Guid};
 use crate::block::partition::Partition;
 use crate::block::root::{self, RootChoice};
-use crate::session::KernelEnv;
 use crate::usb::{self, UsbDisk};
-use crate::{console, klogln, kprintln};
+use crate::{console, klogln, kprintln, rtc};
 use ::usb::host::Size;
 use alloc::boxed::Box;
 use alloc::format;
@@ -18,6 +17,19 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use ext2::{Ext2, MountOptions};
 use vfs::{BlockDevice, Env, Errno, FileSystem, MemFs};
+
+/// The RTC and the kernel log, for filesystems.
+struct KernelEnv;
+
+impl Env for KernelEnv {
+    fn now(&self) -> u64 {
+        rtc::now_unix().unwrap_or(0)
+    }
+
+    fn log(&self, line: &str) {
+        klogln!("{line}");
+    }
+}
 
 /// Mounts ext2 on the device `open` returns: read-write, and if that fails
 /// with `EIO`, read-only on a fresh device. Returns the filesystem and, if

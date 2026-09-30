@@ -216,4 +216,44 @@ mod tests {
         assert!(workflow.contains("run: cargo xtask lint"));
         assert!(workflow.contains("run: cargo xtask unit"));
     }
+
+    /// The user-space gate's definition of done (§1.4 item 3): every
+    /// command the user types runs as a program, so the kernel does not
+    /// link the shell.
+    #[test]
+    fn the_kernel_does_not_depend_on_the_shell() {
+        let out = crate::util::cargo()
+            .args([
+                "metadata",
+                "--format-version",
+                "1",
+                "--no-deps",
+                "--offline",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let meta: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let kernel = meta["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "relay-kernel")
+            .expect("the kernel is a package");
+        let deps: Vec<&str> = kernel["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["name"].as_str().unwrap())
+            .collect();
+        assert!(deps.contains(&"vfs"), "the kernel's dependencies: {deps:?}");
+        assert!(
+            !deps.contains(&"shell"),
+            "the kernel's dependencies: {deps:?}"
+        );
+    }
 }

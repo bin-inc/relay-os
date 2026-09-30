@@ -289,7 +289,6 @@ dependencies = [
  "ext2",
  "heap",
  "relay-abi",
- "shell",
  "spin",
  "sysimg",
  "term",

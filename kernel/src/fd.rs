@@ -1,8 +1,7 @@
 //! A process's file descriptors (user-space gate §5.4): 32 slots, each a
 //! shared reference to an open file, so a child `spawn` hands an fd to
 //! uses the same file as its parent, offset and all. The files are the
-//! console, the in-kernel shell's output and files of the VFS; milestone 3
-//! adds pipe ends.
+//! console and files of the VFS; milestone 3 adds pipe ends.
 
 use crate::file::OpenFile;
 use alloc::sync::Arc;
@@ -18,11 +17,6 @@ pub const FDS: usize = 32;
 pub enum File {
     /// The screen and keyboard.
     Console,
-    /// Standard output (1) or standard error (2) of the in-kernel shell:
-    /// what is written goes to the shell, which sends it where the command
-    /// line says (a redirection, the screen, a script's transcript). Plan 4
-    /// replaces the in-kernel shell and this with it.
-    ShellOutput(u32),
     /// A file of the VFS.
     Vfs(OpenFile),
 }
@@ -52,16 +46,6 @@ impl FdTable {
         for slot in &mut t.slots[..3] {
             *slot = Some(Arc::new(File::Console));
         }
-        t
-    }
-
-    /// The in-kernel shell's fds: the console to read, and its standard
-    /// output and error.
-    pub fn shell() -> FdTable {
-        let mut t = FdTable::new();
-        t.slots[0] = Some(Arc::new(File::Console));
-        t.slots[1] = Some(Arc::new(File::ShellOutput(1)));
-        t.slots[2] = Some(Arc::new(File::ShellOutput(2)));
         t
     }
 
@@ -156,11 +140,11 @@ mod tests {
     }
 
     #[test]
-    fn the_shell_has_the_console_and_its_outputs() {
-        let t = FdTable::shell();
-        assert_eq!(**t.get(0).unwrap(), File::Console);
-        assert_eq!(**t.get(1).unwrap(), File::ShellOutput(1));
-        assert_eq!(**t.get(2).unwrap(), File::ShellOutput(2));
+    fn process_1_has_the_console_as_0_1_and_2() {
+        let t = FdTable::console();
+        for fd in 0..3 {
+            assert_eq!(**t.get(fd).unwrap(), File::Console);
+        }
         assert_eq!(t.open(), 3);
         for fd in [3, 31, 32, 1 << 32, u64::MAX] {
             assert_eq!(t.get(fd).err(), Some(Errno::EBADF), "{fd}");
@@ -168,23 +152,14 @@ mod tests {
     }
 
     #[test]
-    fn process_1_has_the_console_as_0_1_and_2() {
-        let t = FdTable::console();
-        for fd in 0..3 {
-            assert_eq!(**t.get(fd).unwrap(), File::Console);
-        }
-        assert_eq!(t.open(), 3);
-    }
-
-    #[test]
     fn a_child_shares_the_files_it_is_given_and_nothing_else() {
-        let parent = FdTable::shell();
+        let parent = FdTable::console();
         let child = parent
             .for_child(&[map(0, 0), map(1, 2), map(31, 1)])
             .unwrap();
         assert!(Arc::ptr_eq(child.get(0).unwrap(), parent.get(0).unwrap()));
         assert!(Arc::ptr_eq(child.get(1).unwrap(), parent.get(2).unwrap()));
-        assert_eq!(**child.get(31).unwrap(), File::ShellOutput(1));
+        assert!(Arc::ptr_eq(child.get(31).unwrap(), parent.get(1).unwrap()));
         assert_eq!(child.get(2).err(), Some(Errno::EBADF), "not given");
         assert_eq!(child.open(), 3);
         // The files stay while either has them.
@@ -196,21 +171,22 @@ mod tests {
 
     #[test]
     fn a_file_put_in_replaces_the_old_one_for_later_children_only() {
-        let mut shell = FdTable::shell();
-        let before = shell.for_child(&[map(1, 1)]).unwrap();
-        shell.set(1, Arc::new(File::ShellOutput(1)));
-        let after = shell.for_child(&[map(1, 1)]).unwrap();
+        let mut parent = FdTable::console();
+        let old = Arc::clone(parent.get(1).unwrap());
+        let before = parent.for_child(&[map(1, 1)]).unwrap();
+        parent.set(1, Arc::new(File::Console));
+        let after = parent.for_child(&[map(1, 1)]).unwrap();
         assert!(!Arc::ptr_eq(before.get(1).unwrap(), after.get(1).unwrap()));
-        assert!(Arc::ptr_eq(after.get(1).unwrap(), shell.get(1).unwrap()));
-        assert_eq!(**before.get(1).unwrap(), File::ShellOutput(1));
+        assert!(Arc::ptr_eq(after.get(1).unwrap(), parent.get(1).unwrap()));
+        assert!(Arc::ptr_eq(before.get(1).unwrap(), &old));
     }
 
     #[test]
     fn a_file_opened_takes_the_lowest_free_fd_up_to_32() {
-        let mut t = FdTable::shell();
+        let mut t = FdTable::console();
         let console = || Arc::new(File::Console);
         assert_eq!(t.insert(console()), Ok(3));
-        assert_eq!(t.remove(1).map(|f| *f == File::ShellOutput(1)), Ok(true));
+        assert_eq!(t.remove(1).map(|f| *f == File::Console), Ok(true));
         assert_eq!(t.insert(console()), Ok(1), "the lowest free one");
         for fd in 4..32 {
             assert_eq!(t.insert(console()), Ok(fd));
@@ -243,7 +219,7 @@ mod tests {
         let rw = OPEN_READ | OPEN_WRITE | OPEN_CREATE;
         let a = Arc::new(File::Vfs(file::open(&mut t, b"/a", rw).unwrap()));
         let b = Arc::new(File::Vfs(file::open(&mut t, b"/b", rw).unwrap()));
-        let mut fds = FdTable::shell();
+        let mut fds = FdTable::console();
         fds.insert(Arc::clone(&a)).unwrap();
         fds.insert(Arc::clone(&a)).unwrap();
         fds.insert(Arc::clone(&b)).unwrap();
@@ -273,7 +249,7 @@ mod tests {
 
     #[test]
     fn a_bad_mapping_is_refused() {
-        let parent = FdTable::shell();
+        let parent = FdTable::console();
         assert_eq!(parent.for_child(&[map(0, 3)]).err(), Some(Errno::EBADF));
         assert_eq!(parent.for_child(&[map(32, 0)]).err(), Some(Errno::EBADF));
         assert_eq!(
