@@ -15,7 +15,7 @@ every command but `cd`, `exit` and `help` as a program, and its scripts
 may run scripts. Process 1 is the kernel's init: it starts `/bin/sh` at
 boot and again whenever it ends, and a machine that cannot run its shell
 (no `system.img`, or a shell that keeps ending) shows an error screen and
-restarts at a key.
+restarts at a key. The kernel holds no shell of its own any more.
 
 Design: `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`
 (milestone 1) and `docs/superpowers/specs/2026-09-29-user-space-gate-design.md`
@@ -39,9 +39,9 @@ has the whole checklist):
 3. Reboot, press F10 and choose the UEFI entry for the Kingston stick. Every
    startup line says `[ ok ]` and the prompt `root@relay:~# ` follows.
 4. Type `sh checks/check3-a.sh`, then `reboot`, boot the stick again, type
-   `sh checks/check3-b.sh`, then `poweroff`.
+   `sh checks/check3-b.sh` and `sh checks/check4.sh`, then `poweroff`.
 5. Back in Linux Mint: `cargo xtask verify-usb` checks the filesystem and
-   the output of both scripts.
+   the output of the three scripts.
 
 After a code change, `cargo xtask flash --kernel` replaces only the loader,
 the kernel and the programs of `/bin` (`system.img`) and keeps the files on

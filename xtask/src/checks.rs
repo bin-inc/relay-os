@@ -517,9 +517,10 @@ free
     /// The real check scripts against a transcript of each machine: QEMU's
     /// from the `checks` scenario, the NUC's as the NUC wrote them in NUC
     /// check 3 of milestone 2's plan 3b on 2026-09-30
-    /// (`docs/hardware-test.md`), copied off the stick unchanged. A `#nuc>` line must not need a line
-    /// of its own next to the `#>` line for the same output, which QEMU
-    /// alone cannot show.
+    /// (`docs/hardware-test.md`), copied off the stick unchanged; check 4's
+    /// is QEMU's until NUC check 4 records the NUC's. A `#nuc>` line must
+    /// not need a line of its own next to the `#>` line for the same
+    /// output, which QEMU alone cannot show.
     #[test]
     fn the_check_scripts_pass_on_both_machines() {
         let parts = [
@@ -533,6 +534,11 @@ free
                 include_str!("../fixtures/checks/check3-b.qemu.log"),
                 include_str!("../fixtures/checks/check3-b.nuc.log"),
             ),
+            (
+                include_str!("../../rootfs/root/checks/check4.sh"),
+                include_str!("../fixtures/checks/check4.qemu.log"),
+                include_str!("../fixtures/checks/check4.nuc.log"),
+            ),
         ];
         for (i, (script, qemu, nuc)) in parts.iter().enumerate() {
             for (machine, log) in [(Machine::Qemu, qemu), (Machine::Nuc, nuc)] {
@@ -540,9 +546,11 @@ free
                 assert!(r.ok(), "part {i} on {machine:?}: {:?}", r.failures);
             }
             // The NUC's own lines are checked there: QEMU's transcript is
-            // not the NUC's.
-            let r = check(&parse(script, Machine::Nuc).unwrap(), qemu);
-            assert!(!r.ok(), "part {i}");
+            // not the NUC's (check 4 has none: it runs programs only).
+            if script.contains("#nuc>") {
+                let r = check(&parse(script, Machine::Nuc).unwrap(), qemu);
+                assert!(!r.ok(), "part {i}");
+            }
         }
     }
 
