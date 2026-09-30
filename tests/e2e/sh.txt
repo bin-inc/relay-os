@@ -1,0 +1,65 @@
+# /bin/sh, the shell as a program (user-space gate §8.2, §8.3; milestone
+# 2, plan 4a), started here from the in-kernel shell. Every command but cd,
+# exit and help is a program; a redirection is a file the program writes
+# as its fd 1; at the prompt the shell takes the console and gives it to
+# each command (spawn's FOREGROUND); a script's commands run in its own
+# group, its transcript a console tee, and one script may run another.
+timeout 30
+expect root@relay:~# $
+send free
+expect-same mem \nMem:\s+\d+\s+(\d+)\s
+send /bin/sh
+expect /bin/sh\nroot@relay:~# $
+send mkdir /root/a
+send touch /root/a/x /root/a/y
+send ls /root/a
+expect \nx  y\n
+# Into a file a program writes lines, not columns, and never reads its
+# own output back.
+send ls /root/a > /root/list
+send cat /root/list
+expect \nx\ny\n
+send cat /root/list >> /root/list
+expect \ncat: /root/list: input file is output file\n
+send nosuch
+expect \nrelay-sh: nosuch: command not found\n
+send t-fault null-read
+expect \nrelay-sh: t-fault: killed \(page fault at 0x0, read, ip 0x4[0-9a-f]+\)\n
+# The command reads the console at once: it has it before it runs.
+send t-read
+alive 1
+send hello
+expect \nhello\n\[6\] hello\\n\n
+type {ctrl-d}
+expect end of input\nroot@relay:~# $
+send t-spin
+alive 1
+key {ctrl-c}
+expect \n\^C\nroot@relay:~# 
+# Scripts: the transcript gets what the screen gets, a script's programs'
+# output and a nested script's lines too.
+send echo 'echo one' > /root/s.sh
+send echo 'sh /root/t.sh' >> /root/s.sh
+send echo 't-args x' >> /root/s.sh
+send echo 'echo two' > /root/t.sh
+send sh /root/s.sh
+expect \n\+ echo one\none\n\+ sh /root/t.sh\n\+ echo two\ntwo\n\+ t-args x\n\[1\] x\nroot@relay:~# $
+send cat /root/s.log
+expect \n\+ echo one\none\n\+ sh /root/t.sh\n\+ echo two\ntwo\n\+ t-args x\n\[1\] x\nroot@relay:~# $
+send cat /root/t.log
+expect \n\+ echo two\ntwo\nroot@relay:~# $
+# Ctrl-C ends a script with its command.
+send echo t-spin > /root/spin.sh
+send sh /root/spin.sh
+alive 1
+key {ctrl-c}
+expect \+ t-spin\n(pid \d+ \(/bin/(t-spin|sh)\): killed: Ctrl-C\n){2}\^C\nroot@relay:~# 
+send rm -r /root/a /root/list /root/s.sh /root/s.log /root/t.sh /root/t.log /root/spin.sh /root/spin.log
+send cd /tmp
+expect root@relay:/tmp# $
+send exit 3
+expect exit 3\nroot@relay:~# $
+send pwd
+expect \n/root\n
+send free
+expect-same mem \nMem:\s+\d+\s+(\d+)\s

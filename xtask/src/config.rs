@@ -55,4 +55,4 @@ pub const PROFILE: &str = "relay";
 /// User programs (spec §8.4): `relay` plus LTO, without debug info.
 pub const USER_PROFILE: &str = "user";
 /// The packages under `userland/`, whose binaries make up `system.img`.
-pub const USER_PACKAGES: &[&str] = &["relay-tests", "relay-utils"];
+pub const USER_PACKAGES: &[&str] = &["relay-sh", "relay-tests", "relay-utils"];

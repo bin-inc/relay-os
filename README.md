@@ -10,7 +10,9 @@ command that runs. Programs open, read and write files, map memory (their
 runtime gives them a heap), read the console a line at a time or as it is
 typed, and copy what the console shows into files (tees). Every command
 is also a program of its own in `/bin` (`/bin/ls`), which prints what the
-shell's command prints.
+shell's command prints, and the shell itself is one too: `/bin/sh` runs
+every command but `cd`, `exit` and `help` as a program, and its scripts
+may run scripts.
 
 Design: `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`
 (milestone 1) and `docs/superpowers/specs/2026-09-29-user-space-gate-design.md`
@@ -94,7 +96,7 @@ the `e2e-logs` artefact. Hardware checks on the NUC stay manual
 | `crates/relay-rt` | The runtime of user programs: entry, arguments, system calls, heap, panic handler, ABI note, linker script; the shell's `Vfs`, `Console` and `System` over system calls |
 | `crates/sysimg` | The `system.img` archive: format, writer, reader, and `SysImgFs`, mounted at `/bin` |
 | `crates/elf` | The rules a program's ELF file must follow; the kernel's `spawn` and xtask's build both check them |
-| `userland/` | User programs: `utils/` one per command (`cat`, `ls`, …), `tests/` the `t-*` test programs |
+| `userland/` | User programs: `sh/` the shell (`/bin/sh`), `utils/` one per command (`cat`, `ls`, …), `tests/` the `t-*` test programs |
 | `xtask/` | Build, image, QEMU, test and flash tool; it builds `userland/`, checks each program with `readelf` and the kernel's rules, and packs `system.img` |
 | `rootfs/` | Files copied into `/`, among them the NUC check scripts in `root/checks/` |
 | `tests/e2e/` | QEMU end-to-end scenarios |
