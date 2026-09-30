@@ -32,9 +32,14 @@ pub fn cd(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
 }
 
 /// `exit [code]`: the shell stops with `code` (modulo 256), or the last
-/// command's status. As in bash, a code that is not a number is status 2
-/// and the shell still stops; more than one argument stops nothing.
+/// command's status. As in bash, a code that is not a 64-bit number is
+/// status 2 and the shell still stops; more than one argument stops
+/// nothing; `--` before the code is dropped.
 pub fn exit(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
+    let args = match args {
+        [dashes, rest @ ..] if dashes == "--" => rest,
+        _ => args,
+    };
     let status = match args {
         [] => ctx.status,
         [code] => match parse_code(code) {
@@ -53,25 +58,16 @@ pub fn exit(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     status
 }
 
-/// A decimal number with an optional sign, modulo 256.
+/// A decimal number with an optional sign and blanks around it, as bash
+/// takes it: one that fits in 64 bits, modulo 256.
 fn parse_code(code: &str) -> Option<i32> {
-    let (negative, digits) = match code.as_bytes().first() {
-        Some(b'-') => (true, &code[1..]),
-        Some(b'+') => (false, &code[1..]),
-        _ => (false, code),
-    };
+    let code = code.trim_matches([' ', '\t']);
+    let digits = code.strip_prefix(['-', '+']).unwrap_or(code);
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    // Reduced as it goes, so any number of digits fits.
-    let n = digits
-        .bytes()
-        .fold(0u32, |n, d| (n * 10 + u32::from(d - b'0')) % 256);
-    Some(if negative {
-        ((256 - n) % 256) as i32
-    } else {
-        n as i32
-    })
+    let n: i64 = code.parse().ok()?;
+    Some(n.rem_euclid(256) as i32)
 }
 
 /// `pwd`: arguments are ignored, as in bash.
@@ -185,6 +181,11 @@ mod tests {
             ("-1", 255),
             ("+7", 7),
             ("1000", 232),
+            ("' 5 '", 5),
+            ("010", 10),
+            ("9223372036854775807", 255),
+            ("-9223372036854775808", 0),
+            ("-- 3", 3),
         ] {
             let line = alloc::format!("exit {code}");
             assert_eq!(h.run(&line), (status, "".into()), "{code}");
@@ -212,6 +213,23 @@ mod tests {
             h.console.take(),
             "root@relay:/# exit abc\nrelay-sh: exit: abc: numeric argument required\n"
         );
+        // Past what bash's 64-bit number holds, or not a number at all.
+        for code in [
+            "9223372036854775808",
+            "99999999999999999999",
+            "''",
+            "-",
+            "0x10",
+        ] {
+            let line = alloc::format!("exit {code}");
+            assert_eq!(h.run(&line).0, 2, "{code}");
+        }
+        // `--` ends the options, as for any command.
+        h.console.type_in(b"nope\rexit --\r");
+        let mut shell = crate::Shell::new(&mut h.vfs, &mut h.console, &mut h.system);
+        shell.run();
+        assert_eq!(shell.status(), 127);
+        h.console.take();
         // Too many: nothing stops.
         h.console.type_in(b"exit 1 2\recho still\r");
         crate::Shell::new(&mut h.vfs, &mut h.console, &mut h.system).run();
