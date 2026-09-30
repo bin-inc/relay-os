@@ -56,6 +56,10 @@ pub struct Stat {
     pub uid: u32,
     pub gid: u32,
     pub block_size: u32,
+    /// The filesystem it is on: the mount's number from 1, the same for
+    /// every file of one filesystem; 0 for the console. With `ino` it names
+    /// the file (user-space gate §16 item 5).
+    pub dev: u64,
 }
 
 impl Stat {
@@ -86,6 +90,7 @@ impl Stat {
         for (i, v) in words.iter().enumerate() {
             b[48 + 4 * i..52 + 4 * i].copy_from_slice(&v.to_ne_bytes());
         }
+        b[72..80].copy_from_slice(&self.dev.to_ne_bytes());
         b
     }
 }
@@ -203,7 +208,7 @@ mod tests {
 
     #[test]
     fn the_layouts_are_fixed() {
-        assert_eq!(Stat::SIZE, 72);
+        assert_eq!(Stat::SIZE, 80);
         assert_eq!(offset_of!(Stat, ino), 0);
         assert_eq!(offset_of!(Stat, size), 8);
         assert_eq!(offset_of!(Stat, blocks), 16);
@@ -216,6 +221,7 @@ mod tests {
         assert_eq!(offset_of!(Stat, uid), 60);
         assert_eq!(offset_of!(Stat, gid), 64);
         assert_eq!(offset_of!(Stat, block_size), 68);
+        assert_eq!(offset_of!(Stat, dev), 72);
         assert_eq!(StatFs::SIZE, 48);
         assert_eq!(offset_of!(StatFs, block_size), 0);
         assert_eq!(offset_of!(StatFs, blocks), 8);
@@ -276,6 +282,7 @@ mod tests {
             uid: 10,
             gid: 11,
             block_size: 12,
+            dev: 13,
         };
         // SAFETY: both are `repr(C)` of integers with no padding.
         let mem: [u8; Stat::SIZE] = unsafe { core::mem::transmute(s) };

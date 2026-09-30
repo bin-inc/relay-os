@@ -185,7 +185,7 @@ request.
      root is 2 GiB since milestone 2's plan 2; a stick written by an older
      `flash --full` still shows `14.3 GiB`, which the check scripts refuse:
      run `flash --full` again)
-   - `[ ok ] system: 9 programs, ABI 1` (milestone 2: the programs of
+   - `[ ok ] system: 9 programs, ABI 2` (milestone 2: the programs of
      `/bin` from `\EFI\RELAY\system.img`; the count grows as later plans
      add programs)
    - the motd (`Welcome to Relay OS.`) and the prompt `root@relay:~# `.

@@ -140,8 +140,8 @@ pub(super) fn stat(
     }
     let path = path(caller, addr, len)?;
     let slice = UserSlice::new(out, Stat::SIZE as u64)?;
-    let st = caller.with_vfs(|v| v.lookup(&path).and_then(|n| v.stat(n)))?;
-    caller.write(&slice, 0, &open_file::stat_of(&st).to_bytes())?;
+    let (node, st) = caller.with_vfs(|v| v.lookup(&path).and_then(|n| Ok((n, v.stat(n)?))))?;
+    caller.write(&slice, 0, &open_file::stat_of(node, &st).to_bytes())?;
     Ok(0)
 }
 

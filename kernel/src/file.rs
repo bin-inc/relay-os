@@ -114,8 +114,9 @@ pub fn kind(t: FileType) -> u8 {
     }
 }
 
-/// `stat`'s answer for a program.
-pub fn stat_of(s: &vfs::Stat) -> relay_abi::Stat {
+/// `stat`'s answer for a program about the file `node`: its filesystem is
+/// its mount's number from 1 (0 is the console).
+pub fn stat_of(node: Node, s: &vfs::Stat) -> relay_abi::Stat {
     relay_abi::Stat {
         ino: s.ino,
         size: s.size,
@@ -129,6 +130,7 @@ pub fn stat_of(s: &vfs::Stat) -> relay_abi::Stat {
         uid: s.uid,
         gid: s.gid,
         block_size: s.block_size,
+        dev: node.mount as u64 + 1,
     }
 }
 
@@ -245,7 +247,7 @@ impl OpenFile {
 
     pub fn stat(&self, vfs: &mut dyn Vfs) -> Result<relay_abi::Stat, Errno> {
         self.offset()?;
-        Ok(stat_of(&vfs.stat(self.node)?))
+        Ok(stat_of(self.node, &vfs.stat(self.node)?))
     }
 
     /// Fills `buf` with the directory's next entries (spec §7.3), sorted by
@@ -549,6 +551,7 @@ mod tests {
                 uid: 0,
                 gid: 0,
                 block_size: s.block_size,
+                dev: 1,
             }
         );
         let d = open(&mut t, b"/root", OPEN_READ).unwrap();
