@@ -277,6 +277,36 @@ pub fn memory() -> Result<MemInfo, u16> {
     Ok(m)
 }
 
+/// The system's names, as `uname` prints them.
+pub fn uname() -> Result<relay_abi::Uname, u16> {
+    let mut u = relay_abi::Uname::new(b"", b"", b"", b"");
+    let len = relay_abi::Uname::SIZE as u64;
+    let kind = u64::from(relay_abi::info::INFO_UNAME);
+    call(Call::SysInfo, &[kind, &raw mut u as u64, len])?;
+    Ok(u)
+}
+
+/// The newest bytes of the kernel log that fit in `buf` (it holds at most
+/// `relay_abi::info::LOG_MAX`); how many.
+pub fn kernel_log(buf: &mut [u8]) -> Result<usize, u16> {
+    let kind = u64::from(relay_abi::info::INFO_LOG);
+    call(
+        Call::SysInfo,
+        &[kind, buf.as_mut_ptr() as u64, buf.len() as u64],
+    )
+    .map(|n| n as usize)
+}
+
+/// Restarts the machine or switches it off (`relay_abi::power`'s kinds and
+/// `POWER_FORCE`) after shutting the filesystems down; returns only with
+/// the error that kept it up.
+pub fn power(kind: u32, flags: u32) -> u16 {
+    match call(Call::Power, &[u64::from(kind), u64::from(flags)]) {
+        Err(e) => e,
+        Ok(_) => relay_abi::errno::EIO,
+    }
+}
+
 /// The wall clock and the time since the machine started.
 pub fn time() -> Result<relay_abi::Time, u16> {
     let mut t = relay_abi::Time::default();

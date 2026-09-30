@@ -703,6 +703,24 @@ impl Caller for Current {
         KernelVfs.sync()
     }
 
+    fn kernel_log(&self) -> Vec<u8> {
+        crate::klog::KLOG.lock().to_vec()
+    }
+
+    fn power(&mut self, reboot: bool, force: bool) -> Errno {
+        tty::sync_tees();
+        if let Err(e) = KernelVfs.shutdown()
+            && !force
+        {
+            return e;
+        }
+        if reboot {
+            crate::power::reboot()
+        } else {
+            crate::power::poweroff(crate::power::test_mode())
+        }
+    }
+
     fn console_mode(&mut self, line: bool) -> bool {
         let was = tty::set_line_mode(line);
         PROCS.lock().wake_all(Blocked::Console);

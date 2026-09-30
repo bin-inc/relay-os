@@ -141,6 +141,7 @@ impl Env for KernelEnv {
 /// (the root at `/`, the programs at `/bin`); `test_mode` is 1 for
 /// `test=1`. Never returns.
 pub extern "C" fn shell(test_mode: u64) -> ! {
+    power::set_test_mode(test_mode != 0);
     let mut vfs = KernelVfs;
     let mut console = KernelConsole;
     let mut system = KernelSystem {

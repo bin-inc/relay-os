@@ -11,6 +11,9 @@ pub mod lapic;
 pub mod pic;
 pub mod user;
 
+/// The machine, as `uname` names it.
+pub const MACHINE: &str = "x86_64";
+
 /// Stops the CPU for good (interrupts stay disabled).
 pub fn halt_forever() -> ! {
     loop {

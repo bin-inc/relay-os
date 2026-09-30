@@ -112,8 +112,9 @@ pub enum Step {
     /// Restart the machine and boot again on the same disk; the pattern
     /// must appear in what the machine printed before it went down.
     Reboot(Option<String>),
-    /// Switch the machine off; no later step talks to it.
-    Poweroff,
+    /// Switch the machine off with a command (`poweroff` if none is
+    /// given); no later step talks to it.
+    Poweroff(String),
     /// Pull the USB stick out (QMP `device_del`), waiting until QEMU has
     /// removed it.
     Unplug,
@@ -246,7 +247,8 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
                 Regex::new(rest).with_context(|| format!("{name}:{line_no}: bad regex"))?;
                 Step::Reboot(Some(rest.to_string()))
             }
-            "poweroff" => Step::Poweroff,
+            "poweroff" if rest.is_empty() => Step::Poweroff("poweroff".to_string()),
+            "poweroff" => Step::Poweroff(rest.to_string()),
             "unplug" if rest.is_empty() => Step::Unplug,
             "check-script" if rest.starts_with('/') => Step::CheckScript(rest.to_string()),
             "file-lines" => parse_file_lines(rest).with_context(|| format!("{name}:{line_no}"))?,
@@ -717,8 +719,8 @@ fn run_step(
                 bail!("{path} {why}");
             }
         }
-        Step::Poweroff => {
-            exit_with(r, "poweroff", EXIT_POWEROFF, *timeout)?;
+        Step::Poweroff(command) => {
+            exit_with(r, command, EXIT_POWEROFF, *timeout)?;
             r.off = true;
         }
         Step::CheckScript(path) => {
@@ -983,13 +985,18 @@ mod tests {
 
     #[test]
     fn parses_reboot_and_poweroff_steps() {
-        let s = parse_scenario("x", "reboot\nreboot relay: restarting\npoweroff").unwrap();
+        let s = parse_scenario(
+            "x",
+            "reboot\nreboot relay: restarting\npoweroff\npoweroff t-sys poweroff",
+        )
+        .unwrap();
         assert_eq!(
             s.steps,
             vec![
                 (1, Step::Reboot(None)),
                 (2, Step::Reboot(Some("relay: restarting".into()))),
-                (3, Step::Poweroff)
+                (3, Step::Poweroff("poweroff".into())),
+                (4, Step::Poweroff("t-sys poweroff".into()))
             ]
         );
         assert!(parse_scenario("x", "reboot (").is_err());

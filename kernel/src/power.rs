@@ -233,6 +233,17 @@ pub fn reboot() -> ! {
     arch::halt_forever()
 }
 
+/// `test=1`: `poweroff` makes QEMU exit (spec §7.4), whoever asks for it.
+static TEST_MODE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn set_test_mode(on: bool) {
+    TEST_MODE.store(on, core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn test_mode() -> bool {
+    TEST_MODE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Switches the machine off (spec §7.4): in test mode QEMU's
 /// `isa-debug-exit` first, then `SLP_TYPa | SLP_EN` into PM1a control (and
 /// PM1b's value into PM1b). If that is impossible or does not work, the

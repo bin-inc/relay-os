@@ -1,0 +1,12 @@
+# What sys_info tells a program (user-space gate §7.3; milestone 2, plan
+# 3b): the system's names and the kernel log; and power from a program,
+# which shuts the filesystems down cleanly first.
+timeout 60
+expect root@relay:~# $
+send t-sys uname
+expect \nRelay relay \d+\.\d+\.\d+ x86_64\n
+send uname -a
+expect \nRelay relay \d+\.\d+\.\d+ x86_64\n
+send t-sys log
+expect \n\d+ bytes, the first line: Relay OS \d+\.\d+\.\d+\nthe newest 16 bytes: 16 of them, the log's end: true\n
+poweroff t-sys poweroff

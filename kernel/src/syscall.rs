@@ -87,6 +87,12 @@ pub trait Caller {
     fn tee_pop(&mut self) -> Result<(), Errno>;
     /// Writes what waits for the tees, then syncs every filesystem.
     fn sync(&mut self) -> Result<(), Errno>;
+    /// The kernel log.
+    fn kernel_log(&self) -> Vec<u8>;
+    /// Syncs and shuts the filesystems down, then restarts (`reboot`) or
+    /// switches the machine off; returns only the shutdown's error, unless
+    /// `force` goes ahead anyway (spec §7.3).
+    fn power(&mut self, reboot: bool, force: bool) -> Errno;
     /// Writes `bytes` to `file`, output `n` of the in-kernel shell (1 or
     /// 2), which sends them where the command line says; its error, if any.
     fn shell_output(&mut self, file: &Arc<File>, n: u32, bytes: &[u8]) -> Result<(), Errno>;
@@ -165,6 +171,7 @@ pub fn dispatch(caller: &mut impl Caller, number: u64, args: [u64; 6]) -> Outcom
             Ok(0)
         }
         Some(Call::SysInfo) => sys_info(caller, args[0], args[1], args[2]),
+        Some(Call::Power) => power(caller, args[0], args[1]),
         _ => Err(Errno::ENOSYS),
     };
     Outcome::Return(encode(result.map_err(Errno::number)))
@@ -332,12 +339,50 @@ fn time(caller: &mut impl Caller, addr: u64) -> Result<u64, Errno> {
     Ok(0)
 }
 
-/// `sys_info(kind, buffer, length)` (spec §7.3): the bytes written. Plan
-/// 3a has the memory figures (`MemInfo`); the `uname` fields and the kernel
-/// log come with plan 3b.
-fn sys_info(caller: &mut impl Caller, kind: u64, addr: u64, len: u64) -> Result<u64, Errno> {
-    if kind != u64::from(INFO_MEMORY) {
+/// `power(kind, flags)` (spec §7.3): returns only with the error that kept
+/// the machine up.
+fn power(caller: &mut impl Caller, kind: u64, flags: u64) -> Result<u64, Errno> {
+    use relay_abi::power::{POWER_FORCE, POWER_POWEROFF, POWER_REBOOT};
+    let reboot = match u32::try_from(kind) {
+        Ok(POWER_REBOOT) => true,
+        Ok(POWER_POWEROFF) => false,
+        _ => return Err(Errno::EINVAL),
+    };
+    if flags & !u64::from(POWER_FORCE) != 0 {
         return Err(Errno::EINVAL);
+    }
+    Err(caller.power(reboot, flags & u64::from(POWER_FORCE) != 0))
+}
+
+/// `sys_info(kind, buffer, length)` (spec §7.3): the bytes written. The
+/// memory figures and the names need room for their whole struct; the
+/// kernel log gives its newest bytes that fit.
+fn sys_info(caller: &mut impl Caller, kind: u64, addr: u64, len: u64) -> Result<u64, Errno> {
+    use relay_abi::info::{INFO_LOG, INFO_UNAME};
+    match u32::try_from(kind) {
+        Ok(INFO_MEMORY) => {}
+        Ok(INFO_UNAME) => {
+            let u = relay_abi::Uname::new(
+                b"Relay",
+                b"relay",
+                env!("CARGO_PKG_VERSION").as_bytes(),
+                crate::arch::MACHINE.as_bytes(),
+            );
+            let bytes = u.to_bytes();
+            if len < bytes.len() as u64 {
+                return Err(Errno::EINVAL);
+            }
+            caller.write(&UserSlice::new(addr, bytes.len() as u64)?, 0, &bytes)?;
+            return Ok(bytes.len() as u64);
+        }
+        Ok(INFO_LOG) => {
+            let slice = UserSlice::new(addr, len)?;
+            let log = caller.kernel_log();
+            let n = log.len().min(len as usize);
+            caller.write(&slice, 0, &log[log.len() - n..])?;
+            return Ok(n as u64);
+        }
+        _ => return Err(Errno::EINVAL),
     }
     let m = caller.memory();
     let mut bytes = [0u8; size_of::<MemInfo>()];
@@ -685,7 +730,7 @@ mod tests {
             call(&mut f, Call::SysInfo, [info, W, 31]),
             Err(errno::EINVAL)
         );
-        assert_eq!(call(&mut f, Call::SysInfo, [2, W, 32]), Err(errno::EINVAL));
+        assert_eq!(call(&mut f, Call::SysInfo, [4, W, 32]), Err(errno::EINVAL));
         assert_eq!(
             call(&mut f, Call::SysInfo, [info, U, 32]),
             Err(errno::EFAULT)
@@ -826,6 +871,76 @@ mod tests {
     }
 
     #[test]
+    fn sys_info_names_the_system_and_gives_the_newest_of_the_log() {
+        use relay_abi::info::{INFO_LOG, INFO_UNAME};
+        let mut f = fake();
+        let uname = u64::from(INFO_UNAME);
+        assert_eq!(call(&mut f, Call::SysInfo, [uname, W, 256]), Ok(256));
+        let b = get(&mut f, W, 256);
+        assert_eq!(&b[..6], b"Relay\0");
+        assert_eq!(&b[64..70], b"relay\0");
+        assert_eq!(
+            &b[128..128 + 6],
+            concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes()
+        );
+        assert_eq!(&b[192..199], b"x86_64\0");
+        assert_eq!(
+            call(&mut f, Call::SysInfo, [uname, W, 255]),
+            Err(errno::EINVAL)
+        );
+        assert_eq!(
+            call(&mut f, Call::SysInfo, [uname, W + PAGE - 100, 256]),
+            Err(errno::EFAULT)
+        );
+        let log = u64::from(INFO_LOG);
+        assert_eq!(
+            call(&mut f, Call::SysInfo, [log, W, 1000]),
+            Ok(FAKE_LOG.len() as u64)
+        );
+        assert_eq!(get(&mut f, W, FAKE_LOG.len()), FAKE_LOG);
+        assert_eq!(call(&mut f, Call::SysInfo, [log, W, 5]), Ok(5));
+        assert_eq!(
+            get(&mut f, W, 5),
+            FAKE_LOG[FAKE_LOG.len() - 5..],
+            "the newest"
+        );
+        assert_eq!(call(&mut f, Call::SysInfo, [log, W, 0]), Ok(0));
+        assert_eq!(
+            call(&mut f, Call::SysInfo, [log, U, 10]),
+            Err(errno::EFAULT)
+        );
+        assert_eq!(
+            call(&mut f, Call::SysInfo, [4, W, 1000]),
+            Err(errno::EINVAL)
+        );
+        assert_eq!(
+            call(&mut f, Call::SysInfo, [1 << 32 | 1, W, 1000]),
+            Err(errno::EINVAL)
+        );
+    }
+
+    #[test]
+    fn power_returns_only_the_error_that_kept_the_machine_up() {
+        use relay_abi::power::{POWER_FORCE, POWER_POWEROFF, POWER_REBOOT};
+        let mut f = fake();
+        let (reboot, off, force) = (
+            u64::from(POWER_REBOOT),
+            u64::from(POWER_POWEROFF),
+            u64::from(POWER_FORCE),
+        );
+        assert_eq!(call(&mut f, Call::Power, [reboot, 0, 0]), Err(errno::EIO));
+        assert_eq!(call(&mut f, Call::Power, [off, force, 0]), Err(errno::EIO));
+        assert_eq!(f.powered, [(true, false), (false, true)]);
+        for (kind, flags) in [(0, 0), (3, 0), (reboot, 2), (1 << 32 | 1, 0)] {
+            assert_eq!(
+                call(&mut f, Call::Power, [kind, flags, 0]),
+                Err(errno::EINVAL)
+            );
+        }
+        assert_eq!(f.powered.len(), 2, "refused before anything was shut down");
+    }
+
+    #[test]
     fn every_other_call_is_enosys() {
         let mut f = fake();
         let served = [
@@ -863,6 +978,7 @@ mod tests {
             Call::Time,
             Call::Sleep,
             Call::SysInfo,
+            Call::Power,
         ];
         for c in Call::ALL {
             if !served.contains(&c) {
