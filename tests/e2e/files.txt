@@ -1,0 +1,13 @@
+# Programs open, read, write and close files (user-space gate §7.3,
+# milestone 2, plan 3b): open's flags and their errors, an offset shared
+# with a child that got the fd, and 32 fds at most. On the ext2 root.
+timeout 60
+expect root@relay:~# $
+send t-files basic
+expect \ncreate: 3\nexclusive: EEXIST\nno flags: EINVAL\nmissing: ENOENT\n
+expect write: 13\nread a write-only fd: EBADF\nseek: 7\noverwrite: 6\nclose: ok\nclose again: EBADF\n
+expect read: "hello"\nfstat: 13 bytes, regular true\nseek to the end: 13\nread at the end: 0\n
+expect append: 5\nread what was appended: "more\\n"\nseek before the start: EINVAL\nseek the screen: EINVAL\n
+expect the child read: "hello, "\nread after the child: "files"\nfds up to 31, then EMFILE\nroot@relay:~# $
+send cat t-files.tmp
+expect \nhello, files\nmore\nroot@relay:~# $

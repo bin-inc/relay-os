@@ -579,13 +579,6 @@ impl Current {
             .ok_or(Errno::EFAULT)?;
         mm::with_user_memory(|mem, _| f(space, mem))
     }
-
-    /// The running process's file open as `fd`.
-    fn file(&self, fd: u64) -> Result<Arc<File>, Errno> {
-        let t = PROCS.lock();
-        let p = t.get(t.current()).ok_or(Errno::EBADF)?;
-        p.res.fds.get(fd).cloned()
-    }
 }
 
 impl Caller for Current {
@@ -605,30 +598,33 @@ impl Caller for Current {
         self.space(|space, mem| s.read(space, mem))
     }
 
-    fn writable_fd(&mut self, fd: u64) -> Result<(), Errno> {
-        self.file(fd).map(|_| ())
+    fn with_fds<R>(&mut self, f: impl FnOnce(&mut FdTable) -> R) -> R {
+        let mut t = PROCS.lock();
+        let me = t.current();
+        let p = t.get_mut(me).expect("a process makes system calls");
+        f(&mut p.res.fds)
     }
 
-    fn output(&mut self, fd: u64, bytes: &[u8]) -> Result<(), Errno> {
-        let file = self.file(fd)?;
-        match *file {
-            File::Console => console::write_output(bytes),
-            File::ShellOutput(n) => {
-                let out = SHELL_OUT.load(Ordering::Acquire);
-                if out.is_null() || !shell_output_now(&file, n) {
-                    // The shell waits for nobody, or for another command:
-                    // this goes to the screen.
-                    console::write_output(bytes);
-                } else {
-                    // SAFETY: set by the in-kernel shell's `wait`, which is
-                    // blocked until its child has ended and clears it
-                    // before it returns; nothing else calls it meanwhile.
-                    return unsafe { (*out.cast::<Out<'_>>())(n, bytes) };
-                }
-            }
-            File::Vfs(ref open) => return open.write_all(&mut KernelVfs, bytes),
+    fn with_vfs<R>(&mut self, f: impl FnOnce(&mut dyn Vfs) -> R) -> R {
+        f(&mut KernelVfs)
+    }
+
+    fn console_write(&mut self, bytes: &[u8]) {
+        console::write_output(bytes);
+    }
+
+    fn shell_output(&mut self, file: &Arc<File>, n: u32, bytes: &[u8]) -> Result<(), Errno> {
+        let out = SHELL_OUT.load(Ordering::Acquire);
+        if out.is_null() || !shell_output_now(file, n) {
+            // The shell waits for nobody, or for another command: this
+            // goes to the screen.
+            console::write_output(bytes);
+            return Ok(());
         }
-        Ok(())
+        // SAFETY: set by the in-kernel shell's `wait`, which is blocked
+        // until its child has ended and clears it before it returns;
+        // nothing else calls it meanwhile.
+        unsafe { (*out.cast::<Out<'_>>())(n, bytes) }
     }
 
     fn spawn(&mut self, s: &Spawn) -> Result<u32, Errno> {

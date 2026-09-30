@@ -3,19 +3,21 @@
 //! and it answers with the result register's value or with the program's
 //! exit. It checks and copies what the program passes (`UserSlice`,
 //! `UserStr`) and leaves the rest to the `Caller`, the kernel's side of
-//! the process. Plan 3a serves `exit`, `spawn`, `wait`, `kill`, `getpid`,
-//! `write`, `time`, `sleep` and `sys_info`'s memory figures; every other
-//! call is `ENOSYS` until the plan that brings it.
+//! the process. The file calls are in `files`; `proc_list` and `pipe` are
+//! `ENOSYS` until milestone 3.
 
 use crate::exec::ARGS_MAX;
+use crate::fd::{FdTable, File};
 use crate::mm::paging::PAGE;
 use crate::mm::user::{UserSlice, UserStr};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use relay_abi::info::INFO_MEMORY;
 use relay_abi::spawn::{NEW_GROUP, SPAWN_FDS, WAIT_ANY, WAIT_NOHANG};
 use relay_abi::{Call, FdMap, MemInfo, SpawnArgs, Time, WaitStatus, encode};
-use vfs::Errno;
+use vfs::{Errno, Vfs};
 
+mod files;
 #[cfg(test)]
 mod testing;
 
@@ -57,11 +59,15 @@ pub trait Caller {
     fn writable(&mut self, slice: &UserSlice) -> Result<(), Errno>;
     /// A byte string of the program's, copied in.
     fn read_str(&mut self, s: &UserStr) -> Result<Vec<u8>, Errno>;
-    /// `EBADF` unless `fd` is open for writing.
-    fn writable_fd(&mut self, fd: u64) -> Result<(), Errno>;
-    /// Writes `bytes` to `fd` (checked with `writable_fd`); the file's
-    /// error, if any.
-    fn output(&mut self, fd: u64, bytes: &[u8]) -> Result<(), Errno>;
+    /// Runs `f` with the program's fds. `f` must not block.
+    fn with_fds<R>(&mut self, f: impl FnOnce(&mut FdTable) -> R) -> R;
+    /// Runs `f` with the files, from the program's current directory.
+    fn with_vfs<R>(&mut self, f: impl FnOnce(&mut dyn Vfs) -> R) -> R;
+    /// Writes `bytes` to the screen.
+    fn console_write(&mut self, bytes: &[u8]);
+    /// Writes `bytes` to `file`, output `n` of the in-kernel shell (1 or
+    /// 2), which sends them where the command line says; its error, if any.
+    fn shell_output(&mut self, file: &Arc<File>, n: u32, bytes: &[u8]) -> Result<(), Errno>;
     /// Starts a child; its pid.
     fn spawn(&mut self, s: &Spawn) -> Result<u32, Errno>;
     /// A child that has ended, with how; `None` if `nohang` and none has.
@@ -95,7 +101,12 @@ pub fn dispatch(caller: &mut impl Caller, number: u64, args: [u64; 6]) -> Outcom
         Some(Call::Wait) => wait(caller, args[0] as i64, args[1], args[2]),
         Some(Call::Kill) => caller.kill(args[0] as i64).map(|()| 0),
         Some(Call::Getpid) => Ok(u64::from(caller.pid())),
+        Some(Call::Open) => files::open(caller, args[0], args[1], args[2]),
+        Some(Call::Close) => files::close(caller, args[0]),
+        Some(Call::Read) => files::read(caller, args[0], args[1], args[2]),
         Some(Call::Write) => write(caller, args[0], args[1], args[2]),
+        Some(Call::Seek) => files::seek(caller, args[0], args[1] as i64, args[2]),
+        Some(Call::Fstat) => files::fstat(caller, args[0], args[1]),
         Some(Call::Time) => time(caller, args[0]),
         Some(Call::Sleep) => {
             caller.sleep(args[0]);
@@ -181,11 +192,22 @@ fn wait(caller: &mut impl Caller, pid: i64, flags: u64, addr: u64) -> Result<u64
     Ok(u64::from(pid))
 }
 
-/// `write(fd, buffer, length)`. Copies the buffer out a page at a time; a
+/// The file open as `fd`.
+fn file(caller: &mut impl Caller, fd: u64) -> Result<Arc<File>, Errno> {
+    caller.with_fds(|t| t.get(fd).cloned())
+}
+
+/// `write(fd, buffer, length)`. Copies the buffer in a page at a time; a
 /// page that is not the program's, or the file's error, ends the call with
-/// the bytes written before it, or with the error if there were none.
+/// the bytes written before it, or with the error if there were none (a
+/// full disk takes what fits, then says `ENOSPC`).
 fn write(caller: &mut impl Caller, fd: u64, addr: u64, len: u64) -> Result<u64, Errno> {
-    caller.writable_fd(fd)?;
+    let file = file(caller, fd)?;
+    if let File::Vfs(open) = &*file
+        && !open.is_writable()
+    {
+        return Err(Errno::EBADF);
+    }
     let slice = UserSlice::new(addr, len)?;
     let mut buf = [0u8; PAGE as usize];
     let mut done = 0;
@@ -195,13 +217,26 @@ fn write(caller: &mut impl Caller, fd: u64, addr: u64, len: u64) -> Result<u64, 
         let n = (len - done).min(PAGE - (addr + done) % PAGE) as usize;
         let written = caller
             .read(&slice, done, &mut buf[..n])
-            .and_then(|()| caller.output(fd, &buf[..n]));
-        if let Err(e) = written {
-            return if done > 0 { Ok(done) } else { Err(e) };
+            .and_then(|()| write_to(caller, &file, &buf[..n]));
+        match written {
+            Ok(k) => done += k as u64,
+            Err(e) if done == 0 => return Err(e),
+            Err(_) => break,
         }
-        done += n as u64;
     }
     Ok(done)
+}
+
+/// Writes `bytes` to `file`: how many it took.
+fn write_to(caller: &mut impl Caller, file: &Arc<File>, bytes: &[u8]) -> Result<usize, Errno> {
+    match &**file {
+        File::Console => {
+            caller.console_write(bytes);
+            Ok(bytes.len())
+        }
+        File::ShellOutput(n) => caller.shell_output(file, *n, bytes).map(|()| bytes.len()),
+        File::Vfs(open) => caller.with_vfs(|v| open.write(v, bytes)),
+    }
 }
 
 /// `time(&mut Time)` (spec §7.3).
@@ -607,7 +642,12 @@ mod tests {
             Call::Wait,
             Call::Kill,
             Call::Getpid,
+            Call::Open,
+            Call::Close,
+            Call::Read,
             Call::Write,
+            Call::Seek,
+            Call::Fstat,
             Call::Time,
             Call::Sleep,
             Call::SysInfo,
