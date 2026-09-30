@@ -316,9 +316,58 @@ pub fn with_abi(image: &[u8], abi: u32) -> Result<Vec<u8>> {
         .map_err(|e| anyhow::anyhow!("system.img: {e}"))
 }
 
+/// The ABI `t-abi` is built for: the one before this (spec §8.5), as a
+/// program left on a disk by an older build would be.
+pub const STALE_ABI: u32 = relay_abi::VERSION - 1;
+
+/// `program`'s bytes with its `Relay` note saying ABI `abi`: the note's
+/// name, padded to 8 bytes, then its 4-byte version, which must occur
+/// exactly once.
+pub fn with_note_abi(program: &[u8], abi: u32) -> Result<Vec<u8>> {
+    let mut note = b"Relay\0\0\0".to_vec();
+    note.extend_from_slice(&relay_abi::VERSION.to_le_bytes());
+    let mut at = program
+        .windows(note.len())
+        .enumerate()
+        .filter(|(_, w)| *w == note)
+        .map(|(i, _)| i);
+    let (Some(at), None) = (at.next(), at.next()) else {
+        bail!("the program does not hold its Relay note exactly once");
+    };
+    let mut bytes = program.to_vec();
+    bytes[at + 8..at + 12].copy_from_slice(&abi.to_le_bytes());
+    Ok(bytes)
+}
+
+/// `programs` and `t-abi`, `t-args` built for [`STALE_ABI`] (spec §8.5),
+/// sorted by name: the program `spawn` must refuse with `ENOEXEC`, which
+/// the build checks both its checks refuse for that reason alone.
+pub fn with_stale_program(mut programs: Vec<Program>) -> Result<Vec<Program>> {
+    let t_args = programs
+        .iter()
+        .find(|p| p.name == "t-args")
+        .context("t-args is not built")?;
+    let path = t_args.path.with_file_name("t-abi");
+    fs::write(&path, with_note_abi(&fs::read(&t_args.path)?, STALE_ABI)?)?;
+    let why = format!("built for ABI {STALE_ABI}");
+    for e in [check_program(&path).err(), kernel_check(&path).err()] {
+        let e = e.map(|e| e.to_string()).unwrap_or_default();
+        ensure!(
+            e.contains(&why),
+            "t-abi is refused for another reason: {e:?}"
+        );
+    }
+    programs.push(Program {
+        name: "t-abi".into(),
+        path,
+    });
+    programs.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(programs)
+}
+
 /// Builds the programs and writes `target/relay/system.img`.
 pub fn build_system_image() -> Result<PathBuf> {
-    let image = system_image(&build()?)?;
+    let image = system_image(&with_stale_program(build()?)?)?;
     fs::create_dir_all(out_dir())?;
     let path = out_dir().join("system.img");
     fs::write(&path, image)?;
@@ -521,6 +570,33 @@ mod tests {
             "{e}"
         );
         assert!(e.ends_with("): install binutils"), "{e}");
+    }
+
+    #[test]
+    fn t_abi_is_t_args_built_for_the_abi_before() {
+        let programs = with_stale_program(build().unwrap()).unwrap();
+        let path = |name: &str| &programs.iter().find(|p| p.name == name).unwrap().path;
+        let (t_args, t_abi) = (
+            fs::read(path("t-args")).unwrap(),
+            fs::read(path("t-abi")).unwrap(),
+        );
+        assert_eq!(t_abi.len(), t_args.len());
+        let differ: Vec<usize> = (0..t_abi.len())
+            .filter(|&i| t_abi[i] != t_args[i])
+            .collect();
+        assert_eq!(differ.len(), 1, "one byte of the version: 2 -> 1");
+        assert_eq!(STALE_ABI, 1);
+        let e = check_program(path("t-abi")).unwrap_err().to_string();
+        assert!(e.contains("built for ABI 1, this is ABI 2"), "{e}");
+        assert_eq!(
+            kernel_check(path("t-abi")).unwrap_err().to_string(),
+            "the kernel's check: built for ABI 1"
+        );
+        let names: Vec<&str> = programs.iter().map(|p| p.name.as_str()).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "still sorted, as system.img wants");
+        assert!(with_note_abi(b"no note here", 1).is_err());
     }
 
     #[test]
