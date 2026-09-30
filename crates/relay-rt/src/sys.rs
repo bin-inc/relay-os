@@ -223,7 +223,8 @@ pub fn write_all(fd: u32, mut bytes: &[u8]) -> Result<(), u16> {
 /// Starts the program at `path` with `args` (each followed by a NUL,
 /// argument 0 first) in `cwd` (empty: this program's), giving it the fds
 /// `fds` names (child, parent) and closing its others; with `NEW_GROUP` in
-/// `flags` it starts a process group of its own. Its pid.
+/// `flags` it starts a process group of its own, which `FOREGROUND` also
+/// gives the console, in line mode. Its pid.
 pub fn spawn(path: &[u8], args: &[u8], cwd: &[u8], fds: &[FdMap], flags: u32) -> Result<u32, u16> {
     if fds.len() > SPAWN_FDS {
         return Err(relay_abi::errno::EINVAL);

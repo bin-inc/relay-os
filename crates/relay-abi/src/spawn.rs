@@ -8,6 +8,12 @@ pub const SPAWN_FDS: usize = 8;
 /// its pid as the group's number, instead of joining its parent's (spec
 /// §6.4).
 pub const NEW_GROUP: u32 = 1;
+/// `SpawnArgs::flags`, with [`NEW_GROUP`]: the new group becomes the
+/// console's foreground, in line mode, before the child runs, as an
+/// interactive shell gives the console to its command (spec §6.4, §16
+/// item 5). Without it the child might read the console before its parent
+/// could hand it over, and get end of input.
+pub const FOREGROUND: u32 = 2;
 
 /// `wait`'s pid for any child.
 pub const WAIT_ANY: i64 = -1;
@@ -42,7 +48,7 @@ pub struct SpawnArgs {
     /// the child is closed.
     pub fds: [FdMap; SPAWN_FDS],
     pub fd_count: u32,
-    /// [`NEW_GROUP`] or 0.
+    /// [`NEW_GROUP`], with or without [`FOREGROUND`], or 0.
     pub flags: u32,
 }
 
@@ -97,6 +103,7 @@ mod tests {
         assert_eq!(offset_of!(SpawnArgs, fd_count), 112);
         assert_eq!(offset_of!(SpawnArgs, flags), 116);
         assert_eq!((NEW_GROUP, WAIT_NOHANG, WAIT_ANY), (1, 1, -1));
+        assert_eq!(FOREGROUND, 2);
     }
 
     #[test]

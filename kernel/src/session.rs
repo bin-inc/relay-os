@@ -111,6 +111,7 @@ impl System for KernelSystem {
                 cwd: Vec::new(),
                 fds: std.to_vec(),
                 new_group: true,
+                foreground: false,
             })
         }))
     }

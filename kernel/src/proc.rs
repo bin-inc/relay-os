@@ -480,8 +480,18 @@ pub fn spawn(s: &Spawn) -> Result<u32, Errno> {
         cwd: Some(cwd),
     };
     let me = t.current();
-    t.insert(me, s.new_group, name.into_owned(), res)
-        .map_err(|e| unreachable!("has_room was checked under this lock: {e}"))
+    let pid = t
+        .insert(me, s.new_group, name.into_owned(), res)
+        .unwrap_or_else(|e| unreachable!("has_room was checked under this lock: {e}"));
+    drop(t);
+    // Before the child can run: the kernel is not preemptible, and it has
+    // not been switched to yet.
+    if s.foreground {
+        tty::set_foreground(pid);
+        tty::set_line_mode(true);
+        PROCS.lock().wake_all(Blocked::Console);
+    }
+    Ok(pid)
 }
 
 /// A child of the running process that has ended, taken out of the table
