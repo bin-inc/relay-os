@@ -239,6 +239,23 @@ mod tests {
     }
 
     #[test]
+    fn exit_ends_the_script_not_the_shell() {
+        let mut h = Harness::new();
+        h.put("/tmp/s.sh", b"exit 4\necho after\n");
+        assert_eq!(h.run("sh /tmp/s.sh"), (4, "+ exit 4\n".into()));
+        // The shell reads on, as when /bin/sh ran the script as its child.
+        h.console.type_in(b"sh /tmp/s.sh\recho still\r");
+        let mut shell = crate::Shell::new(&mut h.vfs, &mut h.console, &mut h.system);
+        shell.run();
+        assert_eq!(shell.status(), 0);
+        assert!(
+            h.console
+                .text()
+                .ends_with("+ exit 4\nroot@relay:/# echo still\nstill\nroot@relay:/# ")
+        );
+    }
+
+    #[test]
     fn reboot_ends_the_script() {
         let mut h = Harness::new();
         h.put("/tmp/s.sh", b"reboot\necho after\n");

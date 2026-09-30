@@ -35,6 +35,8 @@ pub struct Shell<'a> {
     editor: LineEditor,
     status: i32,
     stopped: bool,
+    /// The last command was `exit`.
+    exited: bool,
     /// A script's lines are running (`sh`).
     in_script: bool,
     /// Where a running script's screen output is copied.
@@ -79,6 +81,7 @@ impl<'a> Shell<'a> {
             editor: LineEditor::new(),
             status: 0,
             stopped: false,
+            exited: false,
             in_script: false,
             transcript: None,
         }
@@ -183,6 +186,7 @@ impl<'a> Shell<'a> {
             },
         };
         self.stopped = ran.stop;
+        self.exited = ran.exited;
         let mut status = ran.status;
         if let Some(script) = ran.script {
             status = self.run_script(script);
@@ -218,9 +222,14 @@ impl<'a> Shell<'a> {
 
     /// Runs a script `sh` read, in this shell (the in-process runner): its
     /// transcript is written by the shell. A script cannot run another.
+    /// Its `exit` ends only the script, as it does under `/bin/sh`, where a
+    /// script is a shell of its own.
     fn run_script(&mut self, script: Script) -> i32 {
         self.transcript = Some(Transcript::new(script.transcript, script.transcript_name));
         let status = self.run_lines(&script.text);
+        if self.exited {
+            self.stopped = false;
+        }
         self.write_transcript();
         self.transcript = None;
         status

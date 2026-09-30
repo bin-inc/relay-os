@@ -33,6 +33,9 @@ pub struct Ctx<'a> {
     pub(crate) transcript: Option<Transcript>,
     /// The last command's exit status, for `exit`.
     pub(crate) status: i32,
+    /// Set by `exit`: in a script the shell runs itself, only the script
+    /// stops.
+    pub(crate) exited: bool,
 }
 
 enum Output<'a> {
@@ -110,6 +113,7 @@ impl<'a> Ctx<'a> {
             in_script: false,
             transcript: None,
             status: 0,
+            exited: false,
         }
     }
 

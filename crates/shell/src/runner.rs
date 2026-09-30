@@ -39,6 +39,8 @@ pub(crate) struct Ran {
     pub message: String,
     /// `exit`, or `reboot`/`poweroff` returning: the shell stops.
     pub stop: bool,
+    /// It was `exit`, which stops only a script the shell runs itself.
+    pub exited: bool,
     /// Set by `sh`: the script the shell runs next.
     pub script: Option<Script>,
 }
@@ -49,6 +51,7 @@ impl Ran {
             status,
             message,
             stop: false,
+            exited: false,
             script: None,
         }
     }
@@ -222,6 +225,7 @@ pub(crate) fn run_function(
         status,
         message,
         stop: ctx.exit,
+        exited: ctx.exited,
         script: ctx.script.take(),
     }
 }

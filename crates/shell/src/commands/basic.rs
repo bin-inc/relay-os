@@ -55,6 +55,7 @@ pub fn exit(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
         _ => return ctx.fail(NAME, format_args!("exit: too many arguments")),
     };
     ctx.exit = true;
+    ctx.exited = true;
     status
 }
 
