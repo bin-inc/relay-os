@@ -202,7 +202,12 @@ request.
    while its parent sleeps; process 1 cannot be killed), `t-fault sse`,
    `t-fault flags-ac` and `t-fault gsbase` (an SSE instruction, a spin with
    the alignment check flag set and a program setting its own `gs` base,
-   all killed), the `fileops`
+   all killed), plan 3b's programs (`t-files basic`, `dir`, `cwd` and
+   `gone`: the file calls on the stick's ext2 root, and another process's
+   removal of a program's working directory and open file; `t-mem map`
+   and `grow 64`: memory from `mem_map` and a heap that grows, `frames
+   lost: 0`; `t-tee end`: a console tee; `t-sys uname`; `t-read apart`:
+   a program outside the console's group reads nothing), the `fileops`
    scenario's operations on `/root/notes` (`mkdir -p`,
    `echo >`/`>>`, `cat`, `ls -l`, `cp`, `mv`, `rmdir` of a full directory,
    `rm -r`, `touch`, `stat`, `head`, `tail`, `wc`, the errors of `cat` and
@@ -211,7 +216,8 @@ request.
    comes back after `+ df` and its two lines.
    `dmesg`'s lines include `cpu: SMEP on, SMAP on`: the kernel would fault
    if it touched a program's page.
-5. Two steps by hand (milestone 2, plan 3a; a script cannot type):
+5. Three steps by hand (milestone 2, plans 3a and 3b; a script cannot
+   type):
    - `t-spin 5`, and while it spins type `echo typed` and Enter on the
      K120: the line shows as it is typed (milestone 2, plan 3b: the line
      discipline echoes it). After five seconds its `… iterations` line
@@ -220,8 +226,13 @@ request.
      the program did not read is the shell's, as in bash.
    - `t-spin`, then Ctrl-C: `^C` and the prompt come back at once, and
      `dmesg` ends with `pid <n> (/bin/t-spin): killed: Ctrl-C`.
+   - `t-read`, then on the K120 `hello wrold`, four Backspaces, `orld`
+     and Enter: the letters show as they are typed and the Backspaces
+     erase them, and `t-read` prints `[12] hello world\n`. Then Ctrl-D:
+     `end of input` and the prompt (the line discipline, milestone 2,
+     plan 3b).
 
-   Photograph the screen after both.
+   Photograph the screen after each.
 6. `reboot`: the NUC restarts (`relay: restarting`). Choose the stick again
    with F10 and type `sh checks/check3-b.sh`: the files written before the
    restart are read back.
@@ -231,7 +242,7 @@ request.
 8. Boot Mint and run `cargo xtask verify-usb`: `e2fsck: clean`, the tree
    lists `/root/notes/a`, `/root/notes/big` (8388608 bytes) and
    `/root/notes/t`, and the last lines are
-   `/root/checks/check3-a.sh: ok, 72 of 72 commands as expected (run <time>)`
+   `/root/checks/check3-a.sh: ok, 84 of 84 commands as expected (run <time>)`
    and `/root/checks/check3-b.sh: ok, 5 of 5 commands as expected (run
    <time>)`, with the UTC times of the two runs (after `flash --kernel` the
    transcripts of an earlier run stay on the stick, so check the times). A
@@ -252,6 +263,8 @@ request.
 | The panic screen just after `+ t-args` or `+ t-fault` | Entering ring 3, a system call or a fault in ring 3 goes wrong on this CPU, where QEMU's works | Photograph the panic screen: its vector, `rip`, `cr2` and registers say which |
 | `t-spin 1` never ends, or the keyboard stops during `t-spin 5` | The LAPIC timer's ticks do not reach ring 3 on this machine, or the tick's poll of the xHCI keyboard fails there | Photograph the screen; after a reboot, `dmesg` shows the `timer:` and `usb:` lines |
 | The panic screen during `t-spawn` or `t-fault flags-ac` | A context switch, or an interrupt taken in ring 3, goes wrong on this CPU: the panic's message names the check that failed (`a program's flags reached a switch`, `TSS rsp0 and the syscall stack differ`, `an interrupt with the program's gs`) | Photograph the panic screen |
+| `t-read` shows nothing as it is typed, a Backspace does not erase, or Ctrl-D does not end it | The line discipline gets the K120's keys otherwise than QEMU's keyboard sends them | Photograph the screen; `dmesg` shows the keyboard's `usb:` lines |
+| A `t-files`, `t-mem` or `t-tee` line differs (`verify-usb` names it) | A file call, `mem_map` or a tee works otherwise on the stick's ext2 or the NUC's memory | The line after `FAILED` names the command, the expectation and what it printed; `dmesg` for `ext2:` and `usb:` lines |
 | `t-fault gsbase` prints `t-fault: no fault` | CR4.FSGSBASE is set: the firmware left it, and the kernel did not clear it | Note it; a program could set a `gs` base that would pass to the next program |
 | `cpu: SMEP not available, SMAP not available` in `dmesg` | CPUID reports neither (the i7-1260P has both) | Note the `dmesg` line; the check scripts expect both on the NUC |
 | `relay-sh: t-args: Exec format error` | The kernel refused the program; `dmesg` shows `spawn /bin/t-args: <reason>` | `cargo xtask flash --kernel` from the same worktree as the kernel |
