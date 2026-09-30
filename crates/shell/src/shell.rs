@@ -325,7 +325,7 @@ impl<'a> Shell<'a> {
 #[cfg(test)]
 mod tests {
     use crate::Shell;
-    use crate::testing::{FakeProgram, FakeStdout, Harness};
+    use crate::testing::{FakeStdout, Harness};
     use alloc::string::String;
     use relay_abi::WaitStatus;
     use vfs::Errno;
@@ -363,139 +363,11 @@ mod tests {
         );
     }
 
-    /// `t-args` in `/bin`, printing its arguments on fd 1 and a line on
-    /// fd 2, and exiting with 3.
-    fn with_programs() -> Harness {
+    #[test]
+    fn the_in_process_runner_runs_no_programs() {
         let mut h = Harness::new();
         h.dir("/bin");
         h.put("/bin/t-args", b"\x7fELF");
-        h.put("/root/text", b"not a program");
-        h.system.programs.push(FakeProgram {
-            path: "/bin/t-args",
-            writes: vec![(1, b"[1] a\n"), (2, b"t-args: note\n"), (1, b"[2] b c\n")],
-            status: WaitStatus::exited(3),
-        });
-        h
-    }
-
-    #[test]
-    fn a_name_that_is_no_built_in_runs_from_bin() {
-        let mut h = with_programs();
-        assert_eq!(
-            h.run("t-args a 'b c' ''"),
-            (3, "[1] a\nt-args: note\n[2] b c\n".into())
-        );
-        assert_eq!(
-            h.system.spawned,
-            [vec![
-                b"t-args".to_vec(),
-                b"a".to_vec(),
-                b"b c".to_vec(),
-                b"".to_vec()
-            ]],
-            "argument 0 is the name as typed, as in bash"
-        );
-        // A path runs as given, and is argument 0 as typed.
-        assert_eq!(h.run("/bin/t-args").0, 3);
-        h.run("cd /bin");
-        assert_eq!(h.run("./t-args x").0, 3);
-        assert_eq!(h.system.spawned[2], [b"./t-args".to_vec(), b"x".to_vec()]);
-        // Built-ins come first.
-        h.put("/bin/echo", b"\x7fELF");
-        assert_eq!(h.run("echo hi"), (0, "hi\n".into()));
-        assert_eq!(h.system.spawned.len(), 3);
-    }
-
-    #[test]
-    fn a_program_s_output_follows_the_redirection_and_its_errors_the_screen() {
-        let mut h = with_programs();
-        assert_eq!(h.run("t-args > /tmp/out"), (3, "t-args: note\n".into()));
-        assert_eq!(h.get("/tmp/out"), b"[1] a\n[2] b c\n");
-        h.run("t-args >> /tmp/out");
-        assert_eq!(h.get("/tmp/out"), b"[1] a\n[2] b c\n[1] a\n[2] b c\n");
-        // A full disk is a write error, as for a built-in.
-        h.spy.zero_writes.set(true);
-        assert_eq!(
-            h.run("t-args > /tmp/out"),
-            (
-                1,
-                "t-args: note\nt-args: write error: No space left on device\n".into()
-            )
-        );
-    }
-
-    #[test]
-    fn what_cannot_run_says_why() {
-        let mut h = with_programs();
-        assert_eq!(
-            h.run("nosuch x"),
-            (127, "relay-sh: nosuch: command not found\n".into())
-        );
-        assert_eq!(
-            h.run("/root/nosuch"),
-            (
-                127,
-                "relay-sh: /root/nosuch: No such file or directory\n".into()
-            )
-        );
-        assert_eq!(
-            h.run("/root/text"),
-            (126, "relay-sh: /root/text: Exec format error\n".into())
-        );
-        assert_eq!(
-            h.run("/root"),
-            (126, "relay-sh: /root: Is a directory\n".into())
-        );
-        // In a script too; the script goes on.
-        h.put("/root/s.sh", b"nosuch\nt-args\n");
-        let (status, out) = h.run("sh /root/s.sh");
-        assert_eq!(status, 3);
-        assert!(
-            out.contains("+ nosuch\nrelay-sh: nosuch: command not found\n+ t-args\n[1] a\n"),
-            "{out}"
-        );
-        let transcript = String::from_utf8(h.get("/root/s.log")).unwrap();
-        assert!(
-            transcript.contains("+ t-args\n[1] a\nt-args: note\n[2] b c\n"),
-            "{transcript}"
-        );
-    }
-
-    #[test]
-    fn names_of_directories_in_bin_are_not_commands() {
-        let mut h = with_programs();
-        for name in ["..", ".", "''"] {
-            let shown = if name == "''" { "" } else { name };
-            assert_eq!(
-                h.run(name),
-                (127, format!("relay-sh: {shown}: command not found\n")),
-                "{name}"
-            );
-        }
-        // Given as a path, a directory still says so.
-        assert_eq!(h.run("./"), (126, "relay-sh: ./: Is a directory\n".into()));
-    }
-
-    #[test]
-    fn a_name_too_long_for_a_file_is_not_found() {
-        let mut h = with_programs();
-        let long = "x".repeat(300);
-        assert_eq!(
-            h.run(&long),
-            (127, format!("relay-sh: {long}: command not found\n")),
-            "as bash says"
-        );
-        // Given as a path, the error is the path's.
-        assert_eq!(
-            h.run(&format!("/{long}")),
-            (126, format!("relay-sh: /{long}: File name too long\n"))
-        );
-    }
-
-    #[test]
-    fn without_programs_every_unknown_name_is_not_found() {
-        let mut h = with_programs();
-        h.system.no_programs = true;
         assert_eq!(
             h.run("t-args"),
             (127, "relay-sh: t-args: command not found\n".into())
@@ -503,88 +375,6 @@ mod tests {
         assert_eq!(
             h.run("/bin/t-args"),
             (127, "relay-sh: /bin/t-args: command not found\n".into())
-        );
-    }
-
-    #[test]
-    fn a_program_sees_its_redirection_s_write_error() {
-        let mut h = with_programs();
-        static BIG: [u8; 5000] = [b'x'; 5000];
-        h.system.programs[0].writes =
-            vec![(1, b"small\n"), (1, &BIG), (1, b"more\n"), (2, b"note\n")];
-        h.spy.zero_writes.set(true);
-        let (status, out) = h.run("t-args > /tmp/out");
-        assert_eq!(
-            h.system.answers,
-            [Ok(()), Err(Errno::ENOSPC), Err(Errno::ENOSPC), Ok(())],
-            "buffered until 4 KiB, then the disk's error, for good; the screen takes fd 2"
-        );
-        assert_eq!(status, 1);
-        assert!(
-            out.ends_with("t-args: write error: No space left on device\n"),
-            "{out}"
-        );
-        // To the screen, every write is fine.
-        h.system.answers.clear();
-        h.run("t-args");
-        assert!(h.system.answers.iter().all(Result::is_ok));
-    }
-
-    #[test]
-    fn a_program_stopped_by_ctrl_c_says_only_so_and_ends_a_script() {
-        let mut h = with_programs();
-        h.system.programs[0].status = WaitStatus::killed(relay_abi::wait::KILLED_CTRL_C);
-        assert_eq!(
-            h.run("t-args"),
-            (130, "[1] a\nt-args: note\n[2] b c\n^C\n".into())
-        );
-        h.put("/root/s.sh", b"t-args\necho after\n");
-        let (status, out) = h.run("sh /root/s.sh");
-        assert_eq!(status, 130);
-        assert!(out.ends_with("[2] b c\n^C\n"), "{out}");
-        assert!(!out.contains("after"), "the script stops: {out}");
-    }
-
-    #[test]
-    fn a_killed_program_is_reported() {
-        let mut h = with_programs();
-        h.system.programs[0].status = WaitStatus {
-            how: relay_abi::wait::KILLED,
-            ..Default::default()
-        };
-        assert_eq!(
-            h.run("t-args"),
-            (
-                137,
-                "[1] a\nt-args: note\n[2] b c\nrelay-sh: t-args: killed\n".into()
-            )
-        );
-        // A fault, redirected: the message goes to the screen.
-        h.system.programs[0].status = WaitStatus::fault(
-            relay_abi::wait::FAULT_PAGE,
-            relay_abi::wait::ACCESS_READ,
-            0,
-            0x40_1a2c,
-        );
-        assert_eq!(
-            h.run("t-args > /tmp/out"),
-            (
-                139,
-                "t-args: note\nrelay-sh: t-args: killed (page fault at 0x0, read, ip 0x401a2c)\n"
-                    .into()
-            )
-        );
-        assert_eq!(h.get("/tmp/out"), b"[1] a\n[2] b c\n");
-        // A write error too: both are reported, and the kill's status stays.
-        h.spy.zero_writes.set(true);
-        assert_eq!(
-            h.run("t-args > /tmp/out"),
-            (
-                139,
-                "t-args: note\nt-args: write error: No space left on device\n\
-                 relay-sh: t-args: killed (page fault at 0x0, read, ip 0x401a2c)\n"
-                    .into()
-            )
         );
     }
 

@@ -9,7 +9,6 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
-use relay_abi::WaitStatus;
 use vfs::{Errno, Node, Vfs};
 
 /// Output to a file is collected up to this size before it is written.
@@ -136,28 +135,6 @@ impl<'a> Ctx<'a> {
     /// Errors always go to the screen, never into a redirection file.
     pub fn err(&mut self, bytes: &[u8]) {
         self.streams().screen(bytes);
-    }
-
-    /// Waits for the program `pid` (`System::spawn`): what it writes to fd 1
-    /// is standard output, to fd 2 the screen. A redirection file's write
-    /// error is the program's too, from the write that met it on (output
-    /// to a file is written in pieces of 4 KiB, so a short one meets it
-    /// only when the command ends, and the shell reports it then).
-    pub(crate) fn wait_program(&mut self, pid: u32) -> Result<WaitStatus, Errno> {
-        let mut streams = Streams {
-            vfs: &mut *self.vfs,
-            console: &mut *self.console,
-            out: &mut self.out,
-            transcript: &mut self.transcript,
-        };
-        self.system.wait(pid, &mut |fd, bytes| {
-            if fd == 1 {
-                streams.out(bytes)
-            } else {
-                streams.screen(bytes);
-                Ok(())
-            }
-        })
     }
 
     /// Whether Ctrl-C has stopped the command. Long loops (reading a file,

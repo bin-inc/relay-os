@@ -3,7 +3,7 @@
 #![cfg(test)]
 
 use crate::Shell;
-use crate::io::{Console, MemInfo, Output, Programs, Stdout, System};
+use crate::io::{Console, MemInfo, Programs, Stdout, System};
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
@@ -11,9 +11,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::Cell;
 use relay_abi::WaitStatus;
-use vfs::{
-    DirEntry, Env, Errno, FileSystem, FileType, Ino, MemFs, MountTable, Node, Stat, StatFs, Vfs,
-};
+use vfs::{DirEntry, Env, Errno, FileSystem, Ino, MemFs, MountTable, Node, Stat, StatFs, Vfs};
 
 /// The time every test runs at: Sat Sep 26 12:00:00 UTC 2026.
 pub const NOW: u64 = 1_790_424_000;
@@ -77,30 +75,12 @@ impl Console for TestConsole {
     }
 }
 
-/// A program the test system runs: what it writes, on which fd, and how
-/// it ends.
-pub struct FakeProgram {
-    pub path: &'static str,
-    pub writes: Vec<(u32, &'static [u8])>,
-    pub status: WaitStatus,
-}
-
 pub struct TestSystem {
     pub now: u64,
     pub log: Vec<u8>,
     pub memory: Option<MemInfo>,
     pub reboots: u32,
     pub poweroffs: u32,
-    /// The programs `spawn` knows, by path; any other file is not one.
-    pub programs: Vec<FakeProgram>,
-    /// Programs cannot run at all (as on the host).
-    pub no_programs: bool,
-    /// The arguments of every program started.
-    pub spawned: Vec<Vec<Vec<u8>>>,
-    /// What each of the programs' writes was answered.
-    pub answers: Vec<Result<(), Errno>>,
-    /// The program started and not yet waited for.
-    child: Option<usize>,
     /// What `reboot` and `poweroff` say, unforced, as a program's `power`
     /// call does when the filesystems cannot be shut down.
     pub power_error: Option<Errno>,
@@ -126,11 +106,6 @@ impl TestSystem {
             memory: None,
             reboots: 0,
             poweroffs: 0,
-            programs: Vec::new(),
-            no_programs: false,
-            spawned: Vec::new(),
-            answers: Vec::new(),
-            child: None,
             power_error: None,
             forced: Vec::new(),
         }
@@ -156,43 +131,6 @@ impl System for TestSystem {
         self.power(force)?;
         self.poweroffs += 1;
         Ok(())
-    }
-    /// As the kernel does: the file must exist and be a program.
-    fn spawn(
-        &mut self,
-        vfs: &mut dyn Vfs,
-        path: &[u8],
-        args: &[&[u8]],
-    ) -> Option<Result<u32, Errno>> {
-        if self.no_programs {
-            return None;
-        }
-        let found = vfs.lookup(path).and_then(|node| {
-            if vfs.stat(node)?.kind == FileType::Directory {
-                return Err(Errno::EISDIR);
-            }
-            self.programs
-                .iter()
-                .position(|p| vfs.lookup(p.path.as_bytes()) == Ok(node))
-                .ok_or(Errno::ENOEXEC)
-        });
-        Some(found.map(|i| {
-            self.spawned.push(args.iter().map(|a| a.to_vec()).collect());
-            self.child = Some(i);
-            i as u32 + 1
-        }))
-    }
-    fn wait(&mut self, pid: u32, out: &mut Output<'_>) -> Result<WaitStatus, Errno> {
-        let i = self
-            .child
-            .take()
-            .filter(|&i| i as u32 + 1 == pid)
-            .ok_or(Errno::ECHILD)?;
-        let p = &self.programs[i];
-        for (fd, bytes) in &p.writes {
-            self.answers.push(out(*fd, bytes));
-        }
-        Ok(p.status)
     }
 }
 

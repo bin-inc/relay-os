@@ -1,10 +1,9 @@
 //! How the shell runs a command that is not one of its own built-ins
 //! (user-space gate §8.2): the `Runner`. The in-process runner runs the
 //! command functions against the shell's `Vfs`, `Console` and `System`, as
-//! milestone 1 does (the unit tests, `cargo xtask host-shell` and the
-//! in-kernel shell, whose other names are programs it reaches through
-//! `System::spawn`); the spawning runner starts `/bin/<name>` for every
-//! one (`/bin/sh`).
+//! milestone 1 does (the unit tests and `cargo xtask host-shell`, where
+//! there are no programs); the spawning runner starts `/bin/<name>` for
+//! every one (`/bin/sh`).
 
 use crate::commands::{self, Builtin, Script};
 use crate::ctx::Ctx;
@@ -96,7 +95,7 @@ impl Runners<'_> {
 }
 
 /// The command functions of `commands::COMMANDS`, run in the shell's
-/// process; any other name is a program, through `System::spawn`.
+/// process; any other name is not found.
 pub(crate) struct InProcess;
 
 impl Runner for InProcess {
@@ -113,7 +112,7 @@ impl Runner for InProcess {
         };
         match commands::find(name) {
             Some(command) => run_function(parts, command, args, file),
-            None => run_program(parts, name, args, file),
+            None => not_found(name),
         }
     }
 }
@@ -278,41 +277,10 @@ pub(crate) fn ended(name: &str, w: &relay_abi::WaitStatus) -> Ran {
     Ran::said(status, message)
 }
 
-/// Runs a program through `System::spawn` (user-space gate §8.2), with
-/// `name` as argument 0 and `args` as the others, as bash does. Its fd 1
-/// is standard output (the redirection file, if any), its fd 2 the screen;
-/// a running script's transcript gets both.
-fn run_program(parts: Parts<'_>, name: &str, args: &[String], file: Option<(Node, u64)>) -> Ran {
-    let path = program_path(name);
-    let mut argv: Vec<&[u8]> = alloc::vec![name.as_bytes()];
-    argv.extend(args.iter().map(|w| w.as_bytes()));
-    let pid = match parts.system.spawn(&mut *parts.vfs, path.as_bytes(), &argv) {
-        Some(Ok(pid)) => pid,
-        // No programs here (the host).
-        None => return not_found(name),
-        Some(Err(e)) => return cannot_start(name, e),
-    };
-    let mut ctx = Ctx::new(parts.vfs, parts.system, parts.console, file);
-    ctx.transcript = parts.transcript.take();
-    let mut ran = match ctx.wait_program(pid) {
-        Ok(w) => ended(name, &w),
-        Err(e) => Ran::said(CANNOT_RUN, format!("{NAME}: {name}: {e}\n")),
-    };
-    if let Err(e) = ctx.finish() {
-        // A program that did not exit keeps its report and status.
-        if ran.message.is_empty() {
-            ran.status = 1;
-        }
-        ran.message
-            .insert_str(0, &format!("{name}: write error: {e}\n"));
-    }
-    *parts.transcript = ctx.transcript.take();
-    ran
-}
-
 #[cfg(test)]
 mod tests {
     use crate::testing::{Harness, Spawned};
+    use alloc::format;
     use alloc::string::String;
     use alloc::vec::Vec;
     use relay_abi::WaitStatus;
@@ -422,6 +390,49 @@ mod tests {
         ] {
             assert_eq!(h.spawning(line), (status, said.into()), "{line}");
         }
+    }
+
+    #[test]
+    fn names_of_directories_in_bin_are_not_commands() {
+        let mut h = with_programs();
+        for dir in ["/bin/..", "/bin/.", "/bin/"] {
+            h.programs.refusals.push((dir, Errno::EISDIR));
+        }
+        h.programs.refusals.push(("./", Errno::EISDIR));
+        for name in ["..", ".", "''"] {
+            let shown = if name == "''" { "" } else { name };
+            assert_eq!(
+                h.spawning(name),
+                (127, format!("relay-sh: {shown}: command not found\n")),
+                "{name}"
+            );
+        }
+        // Given as a path, a directory still says so.
+        assert_eq!(
+            h.spawning("./"),
+            (126, "relay-sh: ./: Is a directory\n".into())
+        );
+    }
+
+    #[test]
+    fn a_name_too_long_for_a_file_is_not_found() {
+        let mut h = with_programs();
+        let long = "x".repeat(300);
+        let (bare, path) = (format!("/bin/{long}"), format!("/{long}"));
+        h.programs.refusals.push((bare.leak(), Errno::ENAMETOOLONG));
+        h.programs
+            .refusals
+            .push((path.clone().leak(), Errno::ENAMETOOLONG));
+        assert_eq!(
+            h.spawning(&long),
+            (127, format!("relay-sh: {long}: command not found\n")),
+            "as bash says"
+        );
+        // Given as a path, the error is the path's.
+        assert_eq!(
+            h.spawning(&path),
+            (126, format!("relay-sh: {path}: File name too long\n"))
+        );
     }
 
     #[test]
