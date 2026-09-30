@@ -10,6 +10,7 @@ pub mod arch;
 pub mod block;
 pub mod cmdline;
 pub mod console;
+pub mod error_screen;
 pub mod exec;
 pub mod fd;
 pub mod file;
