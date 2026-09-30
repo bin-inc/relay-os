@@ -1,0 +1,72 @@
+# One program per command (user-space gate §8.4; milestone 2, plan 4a):
+# each /bin program prints exactly what the in-kernel shell's command of
+# the same name prints, run here by path, since the in-kernel shell's own
+# commands come first. Output follows a redirection, errors stay on the
+# screen, and memory in use is the same before and after. (Under the
+# in-kernel shell a program's standard output is the shell's own output
+# hook, never a file, so what depends on writing into one is in the `sh`
+# scenario, under /bin/sh.)
+timeout 30
+expect root@relay:~# $
+send free
+expect-same mem \nMem:\s+\d+\s+(\d+)\s
+send /bin/pwd
+expect \n/root\n
+send /bin/mkdir -p /root/a/b/c
+send /bin/echo hello > /root/a/f
+send /bin/echo world >> /root/a/f
+send /bin/cat /root/a/f
+expect \nhello\nworld\n
+send /bin/ls -l /root/a
+expect \ntotal 8\ndrwxr-xr-x 3 root root 4096 \w{3} [ \d]\d \d\d:\d\d b\n-rw-r--r-- 1 root root   12 \w{3} [ \d]\d \d\d:\d\d f\n
+send /bin/cp /root/a/f /root/a/g
+send /bin/mv /root/a/g /root/a/b/h
+send /bin/ls /root/a /root/a/b
+expect \n/root/a:\nb  f\n\n/root/a/b:\nc  h\n
+send /bin/rmdir /root/a/b
+expect \nrmdir: failed to remove '/root/a/b': Directory not empty\n
+send /bin/rm -r /root/a/b
+send /bin/touch /root/t
+send /bin/stat /root/t
+expect \n  File: /root/t\n  Size: 0 .*regular empty file\n
+send /bin/head -n 1 /root/a/f
+expect \nhello\n
+send /bin/tail -n 1 /root/a/f
+expect \nworld\n
+send /bin/wc /root/a/f
+expect \n 2  2 12 /root/a/f\n
+# Errors keep their place among the output, and never enter a file.
+send /bin/cat /root/a/f /root/nope /root/a/f
+expect \nhello\nworld\ncat: /root/nope: No such file or directory\nhello\nworld\n
+send /bin/cat /root/nope > /root/out
+expect \ncat: /root/nope: No such file or directory\n
+send /bin/stat /root/out
+expect \n  File: /root/out\n  Size: 0 .*regular empty file\n
+# A program of /bin copies onto the root (SysVfs's tests show that files
+# of two filesystems with one inode number are two files).
+send /bin/cp /bin/t-args /root/t
+expect /bin/cp /bin/t-args /root/t\nroot@relay:~# $
+send /bin/rm /root/a/f /root/t /root/out
+send /bin/rmdir /root/a
+send /bin/ls
+expect \nREADME  checks\n
+send /bin/rm /bin/t-args
+expect \nrm: cannot remove '/bin/t-args': Read-only file system\n
+send /bin/rm -r /
+expect \nrm: it is dangerous to operate recursively on '/'\n
+send /bin/ls /
+expect \nbin  dev  etc  home  lost\+found  root  tmp  usr  var\n
+send /bin/uname -a
+expect \nRelay relay \d+\.\d+\.\d+ x86_64\n
+send /bin/date
+expect \n(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \w{3} [ \d]\d \d\d:\d\d:\d\d UTC 20\d\d\n
+send /bin/df
+expect \nFilesystem     1K-blocks +Used Available Use% Mounted on\n/dev/root +\d+ +\d+ +\d+ +\d+% /\n
+send /bin/dmesg
+expect \n\[ ok \] system: \d+ programs, ABI 2\n
+send /bin/sync
+send /bin/free
+expect \n +total +used +free\nMem: +\d+ +\d+ +\d+\nHeap: +\d+ +\d+ +\d+\n
+send free
+expect-same mem \nMem:\s+\d+\s+(\d+)\s
+poweroff /bin/poweroff
