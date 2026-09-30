@@ -33,3 +33,14 @@ expect \[\d+\] xy
 expect root@relay:~# $
 send t-read apart
 expect \nend of input\nroot@relay:~# $
+# What is typed during a script is echoed once, as it is typed, not again
+# at every later command; the shell's line editor shows it at the prompt.
+send echo t-spin 2 > s.sh
+send echo t-args one >> s.sh
+send echo t-args two >> s.sh
+send sh s.sh
+alive 1
+type abc
+expect abc\d+ iterations\n\+ t-args one\n\[1\] one\n\+ t-args two\n\[1\] two\nroot@relay:~# abc$
+type {ctrl-c}
+expect root@relay:~# $

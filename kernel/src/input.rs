@@ -32,6 +32,10 @@ pub const ESC_TIMEOUT_MS: u64 = 50;
 pub struct InputQueue {
     /// Raw input.
     bytes: VecDeque<u8>,
+    /// How many of `bytes`, from the first, the line discipline echoed
+    /// already (typed in line mode and handed back): they go through it
+    /// again without being echoed again.
+    echoed: usize,
     /// An escape sequence arriving over serial, until it is complete.
     sequence: Vec<u8>,
     /// When its `ESC` came, in milliseconds.
@@ -49,6 +53,7 @@ impl InputQueue {
     pub const fn new() -> InputQueue {
         InputQueue {
             bytes: VecDeque::new(),
+            echoed: 0,
             sequence: Vec::new(),
             sequence_since: 0,
             line_mode: false,
@@ -66,13 +71,19 @@ impl InputQueue {
         let was = core::mem::replace(&mut self.line_mode, line);
         if line && !was {
             let ahead: Vec<u8> = self.bytes.drain(..).collect();
-            self.push(&ahead);
+            let quiet = core::mem::take(&mut self.echoed).min(ahead.len());
+            let mut shown = Vec::new();
+            for key in keys(&ahead[..quiet]) {
+                self.interrupted |= self.line.input(key, &mut shown);
+            }
+            self.push(&ahead[quiet..]);
         } else if !line && was {
             let typed = self.line.take_all();
             if core::mem::take(&mut self.interrupted) {
                 self.push(&[INTERRUPT]);
             }
             self.push(&typed);
+            self.echoed = self.bytes.len();
         }
         was
     }
@@ -108,6 +119,7 @@ impl InputQueue {
         for (b, x) in buf.iter_mut().zip(self.bytes.drain(..n)) {
             *b = x;
         }
+        self.echoed = self.echoed.saturating_sub(n);
         Some(n)
     }
 
@@ -165,6 +177,7 @@ impl InputQueue {
         let bytes = match bytes.iter().rposition(|&b| b == INTERRUPT) {
             Some(i) => {
                 self.bytes.clear();
+                self.echoed = 0;
                 self.sequence.clear();
                 &bytes[i..]
             }
@@ -176,7 +189,9 @@ impl InputQueue {
 
     /// The oldest byte.
     pub fn pop(&mut self) -> Option<u8> {
-        self.bytes.pop_front()
+        let b = self.bytes.pop_front()?;
+        self.echoed = self.echoed.saturating_sub(1);
+        Some(b)
     }
 
     /// Whether nothing waits to be read: no raw input, and no line.
@@ -191,6 +206,7 @@ impl InputQueue {
         match self.bytes.iter().rposition(|&b| b == INTERRUPT) {
             Some(i) => {
                 self.bytes.drain(..=i);
+                self.echoed = self.echoed.saturating_sub(i + 1);
                 true
             }
             None => false,
@@ -548,6 +564,51 @@ mod tests {
         q.set_line_mode(true);
         assert!(q.take_line_interrupt());
         assert_eq!(q.take_echo(), b"y");
+    }
+
+    #[test]
+    fn what_was_typed_ahead_is_echoed_once() {
+        // Found by the prototype's review: text typed during a script was
+        // echoed again at the start of every later command, until the
+        // shell read it.
+        let mut q = line_mode();
+        q.push(b"abc");
+        assert_eq!(q.take_echo(), b"abc");
+        q.set_line_mode(false);
+        q.set_line_mode(true);
+        assert_eq!(q.take_echo(), b"", "echoed once already");
+        q.push(b"d\r");
+        assert_eq!(q.take_echo(), b"d\n");
+        assert_eq!(read(&mut q, 10).unwrap(), b"abcd\n");
+        // What the shell took is gone; what came after is echoed.
+        q.push(b"xyz");
+        q.take_echo();
+        q.set_line_mode(false);
+        assert_eq!(q.pop(), Some(b'x'));
+        q.push(b"w");
+        q.set_line_mode(true);
+        assert_eq!(q.take_echo(), b"w", "yz were echoed, w was not");
+        q.push(b"\r");
+        assert_eq!(read(&mut q, 10).unwrap(), b"yzw\n");
+        // A raw read takes echoed bytes too.
+        q.push(b"12345");
+        assert_eq!(q.take_echo(), b"\n12345");
+        q.set_line_mode(false);
+        assert_eq!(q.read(&mut [0; 2]), Some(2));
+        q.push(b"6");
+        q.set_line_mode(true);
+        assert_eq!(q.take_echo(), b"6");
+        // And so does a Ctrl-C nobody took, handed back before them.
+        let mut q = line_mode();
+        q.push(b"ab\x03cd");
+        q.take_echo();
+        q.set_line_mode(false);
+        assert!(q.take_interrupt());
+        q.push(b"e");
+        q.set_line_mode(true);
+        assert_eq!(q.take_echo(), b"e");
+        q.push(b"\r");
+        assert_eq!(read(&mut q, 10).unwrap(), b"cde\n");
     }
 
     #[test]
