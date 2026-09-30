@@ -220,8 +220,11 @@ impl InputQueue {
     }
 }
 
-/// `bytes` cut into keys: an escape sequence (`ESC` and one byte, or
-/// `ESC [` up to its final byte) is one, every other byte is one.
+/// `bytes` cut into keys: an escape sequence (`ESC [` up to its final byte)
+/// is one, every other byte is one. `ESC` and another byte are the Escape
+/// key and that key: nothing here sends Alt (a serial terminal's `ESC x`
+/// is Escape, then x), and raw input typed ahead keeps an Escape next to
+/// the key after it.
 fn keys(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
     let mut rest = bytes;
     core::iter::from_fn(move || {
@@ -233,7 +236,6 @@ fn keys(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
                     .position(|b| (0x40..=0x7E).contains(b))
                     .map_or(tail.len(), |i| i + 1)
             }
-            [0x1B, _, ..] => 2,
             _ => 1,
         };
         let (key, after) = rest.split_at(n);
@@ -531,11 +533,11 @@ mod tests {
         q.push(b"d\x1b[1;5Ce\r");
         assert_eq!(
             read(&mut q, 10).unwrap(),
-            b"abc\n",
-            "Delete and Alt-x do nothing"
+            b"abxc\n",
+            "Delete does nothing; Alt-x is Escape, then x"
         );
         assert_eq!(read(&mut q, 10).unwrap(), b"de\n");
-        assert_eq!(q.take_echo(), b"abc\nde\n");
+        assert_eq!(q.take_echo(), b"abxc\nde\n");
     }
 
     #[test]
@@ -666,6 +668,22 @@ mod tests {
     }
 
     #[test]
+    fn an_escape_typed_ahead_keeps_the_key_after_it() {
+        // Found by the prototype's review: the Escape key and the next key,
+        // side by side in raw input, went into line mode as one key.
+        let mut q = InputQueue::new();
+        q.push_key(&press(Key::Escape, false));
+        for c in *b"ls" {
+            q.push_key(&press(Key::Char(c), false));
+        }
+        q.push_key(&press(Key::Escape, false));
+        q.push_key(&press(Key::Enter, false));
+        q.set_line_mode(true);
+        assert_eq!(read(&mut q, 10).unwrap(), b"ls\n");
+        assert_eq!(q.take_echo(), b"ls\n");
+    }
+
+    #[test]
     fn a_ctrl_c_nobody_took_is_raw_input_again() {
         // Typed the moment a command ended: the shell's line editor and a
         // script see it, instead of nobody.
@@ -692,7 +710,7 @@ mod tests {
         let got: Vec<&[u8]> = keys(b"a\x1b[1;5Cb\x1bxc\x1b[").collect();
         assert_eq!(
             got,
-            [&b"a"[..], b"\x1b[1;5C", b"b", b"\x1bx", b"c", b"\x1b["]
+            [&b"a"[..], b"\x1b[1;5C", b"b", b"\x1b", b"x", b"c", b"\x1b["]
         );
         assert_eq!(keys(b"\x1b").collect::<Vec<_>>(), [&b"\x1b"[..]]);
     }
