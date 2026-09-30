@@ -19,4 +19,4 @@ pub use block::{BlockDevice, IoError, check_request};
 pub use errno::Errno;
 pub use fs::{DirEntry, Env, FileSystem, FileType, Ino, Stat, StatFs};
 pub use memfs::{MAX_FILE_SIZE, MemFs};
-pub use mount::{Cwd, MountTable, Node, Vfs};
+pub use mount::{Change, Cwd, MountTable, Node, Vfs};

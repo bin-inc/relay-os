@@ -45,6 +45,10 @@ pub enum Errno {
     EPERM,
     /// A call that blocked was cut short (the process was killed).
     EINTR,
+    /// Every fd of a process is in use.
+    EMFILE,
+    /// A buffer too short for the answer (`getcwd`).
+    ERANGE,
 }
 
 impl Errno {
@@ -75,6 +79,8 @@ impl Errno {
             Errno::ESRCH => "No such process",
             Errno::EPERM => "Operation not permitted",
             Errno::EINTR => "Interrupted system call",
+            Errno::EMFILE => "Too many open files",
+            Errno::ERANGE => "Numerical result out of range",
         }
     }
 
@@ -107,6 +113,8 @@ impl Errno {
             Errno::ESRCH => n::ESRCH,
             Errno::EPERM => n::EPERM,
             Errno::EINTR => n::EINTR,
+            Errno::EMFILE => n::EMFILE,
+            Errno::ERANGE => n::ERANGE,
         }
     }
 }
@@ -140,7 +148,7 @@ mod tests {
     }
 
     /// Every variant, so the tests below cover each one.
-    const ALL: [Errno; 24] = [
+    const ALL: [Errno; 26] = [
         Errno::ENOENT,
         Errno::EEXIST,
         Errno::ENOTDIR,
@@ -165,6 +173,8 @@ mod tests {
         Errno::ESRCH,
         Errno::EPERM,
         Errno::EINTR,
+        Errno::EMFILE,
+        Errno::ERANGE,
     ];
 
     /// The name, number and message the host's C library gives: the real

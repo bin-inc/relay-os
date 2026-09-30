@@ -24,6 +24,7 @@ pub const EFBIG: u16 = 27;
 pub const ENOSPC: u16 = 28;
 pub const EROFS: u16 = 30;
 pub const EPIPE: u16 = 32;
+pub const ERANGE: u16 = 34;
 pub const ENAMETOOLONG: u16 = 36;
 pub const ENOSYS: u16 = 38;
 pub const ENOTEMPTY: u16 = 39;
@@ -80,6 +81,7 @@ mod tests {
             ("ENOSPC", ENOSPC),
             ("EROFS", EROFS),
             ("EPIPE", EPIPE),
+            ("ERANGE", ERANGE),
             ("ENAMETOOLONG", ENAMETOOLONG),
             ("ENOSYS", ENOSYS),
             ("ENOTEMPTY", ENOTEMPTY),
