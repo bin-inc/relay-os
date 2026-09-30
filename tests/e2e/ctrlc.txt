@@ -1,0 +1,12 @@
+# Programs share the CPU (user-space gate §6.1, §6.3; milestone 2, plan 3a):
+# t-spin never makes a system call, so only the timer takes the CPU from
+# it, and every tick that interrupts it also polls the keyboard: what is
+# typed on the USB keyboard while it spins is all there when the shell
+# reads again, although the keyboard holds only a few keys itself.
+timeout 30
+expect root@relay:~# $
+send t-spin 3
+alive 1
+key echo typed-while-it-spins
+expect \n\d+ iterations\n
+expect \ntyped-while-it-spins\n

@@ -24,6 +24,11 @@ pub struct KernelStack {
 }
 
 impl KernelStack {
+    /// Its slot, 0 to `SLOTS - 1`: one per process at most.
+    pub fn slot(&self) -> usize {
+        self.slot
+    }
+
     /// The lowest address of the stack; the page below is the guard.
     pub fn bottom(&self) -> u64 {
         AREA + self.slot as u64 * SLOT_SIZE + PAGE

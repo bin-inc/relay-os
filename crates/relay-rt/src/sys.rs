@@ -37,6 +37,19 @@ pub fn write_all(fd: u32, mut bytes: &[u8]) -> Result<(), u16> {
     Ok(())
 }
 
+/// The wall clock and the time since the machine started.
+pub fn time() -> Result<relay_abi::Time, u16> {
+    let mut t = relay_abi::Time::default();
+    let args = [&raw mut t as u64, 0, 0, 0, 0, 0];
+    decode(unsafe { syscall(Call::Time, args) })?;
+    Ok(t)
+}
+
+/// Blocks the program for `ms` milliseconds.
+pub fn sleep(ms: u64) {
+    unsafe { syscall(Call::Sleep, [ms, 0, 0, 0, 0, 0]) };
+}
+
 /// Ends the program with status `code`.
 pub fn exit(code: u8) -> ! {
     unsafe { syscall(Call::Exit, [u64::from(code), 0, 0, 0, 0, 0]) };

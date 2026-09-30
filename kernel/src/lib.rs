@@ -15,6 +15,7 @@ pub mod fd;
 pub mod input;
 pub mod klog;
 pub mod mm;
+pub mod mounts;
 pub mod panic_screen;
 pub mod pci;
 pub mod power;
@@ -26,6 +27,7 @@ pub mod storage;
 pub mod syscall;
 pub mod system;
 pub mod timer;
+pub mod tty;
 pub mod usb;
 
 use boot_info::{BootInfo, MemoryKind, PHYS_OFFSET};
@@ -143,7 +145,8 @@ pub fn kernel_main(info: &'static BootInfo) -> ! {
     let root = storage::mount_root(info.boot_partition_guid());
     let mut vfs = vfs::MountTable::new(root);
     system::mount(info, &mut vfs);
-    session::run_shell(vfs, cmdline.test_mode)
+    let root = mounts::init(vfs);
+    proc::start(session::shell, u64::from(cmdline.test_mode), root)
 }
 
 /// `check=timer`: the 1 kHz tick measured against the RTC's seconds.

@@ -6,7 +6,7 @@
 pub struct Time {
     /// Wall-clock seconds since 1970, UTC (0 without a clock).
     pub unix_seconds: u64,
-    /// Nanoseconds since the kernel's timer started.
+    /// Nanoseconds since the machine started.
     pub uptime_ns: u64,
 }
 

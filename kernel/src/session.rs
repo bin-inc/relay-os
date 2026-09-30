@@ -1,61 +1,30 @@
 //! The shell's surroundings in the kernel (spec §7.2, §7.3): the console as
-//! `shell::Console` (input from the USB keyboards and COM1), the clock,
-//! memory figures, kernel log and programs as `shell::System`, and
-//! `vfs::Env` for filesystems.
+//! `shell::Console` (input from the USB keyboards and COM1, `tty`), the
+//! clock, memory figures, kernel log and programs as `shell::System`, the
+//! kernel's mount table as its `Vfs` (`mounts::KernelVfs`), and `vfs::Env`
+//! for filesystems.
 
-use crate::input::InputQueue;
 use crate::mm::{self, MemStats, frame::FRAME_SIZE};
-use crate::{arch, console, klog, klogln, power, proc, rtc, serial, usb};
+use crate::mounts::KernelVfs;
+use crate::{arch, console, klog, klogln, power, proc, rtc, tty};
 use alloc::vec::Vec;
 use relay_abi::WaitStatus;
 use shell::{Console, MemInfo, Shell, System};
-use vfs::{Env, Errno, MountTable, Vfs};
-
-/// Bytes read from COM1 per poll at most, so a flood cannot starve the rest.
-const SERIAL_BURST: usize = 256;
+use vfs::{Env, Errno, Vfs};
 
 /// The screen and serial for output; the USB keyboards and COM1 for input.
-pub struct KernelConsole {
-    input: InputQueue,
-}
-
-impl KernelConsole {
-    pub fn new() -> KernelConsole {
-        KernelConsole {
-            input: InputQueue::new(),
-        }
-    }
-
-    /// Moves whatever the input devices have into the queue. Never waits.
-    fn poll(&mut self) {
-        usb::poll(&mut self.input);
-        for _ in 0..SERIAL_BURST {
-            match serial::read_byte() {
-                Some(b) => self.input.push_serial(b),
-                None => break,
-            }
-        }
-    }
-}
-
-impl Default for KernelConsole {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+#[derive(Default)]
+pub struct KernelConsole;
 
 impl Console for KernelConsole {
     fn read_byte(&mut self) -> Option<u8> {
         loop {
-            self.poll();
-            if let Some(b) = self.input.pop() {
+            tty::poll();
+            if let Some(b) = tty::pop() {
                 return Some(b);
             }
-            // Nothing typed: time for the work that may wait (a keyboard
-            // plugged in, the Caps Lock LED), then sleep until the next
-            // tick.
-            usb::service();
-            arch::wait_for_interrupt();
+            // Nothing typed: the idle task polls until something is.
+            proc::wait_for_input();
         }
     }
 
@@ -68,8 +37,8 @@ impl Console for KernelConsole {
     }
 
     fn interrupted(&mut self) -> bool {
-        self.poll();
-        self.input.take_interrupt()
+        tty::poll();
+        tty::take_interrupt()
     }
 }
 
@@ -137,11 +106,15 @@ impl Env for KernelEnv {
     }
 }
 
-/// Runs the shell over `vfs`, the root at `/` and the programs at `/bin`
-/// (spec §4.4 step 11). Never returns.
-pub fn run_shell(mut vfs: MountTable, test_mode: bool) -> ! {
-    let mut console = KernelConsole::new();
-    let mut system = KernelSystem { test_mode };
+/// Process 1 (spec §4.4 step 11): the shell over the kernel's mount table
+/// (the root at `/`, the programs at `/bin`); `test_mode` is 1 for
+/// `test=1`. Never returns.
+pub extern "C" fn shell(test_mode: u64) -> ! {
+    let mut vfs = KernelVfs;
+    let mut console = KernelConsole;
+    let mut system = KernelSystem {
+        test_mode: test_mode != 0,
+    };
     Shell::new(&mut vfs, &mut console, &mut system).run();
     // `run` returns only if `reboot` or `poweroff` do, which they do not.
     arch::halt_forever()

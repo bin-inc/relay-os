@@ -9,7 +9,7 @@ use crate::arch::lapic::{self, Lapic, Mode};
 use crate::arch::{irq, pic};
 use crate::mm::{self, paging::Cache, paging::MapError};
 use core::fmt;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use core::time::Duration;
 
 pub const TICK_HZ: u64 = 1000;
@@ -166,6 +166,8 @@ fn calibrate_lapic(l: &mut Lapic, tsc_hz: u64) -> u64 {
 }
 
 static TSC_HZ: AtomicU64 = AtomicU64::new(0);
+/// Whether the 1 kHz tick runs.
+static TICKING: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug)]
 pub struct TimerInfo {
@@ -190,11 +192,24 @@ impl fmt::Display for TimerInfo {
     }
 }
 
-/// Finds the TSC frequency, masks the legacy PIC, starts the LAPIC timer at
+/// Masks the legacy PIC, finds the TSC frequency, starts the LAPIC timer at
 /// `TICK_HZ` and enables interrupts. `hpet` is the HPET base from ACPI;
 /// `force_hpet` (cmdline `tsc=hpet`) measures against it even when CPUID
 /// has the frequency.
 pub fn init(hpet: Option<u64>, force_hpet: bool) -> Result<TimerInfo, TimerError> {
+    init_on(&mut pic::RealPorts, hpet, force_hpet)
+}
+
+/// `init`, with the PIC's ports `io`. The PIC is masked before anything can
+/// fail: an unmasked PIC delivers its IRQs on the firmware's vectors (0x08
+/// is the double fault's) as soon as anything enables interrupts, and the
+/// first system call does.
+fn init_on(
+    io: &mut impl pic::PortOut,
+    hpet: Option<u64>,
+    force_hpet: bool,
+) -> Result<TimerInfo, TimerError> {
+    pic::remap_and_mask(io, irq::PIC_BASE);
     let (tsc_hz, source) = match cpuid_tsc() {
         Some(found) if !force_hpet => found,
         _ => {
@@ -204,7 +219,6 @@ pub fn init(hpet: Option<u64>, force_hpet: bool) -> Result<TimerInfo, TimerError
     };
     TSC_HZ.store(tsc_hz, Ordering::Relaxed);
 
-    pic::remap_and_mask(&mut pic::RealPorts, irq::PIC_BASE);
     let mode = Lapic::detect();
     let mmio = match mode {
         Mode::XApic { phys } => mm::map_mmio(phys, 0x1000, Cache::Uncached)? as usize,
@@ -220,11 +234,27 @@ pub fn init(hpet: Option<u64>, force_hpet: bool) -> Result<TimerInfo, TimerError
         lapic::periodic_count(timer_hz, TICK_HZ),
     );
     x86_64::instructions::interrupts::enable();
+    TICKING.store(true, Ordering::Relaxed);
     Ok(TimerInfo {
         tsc_hz,
         source,
         lapic_mode: mode,
     })
+}
+
+/// Whether the 1 kHz tick runs (`init` succeeded).
+pub fn is_ticking() -> bool {
+    TICKING.load(Ordering::Relaxed)
+}
+
+/// The tick a sleep of `ms` milliseconds that starts at tick `now` ends on:
+/// the ticks `ms` takes, rounded up, and one more, since the next tick may
+/// come right after `now`. So a sleep is never shorter than asked.
+pub fn sleep_until(now: u64, ms: u64) -> u64 {
+    let ticks = ms
+        .checked_mul(TICK_HZ)
+        .map_or(u64::MAX, |t| t.div_ceil(1000));
+    now.saturating_add(ticks).saturating_add(1)
 }
 
 /// Timer ticks since the timer started (1 per millisecond).
@@ -309,6 +339,38 @@ pub fn count_ticks_over(seconds: u64, mut clock: impl FnMut() -> u8) -> Option<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct Ports(Vec<(u16, u8)>);
+
+    impl pic::PortOut for Ports {
+        fn outb(&mut self, port: u16, value: u8) {
+            self.0.push((port, value));
+        }
+    }
+
+    #[test]
+    fn the_pic_is_masked_even_when_the_timer_cannot_start() {
+        // No HPET to measure against, as on a machine whose ACPI tables
+        // lack one: `init` fails before it touches the LAPIC.
+        let mut io = Ports::default();
+        assert!(matches!(
+            init_on(&mut io, None, true),
+            Err(TimerError::NoSource)
+        ));
+        assert!(io.0.contains(&(pic::MASTER_DATA, 0xFF)), "master masked");
+        assert!(io.0.contains(&(pic::SLAVE_DATA, 0xFF)), "slave masked");
+    }
+
+    #[test]
+    fn a_sleep_is_never_shorter_than_asked() {
+        // At tick 100 the next tick may come at once: 1 ms needs 2 more.
+        assert_eq!(sleep_until(100, 1), 102);
+        assert_eq!(sleep_until(100, 20), 121);
+        assert_eq!(sleep_until(0, 0), 1);
+        assert_eq!(sleep_until(u64::MAX - 5, 10), u64::MAX, "no overflow");
+        assert_eq!(sleep_until(7, u64::MAX), u64::MAX);
+    }
 
     #[test]
     fn tsc_cycles_become_time() {

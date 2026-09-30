@@ -1,22 +1,29 @@
 //! The system-call dispatcher (user-space gate §7), architecture-neutral:
 //! the `arch` entry stub hands it the call number and the six arguments,
 //! and it answers with the result register's value or with the program's
-//! exit. Plan 2 of milestone 2 serves `exit` and `write` to fds 1 and 2;
+//! exit. It serves `exit`, `write` to fds 1 and 2, `time` and `sleep`;
 //! every other call is `ENOSYS` until the plan that brings it.
 
 use crate::mm::paging::PAGE;
 use crate::mm::user::UserSlice;
-use relay_abi::{Call, encode};
+use relay_abi::{Call, Time, encode};
 use vfs::Errno;
 
-/// What the dispatcher needs of the program that called: its memory and
-/// where its output goes.
+/// What the dispatcher needs of the program that called: its memory,
+/// where its output goes, and the kernel's services.
 pub trait Caller {
     /// Copies `buf.len()` bytes from `offset` into `slice`; `EFAULT` if
     /// they are not all the program's.
     fn read(&mut self, slice: &UserSlice, offset: u64, buf: &mut [u8]) -> Result<(), Errno>;
+    /// Copies `bytes` into `slice` from `offset`; `EFAULT`, and nothing
+    /// written, if they are not all the program's and writable.
+    fn write(&mut self, slice: &UserSlice, offset: u64, bytes: &[u8]) -> Result<(), Errno>;
     /// What the program wrote to fd 1 or 2.
     fn output(&mut self, fd: u32, bytes: &[u8]);
+    /// The wall clock and the uptime.
+    fn time(&self) -> Time;
+    /// Blocks the program for `ms` milliseconds.
+    fn sleep(&mut self, ms: u64);
 }
 
 /// How a call ends.
@@ -33,6 +40,11 @@ pub fn dispatch(caller: &mut impl Caller, number: u64, args: [u64; 6]) -> Outcom
     let result = match Call::from_number(number) {
         Some(Call::Exit) => return Outcome::Exit(args[0] as u8),
         Some(Call::Write) => write(caller, args[0], args[1], args[2]),
+        Some(Call::Time) => time(caller, args[0]),
+        Some(Call::Sleep) => {
+            caller.sleep(args[0]);
+            Ok(0)
+        }
         _ => Err(Errno::ENOSYS),
     };
     Outcome::Return(encode(result.map_err(Errno::number)))
@@ -63,6 +75,16 @@ fn write(caller: &mut impl Caller, fd: u64, addr: u64, len: u64) -> Result<u64, 
     Ok(done)
 }
 
+/// `time(&mut Time)` (spec §7.3).
+fn time(caller: &mut impl Caller, addr: u64) -> Result<u64, Errno> {
+    let t = caller.time();
+    let mut bytes = [0u8; size_of::<Time>()];
+    bytes[..8].copy_from_slice(&t.unix_seconds.to_ne_bytes());
+    bytes[8..].copy_from_slice(&t.uptime_ns.to_ne_bytes());
+    caller.write(&UserSlice::new(addr, bytes.len() as u64)?, 0, &bytes)?;
+    Ok(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,22 +95,42 @@ mod tests {
 
     const U: u64 = 0x40_0000;
 
-    /// A program with three readable pages at `U` holding a pattern, and
-    /// nothing after them; what it wrote.
+    /// A program with three readable pages at `U` holding a pattern, a
+    /// writable page after them and nothing after that; what it wrote, and
+    /// how long it slept.
     struct Fake {
         mem: FakeMem,
         space: AddressSpace,
         written: Vec<(u32, Vec<u8>)>,
+        slept: Vec<u64>,
     }
+
+    /// What the fake clock says.
+    const NOW: Time = Time {
+        unix_seconds: 1_790_000_000,
+        uptime_ns: 12_345_678_901,
+    };
 
     impl Caller for Fake {
         fn read(&mut self, slice: &UserSlice, offset: u64, buf: &mut [u8]) -> Result<(), Errno> {
             slice.read(&self.space, &mut self.mem, offset, buf)
         }
+        fn write(&mut self, slice: &UserSlice, offset: u64, bytes: &[u8]) -> Result<(), Errno> {
+            slice.write(&self.space, &mut self.mem, offset, bytes)
+        }
         fn output(&mut self, fd: u32, bytes: &[u8]) {
             self.written.push((fd, bytes.to_vec()));
         }
+        fn time(&self) -> Time {
+            NOW
+        }
+        fn sleep(&mut self, ms: u64) {
+            self.slept.push(ms);
+        }
     }
+
+    /// The writable page.
+    const W: u64 = U + 3 * PAGE;
 
     fn fake() -> Fake {
         let mut mem = FakeMem::new();
@@ -98,10 +140,12 @@ mod tests {
         space.map_zeroed(&mut mem, U, 3, Perm::Read).unwrap();
         let pattern: Vec<u8> = (0..3 * PAGE).map(|i| (i % 251) as u8).collect();
         space.fill(&mut mem, U, &pattern).unwrap();
+        space.map_zeroed(&mut mem, W, 1, Perm::ReadWrite).unwrap();
         Fake {
             mem,
             space,
             written: Vec::new(),
+            slept: Vec::new(),
         }
     }
 
@@ -168,7 +212,7 @@ mod tests {
     #[test]
     fn a_bad_buffer_is_efault_or_a_short_write() {
         let mut f = fake();
-        let end = U + 3 * PAGE;
+        let end = U + 4 * PAGE;
         assert_eq!(
             call(&mut f, Call::Write, [1, 0, 1]),
             Err(errno::EFAULT),
@@ -187,8 +231,9 @@ mod tests {
         assert!(f.written.is_empty());
         // Every byte before the hole is written, as on Linux.
         assert_eq!(call(&mut f, Call::Write, [1, end - 5000, 9000]), Ok(5000));
-        let want: Vec<u8> = (3 * PAGE - 5000..3 * PAGE)
+        let want: Vec<u8> = (4 * PAGE - 5000..3 * PAGE)
             .map(|i| (i % 251) as u8)
+            .chain([0; PAGE as usize])
             .collect();
         assert_eq!(text(&f, 1), want);
         f.written.clear();
@@ -201,10 +246,38 @@ mod tests {
     }
 
     #[test]
+    fn time_fills_in_the_clock_s_answer() {
+        let mut f = fake();
+        assert_eq!(call(&mut f, Call::Time, [W + 8, 0, 0]), Ok(0));
+        let mut buf = [0u8; 16];
+        UserSlice::new(W + 8, 16)
+            .unwrap()
+            .read(&f.space, &mut f.mem, 0, &mut buf)
+            .unwrap();
+        assert_eq!(buf[..8], NOW.unix_seconds.to_ne_bytes());
+        assert_eq!(buf[8..], NOW.uptime_ns.to_ne_bytes());
+        for bad in [0, U, W + PAGE - 8, u64::MAX - 4] {
+            assert_eq!(
+                call(&mut f, Call::Time, [bad, 0, 0]),
+                Err(errno::EFAULT),
+                "{bad:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn sleep_blocks_for_what_it_is_asked() {
+        let mut f = fake();
+        assert_eq!(call(&mut f, Call::Sleep, [250, 0, 0]), Ok(0));
+        assert_eq!(call(&mut f, Call::Sleep, [0, 0, 0]), Ok(0));
+        assert_eq!(f.slept, [250, 0]);
+    }
+
+    #[test]
     fn every_other_call_is_enosys() {
         let mut f = fake();
         for c in Call::ALL {
-            if c != Call::Exit && c != Call::Write {
+            if ![Call::Exit, Call::Write, Call::Time, Call::Sleep].contains(&c) {
                 assert_eq!(call(&mut f, c, [1, U, 1]), Err(errno::ENOSYS), "{c:?}");
             }
         }

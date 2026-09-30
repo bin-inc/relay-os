@@ -119,6 +119,12 @@ pub fn heap_room() -> usize {
     HEAP.stats().largest_free.saturating_sub(HEAP_MARGIN)
 }
 
+/// Whether the memory manager is locked now (for the kernel's checks that
+/// no lock is held across a switch).
+pub fn is_locked() -> bool {
+    MEMORY.is_locked()
+}
+
 /// The kernel's own page tables, for CR3 when no program runs.
 pub fn kernel_pml4() -> u64 {
     MEMORY

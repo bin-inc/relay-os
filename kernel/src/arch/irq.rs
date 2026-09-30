@@ -6,8 +6,11 @@
 //! Vectors: 32-47 the (masked) legacy PIC, 48 the LAPIC timer, 255 the LAPIC
 //! spurious vector. Every other vector from 32 up has a gate too: an
 //! interrupt the firmware left pending costs a count and an EOI instead of a
-//! fault, and one that keeps firing (a source nobody masked) panics as an
-//! interrupt storm, naming its vector.
+//! fault, and one that keeps firing (a source nobody masked, [`STORM_LIMIT`]
+//! times within a second) panics as an interrupt storm, naming its vector.
+//! Whatever the vector, the LAPIC gets an EOI when it delivered it (its
+//! in-service bit is set), so a source the firmware routed through the
+//! LAPIC onto 32-47 does not block every vector below it.
 
 use super::idt::ExceptionFrame;
 use core::arch::naked_asm;
@@ -18,8 +21,11 @@ pub const FIRST_VECTOR: u8 = 32;
 pub const PIC_BASE: u8 = 32;
 pub const TIMER_VECTOR: u8 = 48;
 pub const SPURIOUS_VECTOR: u8 = 255;
-/// An unexpected vector that fires this often has a live source.
+/// An unexpected vector that fires this often within [`STORM_WINDOW`] ticks
+/// has a live source.
 pub const STORM_LIMIT: u32 = 1000;
+/// Timer ticks (a second) in which `STORM_LIMIT` interrupts are a storm.
+pub const STORM_WINDOW: u64 = 1000;
 /// Bytes per entry stub; each starts on a 16-byte boundary.
 const STUB_SIZE: u64 = 16;
 
@@ -37,6 +43,37 @@ pub enum Action {
     /// The LAPIC's spurious vector: no EOI.
     Spurious,
     Unexpected,
+}
+
+/// Which end-of-interrupt signals an interrupt needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Eoi {
+    pub lapic: bool,
+    pub pic_master: bool,
+}
+
+/// The EOIs for `action`, given whether the LAPIC has its vector in
+/// service. The timer is always the LAPIC's; the spurious vector never
+/// gets one.
+pub fn eoi_for(action: Action, in_service: bool) -> Eoi {
+    match action {
+        Action::Timer => Eoi {
+            lapic: true,
+            pic_master: false,
+        },
+        Action::Spurious => Eoi {
+            lapic: false,
+            pic_master: false,
+        },
+        Action::Legacy { eoi_master, .. } => Eoi {
+            lapic: in_service,
+            pic_master: eoi_master,
+        },
+        Action::Unexpected => Eoi {
+            lapic: in_service,
+            pic_master: false,
+        },
+    }
 }
 
 pub fn classify(vector: u8) -> Action {
@@ -58,39 +95,85 @@ pub fn classify(vector: u8) -> Action {
 pub static TICKS: AtomicU64 = AtomicU64::new(0);
 /// Spurious and legacy-PIC interrupts seen.
 pub static SPURIOUS: AtomicU64 = AtomicU64::new(0);
-/// Interrupts per vector that nothing handles.
-static UNEXPECTED: [AtomicU32; 256] = [const { AtomicU32::new(0) }; 256];
+/// Interrupts on a vector nothing handles, in the window that started at
+/// tick `since`.
+pub struct Storm {
+    since: AtomicU64,
+    count: AtomicU32,
+}
 
-/// Counts an interrupt on a vector nothing handles; true once that vector
-/// has fired `STORM_LIMIT` times.
-pub fn note_unexpected(counts: &[AtomicU32; 256], vector: u8) -> bool {
-    counts[vector as usize].fetch_add(1, Ordering::Relaxed) + 1 >= STORM_LIMIT
+impl Storm {
+    pub const fn new() -> Storm {
+        Storm {
+            since: AtomicU64::new(0),
+            count: AtomicU32::new(0),
+        }
+    }
+}
+
+impl Default for Storm {
+    fn default() -> Self {
+        Storm::new()
+    }
+}
+
+static UNEXPECTED: [Storm; 256] = [const { Storm::new() }; 256];
+
+/// Counts an interrupt on a vector nothing handles at tick `now`; true once
+/// that vector has fired `STORM_LIMIT` times within `STORM_WINDOW` ticks.
+/// An older window starts again: a stray interrupt now and then over days
+/// is no storm.
+pub fn note_unexpected(storms: &[Storm; 256], vector: u8, now: u64) -> bool {
+    let s = &storms[vector as usize];
+    if now.saturating_sub(s.since.load(Ordering::Relaxed)) >= STORM_WINDOW {
+        s.since.store(now, Ordering::Relaxed);
+        s.count.store(0, Ordering::Relaxed);
+    }
+    s.count.fetch_add(1, Ordering::Relaxed) + 1 >= STORM_LIMIT
 }
 
 extern "C" fn dispatch(frame: &ExceptionFrame) {
-    match classify(frame.vector as u8) {
+    debug_assert!(
+        super::user::gs_is_kernel(),
+        "an interrupt with the program's gs"
+    );
+    debug_assert!(
+        super::user::flags_are_kernel(),
+        "an interrupt with the program's flags"
+    );
+    let vector = frame.vector as u8;
+    let action = classify(vector);
+    match action {
         Action::Timer => {
             TICKS.fetch_add(1, Ordering::Relaxed);
-            super::lapic::eoi();
         }
-        Action::Legacy { eoi_master, .. } => {
-            SPURIOUS.fetch_add(1, Ordering::Relaxed);
-            if eoi_master {
-                super::pic::eoi_master(&mut super::pic::RealPorts);
-            }
-        }
-        Action::Spurious => {
+        Action::Legacy { .. } | Action::Spurious => {
             SPURIOUS.fetch_add(1, Ordering::Relaxed);
         }
         Action::Unexpected => {
-            let vector = frame.vector as u8;
-            if note_unexpected(&UNEXPECTED, vector) {
+            if note_unexpected(&UNEXPECTED, vector, TICKS.load(Ordering::Relaxed)) {
                 panic!(
-                    "interrupt storm: vector {vector} fired {STORM_LIMIT} times and nothing handles it"
+                    "interrupt storm: vector {vector} fired {STORM_LIMIT} times in a second and nothing handles it"
                 );
             }
-            // Only LAPIC-delivered sources can raise these vectors.
-            super::lapic::eoi();
+        }
+    }
+    let in_service = action != Action::Timer
+        && action != Action::Spurious
+        && super::lapic::vector_in_service(vector);
+    let eoi = eoi_for(action, in_service);
+    if eoi.pic_master {
+        super::pic::eoi_master(&mut super::pic::RealPorts);
+    }
+    if eoi.lapic {
+        super::lapic::eoi();
+    }
+    // After the EOI: a tick may switch to another process.
+    if action == Action::Timer {
+        if frame.cs & 3 == 3 {
+            crate::proc::user_tick();
+        } else {
+            crate::proc::kernel_tick();
         }
     }
 }
@@ -136,10 +219,22 @@ pub fn stub(vector: u8) -> u64 {
 
 /// Saves the registers in `ExceptionFrame` layout (the stub pushed a zero
 /// error code and the vector), calls `dispatch` on a 16-byte aligned stack,
-/// restores everything and returns from the interrupt.
+/// restores everything and returns from the interrupt. An interrupt of
+/// ring 3 swaps to the kernel's `gs` and loads the kernel's flags first,
+/// and swaps back last (see `user`); `iretq` gives the program its flags
+/// back.
 #[unsafe(naked)]
 unsafe extern "C" fn irq_common() {
     naked_asm!(
+        // The interrupted CS, above the vector, the error code and RIP.
+        "test qword ptr [rsp + 24], 3",
+        "jz 2f",
+        "swapgs",
+        // The kernel's flags (bit 1 only): nothing the program set, AC
+        // above all (it would switch SMAP off), reaches the handler.
+        "push 2",
+        "popfq",
+        "2:",
         "push rax", "push rbx", "push rcx", "push rdx", "push rsi", "push rdi", "push rbp",
         "push r8", "push r9", "push r10", "push r11", "push r12", "push r13", "push r14", "push r15",
         "mov rdi, rsp",
@@ -151,6 +246,10 @@ unsafe extern "C" fn irq_common() {
         "pop r15", "pop r14", "pop r13", "pop r12", "pop r11", "pop r10", "pop r9", "pop r8",
         "pop rbp", "pop rdi", "pop rsi", "pop rdx", "pop rcx", "pop rbx", "pop rax",
         "add rsp, 16",
+        "test qword ptr [rsp + 8], 3",
+        "jz 3f",
+        "swapgs",
+        "3:",
         "iretq",
         dispatch = sym dispatch,
     )
@@ -207,11 +306,71 @@ mod tests {
 
     #[test]
     fn an_unexpected_vector_is_a_storm_at_the_limit() {
-        let counts = [const { AtomicU32::new(0) }; 256];
+        let storms = [const { Storm::new() }; 256];
         for _ in 1..STORM_LIMIT {
-            assert!(!note_unexpected(&counts, 100));
+            assert!(!note_unexpected(&storms, 100, 5));
         }
-        assert!(note_unexpected(&counts, 100));
-        assert!(!note_unexpected(&counts, 101), "counted per vector");
+        assert!(note_unexpected(&storms, 100, 999));
+        assert!(!note_unexpected(&storms, 101, 999), "counted per vector");
+    }
+
+    #[test]
+    fn a_stray_interrupt_now_and_then_is_no_storm() {
+        let storms = [const { Storm::new() }; 256];
+        // Fewer than the limit in each second, for a long time.
+        for second in 0..10 {
+            for _ in 1..STORM_LIMIT {
+                assert!(!note_unexpected(&storms, 60, second * STORM_WINDOW + 7));
+            }
+        }
+        // The limit within one second is a storm, whenever it comes.
+        for _ in 1..STORM_LIMIT {
+            note_unexpected(&storms, 61, 50_000);
+        }
+        assert!(note_unexpected(&storms, 61, 50_000 + STORM_WINDOW - 1));
+    }
+
+    #[test]
+    fn the_lapic_gets_an_eoi_for_whatever_it_delivered() {
+        let lapic = |a| eoi_for(a, true);
+        let legacy = |irq| Action::Legacy {
+            irq,
+            eoi_master: irq == 15,
+        };
+        // A LAPIC-delivered source on the PIC's vectors.
+        assert!(lapic(legacy(3)).lapic);
+        assert!(!eoi_for(legacy(3), false).lapic, "a spurious PIC IRQ");
+        assert_eq!(
+            eoi_for(legacy(15), false),
+            Eoi {
+                lapic: false,
+                pic_master: true
+            }
+        );
+        assert!(lapic(Action::Unexpected).lapic);
+        assert!(!eoi_for(Action::Unexpected, false).lapic);
+        assert!(eoi_for(Action::Timer, false).lapic);
+        assert!(!lapic(Action::Spurious).lapic);
+        assert!(!lapic(Action::Timer).pic_master);
+    }
+
+    /// `test qword ptr [rsp + 24], 3; jz +6; swapgs; push 2; popfq`: from
+    /// ring 3, to the kernel's `gs` and flags.
+    const FROM_RING_3: [u8; 17] = [
+        0x48, 0xF7, 0x44, 0x24, 0x18, 0x03, 0x00, 0x00, 0x00, 0x74, 0x06, 0x0F, 0x01, 0xF8, 0x6A,
+        0x02, 0x9D,
+    ];
+
+    #[test]
+    fn an_interrupt_of_ring_3_gets_the_kernel_s_gs_and_flags() {
+        // SAFETY: reads the kernel's own code.
+        let code = unsafe { *(irq_common as *const [u8; 128]) };
+        assert_eq!(code[..17], FROM_RING_3, "first thing");
+        // Before `iretq`: `test qword ptr [rsp + 8], 3; jz +3; swapgs`.
+        let back = [
+            0x48, 0xF7, 0x44, 0x24, 0x08, 0x03, 0x00, 0x00, 0x00, 0x74, 0x03, 0x0F, 0x01, 0xF8,
+            0x48, 0xCF,
+        ];
+        assert!(code.windows(back.len()).any(|w| w == back), "last thing");
     }
 }
