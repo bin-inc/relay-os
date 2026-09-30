@@ -65,6 +65,10 @@ pub trait Caller {
     fn with_vfs<R>(&mut self, f: impl FnOnce(&mut dyn Vfs) -> R) -> R;
     /// The most bytes the kernel's heap may give one allocation now.
     fn heap_room(&self) -> usize;
+    /// Maps `pages` fresh pages in the `mem_map` area; their address.
+    fn mem_map(&mut self, pages: u64) -> Result<u64, Errno>;
+    /// Gives back `pages` pages from `addr`, which `mem_map` gave.
+    fn mem_unmap(&mut self, addr: u64, pages: u64) -> Result<(), Errno>;
     /// Writes `bytes` to the screen.
     fn console_write(&mut self, bytes: &[u8]);
     /// Writes `bytes` to `file`, output `n` of the in-kernel shell (1 or
@@ -103,6 +107,8 @@ pub fn dispatch(caller: &mut impl Caller, number: u64, args: [u64; 6]) -> Outcom
         Some(Call::Wait) => wait(caller, args[0] as i64, args[1], args[2]),
         Some(Call::Kill) => caller.kill(args[0] as i64).map(|()| 0),
         Some(Call::Getpid) => Ok(u64::from(caller.pid())),
+        Some(Call::MemMap) => mem_map(caller, args[0]),
+        Some(Call::MemUnmap) => mem_unmap(caller, args[0], args[1]),
         Some(Call::Open) => files::open(caller, args[0], args[1], args[2]),
         Some(Call::Close) => files::close(caller, args[0]),
         Some(Call::Read) => files::read(caller, args[0], args[1], args[2]),
@@ -252,6 +258,25 @@ fn write_to(caller: &mut impl Caller, file: &Arc<File>, bytes: &[u8]) -> Result<
         File::ShellOutput(n) => caller.shell_output(file, *n, bytes).map(|()| bytes.len()),
         File::Vfs(open) => caller.with_vfs(|v| open.write(v, bytes)),
     }
+}
+
+/// `mem_map(length)` (spec §7.3): fresh zeroed read-write pages, the
+/// length rounded up to whole pages; their address. `EINVAL` for nothing,
+/// `ENOMEM` when they do not fit or the frames would run too low.
+fn mem_map(caller: &mut impl Caller, len: u64) -> Result<u64, Errno> {
+    if len == 0 {
+        return Err(Errno::EINVAL);
+    }
+    caller.mem_map(len.div_ceil(PAGE))
+}
+
+/// `mem_unmap(address, length)` (spec §7.3): whole pages of earlier
+/// `mem_map`s, the length rounded up to pages; `EINVAL` otherwise.
+fn mem_unmap(caller: &mut impl Caller, addr: u64, len: u64) -> Result<u64, Errno> {
+    if len == 0 {
+        return Err(Errno::EINVAL);
+    }
+    caller.mem_unmap(addr, len.div_ceil(PAGE)).map(|()| 0)
 }
 
 /// `time(&mut Time)` (spec §7.3).
@@ -649,6 +674,57 @@ mod tests {
     }
 
     #[test]
+    fn mem_map_gives_whole_pages_and_mem_unmap_takes_them_back() {
+        use crate::mm::space::MAP_START;
+        let mut f = fake();
+        assert_eq!(
+            call(&mut f, Call::MemMap, [1, 0, 0]),
+            Ok(MAP_START),
+            "a page for a byte"
+        );
+        assert_eq!(
+            call(&mut f, Call::MemMap, [PAGE + 1, 0, 0]),
+            Ok(MAP_START + PAGE)
+        );
+        assert_eq!(f.space.maps(), [(MAP_START, 3)]);
+        assert_eq!(call(&mut f, Call::MemMap, [0, 0, 0]), Err(errno::EINVAL));
+        assert_eq!(
+            call(&mut f, Call::MemMap, [u64::MAX, 0, 0]),
+            Err(errno::ENOMEM)
+        );
+        f.room = 2;
+        assert_eq!(
+            call(&mut f, Call::MemMap, [3 * PAGE, 0, 0]),
+            Err(errno::ENOMEM),
+            "the reserve"
+        );
+        assert_eq!(
+            call(&mut f, Call::MemUnmap, [MAP_START + PAGE, 1, 0]),
+            Ok(0),
+            "a byte is its page"
+        );
+        assert_eq!(f.space.maps(), [(MAP_START, 1), (MAP_START + 2 * PAGE, 1)]);
+        assert_eq!(
+            call(&mut f, Call::MemUnmap, [MAP_START, 0, 0]),
+            Err(errno::EINVAL)
+        );
+        assert_eq!(
+            call(&mut f, Call::MemUnmap, [MAP_START + 1, 1, 0]),
+            Err(errno::EINVAL)
+        );
+        assert_eq!(
+            call(&mut f, Call::MemUnmap, [U, PAGE, 0]),
+            Err(errno::EINVAL),
+            "not mem_map's"
+        );
+        assert_eq!(
+            call(&mut f, Call::MemUnmap, [MAP_START, u64::MAX, 0]),
+            Err(errno::EINVAL)
+        );
+        assert_eq!(f.unmapped, [(MAP_START + PAGE, 1)], "flushed once");
+    }
+
+    #[test]
     fn every_other_call_is_enosys() {
         let mut f = fake();
         let served = [
@@ -657,6 +733,8 @@ mod tests {
             Call::Wait,
             Call::Kill,
             Call::Getpid,
+            Call::MemMap,
+            Call::MemUnmap,
             Call::Open,
             Call::Close,
             Call::Read,

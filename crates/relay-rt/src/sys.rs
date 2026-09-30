@@ -21,6 +21,21 @@ fn call(c: Call, args: &[u64]) -> Result<u64, u16> {
     decode(unsafe { syscall(c, a) })
 }
 
+/// Maps `len` bytes (rounded up to pages) of fresh zeroed memory; its
+/// address.
+pub fn mem_map(len: usize) -> Result<usize, u16> {
+    call(Call::MemMap, &[len as u64]).map(|a| a as usize)
+}
+
+/// Gives back `len` bytes (rounded up to pages) from `addr`, of memory
+/// `mem_map` gave.
+///
+/// # Safety
+/// Nothing may use that memory any more.
+pub unsafe fn mem_unmap(addr: usize, len: usize) -> Result<(), u16> {
+    call(Call::MemUnmap, &[addr as u64, len as u64]).map(|_| ())
+}
+
 /// Opens `path` with `relay_abi::file`'s `OPEN_*` flags: the new fd.
 pub fn open(path: &[u8], flags: u32) -> Result<u32, u16> {
     call(

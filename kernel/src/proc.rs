@@ -629,6 +629,32 @@ impl Caller for Current {
         mm::heap_room()
     }
 
+    fn mem_map(&mut self, pages: u64) -> Result<u64, Errno> {
+        let mut t = PROCS.lock();
+        let me = t.current();
+        let space = t
+            .get_mut(me)
+            .and_then(|p| p.res.space.as_mut())
+            .ok_or(Errno::ENOMEM)?;
+        mm::with_user_memory(|mem, _| {
+            let room = mem.room();
+            space.map_area(mem, pages, room)
+        })
+    }
+
+    fn mem_unmap(&mut self, addr: u64, pages: u64) -> Result<(), Errno> {
+        let mut t = PROCS.lock();
+        let me = t.current();
+        let space = t
+            .get_mut(me)
+            .and_then(|p| p.res.space.as_mut())
+            .ok_or(Errno::EINVAL)?;
+        mm::with_user_memory(|mem, _| space.unmap_area(mem, addr, pages))?;
+        // Its tables are the ones in CR3.
+        mm::flush_pages(addr, pages);
+        Ok(())
+    }
+
     fn console_write(&mut self, bytes: &[u8]) {
         console::write_output(bytes);
     }

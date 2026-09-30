@@ -45,6 +45,10 @@ pub struct Fake {
     pub vfs: MountTable,
     /// What `heap_room` says.
     pub heap_room: usize,
+    /// Frames `mem_map` may take.
+    pub room: u64,
+    /// What `mem_unmap` gave back (and the kernel would flush).
+    pub unmapped: Vec<(u64, u64)>,
     pub written: Vec<(u64, Vec<u8>)>,
     pub slept: Vec<u64>,
     pub spawned: Vec<Spawn>,
@@ -78,6 +82,14 @@ impl Caller for Fake {
     }
     fn heap_room(&self) -> usize {
         self.heap_room
+    }
+    fn mem_map(&mut self, pages: u64) -> Result<u64, Errno> {
+        self.space.map_area(&mut self.mem, pages, self.room)
+    }
+    fn mem_unmap(&mut self, addr: u64, pages: u64) -> Result<(), Errno> {
+        self.space.unmap_area(&mut self.mem, addr, pages)?;
+        self.unmapped.push((addr, pages));
+        Ok(())
     }
     fn console_write(&mut self, bytes: &[u8]) {
         self.written.push((0, bytes.to_vec()));
@@ -146,6 +158,8 @@ pub fn fake() -> Fake {
         fds,
         vfs: files(),
         heap_room: usize::MAX,
+        room: u64::MAX,
+        unmapped: Vec::new(),
         written: Vec::new(),
         slept: Vec::new(),
         spawned: Vec::new(),
