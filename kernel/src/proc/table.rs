@@ -172,6 +172,15 @@ impl<R> Table<R> {
         self.procs.iter_mut()
     }
 
+    /// Whether a process of group `pgid` still runs (or waits): the console
+    /// can be given to it. A group whose members are all zombies is none,
+    /// since nothing of it can read the console again.
+    pub fn has_group(&self, pgid: u32) -> bool {
+        self.procs
+            .iter()
+            .any(|p| p.pgid == pgid && !matches!(p.state, State::Zombie(_)))
+    }
+
     /// Whether another process can start: an entry is free, and a pid is
     /// left. `insert` refuses exactly when it is not.
     pub fn has_room(&self) -> bool {
@@ -709,5 +718,20 @@ mod tests {
             "and keeps how it ended"
         );
         assert_eq!(t.get(zombie).unwrap().killed, None);
+    }
+
+    #[test]
+    fn a_group_of_zombies_is_no_group_to_give_the_console() {
+        let mut t = table();
+        add(&mut t, 0, true);
+        let leader = add(&mut t, 1, true);
+        let other = add(&mut t, leader, false);
+        assert!(t.has_group(leader));
+        assert!(!t.has_group(99), "nobody's group");
+        assert!(!t.has_group(0));
+        t.end(leader, WaitStatus::exited(0));
+        assert!(t.has_group(leader), "one of it still runs");
+        t.end(other, WaitStatus::exited(0));
+        assert!(!t.has_group(leader), "only zombies are left of it");
     }
 }

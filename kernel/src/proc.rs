@@ -758,7 +758,7 @@ impl Caller for Current {
 
     fn console_foreground(&mut self, pgid: u32) -> Result<(), Errno> {
         let mut t = PROCS.lock();
-        if !t.iter().any(|p| p.pgid == pgid) {
+        if !t.has_group(pgid) {
             return Err(Errno::ESRCH);
         }
         tty::set_foreground(pgid);
