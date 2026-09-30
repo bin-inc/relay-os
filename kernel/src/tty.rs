@@ -64,12 +64,18 @@ pub fn read(buf: &mut [u8]) -> Option<usize> {
 
 /// The line discipline's echo, to the screen and the tees. It may come
 /// from a tick, where no file can be written: the tees keep it for the
-/// next write.
+/// next write or read of a process (`flush_due_tees`), up to a limit.
 fn output(echo: &[u8]) {
     if !echo.is_empty() {
         console::write_output(echo);
-        TEES.lock().add(echo);
+        TEES.lock().add_echo(echo);
     }
+}
+
+/// Writes the tees' copies that are due; for a process that reads the
+/// console, whose echo would otherwise wait for its next write.
+pub fn flush_due_tees() {
+    flush(&mut TEES.lock(), false);
 }
 
 /// The console's tees (spec §6.5).

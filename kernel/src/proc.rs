@@ -682,6 +682,7 @@ impl Caller for Current {
             }
             tty::poll();
             if let Some(n) = tty::read(buf) {
+                tty::flush_due_tees();
                 return Ok(n);
             }
             // Typing, a kill, or a change of foreground group or mode wakes

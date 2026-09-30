@@ -10,6 +10,8 @@
 //! - `t-tee gone`: a tee whose file is removed is gone: the sync's write
 //!   to it fails, its pop is `ENOENT`, and a new file that may have got its
 //!   inode gets nothing.
+//! - `t-tee typed`: reads lines from the console until `end`, writing
+//!   nothing: the tee gets their echo as they are read, 4 KiB at a time.
 //! - `t-tee full`, on a full disk: a tee that cannot be written is removed,
 //!   and its pop says `ENOSPC`.
 #![no_std]
@@ -30,8 +32,9 @@ fn main(args: Args) -> u8 {
         Some(b"end") => end(),
         Some(b"gone") => gone(),
         Some(b"full") => full(),
+        Some(b"typed") => typed(),
         _ => {
-            let _ = sys::write_all(2, b"usage: t-tee basic|end|gone|full\n");
+            let _ = sys::write_all(2, b"usage: t-tee basic|end|gone|typed|full\n");
             return 2;
         }
     };
@@ -177,4 +180,22 @@ fn full() -> Result<(), u16> {
     show_ok("pop", sys::console_tee_pop());
     sys::close(log)?;
     sys::unlink(b"t-tee.full")
+}
+
+fn typed() -> Result<(), u16> {
+    let log = create(b"t-tee.typed")?;
+    sys::console_tee_push(log)?;
+    let mut buf = [0u8; 4096];
+    for _ in 0..20 {
+        let n = sys::read(0, &mut buf)?;
+        if n == 0 || &buf[..n] == b"end\n" {
+            break;
+        }
+    }
+    // Nothing written, no sync: only the reads can have written the echo.
+    let written = size(b"t-tee.typed") >= 4096;
+    sys::console_tee_pop()?;
+    let _ = writeln!(Fd(1), "written as it was typed: {written}");
+    sys::close(log)?;
+    sys::unlink(b"t-tee.typed")
 }
