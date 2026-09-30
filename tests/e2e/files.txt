@@ -11,3 +11,20 @@ expect append: 5\nread what was appended: "more\\n"\nseek before the start: EINV
 expect the child read: "hello, "\nread after the child: "files"\nfds up to 31, then EMFILE\nroot@relay:~# $
 send cat t-files.tmp
 expect \nhello, files\nmore\nroot@relay:~# $
+# Directories and names: mkdir, read_dir a record at a time (in
+# name order, `/` after a directory), stat, truncate, touch, rename,
+# readlink, statfs, sync, unlink and rmdir.
+send t-files dir
+expect \nmkdir: ok\nmkdir again: EEXIST\nentries: \./ \.\./ a b sub/ \(5 calls\)\n
+expect read_dir at the end: 0\nread_dir of a file: ENOTDIR\nstat size: 3\ntruncate: ok\nstat size: 10\n
+expect touch: ok\ntouch a missing file: ENOENT\nrename: ok\nstat the old name: ENOENT\nreadlink of a file: EINVAL\n
+expect rmdir a full directory: ENOTEMPTY\nunlink a directory: EISDIR\nstatfs: some blocks, free ones among them true\n
+expect sync: ok\nrmdir: ok\nstat it: ENOENT\nroot@relay:~# $
+# A working directory of its own: chdir and getcwd, and a child's.
+send t-files cwd
+expect \ngetcwd: /root\ngetcwd into 3 bytes: ERANGE\nchdir: ok\ngetcwd: /root/t-files.c\nstat it from above: 4\n
+expect chdir to a file: ENOTDIR\nchdir to nothing: ENOENT\nmy working directory: /root/t-files.c\nmy working directory: /root\ngetcwd: /root\n
+send pwd
+expect \n/root\nroot@relay:~# $
+send ls t-files.c
+expect \nls: cannot access 't-files.c': No such file or directory\n

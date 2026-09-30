@@ -63,6 +63,8 @@ pub trait Caller {
     fn with_fds<R>(&mut self, f: impl FnOnce(&mut FdTable) -> R) -> R;
     /// Runs `f` with the files, from the program's current directory.
     fn with_vfs<R>(&mut self, f: impl FnOnce(&mut dyn Vfs) -> R) -> R;
+    /// The most bytes the kernel's heap may give one allocation now.
+    fn heap_room(&self) -> usize;
     /// Writes `bytes` to the screen.
     fn console_write(&mut self, bytes: &[u8]);
     /// Writes `bytes` to `file`, output `n` of the in-kernel shell (1 or
@@ -107,6 +109,19 @@ pub fn dispatch(caller: &mut impl Caller, number: u64, args: [u64; 6]) -> Outcom
         Some(Call::Write) => write(caller, args[0], args[1], args[2]),
         Some(Call::Seek) => files::seek(caller, args[0], args[1] as i64, args[2]),
         Some(Call::Fstat) => files::fstat(caller, args[0], args[1]),
+        Some(Call::Stat) => files::stat(caller, args[0], args[1], args[2], args[3]),
+        Some(Call::ReadDir) => files::read_dir(caller, args[0], args[1], args[2]),
+        Some(Call::Mkdir) => files::on_path(caller, args[0], args[1], |v, p| v.mkdir(p)),
+        Some(Call::Rmdir) => files::on_path(caller, args[0], args[1], |v, p| v.rmdir(p)),
+        Some(Call::Unlink) => files::on_path(caller, args[0], args[1], |v, p| v.unlink(p)),
+        Some(Call::Truncate) => files::truncate(caller, args[0], args[1], args[2]),
+        Some(Call::Touch) => files::on_path(caller, args[0], args[1], files::touch),
+        Some(Call::Readlink) => files::readlink(caller, args[0], args[1], args[2], args[3]),
+        Some(Call::Rename) => files::rename(caller, [args[0], args[1], args[2], args[3]]),
+        Some(Call::Statfs) => files::statfs(caller, args[0], args[1], args[2]),
+        Some(Call::Sync) => caller.with_vfs(|v| v.sync()).map(|()| 0),
+        Some(Call::Chdir) => files::on_path(caller, args[0], args[1], |v, p| v.chdir(p)),
+        Some(Call::Getcwd) => files::getcwd(caller, args[0], args[1]),
         Some(Call::Time) => time(caller, args[0]),
         Some(Call::Sleep) => {
             caller.sleep(args[0]);
@@ -648,6 +663,19 @@ mod tests {
             Call::Write,
             Call::Seek,
             Call::Fstat,
+            Call::Stat,
+            Call::ReadDir,
+            Call::Mkdir,
+            Call::Rmdir,
+            Call::Unlink,
+            Call::Truncate,
+            Call::Touch,
+            Call::Readlink,
+            Call::Rename,
+            Call::Statfs,
+            Call::Sync,
+            Call::Chdir,
+            Call::Getcwd,
             Call::Time,
             Call::Sleep,
             Call::SysInfo,

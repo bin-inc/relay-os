@@ -43,6 +43,8 @@ pub struct Fake {
     pub space: AddressSpace,
     pub fds: FdTable,
     pub vfs: MountTable,
+    /// What `heap_room` says.
+    pub heap_room: usize,
     pub written: Vec<(u64, Vec<u8>)>,
     pub slept: Vec<u64>,
     pub spawned: Vec<Spawn>,
@@ -73,6 +75,9 @@ impl Caller for Fake {
     }
     fn with_vfs<R>(&mut self, f: impl FnOnce(&mut dyn Vfs) -> R) -> R {
         f(&mut self.vfs)
+    }
+    fn heap_room(&self) -> usize {
+        self.heap_room
     }
     fn console_write(&mut self, bytes: &[u8]) {
         self.written.push((0, bytes.to_vec()));
@@ -140,6 +145,7 @@ pub fn fake() -> Fake {
         space,
         fds,
         vfs: files(),
+        heap_room: usize::MAX,
         written: Vec::new(),
         slept: Vec::new(),
         spawned: Vec::new(),
@@ -191,14 +197,16 @@ impl Env for Clock {
     fn log(&self, _: &str) {}
 }
 
-/// `/root/f` holding "hello", with `/root` the current directory, and a
-/// filesystem at `/full` with room for `FULL_BYTES`.
+/// `/root/f` holding "hello" and `/root/link` to it, with `/root` the
+/// current directory, and a filesystem at `/full` with room for
+/// `FULL_BYTES`.
 fn files() -> MountTable {
     let mut fs = MemFs::new(Box::new(Clock));
     let root = fs.root();
     let home = fs.mkdir(root, b"root").unwrap();
     let f = fs.create(home, b"f").unwrap();
     fs.write_at(f, 0, b"hello").unwrap();
+    fs.symlink(home, b"link", b"f").unwrap();
     let mut t = MountTable::new(Box::new(fs));
     let full = MemFs::new(Box::new(Clock)).with_capacity(FULL_BYTES);
     t.mount(b"/full", Box::new(full)).unwrap();

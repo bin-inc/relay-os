@@ -609,6 +609,10 @@ impl Caller for Current {
         f(&mut KernelVfs)
     }
 
+    fn heap_room(&self) -> usize {
+        mm::heap_room()
+    }
+
     fn console_write(&mut self, bytes: &[u8]) {
         console::write_output(bytes);
     }

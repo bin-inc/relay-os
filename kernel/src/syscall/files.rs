@@ -8,8 +8,9 @@ use crate::mm::paging::PAGE;
 use crate::mm::user::{UserSlice, UserStr};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use relay_abi::file::{KIND_CHAR_DEVICE, Stat};
-use vfs::Errno;
+use relay_abi::StatFs;
+use relay_abi::file::{KIND_CHAR_DEVICE, STAT_NOFOLLOW, Stat};
+use vfs::{Errno, Vfs};
 
 /// A path of the program's, copied in: at most 4096 bytes.
 pub(super) fn path(caller: &mut impl Caller, addr: u64, len: u64) -> Result<Vec<u8>, Errno> {
@@ -106,6 +107,144 @@ pub(super) fn fstat(caller: &mut impl Caller, fd: u64, addr: u64) -> Result<u64,
     };
     caller.write(&slice, 0, &stat.to_bytes())?;
     Ok(0)
+}
+
+/// `read_dir`'s records are made in a buffer of at most this, and copied
+/// out whole.
+const READ_DIR_MAX: u64 = 64 * 1024;
+
+/// `stat(path, length, flags, &mut Stat)`. Symbolic links are never
+/// followed (milestone 1), so a link's status is its own with
+/// `STAT_NOFOLLOW` or without.
+pub(super) fn stat(
+    caller: &mut impl Caller,
+    addr: u64,
+    len: u64,
+    flags: u64,
+    out: u64,
+) -> Result<u64, Errno> {
+    if flags & !u64::from(STAT_NOFOLLOW) != 0 {
+        return Err(Errno::EINVAL);
+    }
+    let path = path(caller, addr, len)?;
+    let slice = UserSlice::new(out, Stat::SIZE as u64)?;
+    let st = caller.with_vfs(|v| v.lookup(&path).and_then(|n| v.stat(n)))?;
+    caller.write(&slice, 0, &open_file::stat_of(&st).to_bytes())?;
+    Ok(0)
+}
+
+/// `read_dir(fd, buffer, length)`: the directory's next entries as
+/// `relay_abi::file` records, the bytes written; 0 after the last. The
+/// buffer is checked writable before anything is read, so no entry is
+/// lost to a bad one.
+pub(super) fn read_dir(
+    caller: &mut impl Caller,
+    fd: u64,
+    addr: u64,
+    len: u64,
+) -> Result<u64, Errno> {
+    let file = file(caller, fd)?;
+    let File::Vfs(open) = &*file else {
+        return Err(Errno::ENOTDIR);
+    };
+    let len = len.min(READ_DIR_MAX);
+    let slice = UserSlice::new(addr, len)?;
+    caller.writable(&slice)?;
+    let room = caller.heap_room();
+    let mut buf = alloc::vec![0u8; len as usize];
+    let n = caller.with_vfs(|v| open.read_dir(v, &mut buf, room))?;
+    caller.write(&slice, 0, &buf[..n])?;
+    Ok(n as u64)
+}
+
+/// A call on one path: `mkdir`, `rmdir`, `unlink`, `touch`, `chdir`.
+pub(super) fn on_path(
+    caller: &mut impl Caller,
+    addr: u64,
+    len: u64,
+    op: impl FnOnce(&mut dyn Vfs, &[u8]) -> Result<(), Errno>,
+) -> Result<u64, Errno> {
+    let path = path(caller, addr, len)?;
+    caller.with_vfs(|v| op(v, &path)).map(|()| 0)
+}
+
+/// `touch(path, length)`: the file's times set to now; `ENOENT` if it does
+/// not exist (a program creates files with `open`).
+pub(super) fn touch(v: &mut dyn Vfs, path: &[u8]) -> Result<(), Errno> {
+    let node = v.lookup(path)?;
+    v.touch(node)
+}
+
+/// `truncate(path, length, size)`.
+pub(super) fn truncate(
+    caller: &mut impl Caller,
+    addr: u64,
+    len: u64,
+    size: u64,
+) -> Result<u64, Errno> {
+    on_path(caller, addr, len, |v, path| {
+        let node = v.lookup(path)?;
+        v.truncate(node, size)
+    })
+}
+
+/// `readlink(path, length, buffer, buffer length)`: the link's target, cut
+/// at the buffer's length as on Linux; the bytes written.
+pub(super) fn readlink(
+    caller: &mut impl Caller,
+    addr: u64,
+    len: u64,
+    out: u64,
+    out_len: u64,
+) -> Result<u64, Errno> {
+    let path = path(caller, addr, len)?;
+    let slice = UserSlice::new(out, out_len)?;
+    let target = caller.with_vfs(|v| v.lookup(&path).and_then(|n| v.read_link(n)))?;
+    let n = target.len().min(out_len as usize);
+    caller.write(&slice, 0, &target[..n])?;
+    Ok(n as u64)
+}
+
+/// `rename(from, length, to, length)`.
+pub(super) fn rename(caller: &mut impl Caller, a: [u64; 4]) -> Result<u64, Errno> {
+    let from = path(caller, a[0], a[1])?;
+    let to = path(caller, a[2], a[3])?;
+    caller.with_vfs(|v| v.rename(&from, &to)).map(|()| 0)
+}
+
+/// `statfs(path, length, &mut StatFs)`: the filesystem holding the path.
+pub(super) fn statfs(
+    caller: &mut impl Caller,
+    addr: u64,
+    len: u64,
+    out: u64,
+) -> Result<u64, Errno> {
+    let path = path(caller, addr, len)?;
+    let slice = UserSlice::new(out, StatFs::SIZE as u64)?;
+    let f = caller.with_vfs(|v| v.statfs(&path))?;
+    let s = StatFs {
+        block_size: f.block_size,
+        blocks: f.blocks,
+        free_blocks: f.free_blocks,
+        avail_blocks: f.avail_blocks,
+        files: f.files,
+        free_files: f.free_files,
+    };
+    caller.write(&slice, 0, &s.to_bytes())?;
+    Ok(0)
+}
+
+/// `getcwd(buffer, length)`: the current directory's path, the bytes
+/// written; `ERANGE` if the buffer is too short. A directory that was
+/// removed keeps the path it had, as the in-kernel shell's `pwd` shows it.
+pub(super) fn getcwd(caller: &mut impl Caller, addr: u64, len: u64) -> Result<u64, Errno> {
+    let slice = UserSlice::new(addr, len)?;
+    let cwd = caller.with_vfs(|v| v.cwd());
+    if cwd.len() as u64 > len {
+        return Err(Errno::ERANGE);
+    }
+    caller.write(&slice, 0, &cwd)?;
+    Ok(cwd.len() as u64)
 }
 
 #[cfg(test)]
@@ -337,6 +476,214 @@ mod tests {
             Err(errno::EFAULT)
         );
         assert_eq!(call(&mut f, Call::Fstat, [9, W, 0]), Err(errno::EBADF));
+    }
+
+    /// Calls `c` on `path` (put at `W + 512`) and the other arguments.
+    fn on(f: &mut Fake, c: Call, path: &[u8], rest: [u64; 2]) -> Result<u64, u16> {
+        put(f, W + 512, path);
+        let args = [W + 512, path.len() as u64, rest[0], rest[1], 0, 0];
+        match super::super::dispatch(f, c.number(), args) {
+            super::super::Outcome::Return(r) => relay_abi::decode(r),
+            super::super::Outcome::Exit(_) => unreachable!(),
+        }
+    }
+
+    fn u64_at(b: &[u8], i: usize) -> u64 {
+        u64::from_ne_bytes(b[i..i + 8].try_into().unwrap())
+    }
+
+    #[test]
+    fn stat_names_a_file_by_its_path_and_never_follows_a_link() {
+        let mut f = fake();
+        assert_eq!(on(&mut f, Call::Stat, b"f", [0, W]), Ok(0));
+        assert_eq!(u64_at(&get(&mut f, W, 72), 8), 5, "its size");
+        assert_eq!(on(&mut f, Call::Stat, b"link", [0, W]), Ok(0));
+        assert_eq!(get(&mut f, W + 48, 1), [relay_abi::file::KIND_SYMLINK]);
+        let nofollow = u64::from(relay_abi::file::STAT_NOFOLLOW);
+        assert_eq!(on(&mut f, Call::Stat, b"link", [nofollow, W]), Ok(0));
+        assert_eq!(get(&mut f, W + 48, 1), [relay_abi::file::KIND_SYMLINK]);
+        assert_eq!(on(&mut f, Call::Stat, b"f", [2, W]), Err(errno::EINVAL));
+        assert_eq!(on(&mut f, Call::Stat, b"nope", [0, W]), Err(errno::ENOENT));
+        assert_eq!(on(&mut f, Call::Stat, b"f", [0, U]), Err(errno::EFAULT));
+    }
+
+    #[test]
+    fn read_dir_copies_out_records_and_goes_on_where_it_stopped() {
+        let mut f = fake();
+        let d = open(&mut f, b"/root", OPEN_READ).unwrap();
+        // Room for two records of short names.
+        let two = 2 * relay_abi::file::DirEntry::record_len(4) as u64;
+        let mut names = Vec::new();
+        for _ in 0..4 {
+            let n = call(&mut f, Call::ReadDir, [d, W, two]).unwrap();
+            let bytes = get(&mut f, W, n as usize);
+            names.extend(relay_abi::file::dir_entries(&bytes).map(|r| r.name.to_vec()));
+        }
+        assert_eq!(
+            names,
+            [
+                b".".to_vec(),
+                b"..".to_vec(),
+                b"f".to_vec(),
+                b"link".to_vec()
+            ]
+        );
+        call(&mut f, Call::Seek, [d, 0, 0]).unwrap();
+        // A bad buffer loses no entry.
+        assert_eq!(call(&mut f, Call::ReadDir, [d, U, two]), Err(errno::EFAULT));
+        assert_eq!(
+            call(&mut f, Call::ReadDir, [d, W + PAGE - 8, two]),
+            Err(errno::EFAULT)
+        );
+        let n = call(&mut f, Call::ReadDir, [d, W, two]).unwrap();
+        assert_eq!(
+            relay_abi::file::dir_entries(&get(&mut f, W, n as usize))
+                .next()
+                .unwrap()
+                .name,
+            b"."
+        );
+        assert_eq!(
+            call(&mut f, Call::ReadDir, [d, W, 8]),
+            Err(errno::EINVAL),
+            "not one fits"
+        );
+        let file = open(&mut f, b"f", OPEN_READ).unwrap();
+        assert_eq!(
+            call(&mut f, Call::ReadDir, [file, W, two]),
+            Err(errno::ENOTDIR)
+        );
+        assert_eq!(
+            call(&mut f, Call::ReadDir, [0, W, two]),
+            Err(errno::ENOTDIR),
+            "the console"
+        );
+        f.heap_room = 0;
+        assert_eq!(call(&mut f, Call::ReadDir, [d, W, two]), Err(errno::ENOMEM));
+        // A huge buffer is fine: records are made in 64 KiB at most.
+        f.heap_room = usize::MAX;
+        call(&mut f, Call::Seek, [d, 0, 0]).unwrap();
+        assert!(call(&mut f, Call::ReadDir, [d, W, PAGE]).unwrap() > 0);
+    }
+
+    #[test]
+    fn the_calls_on_a_path_do_what_their_vfs_operation_does() {
+        let mut f = fake();
+        assert_eq!(on(&mut f, Call::Mkdir, b"d", [0, 0]), Ok(0));
+        assert_eq!(on(&mut f, Call::Mkdir, b"d", [0, 0]), Err(errno::EEXIST));
+        assert_eq!(open(&mut f, b"d/x", OPEN_WRITE | OPEN_CREATE), Ok(3));
+        assert_eq!(on(&mut f, Call::Rmdir, b"d", [0, 0]), Err(errno::ENOTEMPTY));
+        assert_eq!(on(&mut f, Call::Truncate, b"d/x", [10, 0]), Ok(0));
+        assert_eq!(on(&mut f, Call::Stat, b"d/x", [0, W]), Ok(0));
+        assert_eq!(u64_at(&get(&mut f, W, 72), 8), 10);
+        assert_eq!(on(&mut f, Call::Touch, b"d/x", [0, 0]), Ok(0));
+        assert_eq!(
+            on(&mut f, Call::Touch, b"d/nope", [0, 0]),
+            Err(errno::ENOENT)
+        );
+        put(&mut f, W + 900, b"d/y");
+        assert_eq!(on(&mut f, Call::Rename, b"d/x", [W + 900, 3]), Ok(0));
+        assert_eq!(on(&mut f, Call::Unlink, b"d/x", [0, 0]), Err(errno::ENOENT));
+        assert_eq!(on(&mut f, Call::Unlink, b"d/y", [0, 0]), Ok(0));
+        assert_eq!(on(&mut f, Call::Unlink, b"d", [0, 0]), Err(errno::EISDIR));
+        assert_eq!(on(&mut f, Call::Rmdir, b"d", [0, 0]), Ok(0));
+        put(&mut f, W + 900, b"/full/f");
+        assert_eq!(
+            on(&mut f, Call::Rename, b"f", [W + 900, 7]),
+            Err(errno::EXDEV)
+        );
+        assert_eq!(on(&mut f, Call::Rename, b"f", [0, 7]), Err(errno::EFAULT));
+        assert_eq!(call(&mut f, Call::Sync, [0, 0, 0]), Ok(0));
+        for c in [
+            Call::Mkdir,
+            Call::Rmdir,
+            Call::Unlink,
+            Call::Touch,
+            Call::Chdir,
+        ] {
+            assert_eq!(
+                call(&mut f, c, [W, 4097, 0]),
+                Err(errno::ENAMETOOLONG),
+                "{c:?}"
+            );
+            assert_eq!(call(&mut f, c, [0, 1, 0]), Err(errno::EFAULT), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn readlink_gives_the_target_cut_at_the_buffer() {
+        let mut f = fake();
+        assert_eq!(on(&mut f, Call::Readlink, b"link", [W, 100]), Ok(1));
+        assert_eq!(get(&mut f, W, 1), b"f");
+        assert_eq!(on(&mut f, Call::Readlink, b"link", [W, 0]), Ok(0));
+        assert_eq!(
+            on(&mut f, Call::Readlink, b"f", [W, 100]),
+            Err(errno::EINVAL),
+            "not a link"
+        );
+        assert_eq!(
+            on(&mut f, Call::Readlink, b"link", [U, 100]),
+            Err(errno::EFAULT)
+        );
+    }
+
+    #[test]
+    fn statfs_fills_in_the_filesystem_s_figures() {
+        let mut f = fake();
+        assert_eq!(on(&mut f, Call::Statfs, b"/full", [W, 0]), Ok(0));
+        let b = get(&mut f, W, 48);
+        let want = vfs::Vfs::statfs(&mut f.vfs, b"/full").unwrap();
+        assert_eq!(
+            [
+                u64_at(&b, 0),
+                u64_at(&b, 8),
+                u64_at(&b, 16),
+                u64_at(&b, 24),
+                u64_at(&b, 32),
+                u64_at(&b, 40)
+            ],
+            [
+                want.block_size,
+                want.blocks,
+                want.free_blocks,
+                want.avail_blocks,
+                want.files,
+                want.free_files
+            ]
+        );
+        assert_eq!(
+            on(&mut f, Call::Statfs, b"/nope", [W, 0]),
+            Err(errno::ENOENT)
+        );
+        assert_eq!(
+            on(&mut f, Call::Statfs, b"/", [W + PAGE - 40, 0]),
+            Err(errno::EFAULT)
+        );
+    }
+
+    #[test]
+    fn chdir_and_getcwd() {
+        let mut f = fake();
+        assert_eq!(call(&mut f, Call::Getcwd, [W, 100, 0]), Ok(5));
+        assert_eq!(get(&mut f, W, 5), b"/root");
+        assert_eq!(call(&mut f, Call::Getcwd, [W, 4, 0]), Err(errno::ERANGE));
+        assert_eq!(call(&mut f, Call::Getcwd, [U, 100, 0]), Err(errno::EFAULT));
+        assert_eq!(on(&mut f, Call::Chdir, b"/full", [0, 0]), Ok(0));
+        assert_eq!(call(&mut f, Call::Getcwd, [W, 100, 0]), Ok(5));
+        assert_eq!(get(&mut f, W, 5), b"/full");
+        assert_eq!(
+            on(&mut f, Call::Chdir, b"/root/f", [0, 0]),
+            Err(errno::ENOTDIR)
+        );
+        assert_eq!(
+            on(&mut f, Call::Chdir, b"/nope", [0, 0]),
+            Err(errno::ENOENT)
+        );
+        assert_eq!(
+            open(&mut f, b"../root/f", OPEN_READ),
+            Ok(3),
+            "relative to /full"
+        );
     }
 
     #[test]
