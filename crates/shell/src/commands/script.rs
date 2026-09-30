@@ -6,7 +6,11 @@
 //! stop the script; Ctrl-C does. Everything the script shows on the screen,
 //! errors included, also goes into a transcript next to it (`x.sh` →
 //! `x.log`), written and synced as each line starts and ends, so it can be
-//! checked afterwards (`cargo xtask verify-usb`).
+//! checked afterwards (`cargo xtask verify-usb`). Under `/bin/sh` the
+//! transcript is a console tee, and a script may run another. A command of
+//! the script that redirects into the script's own transcript garbles it,
+//! as it would under bash: the redirection writes from the file's start,
+//! the transcript goes on where it was.
 
 use crate::ctx::{Ctx, getopt, quote, quote_if_needed};
 use alloc::format;

@@ -3,11 +3,12 @@
 //! (spec §7.3, §8.3; user-space gate §8.2).
 
 use crate::commands::{self, Script};
+use crate::ctx::Ctx;
 use crate::editor::{Feed, LineEditor};
-use crate::io::{Console, Programs, System};
+use crate::io::{Console, Programs, Stdout, System};
 use crate::parser::{self, HOME};
 use crate::runner::{self, Parts, Ran, Runners};
-use crate::transcript::Transcript;
+use crate::transcript::{self, Transcript};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -215,16 +216,63 @@ impl<'a> Shell<'a> {
         }
     }
 
+    /// Runs a script `sh` read, in this shell (the in-process runner): its
+    /// transcript is written by the shell. A script cannot run another.
+    fn run_script(&mut self, script: Script) -> i32 {
+        self.transcript = Some(Transcript::new(script.transcript, script.transcript_name));
+        let status = self.run_lines(&script.text);
+        self.write_transcript();
+        self.transcript = None;
+        status
+    }
+
+    /// `/bin/sh FILE`: runs the script `args` names (user-space gate §8.3)
+    /// as `sh` does, in a spawning shell (`Shell::spawning`), whose
+    /// commands then run in its process group. The transcript is a console
+    /// tee, so it gets the output of the script's programs and of any
+    /// script it runs (whose own transcript is pushed on top); a write
+    /// that failed is reported when the script ends. `stdout` is the
+    /// shell's fd 1: a script's output cannot be redirected.
+    pub fn run_file(&mut self, args: &[String], stdout: &mut dyn Stdout) -> i32 {
+        let Some(sh) = commands::find("sh") else {
+            unreachable!("sh is in the command table")
+        };
+        let mut ctx = Ctx::program(
+            &mut *self.vfs,
+            &mut *self.system,
+            &mut *self.console,
+            stdout,
+        );
+        let status = (sh.run)(&mut ctx, args);
+        let Some(script) = ctx.script.take() else {
+            return status;
+        };
+        let Some(programs) = self.runner.programs() else {
+            unreachable!("run_file needs a spawning shell")
+        };
+        let log = script.transcript_name;
+        if let Err(e) = programs.tee_push(log.as_bytes()) {
+            let shown = path::display(log.as_bytes());
+            let message = format!("sh: cannot write the transcript {shown}: {e}\n");
+            self.console.write(message.as_bytes());
+            return 1;
+        }
+        let status = self.run_lines(&script.text);
+        if let Some(Err(e)) = self.runner.programs().map(|p| p.tee_pop()) {
+            self.console.write(transcript::ended(&log, e).as_bytes());
+        }
+        status
+    }
+
     /// Runs a script's lines (spec §15 item 12): each command is shown as
     /// `+ <line>`, then runs and is synced as if typed. Blank and comment
     /// lines are skipped. Ctrl-C, `exit`, or `reboot`/`poweroff`
     /// returning, ends the script; failing commands do not. Returns the
     /// last status.
-    fn run_script(&mut self, script: Script) -> i32 {
+    fn run_lines(&mut self, text: &str) -> i32 {
         self.in_script = true;
-        self.transcript = Some(Transcript::new(script.transcript, script.transcript_name));
         let mut status = 0;
-        for line in script.text.lines() {
+        for line in text.lines() {
             if matches!(parser::parse(line), Ok(c) if c.words.is_empty() && c.redirect.is_none()) {
                 continue;
             }
@@ -244,8 +292,6 @@ impl<'a> Shell<'a> {
                 break;
             }
         }
-        self.write_transcript();
-        self.transcript = None;
         self.in_script = false;
         status
     }
@@ -270,7 +316,7 @@ impl<'a> Shell<'a> {
 #[cfg(test)]
 mod tests {
     use crate::Shell;
-    use crate::testing::{FakeProgram, Harness};
+    use crate::testing::{FakeProgram, FakeStdout, Harness};
     use alloc::string::String;
     use relay_abi::WaitStatus;
     use vfs::Errno;
@@ -531,6 +577,106 @@ mod tests {
                     .into()
             )
         );
+    }
+
+    /// `/bin/t-args` exits with 3 and `/bin/sh` with 0, for a spawning
+    /// shell.
+    fn spawning() -> Harness {
+        let mut h = Harness::new();
+        h.programs
+            .known
+            .push(("/bin/t-args", WaitStatus::exited(3)));
+        h.programs.known.push(("/bin/sh", WaitStatus::exited(0)));
+        h
+    }
+
+    #[test]
+    fn bin_sh_runs_a_script_s_commands_in_its_own_group_with_its_transcript_a_tee() {
+        let mut h = spawning();
+        h.put("/tmp/s.log", b"an old transcript");
+        h.put(
+            "/tmp/s.sh",
+            b"t-args a\n# a comment\ncd /etc\nnosuch\nt-args b\n",
+        );
+        let mut out = FakeStdout::console();
+        assert_eq!(
+            h.sh(&["/tmp/s.sh"], &mut out),
+            (
+                3,
+                "+ t-args a\n+ cd /etc\n+ nosuch\nrelay-sh: nosuch: command not found\n+ t-args b\n"
+                    .into()
+            )
+        );
+        assert!(
+            h.programs.spawned.iter().all(|s| !s.foreground),
+            "a script's commands run in its group, so Ctrl-C ends it with them"
+        );
+        assert_eq!(h.programs.pushed, ["/tmp/s.log"]);
+        assert!(h.programs.tees.is_empty(), "popped at the end");
+        assert_eq!(h.get("/tmp/s.log"), b"", "emptied; the tee writes it");
+        assert_eq!(h.run("pwd").1, "/etc\n", "the script's own directory");
+    }
+
+    #[test]
+    fn a_script_run_by_bin_sh_may_run_another() {
+        let mut h = spawning();
+        h.put("/tmp/s.sh", b"sh /tmp/t.sh\n");
+        let mut out = FakeStdout::console();
+        assert_eq!(
+            h.sh(&["/tmp/s.sh"], &mut out),
+            (0, "+ sh /tmp/t.sh\n".into())
+        );
+        assert_eq!(h.programs.spawned[0].path, "/bin/sh");
+        assert_eq!(h.programs.spawned[0].args, ["sh", "/tmp/t.sh"]);
+    }
+
+    #[test]
+    fn a_transcript_that_failed_is_reported_when_the_script_ends() {
+        let mut h = spawning();
+        h.put("/tmp/s.sh", b"t-args\nt-args\n");
+        h.programs.pop_error = Some(Errno::ENOSPC);
+        let mut out = FakeStdout::console();
+        assert_eq!(
+            h.sh(&["/tmp/s.sh"], &mut out),
+            (
+                3,
+                "+ t-args\n+ t-args\nsh: /tmp/s.log: No space left on device; the transcript ends here\n"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_transcript_that_cannot_be_pushed_runs_nothing() {
+        let mut h = spawning();
+        h.put("/tmp/s.sh", b"t-args\n");
+        h.programs.push_error = Some(Errno::EBUSY);
+        let mut out = FakeStdout::console();
+        assert_eq!(
+            h.sh(&["/tmp/s.sh"], &mut out),
+            (
+                1,
+                "sh: cannot write the transcript /tmp/s.log: Device or resource busy\n".into()
+            )
+        );
+        assert!(h.programs.spawned.is_empty());
+    }
+
+    #[test]
+    fn bin_sh_keeps_sh_s_rules() {
+        let mut h = spawning();
+        h.put("/tmp/s.sh", b"t-args\n");
+        let mut out = FakeStdout::file(None);
+        assert_eq!(
+            h.sh(&["/tmp/s.sh"], &mut out),
+            (1, "sh: a script's output cannot be redirected\n".into())
+        );
+        let mut out = FakeStdout::console();
+        assert_eq!(
+            h.sh(&["/tmp/nope.sh"], &mut out),
+            (1, "sh: /tmp/nope.sh: No such file or directory\n".into())
+        );
+        assert!(h.programs.spawned.is_empty() && h.programs.pushed.is_empty());
     }
 
     #[test]

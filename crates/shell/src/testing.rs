@@ -222,6 +222,14 @@ pub struct FakePrograms {
     pub spawned: Vec<Spawned>,
     /// The children started and not yet waited for, by pid.
     children: Vec<(u32, WaitStatus)>,
+    /// The tees pushed and not popped, by path.
+    pub tees: Vec<String>,
+    /// Every tee pushed.
+    pub pushed: Vec<String>,
+    /// What `tee_push` fails with, if anything.
+    pub push_error: Option<Errno>,
+    /// What the next `tee_pop` returns, as a failed write would.
+    pub pop_error: Option<Errno>,
     next_fd: u32,
     next_pid: u32,
 }
@@ -236,6 +244,10 @@ impl FakePrograms {
             closed: Vec::new(),
             spawned: Vec::new(),
             children: Vec::new(),
+            tees: Vec::new(),
+            pushed: Vec::new(),
+            push_error: None,
+            pop_error: None,
             next_fd: 3,
             next_pid: 100,
         }
@@ -287,6 +299,19 @@ impl Programs for FakePrograms {
             .position(|c| c.0 == pid)
             .ok_or(Errno::ECHILD)?;
         Ok(self.children.remove(i).1)
+    }
+    fn tee_push(&mut self, path: &[u8]) -> Result<(), Errno> {
+        if let Some(e) = self.push_error {
+            return Err(e);
+        }
+        let path = String::from_utf8_lossy(path).into_owned();
+        self.pushed.push(path.clone());
+        self.tees.push(path);
+        Ok(())
+    }
+    fn tee_pop(&mut self) -> Result<(), Errno> {
+        self.tees.pop().ok_or(Errno::EINVAL)?;
+        self.pop_error.take().map_or(Ok(()), Err)
     }
 }
 
@@ -555,6 +580,20 @@ impl Harness {
             &mut self.system,
             stdout,
         );
+        (status, self.console.take())
+    }
+
+    /// Runs `/bin/sh` with `args` (after argument 0), as a spawning shell
+    /// does, its fd 1 `stdout`; its status and what it printed.
+    pub fn sh(&mut self, args: &[&str], stdout: &mut FakeStdout) -> (i32, String) {
+        let args: Vec<String> = args.iter().map(|a| String::from(*a)).collect();
+        let status = Shell::spawning(
+            &mut self.vfs,
+            &mut self.console,
+            &mut self.system,
+            &mut self.programs,
+        )
+        .run_file(&args, stdout);
         (status, self.console.take())
     }
 

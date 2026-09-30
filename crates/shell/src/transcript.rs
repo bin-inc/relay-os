@@ -58,9 +58,14 @@ impl Transcript {
 
     /// What the screen says when a write failed; the transcript ends there.
     pub fn ended(&self, e: Errno) -> String {
-        let name = path::display(self.name.as_bytes());
-        format!("sh: {name}: {e}; the transcript ends here\n")
+        ended(&self.name, e)
     }
+}
+
+/// What the screen says when a write of the transcript `name` failed.
+pub fn ended(name: &str, e: Errno) -> String {
+    let name = path::display(name.as_bytes());
+    format!("sh: {name}: {e}; the transcript ends here\n")
 }
 
 #[cfg(test)]

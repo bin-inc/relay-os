@@ -110,4 +110,10 @@ pub trait Programs {
     ) -> Result<u32, Errno>;
     /// Waits for the child `pid` to end.
     fn wait(&mut self, pid: u32) -> Result<WaitStatus, Errno>;
+    /// Copies the console into the file at `path` from now on (a script's
+    /// transcript, spec §6.5), written at its end.
+    fn tee_push(&mut self, path: &[u8]) -> Result<(), Errno>;
+    /// Stops the copy `tee_push` started; the error of a write that failed
+    /// meanwhile, which ended the copying there.
+    fn tee_pop(&mut self) -> Result<(), Errno>;
 }

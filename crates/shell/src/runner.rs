@@ -82,6 +82,14 @@ impl Runners<'_> {
             Runners::Spawning(r) => r,
         }
     }
+
+    /// The spawning runner's programs, which push and pop tees.
+    pub fn programs(&mut self) -> Option<&mut dyn Programs> {
+        match self {
+            Runners::InProcess(_) => None,
+            Runners::Spawning(r) => Some(&mut *r.programs),
+        }
+    }
 }
 
 /// The command functions of `commands::COMMANDS`, run in the shell's
