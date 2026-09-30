@@ -225,23 +225,27 @@ extern "C" fn exception_dispatch(frame: &ExceptionFrame) -> ! {
     crate::panic_screen::exception(frame)
 }
 
-/// Vectors that run on the IST stack whatever the stack pointer was: a
-/// double fault (the kernel stack may have overflowed), an NMI and a
-/// machine check (they may arrive between `syscall` and the switch to the
-/// kernel stack, or just before `sysret`, with a program's stack pointer).
-const IST_VECTORS: [usize; 3] = [2, 8, 18];
+/// The IST stack of a vector that runs on one whatever the stack pointer
+/// was, 0 for the others: a double fault (the kernel stack may have
+/// overflowed), an NMI and a machine check (they may arrive between
+/// `syscall` and the switch to the kernel stack, or just before `sysret`,
+/// with a program's stack pointer), each on its own, so one arriving while
+/// another's handler runs keeps that one's frame.
+fn ist(vector: usize) -> u8 {
+    match vector {
+        8 => super::gdt::DOUBLE_FAULT_IST,
+        2 => super::gdt::NMI_IST,
+        18 => super::gdt::MACHINE_CHECK_IST,
+        _ => 0,
+    }
+}
 
-/// Gates for the 32 exceptions (three on the IST stack) and for every
-/// hardware interrupt vector, 32-255.
+/// Gates for the 32 exceptions (three on IST stacks) and for every hardware
+/// interrupt vector, 32-255.
 fn gates(selector: u16) -> [Gate; 256] {
     let mut gates = [Gate::MISSING; 256];
     for (v, stub) in STUBS.iter().enumerate() {
-        let ist = if IST_VECTORS.contains(&v) {
-            super::gdt::DOUBLE_FAULT_IST
-        } else {
-            0
-        };
-        gates[v] = Gate::new(*stub as *const () as u64, selector, ist);
+        gates[v] = Gate::new(*stub as *const () as u64, selector, ist(v));
     }
     for v in super::irq::FIRST_VECTOR..=255 {
         gates[v as usize] = Gate::new(super::irq::stub(v), selector, 0);
@@ -287,8 +291,8 @@ mod tests {
         let g = gates(0x08);
         assert!(g.iter().all(|gate| gate.type_attr == 0x8E));
         assert_eq!(g[8].ist, 1, "double fault on IST1");
-        assert_eq!(g[2].ist, 1, "NMI on IST1");
-        assert_eq!(g[18].ist, 1, "machine check on IST1");
+        assert_eq!(g[2].ist, 2, "NMI on IST2");
+        assert_eq!(g[18].ist, 3, "machine check on IST3");
         let others = (0..256).filter(|v| ![2, 8, 18].contains(v));
         assert!(others.into_iter().all(|v| g[v].ist == 0));
         let addr = |v: usize| {

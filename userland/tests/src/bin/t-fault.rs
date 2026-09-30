@@ -4,8 +4,15 @@
 //! `stack` (runs into the guard page below the stack) and `kernel-read`
 //! (reads an upper-half address). `flags-exit` and `flags-ud` set the
 //! nested-task, alignment-check and direction flags, then exit or fault:
-//! none of them may reach the kernel or the next program. Plan 3 adds
-//! `sse`, once CR0.TS makes SSE fault.
+//! none of them may reach the kernel or the next program (`flags-exit`
+//! sets the trap flag too). `flags-tf` sets the trap flag and makes a
+//! call that returns: the single step traps after the return, in ring 3,
+//! which kills the program. `flags-ac` sets
+//! them and spins through a few hundred timer ticks before it faults: the
+//! kernel's interrupt handlers must not run with them either (AC would
+//! switch SMAP off). `sse` runs an SSE instruction, which CR0.TS makes a
+//! fault (spec §5.5). `gsbase` tries to set its own `gs` base, an invalid
+//! opcode while CR4.FSGSBASE is clear.
 #![no_std]
 #![no_main]
 
@@ -20,6 +27,8 @@ static mut DATA: [u8; 16] = [0xC3; 16];
 
 /// RFLAGS bits: direction, nested task, alignment check.
 const FLAGS: u64 = (1 << 10) | (1 << 14) | (1 << 18);
+/// RFLAGS' trap flag.
+const TF: u64 = 1 << 8;
 
 fn main(args: Args) -> u8 {
     let kind = args.get(1).unwrap_or(b"");
@@ -33,6 +42,8 @@ fn main(args: Args) -> u8 {
             }
             b"exec-data" => asm!("call {0}", in(reg) &raw const DATA as u64),
             b"ud" => asm!("ud2"),
+            b"sse" => asm!("xorps xmm0, xmm0"),
+            b"gsbase" => asm!("wrgsbase {0}", in(reg) 0x1000u64),
             b"div0" => asm!(
                 "div {0:e}",
                 in(reg) 0u32,
@@ -43,15 +54,40 @@ fn main(args: Args) -> u8 {
             b"kernel-read" => {
                 asm!("mov {0}, qword ptr [{0}]", inout(reg) 0xFFFF_8000_0000_0000u64 => _)
             }
-            // `exit(0)` at once: no Rust code runs with these flags.
+            // `exit(0)` at once: no Rust code runs with these flags, and
+            // the trap flag's step after `syscall` is not the kernel's.
             b"flags-exit" => asm!(
                 "pushfq",
                 "or qword ptr [rsp], {flags}",
                 "popfq",
                 "syscall",
-                flags = in(reg) FLAGS,
+                flags = in(reg) FLAGS | TF,
                 in("rax") 1u64,
                 in("rdi") 0u64,
+                options(noreturn),
+            ),
+            b"flags-ac" => asm!(
+                "pushfq",
+                "or qword ptr [rsp], {flags}",
+                "popfq",
+                "2:",
+                "dec rcx",
+                "jnz 2b",
+                "ud2",
+                flags = in(reg) FLAGS,
+                in("rcx") 1u64 << 30,
+                options(noreturn),
+            ),
+            // The trap flag, then a call that returns: the single-step
+            // trap comes after `sysret`, in ring 3.
+            b"flags-tf" => asm!(
+                "pushfq",
+                "or qword ptr [rsp], {tf}",
+                "popfq",
+                "syscall",
+                "ud2",
+                tf = in(reg) TF,
+                in("rax") 5u64,
                 options(noreturn),
             ),
             b"flags-ud" => asm!(
@@ -65,7 +101,7 @@ fn main(args: Args) -> u8 {
             _ => {
                 let _ = sys::write_all(
                     2,
-                    b"usage: t-fault null-read|null-write|write-code|exec-data|ud|div0|stack|kernel-read|flags-exit|flags-ud\n",
+                    b"usage: t-fault null-read|null-write|write-code|exec-data|ud|div0|stack|kernel-read|flags-exit|flags-ud|flags-ac|flags-tf|sse|gsbase\n",
                 );
                 return 2;
             }

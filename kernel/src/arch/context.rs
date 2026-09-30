@@ -124,9 +124,10 @@ pub unsafe fn switch_to(save: *mut u64, next: &Next) {
     );
 }
 
-/// Points CR3 at the kernel's own tables (before a program's are freed).
-pub fn use_kernel_tables(pml4: u64) {
-    // SAFETY: the kernel's tables map everything the kernel uses.
+/// Points CR3 at the tables whose PML4 is at `pml4`: the kernel's own
+/// (before a program's are freed), or any that share the kernel's half.
+pub fn use_tables(pml4: u64) {
+    // SAFETY: every table the kernel makes maps its upper half.
     unsafe {
         Cr3::write(
             PhysFrame::containing_address(PhysAddr::new(pml4)),

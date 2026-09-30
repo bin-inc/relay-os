@@ -7,6 +7,7 @@ Mon Sep 28 14:09:17 UTC 2026
 Relay OS 0.2.0
 [ ok ] console 1920x1080 (120x33 cells)
 [ ok ] cpu tables
+cpu: SMEP on, SMAP on
 [ ok ] boot info: 1008 MiB usable in 25 regions, cmdline 'test=1'
 [ ok ] memory: 976 MiB free of 1008 MiB, heap 32 MiB
 acpi: tables FACP APIC HPET MCFG WAET BGRT
@@ -63,6 +64,23 @@ total 20
 [3] 
 + t-fault null-read
 relay-sh: t-fault: killed (page fault at 0x0, read, ip 0x400205)
++ t-spin 1
+4517789696 iterations
++ t-spawn 100
+free frames before: 249241
+free frames after: 249241
+frames lost: 0
++ t-spawn kill
+t-spin: kill
+kill 1: EPERM
+kill 999999: ESRCH
+pid above 1: true
++ t-fault sse
+relay-sh: t-fault: killed (FPU/SSE instruction, ip 0x40011b)
++ t-fault flags-ac
+relay-sh: t-fault: killed (invalid opcode, ip 0x400349)
++ t-fault gsbase
+relay-sh: t-fault: killed (invalid opcode, ip 0x400131)
 + mkdir -p /root/notes/old
 + echo remember me > /root/notes/a
 + echo and me >> /root/notes/a

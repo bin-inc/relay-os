@@ -1,0 +1,10 @@
+# SMAP is on (user-space gate §5.1; milestone 2, plan 3a): the kernel reading
+# a program's page is a page fault in ring 0, the panic screen, not a
+# silent read. The CPU says why: a present page, read, from ring 0.
+cmdline test=1 panic=user-read
+timeout 30
+expect triggering UserRead
+expect KERNEL PANIC
+expect CPU exception 14: page fault \(error code 0x1\)
+expect CR2=0x0000000000400000
+expect System halted

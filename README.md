@@ -4,7 +4,9 @@ A small operating system written from scratch in Rust. Milestone 1 boots
 from a USB stick on an Intel NUC 12 Pro, shows a terminal over HDMI and
 stores files on the stick's ext2 root filesystem. Milestone 2 runs programs
 from `/bin` in ring 3, each in its own address space: the shell runs a
-name it does not know (`t-args a b`) as a program.
+name it does not know (`t-args a b`) as a program, programs start
+programs, the timer shares the CPU among them, and Ctrl-C stops the
+command that runs.
 
 Design: `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`
 (milestone 1) and `docs/superpowers/specs/2026-09-29-user-space-gate-design.md`

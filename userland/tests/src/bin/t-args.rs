@@ -1,4 +1,4 @@
-//! `t-args [ARG]...`: prints each argument after the program's path as
+//! `t-args [ARG]...`: prints each argument after argument 0 as
 //! `[n] <arg>`, one per line (spec §8.5), so a scenario sees exactly what
 //! `spawn` passed.
 #![no_std]

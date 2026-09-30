@@ -46,6 +46,27 @@ impl KernelStack {
     }
 }
 
+/// Why there is no kernel stack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StackError {
+    /// Every slot is in use: one per process-table entry, so the table is
+    /// full.
+    NoSlot,
+    /// No frames for it.
+    NoMemory,
+}
+
+impl StackError {
+    /// What `spawn` says: `EAGAIN` for a full table, `ENOMEM` when the
+    /// memory ran out.
+    pub fn errno(self) -> vfs::Errno {
+        match self {
+            StackError::NoSlot => vfs::Errno::EAGAIN,
+            StackError::NoMemory => vfs::Errno::ENOMEM,
+        }
+    }
+}
+
 /// Which slots are in use.
 #[derive(Default)]
 pub struct KernelStacks {
@@ -57,14 +78,16 @@ impl KernelStacks {
         KernelStacks { used: 0 }
     }
 
-    /// Maps a stack in a free slot; `None` when every slot is in use or
-    /// there are no frames (what was mapped is given back).
+    /// Maps a stack in a free slot; `NoSlot` when every slot is in use,
+    /// `NoMemory` when there are no frames (what was mapped is given back).
     pub fn alloc(
         &mut self,
         tables: &mut PageTables,
         mem: &mut impl PhysMem,
-    ) -> Option<KernelStack> {
-        let slot = (0..SLOTS).find(|&s| self.used & (1 << s) == 0)?;
+    ) -> Result<KernelStack, StackError> {
+        let slot = (0..SLOTS)
+            .find(|&s| self.used & (1 << s) == 0)
+            .ok_or(StackError::NoSlot)?;
         let stack = KernelStack { slot };
         for (n, virt) in stack.pages().enumerate() {
             let mapped = mem.alloc_table().map(|frame| {
@@ -76,11 +99,11 @@ impl KernelStacks {
             });
             if !matches!(mapped, Some(Ok(()))) {
                 release(&stack, n, tables, mem);
-                return None;
+                return Err(StackError::NoMemory);
             }
         }
         self.used |= 1 << slot;
-        Some(stack)
+        Ok(stack)
     }
 
     /// Gives back the stack's frames and its slot. The caller flushes the
@@ -174,11 +197,16 @@ mod tests {
             .map(|_| stacks.alloc(&mut t, &mut m).unwrap())
             .collect();
         assert_eq!(all.last().unwrap().slot, SLOTS - 1);
-        assert_eq!(stacks.alloc(&mut t, &mut m), None);
+        assert_eq!(stacks.alloc(&mut t, &mut m), Err(StackError::NoSlot));
+        assert_eq!(
+            StackError::NoSlot.errno(),
+            vfs::Errno::EAGAIN,
+            "a full table"
+        );
         for s in all {
             stacks.free(s, &mut t, &mut m);
         }
-        assert!(stacks.alloc(&mut t, &mut m).is_some());
+        assert!(stacks.alloc(&mut t, &mut m).is_ok());
     }
 
     #[test]
@@ -188,7 +216,8 @@ mod tests {
         // A frame for the first page, but none for the tables it needs.
         let cold = m.frames();
         m.limit = cold + 1;
-        assert_eq!(stacks.alloc(&mut t, &mut m), None);
+        assert_eq!(stacks.alloc(&mut t, &mut m), Err(StackError::NoMemory));
+        assert_eq!(StackError::NoMemory.errno(), vfs::Errno::ENOMEM);
         assert_eq!(m.frames(), cold);
         m.limit = usize::MAX;
         // Tables for the first slot, so only the stack's own frames vary.
@@ -197,10 +226,14 @@ mod tests {
         let before = m.frames();
         for extra in [0, 1, 7, 15] {
             m.limit = before + extra;
-            assert_eq!(stacks.alloc(&mut t, &mut m), None, "{extra} frames");
+            assert_eq!(
+                stacks.alloc(&mut t, &mut m),
+                Err(StackError::NoMemory),
+                "{extra} frames"
+            );
             assert_eq!(m.frames(), before);
         }
         m.limit = usize::MAX;
-        assert_eq!(stacks.alloc(&mut t, &mut m), Some(KernelStack { slot: 0 }));
+        assert_eq!(stacks.alloc(&mut t, &mut m), Ok(KernelStack { slot: 0 }));
     }
 }

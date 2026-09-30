@@ -1,6 +1,7 @@
 //! The arguments a program was started with (spec §5.3): `count` byte
-//! strings, each followed by a NUL; argument 0 is the program's path as
-//! given to `spawn`.
+//! strings, each followed by a NUL; argument 0 is what the program that
+//! started it gave (the shells give the command's name as typed, as bash
+//! does).
 
 #[derive(Clone, Copy, Debug)]
 pub struct Args {

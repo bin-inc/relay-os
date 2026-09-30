@@ -23,6 +23,7 @@ dmesg
 #qemu> \[ ok \] console \d+x\d+ \(\d+x\d+ cells\)
 #nuc> \[ ok \] console 1920x1200 \(120x33 cells\)
 #> \[ ok \] cpu tables
+#> cpu: SMEP on, SMAP on
 #qemu> \[ ok \] boot info: \d+ MiB usable in \d+ regions, cmdline '.*'
 #nuc> \[ ok \] boot info: 159\d\d MiB usable in \d+ regions, cmdline ''
 #> \[ ok \] memory: \d+ MiB free of \d+ MiB, heap 32 MiB
@@ -72,6 +73,30 @@ t-args a 'b c' ''
 #> \[3\]\x20
 t-fault null-read
 #> relay-sh: t-fault: killed \(page fault at 0x0, read, ip 0x4[0-9a-f]+\)
+
+# Processes and scheduling (milestone 2, plan 3a): t-spin never makes a
+# system call and still ends after its second, the timer taking the CPU
+# from it; a hundred children lose no frame; a child killed while its
+# parent sleeps; an SSE instruction, a spin with AC set and a program
+# setting its own gs base (whatever the firmware left in CR4), killed
+# without harm to the kernel.
+t-spin 1
+#> \d+ iterations
+t-spawn 100
+#> free frames before: \d+
+#> free frames after: \d+
+#> frames lost: 0
+t-spawn kill
+#> t-spin: kill
+#> kill 1: EPERM
+#> kill 999999: ESRCH
+#> pid above 1: true
+t-fault sse
+#> relay-sh: t-fault: killed \(FPU/SSE instruction, ip 0x4[0-9a-f]+\)
+t-fault flags-ac
+#> relay-sh: t-fault: killed \(invalid opcode, ip 0x4[0-9a-f]+\)
+t-fault gsbase
+#> relay-sh: t-fault: killed \(invalid opcode, ip 0x4[0-9a-f]+\)
 
 # The file operations of the fileops scenario.
 mkdir -p /root/notes/old

@@ -11,13 +11,14 @@ a  big  t
 Relay OS 0.2.0
 [[32m ok [0m] console 1920x1200 (120x33 cells)
 [[32m ok [0m] cpu tables
+cpu: SMEP on, SMAP on
 [[32m ok [0m] boot info: 15947 MiB usable in 30 regions, cmdline ''
 [[32m ok [0m] memory: 15913 MiB free of 15947 MiB, heap 32 MiB
 acpi: tables FACP FIDT SSDT SSDT SSDT SSDT SSDT HPET APIC MCFG SSDT SSDT UEFI NHLT LPIT WDAT SSDT SSDT DBGP DBG2 DMAR FPDT SSDT SSDT SSDT SSDT TPM2 BGRT PHAT WSMT
 acpi: FADT reset io 0xcf9 <- 0x6, PM1a_CNT io 0x1804, PM1b_CNT none, century register 0x32
 [[32m ok [0m] acpi: 30 tables, ECAM 0xc0000000 buses 0-255, HPET 0xfed00000, S5 7/0
 [[32m ok [0m] timer: TSC 2496.000 MHz (CPUID 0x15), 1000 Hz tick (xAPIC)
-[[32m ok [0m] rtc: 2026-09-29 15:20:36 UTC
+[[32m ok [0m] rtc: 2026-09-30 00:43:21 UTC
 pci: 00:00.0 8086:4621 060000 host bridge
 pci: 00:02.0 8086:46a6 030000 display, bar0 mem64 0x603c000000 16M, bar2 mem64 0x4000000000 256M pf, bar4 io 0x3000 64
 pci: 00:06.0 8086:464d 060400 PCI bridge
@@ -100,6 +101,6 @@ usb: 00:14.0 port 15: 0951:1666 SuperSpeed, disk Kingston DataTraveler 3.0, 14.4
 [[32m ok [0m] usb: 2 controllers, 4 devices
 [[32m ok [0m] keyboard: 2 keyboards
 storage: 00:14.0 port 15: GPT with 2 partitions
-storage: root on 00:14.0 port 15, the disk with the boot partition CCC3C19B-934C-4000-BD36-573C3A635FC3
+storage: root on 00:14.0 port 15, the disk with the boot partition EA21FAFB-8130-4BAA-9D76-C1E6D5F4DECD
 [[32m ok [0m] mount /: ext2 on 00:14.0 port 15 partition 2, 2.0 GiB
-[[32m ok [0m] system: 2 programs, ABI 1
+[[32m ok [0m] system: 4 programs, ABI 1

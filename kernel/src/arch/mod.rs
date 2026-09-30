@@ -2,6 +2,7 @@
 //! 3 and the context switch.
 
 pub mod context;
+pub mod cpu;
 pub mod fault;
 pub mod gdt;
 pub mod idt;

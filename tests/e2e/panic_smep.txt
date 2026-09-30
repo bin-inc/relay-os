@@ -1,0 +1,9 @@
+# SMEP is on (user-space gate §5.1; milestone 2, plan 3a): the kernel running
+# a program's code is a page fault in ring 0 at the fetch, the panic screen.
+cmdline test=1 panic=user-exec
+timeout 30
+expect triggering UserExec
+expect KERNEL PANIC
+expect CPU exception 14: page fault \(error code 0x11\)
+expect CR2=0x0000000000400000
+expect System halted

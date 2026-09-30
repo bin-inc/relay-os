@@ -168,6 +168,12 @@ impl<R> Table<R> {
         self.procs.iter()
     }
 
+    /// Whether another process can start: an entry is free, and a pid is
+    /// left. `insert` refuses exactly when it is not.
+    pub fn has_room(&self) -> bool {
+        self.procs.len() < MAX && self.next_pid != 0
+    }
+
     /// Adds a ready process, a child of `ppid`, in its parent's group or,
     /// with `new_group` (or no parent), in a new group numbered with its
     /// own pid; its pid. `EAGAIN` when [`MAX`] processes exist, or every
@@ -179,7 +185,7 @@ impl<R> Table<R> {
         name: String,
         res: R,
     ) -> Result<u32, Errno> {
-        if self.procs.len() >= MAX || self.next_pid == 0 {
+        if !self.has_room() {
             return Err(Errno::EAGAIN);
         }
         let pid = self.next_pid;
@@ -427,6 +433,25 @@ mod tests {
         t.end(u32::MAX, WaitStatus::exited(0));
         assert!(t.reap(0, Want::Pid(u32::MAX)).unwrap().is_some());
         assert_eq!(t.insert(0, true, String::from("x"), ()), Err(Errno::EAGAIN));
+    }
+
+    #[test]
+    fn room_for_another_process_takes_an_entry_and_a_pid() {
+        let mut t = table();
+        assert!(t.has_room());
+        for _ in 0..MAX {
+            add(&mut t, 0, true);
+        }
+        assert!(!t.has_room(), "a full table");
+        t.end(64, WaitStatus::exited(0));
+        assert!(t.reap(0, Want::Pid(64)).unwrap().is_some());
+        assert!(t.has_room());
+        t.next_pid = u32::MAX;
+        assert!(t.has_room(), "the last pid is still free");
+        add(&mut t, 0, true);
+        t.end(u32::MAX, WaitStatus::exited(0));
+        assert!(t.reap(0, Want::Pid(u32::MAX)).unwrap().is_some());
+        assert!(!t.has_room(), "an entry is free, but no pid is");
     }
 
     #[test]

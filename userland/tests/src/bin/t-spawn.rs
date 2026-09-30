@@ -1,6 +1,7 @@
 //! `t-spawn N`: starts N children that exit at once, waiting for each, and
-//! prints the free frames before and after (spec §8.5), so a scenario sees
-//! that starting and ending a program leaks nothing. More kinds:
+//! prints the free frames before and after (spec §8.5), and how many were
+//! lost, so a scenario sees that starting and ending a program leaks
+//! nothing. More kinds:
 //!
 //! - `t-spawn kill` starts `t-spin`, kills it after a moment and prints how
 //!   it ended; then shows that process 1 cannot be killed and a pid nobody
@@ -101,6 +102,9 @@ fn many(n: u64) -> Result<(), u16> {
     let after = free()?;
     let _ = writeln!(Fd(1), "free frames before: {before}");
     let _ = writeln!(Fd(1), "free frames after: {after}");
+    // For the NUC's check script, which compares no two lines.
+    let lost = i128::from(before) - i128::from(after);
+    let _ = writeln!(Fd(1), "frames lost: {lost}");
     Ok(())
 }
 

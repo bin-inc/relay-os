@@ -185,7 +185,7 @@ request.
      root is 2 GiB since milestone 2's plan 2; a stick written by an older
      `flash --full` still shows `14.3 GiB`, which the check scripts refuse:
      run `flash --full` again)
-   - `[ ok ] system: 2 programs, ABI 1` (milestone 2: the programs of
+   - `[ ok ] system: 4 programs, ABI 1` (milestone 2: the programs of
      `/bin` from `\EFI\RELAY\system.img`; the count grows as later plans
      add programs)
    - the motd (`Welcome to Relay OS.`) and the prompt `root@relay:~# `.
@@ -196,23 +196,39 @@ request.
    later), `ls -l /bin` (the programs of the system archive),
    `t-args a 'b c' ''` and `t-fault null-read` (programs in ring 3: three
    arguments printed, then `relay-sh: t-fault: killed (page fault at 0x0,
-   read, ip …)` and the script goes on), the `fileops`
+   read, ip …)` and the script goes on), `t-spin 1` (a program that never
+   makes a system call ends after its second: the timer takes the CPU from
+   it), `t-spawn 100` (`frames lost: 0`), `t-spawn kill` (a child killed
+   while its parent sleeps; process 1 cannot be killed), `t-fault sse`,
+   `t-fault flags-ac` and `t-fault gsbase` (an SSE instruction, a spin with
+   the alignment check flag set and a program setting its own `gs` base,
+   all killed), the `fileops`
    scenario's operations on `/root/notes` (`mkdir -p`,
    `echo >`/`>>`, `cat`, `ls -l`, `cp`, `mv`, `rmdir` of a full directory,
    `rm -r`, `touch`, `stat`, `head`, `tail`, `wc`, the errors of `cat` and
    `rm -r /`), an 8 MiB file built by doubling (each step writes up to
    4 MiB to the stick and syncs), and `df`. Ctrl-C stops it. The prompt
    comes back after `+ df` and its two lines.
-5. `reboot`: the NUC restarts (`relay: restarting`). Choose the stick again
+   `dmesg`'s lines include `cpu: SMEP on, SMAP on`: the kernel would fault
+   if it touched a program's page.
+5. Two steps by hand (milestone 2, plan 3a; a script cannot type):
+   - `t-spin 5`, and while it spins type `echo typed` and Enter on the
+     K120. After five seconds its `… iterations` line comes, then `typed`:
+     the keyboard is polled on every tick that interrupts a program.
+   - `t-spin`, then Ctrl-C: `^C` and the prompt come back at once, and
+     `dmesg` ends with `pid <n> (/bin/t-spin): killed: Ctrl-C`.
+
+   Photograph the screen after both.
+6. `reboot`: the NUC restarts (`relay: restarting`). Choose the stick again
    with F10 and type `sh checks/check3-b.sh`: the files written before the
    restart are read back.
-6. `poweroff`: the NUC switches itself off (`relay: powering off`). If the
+7. `poweroff`: the NUC switches itself off (`relay: powering off`). If the
    screen says `System halted. It is now safe to power off.` instead, note
    the `relay:` line above it and hold the power button.
-7. Boot Mint and run `cargo xtask verify-usb`: `e2fsck: clean`, the tree
+8. Boot Mint and run `cargo xtask verify-usb`: `e2fsck: clean`, the tree
    lists `/root/notes/a`, `/root/notes/big` (8388608 bytes) and
    `/root/notes/t`, and the last lines are
-   `/root/checks/check3-a.sh: ok, 66 of 66 commands as expected (run <time>)`
+   `/root/checks/check3-a.sh: ok, 72 of 72 commands as expected (run <time>)`
    and `/root/checks/check3-b.sh: ok, 5 of 5 commands as expected (run
    <time>)`, with the UTC times of the two runs (after `flash --kernel` the
    transcripts of an earlier run stay on the stick, so check the times). A
@@ -231,6 +247,10 @@ request.
 | `[FAIL] system: no system.img` | The loader could not read `\EFI\RELAY\system.img` (it is missing, or the FAT is damaged) | `cargo xtask flash --kernel` writes it with the loader and the kernel |
 | `[FAIL] system: ABI N, kernel wants M` or `[FAIL] system: system.img: …` | The archive on the ESP is from another build, or damaged | `cargo xtask flash --kernel` from the same worktree as the kernel |
 | The panic screen just after `+ t-args` or `+ t-fault` | Entering ring 3, a system call or a fault in ring 3 goes wrong on this CPU, where QEMU's works | Photograph the panic screen: its vector, `rip`, `cr2` and registers say which |
+| `t-spin 1` never ends, or the keyboard stops during `t-spin 5` | The LAPIC timer's ticks do not reach ring 3 on this machine, or the tick's poll of the xHCI keyboard fails there | Photograph the screen; after a reboot, `dmesg` shows the `timer:` and `usb:` lines |
+| The panic screen during `t-spawn` or `t-fault flags-ac` | A context switch, or an interrupt taken in ring 3, goes wrong on this CPU: the panic's message names the check that failed (`a program's flags reached a switch`, `TSS rsp0 and the syscall stack differ`, `an interrupt with the program's gs`) | Photograph the panic screen |
+| `t-fault gsbase` prints `t-fault: no fault` | CR4.FSGSBASE is set: the firmware left it, and the kernel did not clear it | Note it; a program could set a `gs` base that would pass to the next program |
+| `cpu: SMEP not available, SMAP not available` in `dmesg` | CPUID reports neither (the i7-1260P has both) | Note the `dmesg` line; the check scripts expect both on the NUC |
 | `relay-sh: t-args: Exec format error` | The kernel refused the program; `dmesg` shows `spawn /bin/t-args: <reason>` | `cargo xtask flash --kernel` from the same worktree as the kernel |
 | `[FAIL] mount /: no disk with the boot partition` | No disk has the boot partition, and none has exactly one ESP and one Linux partition | `dmesg`: the `storage:` GPT lines list what each disk has |
 | `[FAIL] mount /: …; mounted read-only` | The stick refused a write (worn out or write-protected) | The files can be read; note the `usb: … write at block N:` line in `dmesg` |
@@ -258,3 +278,4 @@ request.
 | 2026-09-29 | 3 (milestone 2, plan 1) | `03aa632` | Pass | `flash --full`, then F10: every startup line `[ ok ]`, `console 1920x1200 (120x33 cells)`, `boot info: 15947 MiB usable in 32 regions`, `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 14.3 GiB`, then the new `[ ok ] system: 1 program, ABI 1`: the loader read `\EFI\RELAY\system.img` from the NUC's ESP and the kernel mounted it at `/bin`. Check 3 by script: `ls -l /bin` listed `-rwxr-xr-x 1 root root 19688 … t-args`; `reboot`, `poweroff` as before. In Mint `verify-usb`: `e2fsck: clean`; `check3-a.sh: ok, 64 of 64 commands as expected`, `check3-b.sh: ok, 5 of 5 commands as expected`. The transcripts replaced the hand-edited fixtures in `xtask/fixtures/checks/`. (PR #48 merged before this row; it lands in the follow-up.) |
 | 2026-09-29 | 3 (milestone 2, plan 2) | `a809a6c` | Pass | `flash --full`, then F10: every startup line `[ ok ]`, `console 1920x1200 (120x33 cells)`, `boot info: 15947 MiB usable in 34 regions`, `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 14.3 GiB`, `[ ok ] system: 2 programs, ABI 1`. Check 3 by script: `ls -l /bin` listed `t-args` (19688 bytes) and `t-fault` (19296); `t-args a 'b c' ''` printed `[1] a`, `[2] b c`, `[3] `, the first program run in ring 3 on the NUC; `t-fault null-read` gave `relay-sh: t-fault: killed (page fault at 0x0, read, ip 0x4002e5)` and the script went on; `reboot`, `poweroff` as before. In Mint `verify-usb`: `e2fsck: clean`; `check3-a.sh: ok, 66 of 66 commands as expected`, `check3-b.sh: ok, 5 of 5 commands as expected`. On the first boot the stick's first device-descriptor request on port 15 timed out; the setup's retry (milestone 1's plan 5) attached it on the second try (slot 5); the second boot attached it at once. The transcripts replaced the hand-edited fixtures in `xtask/fixtures/checks/`. |
 | 2026-09-29 | 3 (the 2 GiB root) | `30b0756` | Pass | `flash --full` printed `creating ext2 on 2.0 GiB...`: the root is partition 2 of exactly 4194304 sectors, the rest of the stick unused. F10: every startup line `[ ok ]`, `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 2.0 GiB`, `[ ok ] system: 2 programs, ABI 1`; the stick attached at the first try. Check 3 by script: `df` showed `/dev/root 2064208 8304 1951048 1% /`; `t-args` and `t-fault` as before; `reboot`, `poweroff` as before. In Mint `verify-usb`: `e2fsck: clean`; `check3-a.sh: ok, 66 of 66 commands as expected`, `check3-b.sh: ok, 5 of 5 commands as expected`. `check3-a.sh` took about 2 min 10 s (24 s in the check before, with the same kernel): the stick's write speed varies from run to run. The transcripts replaced the hand-edited fixtures in `xtask/fixtures/checks/`. |
+| 2026-09-30 | 3 (milestone 2, plan 3a) | `5fa17c9` | Pass | `flash --full`, then F10: every startup line `[ ok ]`, `cpu: SMEP on, SMAP on` in `dmesg` right after `[ ok ] cpu tables`, `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 2.0 GiB`, `[ ok ] system: 4 programs, ABI 1`; the stick attached at the first try on both boots. Check 3 by script: `ls -l /bin` listed `t-args` (19688 bytes), `t-fault` (19296), `t-spawn` (28904) and `t-spin` (19560); `t-spin 1` made 4594860032 iterations and ended after its second, preempted by the real LAPIC timer; `t-spawn 100` showed 4073369 free frames before and after (`frames lost: 0`); `t-spawn kill` killed the spinning `t-spin` while it slept (`t-spin: kill`, `kill 1: EPERM`, `kill 999999: ESRCH`); `t-fault sse` gave `killed (FPU/SSE instruction, ip 0x40012b)`, `t-fault flags-ac` and `t-fault gsbase` `killed (invalid opcode, …)`, so CR4.FSGSBASE is clear on the NUC; the two steps by hand (typing on the K120 during `t-spin 5`, Ctrl-C of `t-spin`) passed; `reboot`, `poweroff` as before. In Mint `verify-usb`: `e2fsck: clean`; `check3-a.sh: ok, 72 of 72 commands as expected`, `check3-b.sh: ok, 5 of 5 commands as expected`. The transcripts replaced the hand-edited fixtures in `xtask/fixtures/checks/`. |
