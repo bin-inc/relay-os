@@ -8,7 +8,7 @@ use crate::sysvfs::{SysVfs, node_of};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use relay_abi::console::MODE_RAW;
+use relay_abi::console::{MODE_LINE, MODE_RAW};
 use relay_abi::file::{KIND_CHAR_DEVICE, OPEN_APPEND, OPEN_CREATE, OPEN_TRUNCATE, OPEN_WRITE};
 use relay_abi::info::LOG_MAX;
 use relay_abi::power::{POWER_FORCE, POWER_POWEROFF, POWER_REBOOT};
@@ -167,7 +167,9 @@ impl Stdout for SysStdout {
 }
 
 /// `/bin/sh`'s way to its commands (user-space gate §8.2, §8.3): `spawn`,
-/// `wait`, and the tees of a script's transcript.
+/// `wait`, and the tees of a script's transcript. A command always starts
+/// with the console in line mode, which `FOREGROUND` sets for one in a
+/// group of its own.
 pub struct SysPrograms {
     /// The shell leads a process group of its own, so a command at its
     /// prompt may have one too, with the console; a shell in a script's
@@ -221,6 +223,11 @@ impl Programs for SysPrograms {
         let flags = if foreground && self.own_group {
             NEW_GROUP | FOREGROUND
         } else {
+            // A command in the shell's own group reads the console in line
+            // mode too, which is also where Ctrl-C ends it (and the group):
+            // an interactive shell that leads no group left it raw at its
+            // prompt.
+            let _ = sys::console_mode(MODE_LINE);
             0
         };
         sys::spawn(path, &arg_bytes(args), b"", &command_fds(stdout), flags)

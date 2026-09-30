@@ -76,6 +76,18 @@ send echo again
 expect \nagain\nroot@relay:~# $
 send exit
 expect \+ echo after\nafter\nroot@relay:~# $
+# Its commands get the console in line mode, as a command at a prompt
+# does, so Ctrl-C ends one, with the shell and the script around it.
+send echo sh > /root/j.sh
+send echo 'echo never' >> /root/j.sh
+send sh /root/j.sh
+expect \+ sh\nroot@relay:~# $
+send t-spin
+alive 1
+key {ctrl-c}
+expect \^C\nroot@relay:~# 
+send echo back
+expect \nback\n
 # Ctrl-C ends a script with its command.
 send echo t-spin > /root/spin.sh
 send sh /root/spin.sh
@@ -91,7 +103,7 @@ alive 1
 send t-spawn fill
 expect \nfilled the table with 61 children\n
 alive 1
-send rm -r /root/a /root/list /root/s.sh /root/s.log /root/t.sh /root/t.log /root/spin.sh /root/spin.log /root/i.sh /root/i.log
+send rm -r /root/a /root/list /root/s.sh /root/s.log /root/t.sh /root/t.log /root/spin.sh /root/spin.log /root/i.sh /root/i.log /root/j.sh /root/j.log
 send cd /tmp
 expect root@relay:/tmp# $
 send exit 3
