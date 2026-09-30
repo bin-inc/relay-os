@@ -1201,5 +1201,5 @@ does. Facts found before the spec was first merged are already in its body.
    - **Check scripts** (§12.4). `check3-a.sh` runs `t-files basic`, `dir`,
      `cwd` and `gone`, `t-mem map` and `grow 64`, `t-tee end`, `t-sys uname`
      and `t-read apart` (84 commands); a third step by hand types into `t-read`
-     on the K120, with Backspace and Ctrl-D. The recorded transcripts get those
-     lines by hand until plan 3b's NUC check records real ones.
+     on the K120, with Backspace and Ctrl-D. The recorded NUC transcripts are
+     those of plan 3b's NUC check.

@@ -2,7 +2,7 @@
 + uname -a
 Relay relay 0.2.0 x86_64
 + date
-Wed Sep 30 00:41:19 UTC 2026
+Wed Sep 30 06:19:05 UTC 2026
 + dmesg
 Relay OS 0.2.0
 [[32m ok [0m] console 1920x1200 (120x33 cells)
@@ -14,7 +14,7 @@ acpi: tables FACP FIDT SSDT SSDT SSDT SSDT SSDT HPET APIC MCFG SSDT SSDT UEFI NH
 acpi: FADT reset io 0xcf9 <- 0x6, PM1a_CNT io 0x1804, PM1b_CNT none, century register 0x32
 [[32m ok [0m] acpi: 30 tables, ECAM 0xc0000000 buses 0-255, HPET 0xfed00000, S5 7/0
 [[32m ok [0m] timer: TSC 2496.000 MHz (CPUID 0x15), 1000 Hz tick (xAPIC)
-[[32m ok [0m] rtc: 2026-09-30 00:41:04 UTC
+[[32m ok [0m] rtc: 2026-09-30 06:18:23 UTC
 pci: 00:00.0 8086:4621 060000 host bridge
 pci: 00:02.0 8086:46a6 030000 display, bar0 mem64 0x603c000000 16M, bar2 mem64 0x4000000000 256M pf, bar4 io 0x3000 64
 pci: 00:06.0 8086:464d 060400 PCI bridge
@@ -97,15 +97,20 @@ usb: 00:14.0 port 15: 0951:1666 SuperSpeed, disk Kingston DataTraveler 3.0, 14.4
 [[32m ok [0m] usb: 2 controllers, 4 devices
 [[32m ok [0m] keyboard: 2 keyboards
 storage: 00:14.0 port 15: GPT with 2 partitions
-storage: root on 00:14.0 port 15, the disk with the boot partition EA21FAFB-8130-4BAA-9D76-C1E6D5F4DECD
+storage: root on 00:14.0 port 15, the disk with the boot partition 4A7D166A-7C33-42FF-A52D-CAE8368D7935
 [[32m ok [0m] mount /: ext2 on 00:14.0 port 15 partition 2, 2.0 GiB
-[[32m ok [0m] system: 4 programs, ABI 1
+[[32m ok [0m] system: 9 programs, ABI 1
 + ls -l /bin
-total 88
--rwxr-xr-x 1 root root 19688 Sep 30 00:38 t-args
--rwxr-xr-x 1 root root 19296 Sep 30 00:38 t-fault
--rwxr-xr-x 1 root root 28904 Sep 30 00:38 t-spawn
--rwxr-xr-x 1 root root 19560 Sep 30 00:38 t-spin
+total 270
+-rwxr-xr-x 1 root root 19688 Sep 30 06:16 t-args
+-rwxr-xr-x 1 root root 19296 Sep 30 06:16 t-fault
+-rwxr-xr-x 1 root root 50552 Sep 30 06:16 t-files
+-rwxr-xr-x 1 root root 39216 Sep 30 06:16 t-mem
+-rwxr-xr-x 1 root root 28232 Sep 30 06:16 t-read
+-rwxr-xr-x 1 root root 28904 Sep 30 06:16 t-spawn
+-rwxr-xr-x 1 root root 19560 Sep 30 06:16 t-spin
+-rwxr-xr-x 1 root root 29496 Sep 30 06:16 t-sys
+-rwxr-xr-x 1 root root 36832 Sep 30 06:16 t-tee
 + t-args a 'b c' ''
 [1] a
 [2] b c
@@ -115,8 +120,8 @@ relay-sh: t-fault: killed (page fault at 0x0, read, ip 0x4001e9)
 + t-spin 1
 4594860032 iterations
 + t-spawn 100
-free frames before: 4073369
-free frames after: 4073369
+free frames before: 4073307
+free frames after: 4073307
 frames lost: 0
 + t-spawn kill
 t-spin: kill
@@ -222,8 +227,8 @@ remember me
 and me
 + ls -l /root/notes
 total 8
--rw-r--r-- 1 root root   19 Sep 30 00:41 a
-drwxr-xr-x 2 root root 4096 Sep 30 00:41 old
+-rw-r--r-- 1 root root   19 Sep 30 06:19 a
+drwxr-xr-x 2 root root 4096 Sep 30 06:19 old
 + cp /root/notes/a /root/notes/b
 + mv /root/notes/b /root/notes/old/c
 + ls /root/notes /root/notes/old
@@ -243,9 +248,9 @@ a
   Size: 0         	Blocks: 0          IO Block: 4096   regular empty file
 Inode: 8195        Links: 1
 Access: (0644/-rw-r--r--)  Uid: (    0/    root)   Gid: (    0/    root)
-Access: 2026-09-30 00:41:27.000000000 +0000
-Modify: 2026-09-30 00:41:27.000000000 +0000
-Change: 2026-09-30 00:41:27.000000000 +0000
+Access: 2026-09-30 06:19:15.000000000 +0000
+Modify: 2026-09-30 06:19:15.000000000 +0000
+Change: 2026-09-30 06:19:15.000000000 +0000
  Birth: -
 + head -n 1 /root/notes/a
 remember me
@@ -302,4 +307,4 @@ rm: it is dangerous to operate recursively on '/'
 a  big  t
 + df
 Filesystem     1K-blocks Used Available Use% Mounted on
-/dev/root        2064208 8304   1951048   1% /
+/dev/root        2064208 8308   1951044   1% /
