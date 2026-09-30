@@ -10,14 +10,18 @@
 #![cfg_attr(not(test), no_std)]
 
 mod call;
+pub mod console;
 pub mod errno;
+pub mod file;
 pub mod info;
+pub mod power;
 mod result;
 pub mod spawn;
 pub mod wait;
 
 pub use call::Call;
-pub use info::{MemInfo, Time};
+pub use file::{DirEntry, Stat, StatFs};
+pub use info::{MemInfo, Time, Uname};
 pub use result::{MAX_ERRNO, decode, encode};
 pub use spawn::{FdMap, SpawnArgs};
 pub use wait::WaitStatus;
