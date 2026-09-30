@@ -83,9 +83,10 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// Standard output.
+    /// Standard output. A write error is kept for `finish` (and
+    /// `out_failed`); later output is dropped.
     pub fn out(&mut self, bytes: &[u8]) {
-        self.streams().out(bytes);
+        let _ = self.streams().out(bytes);
     }
 
     /// Errors always go to the screen, never into a redirection file.
@@ -94,7 +95,10 @@ impl<'a> Ctx<'a> {
     }
 
     /// Waits for the program `pid` (`System::spawn`): what it writes to fd 1
-    /// is standard output, to fd 2 the screen.
+    /// is standard output, to fd 2 the screen. A redirection file's write
+    /// error is the program's too, from the write that met it on (output
+    /// to a file is written in pieces of 4 KiB, so a short one meets it
+    /// only when the command ends, and the shell reports it then).
     pub(crate) fn wait_program(&mut self, pid: u32) -> Result<WaitStatus, Errno> {
         let mut streams = Streams {
             vfs: &mut *self.vfs,
@@ -104,9 +108,10 @@ impl<'a> Ctx<'a> {
         };
         self.system.wait(pid, &mut |fd, bytes| {
             if fd == 1 {
-                streams.out(bytes);
+                streams.out(bytes)
             } else {
                 streams.screen(bytes);
+                Ok(())
             }
         })
     }
@@ -169,15 +174,23 @@ struct Streams<'s> {
 }
 
 impl Streams<'_> {
-    fn out(&mut self, bytes: &[u8]) {
+    /// Standard output; the file's first write error, once there is one.
+    fn out(&mut self, bytes: &[u8]) -> Result<(), Errno> {
         match &mut *self.out {
             Output::Console => self.screen(bytes),
-            Output::File { buf, .. } => {
+            Output::File { buf, error, .. } => {
+                if let Some(e) = error {
+                    return Err(*e);
+                }
                 buf.extend_from_slice(bytes);
                 if buf.len() >= FILE_BUFFER {
                     self.flush();
                 }
             }
+        }
+        match &*self.out {
+            Output::File { error: Some(e), .. } => Err(*e),
+            _ => Ok(()),
         }
     }
 

@@ -6,10 +6,11 @@
 
 use crate::mm::{self, MemStats, frame::FRAME_SIZE};
 use crate::mounts::KernelVfs;
-use crate::{arch, console, klog, klogln, power, proc, rtc, tty};
+use crate::syscall::Spawn;
+use crate::{arch, console, exec, klog, klogln, power, proc, rtc, tty};
 use alloc::vec::Vec;
-use relay_abi::WaitStatus;
-use shell::{Console, MemInfo, Shell, System};
+use relay_abi::{FdMap, WaitStatus};
+use shell::{Console, MemInfo, Output, Shell, System};
 use vfs::{Env, Errno, Vfs};
 
 /// The screen and serial for output; the USB keyboards and COM1 for input.
@@ -79,17 +80,43 @@ impl System for KernelSystem {
         power::poweroff(self.test_mode)
     }
 
+    /// Through the kernel's mount table from the shell's current directory
+    /// (which `vfs` is), in a new process group, with the shell's fds 0-2,
+    /// its outputs fresh for this command; the orphans that have ended are
+    /// collected first.
     fn spawn(
         &mut self,
-        vfs: &mut dyn Vfs,
+        _vfs: &mut dyn Vfs,
         path: &[u8],
         args: &[&[u8]],
     ) -> Option<Result<u32, Errno>> {
-        Some(proc::spawn(vfs, path, args))
+        let std = [0, 1, 2].map(|fd| FdMap {
+            child: fd,
+            parent: fd,
+        });
+        // Orphans that ended while the shell waited for nobody; and
+        // outputs of the command's own.
+        proc::collect_orphans();
+        proc::renew_outputs();
+        Some(exec::arg_bytes(args).and_then(|bytes| {
+            proc::spawn(&Spawn {
+                path: path.to_vec(),
+                args: bytes,
+                argc: args.len() as u64,
+                cwd: Vec::new(),
+                fds: std.to_vec(),
+                new_group: true,
+            })
+        }))
     }
 
-    fn wait(&mut self, pid: u32, out: &mut dyn FnMut(u32, &[u8])) -> Result<WaitStatus, Errno> {
-        proc::wait(pid, out)
+    /// The command has the console, in line mode, while the shell waits
+    /// for it (spec §6.4): a Ctrl-C kills it.
+    fn wait(&mut self, pid: u32, out: &mut Output<'_>) -> Result<WaitStatus, Errno> {
+        proc::give_console(pid);
+        let ended = proc::wait(pid, out);
+        proc::take_console();
+        ended
     }
 }
 

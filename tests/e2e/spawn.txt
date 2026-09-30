@@ -1,0 +1,42 @@
+# Programs start programs (user-space gate §5.4, §7.3, §12.2; milestone 2,
+# plan 3a): a thousand children that exit at once leave the free frames as
+# they were, `kill` ends a program that never makes a system call while
+# its parent sleeps, process 1 cannot be killed, and an orphan passes to
+# process 1, which collects it.
+timeout 60
+expect root@relay:~# $
+send t-args warm-up
+expect \n\[1\] warm-up\n
+send t-spawn 1000
+expect-same frames \nfree frames before: (\d+)\n
+expect-same frames free frames after: (\d+)\n
+send free
+expect-same mem \nMem:\s+\d+\s+(\d+)\s
+send t-args a 'b c' ''
+expect \n\[1\] a\n\[2\] b c\n\[3\] \nroot@relay:~# $
+send t-spawn kill
+expect \nt-spin: kill\nkill 1: EPERM\nkill 999999: ESRCH\npid above 1: true\n
+send dmesg
+expect \npid \d+ \(/bin/t-spin\): killed: kill\n
+# A program killed before it has run runs none of its code: the kernel log
+# line comes right after the command, with no output of t-args before it.
+send t-spawn kill-new
+expect t-spawn kill-new\npid \d+ \(/bin/t-args\): killed: kill\nt-args: kill\n
+# An orphan's output goes to the screen, never into the output of the
+# command the shell waits for next: the orphaned t-spin 1 prints while
+# t-spin 2 runs, redirected.
+send t-spawn orphan
+send t-spin 2 > /root/o.txt
+expect > /root/o.txt\n\d+ iterations\n
+send cat /root/o.txt
+expect # cat /root/o.txt\n\d+ iterations\nroot@relay:~# $
+send free
+expect-same mem \nMem:\s+\d+\s+(\d+)\s
+# Orphans that end while the shell waits for nobody are collected before
+# its next command starts: a table full of their zombies would refuse
+# every program until a reboot.
+send t-spawn fill
+expect \nfilled the table with 62 children\n
+alive 1
+send t-spawn 10
+expect \nfree frames after: \d+\n

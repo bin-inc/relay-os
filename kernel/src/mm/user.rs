@@ -80,13 +80,7 @@ impl UserSlice {
             .filter(|&end| end <= self.len)
             .ok_or(Errno::EFAULT)?;
         let (start, end) = (self.addr + offset, self.addr + end);
-        let mut page = start - start % PAGE;
-        while page < end {
-            match space.user_page(mem, page) {
-                Some((_, Perm::ReadWrite)) => page += PAGE,
-                _ => return Err(Errno::EFAULT),
-            }
-        }
+        writable(space, mem, start, end)?;
         let mut virt = start;
         let mut done = 0;
         while virt < end {
@@ -99,6 +93,34 @@ impl UserSlice {
         }
         Ok(())
     }
+
+    /// Whether every page of the range is one of the program's and
+    /// writable; `EFAULT` otherwise. Nothing is written.
+    pub fn check_writable(
+        &self,
+        space: &AddressSpace,
+        mem: &mut impl PhysMem,
+    ) -> Result<(), Errno> {
+        writable(space, mem, self.addr, self.addr + self.len)
+    }
+}
+
+/// `EFAULT` unless every page from `start` up to `end` is the program's
+/// and writable.
+fn writable(
+    space: &AddressSpace,
+    mem: &mut impl PhysMem,
+    start: u64,
+    end: u64,
+) -> Result<(), Errno> {
+    let mut page = start - start % PAGE;
+    while page < end {
+        match space.user_page(mem, page) {
+            Some((_, Perm::ReadWrite)) => page += PAGE,
+            _ => return Err(Errno::EFAULT),
+        }
+    }
+    Ok(())
 }
 
 /// A byte string a program passes (a path, its children's arguments):
