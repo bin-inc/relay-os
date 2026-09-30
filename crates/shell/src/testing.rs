@@ -3,7 +3,7 @@
 #![cfg(test)]
 
 use crate::Shell;
-use crate::io::{Console, MemInfo, Output, System};
+use crate::io::{Console, MemInfo, Output, Programs, System};
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
@@ -173,6 +173,100 @@ impl System for TestSystem {
     }
 }
 
+/// What a spawning shell asked `FakePrograms` to start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Spawned {
+    pub path: String,
+    pub args: Vec<String>,
+    /// The redirection's fd, as fd 1.
+    pub stdout: Option<u32>,
+    pub foreground: bool,
+}
+
+/// `/bin/sh`'s system calls, for the spawning runner: redirection files
+/// are opened by path (and recorded, not created), and a program is known
+/// by its path.
+pub struct FakePrograms {
+    /// The programs `spawn` starts, by path, and how each ends.
+    pub known: Vec<(&'static str, WaitStatus)>,
+    /// What `spawn` says of a path it does not know (default `ENOENT`).
+    pub refusals: Vec<(&'static str, Errno)>,
+    /// Every redirection opened: its path, whether it appends, its fd.
+    pub opened: Vec<(String, bool, u32)>,
+    /// What `open_output` fails with, if anything.
+    pub open_error: Option<Errno>,
+    pub closed: Vec<u32>,
+    pub spawned: Vec<Spawned>,
+    /// The children started and not yet waited for, by pid.
+    children: Vec<(u32, WaitStatus)>,
+    next_fd: u32,
+    next_pid: u32,
+}
+
+impl FakePrograms {
+    pub fn new() -> FakePrograms {
+        FakePrograms {
+            known: Vec::new(),
+            refusals: Vec::new(),
+            opened: Vec::new(),
+            open_error: None,
+            closed: Vec::new(),
+            spawned: Vec::new(),
+            children: Vec::new(),
+            next_fd: 3,
+            next_pid: 100,
+        }
+    }
+}
+
+impl Programs for FakePrograms {
+    fn open_output(&mut self, path: &[u8], append: bool) -> Result<u32, Errno> {
+        if let Some(e) = self.open_error {
+            return Err(e);
+        }
+        self.next_fd += 1;
+        let path = String::from_utf8_lossy(path).into_owned();
+        self.opened.push((path, append, self.next_fd));
+        Ok(self.next_fd)
+    }
+    fn close(&mut self, fd: u32) {
+        self.closed.push(fd);
+    }
+    fn spawn(
+        &mut self,
+        path: &[u8],
+        args: &[&[u8]],
+        stdout: Option<u32>,
+        foreground: bool,
+    ) -> Result<u32, Errno> {
+        let path = String::from_utf8_lossy(path).into_owned();
+        let Some(&(_, status)) = self.known.iter().find(|(p, _)| *p == path) else {
+            let refusal = self.refusals.iter().find(|(p, _)| *p == path);
+            return Err(refusal.map_or(Errno::ENOENT, |r| r.1));
+        };
+        self.spawned.push(Spawned {
+            path,
+            args: args
+                .iter()
+                .map(|a| String::from_utf8_lossy(a).into_owned())
+                .collect(),
+            stdout,
+            foreground,
+        });
+        self.next_pid += 1;
+        self.children.push((self.next_pid, status));
+        Ok(self.next_pid)
+    }
+    fn wait(&mut self, pid: u32) -> Result<WaitStatus, Errno> {
+        let i = self
+            .children
+            .iter()
+            .position(|c| c.0 == pid)
+            .ok_or(Errno::ECHILD)?;
+        Ok(self.children.remove(i).1)
+    }
+}
+
 struct Clock;
 
 impl Env for Clock {
@@ -306,6 +400,7 @@ pub struct Harness {
     pub vfs: MountTable,
     pub console: TestConsole,
     pub system: TestSystem,
+    pub programs: FakePrograms,
     pub spy: Rc<SpyState>,
 }
 
@@ -331,6 +426,7 @@ impl Harness {
             vfs: MountTable::new(Box::new(fs)),
             console: TestConsole::new(),
             system: TestSystem::new(),
+            programs: FakePrograms::new(),
             spy: state,
         }
     }
@@ -342,6 +438,7 @@ impl Harness {
             vfs,
             console: TestConsole::new(),
             system: TestSystem::new(),
+            programs: FakePrograms::new(),
             spy,
         }
     }
@@ -349,6 +446,19 @@ impl Harness {
     /// Runs one command line; its exit status and everything it printed.
     pub fn run(&mut self, line: &str) -> (i32, String) {
         let status = Shell::new(&mut self.vfs, &mut self.console, &mut self.system).execute(line);
+        (status, self.console.take())
+    }
+
+    /// Runs one command line in a spawning shell (`/bin/sh`'s); its exit
+    /// status and what the shell printed.
+    pub fn spawning(&mut self, line: &str) -> (i32, String) {
+        let status = Shell::spawning(
+            &mut self.vfs,
+            &mut self.console,
+            &mut self.system,
+            &mut self.programs,
+        )
+        .execute(line);
         (status, self.console.take())
     }
 

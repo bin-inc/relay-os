@@ -1,7 +1,8 @@
 //! What the shell needs from its surroundings besides files (spec §7.3).
-//! The kernel implements both traits over its console, clock, memory
-//! manager, log, ACPI and programs; `xtask host-shell` over the host
-//! terminal; the tests over buffers.
+//! The kernel implements `Console` and `System` over its console, clock,
+//! memory manager, log, ACPI and programs; `xtask host-shell` over the
+//! host terminal; `relay-rt` over system calls; the tests over buffers.
+//! `Programs` is `/bin/sh`'s way to its commands.
 
 use alloc::vec::Vec;
 use relay_abi::WaitStatus;
@@ -70,4 +71,28 @@ pub trait System {
     fn wait(&mut self, _pid: u32, _out: &mut Output<'_>) -> Result<WaitStatus, Errno> {
         Err(Errno::ECHILD)
     }
+}
+
+/// Programs, for a shell that runs its commands as programs (`/bin/sh`,
+/// user-space gate §8.2): `relay-rt`'s system calls there, a fake in the
+/// tests.
+pub trait Programs {
+    /// Opens a redirection target for writing: created if missing, emptied
+    /// or, with `append`, written at its end. Its fd.
+    fn open_output(&mut self, path: &[u8], append: bool) -> Result<u32, Errno>;
+    fn close(&mut self, fd: u32);
+    /// Starts the program at `path` with `args` (argument 0 first); its
+    /// pid. It gets the shell's fds 0 and 2, and `stdout` (or the shell's
+    /// fd 1) as its fd 1. With `foreground` it runs in a process group of
+    /// its own, which gets the console (an interactive shell's command,
+    /// spec §6.4); otherwise in the shell's group (a script's).
+    fn spawn(
+        &mut self,
+        path: &[u8],
+        args: &[&[u8]],
+        stdout: Option<u32>,
+        foreground: bool,
+    ) -> Result<u32, Errno>;
+    /// Waits for the child `pid` to end.
+    fn wait(&mut self, pid: u32) -> Result<WaitStatus, Errno>;
 }

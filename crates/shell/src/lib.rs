@@ -22,6 +22,6 @@ mod time;
 mod transcript;
 
 pub use ctx::Ctx;
-pub use io::{Console, MemInfo, Output, System};
+pub use io::{Console, MemInfo, Output, Programs, System};
 pub use shell::Shell;
 pub use vfs::Vfs;

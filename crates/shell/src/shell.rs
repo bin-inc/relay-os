@@ -4,7 +4,7 @@
 
 use crate::commands::{self, Script};
 use crate::editor::{Feed, LineEditor};
-use crate::io::{Console, System};
+use crate::io::{Console, Programs, System};
 use crate::parser::{self, HOME};
 use crate::runner::{self, Parts, Ran, Runners};
 use crate::transcript::Transcript;
@@ -30,7 +30,7 @@ pub struct Shell<'a> {
     vfs: &'a mut dyn Vfs,
     console: &'a mut dyn Console,
     system: &'a mut dyn System,
-    runner: Runners,
+    runner: Runners<'a>,
     editor: LineEditor,
     status: i32,
     stopped: bool,
@@ -51,11 +51,24 @@ impl<'a> Shell<'a> {
         Shell::with_runner(vfs, console, system, Runners::InProcess(runner::InProcess))
     }
 
+    /// A shell whose commands are programs: `/bin/sh` (the spawning
+    /// runner, user-space gate §8.2). Only `cd`, `exit` and `help` run in
+    /// it.
+    pub fn spawning(
+        vfs: &'a mut dyn Vfs,
+        console: &'a mut dyn Console,
+        system: &'a mut dyn System,
+        programs: &'a mut dyn Programs,
+    ) -> Shell<'a> {
+        let runner = Runners::Spawning(runner::Spawning { programs });
+        Shell::with_runner(vfs, console, system, runner)
+    }
+
     fn with_runner(
         vfs: &'a mut dyn Vfs,
         console: &'a mut dyn Console,
         system: &'a mut dyn System,
-        runner: Runners,
+        runner: Runners<'a>,
     ) -> Shell<'a> {
         Shell {
             vfs,

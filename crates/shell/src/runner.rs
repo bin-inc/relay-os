@@ -3,11 +3,12 @@
 //! command functions against the shell's `Vfs`, `Console` and `System`, as
 //! milestone 1 does (the unit tests, `cargo xtask host-shell` and the
 //! in-kernel shell, whose other names are programs it reaches through
-//! `System::spawn`).
+//! `System::spawn`); the spawning runner starts `/bin/<name>` for every
+//! one (`/bin/sh`).
 
 use crate::commands::{self, Builtin, Script};
 use crate::ctx::Ctx;
-use crate::io::{Console, System};
+use crate::io::{Console, Programs, System};
 use crate::killed;
 use crate::parser::Redirect;
 use crate::shell::{CANCELLED, CANNOT_RUN, NAME, NOT_FOUND};
@@ -69,14 +70,16 @@ pub(crate) trait Runner {
 /// The runners a shell may have. (A shell holds its runner in this rather
 /// than in a box, so that it holds no destructor that would keep what it
 /// borrows until it is dropped.)
-pub(crate) enum Runners {
+pub(crate) enum Runners<'a> {
     InProcess(InProcess),
+    Spawning(Spawning<'a>),
 }
 
-impl Runners {
+impl Runners<'_> {
     pub fn get(&mut self) -> &mut dyn Runner {
         match self {
             Runners::InProcess(r) => r,
+            Runners::Spawning(r) => r,
         }
     }
 }
@@ -100,6 +103,50 @@ impl Runner for InProcess {
         match commands::find(name) {
             Some(command) => run_function(parts, command, args, file),
             None => run_program(parts, name, args, file),
+        }
+    }
+}
+
+/// Every command a program: `/bin/<name>`, or the path as given.
+pub(crate) struct Spawning<'a> {
+    pub programs: &'a mut dyn Programs,
+}
+
+impl Runner for Spawning<'_> {
+    /// Redirections are opened in the shell and passed to the program as
+    /// its fd 1, which the shell closes once the program has it. At the
+    /// prompt a program gets a process group of its own and the console;
+    /// in a script it runs in the shell's group, so that Ctrl-C ends the
+    /// script with it (spec §6.4).
+    fn run(
+        &mut self,
+        parts: Parts<'_>,
+        name: &str,
+        args: &[String],
+        redirect: Option<&Redirect>,
+    ) -> Ran {
+        let stdout = match redirect {
+            Some(r) => match self.programs.open_output(r.path.as_bytes(), r.append) {
+                Ok(fd) => Some(fd),
+                Err(e) => return Ran::said(1, format!("{NAME}: {}: {e}\n", r.path)),
+            },
+            None => None,
+        };
+        let mut argv: Vec<&[u8]> = alloc::vec![name.as_bytes()];
+        argv.extend(args.iter().map(|w| w.as_bytes()));
+        let path = program_path(name);
+        let started = self
+            .programs
+            .spawn(path.as_bytes(), &argv, stdout, !parts.in_script);
+        if let Some(fd) = stdout {
+            self.programs.close(fd);
+        }
+        match started {
+            Ok(pid) => match self.programs.wait(pid) {
+                Ok(w) => ended(name, &w),
+                Err(e) => Ran::said(CANNOT_RUN, format!("{NAME}: {name}: {e}\n")),
+            },
+            Err(e) => cannot_start(name, e),
         }
     }
 }
@@ -249,4 +296,145 @@ fn run_program(parts: Parts<'_>, name: &str, args: &[String], file: Option<(Node
     }
     *parts.transcript = ctx.transcript.take();
     ran
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::testing::{Harness, Spawned};
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    use relay_abi::WaitStatus;
+    use relay_abi::wait::{ACCESS_READ, FAULT_PAGE, KILLED_CTRL_C};
+    use vfs::Errno;
+
+    fn words(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| String::from(*s)).collect()
+    }
+
+    /// `/bin/t-args` exits with 3; `/bin/cat` with 0.
+    fn with_programs() -> Harness {
+        let mut h = Harness::new();
+        h.programs
+            .known
+            .push(("/bin/t-args", WaitStatus::exited(3)));
+        h.programs.known.push(("/bin/cat", WaitStatus::exited(0)));
+        h
+    }
+
+    #[test]
+    fn every_command_but_cd_exit_and_help_is_a_program() {
+        let mut h = with_programs();
+        assert_eq!(h.spawning("t-args a 'b c' ''"), (3, String::new()));
+        assert_eq!(
+            h.programs.spawned,
+            [Spawned {
+                path: "/bin/t-args".into(),
+                args: words(&["t-args", "a", "b c", ""]),
+                stdout: None,
+                foreground: true,
+            }],
+            "argument 0 is the name as typed; at the prompt it gets the console"
+        );
+        // `cat` is a program too, not the command function.
+        h.put("/tmp/f", b"in the file\n");
+        assert_eq!(h.spawning("cat /tmp/f"), (0, String::new()));
+        assert_eq!(h.programs.spawned[1].path, "/bin/cat");
+        // The shell's own commands run in it.
+        assert_eq!(h.spawning("cd /tmp"), (0, String::new()));
+        assert_eq!(h.spawning("help").0, 0);
+        assert_eq!(h.programs.spawned.len(), 2);
+        assert_eq!(h.run("pwd").1, "/tmp\n");
+    }
+
+    #[test]
+    fn a_path_runs_as_given() {
+        let mut h = with_programs();
+        h.programs.known.push(("./t-args", WaitStatus::exited(5)));
+        assert_eq!(h.spawning("./t-args x").0, 5);
+        assert_eq!(h.programs.spawned[0].args, words(&["./t-args", "x"]));
+        assert_eq!(h.spawning("/bin/t-args").0, 3);
+    }
+
+    #[test]
+    fn a_redirection_is_opened_in_the_shell_and_passed_as_fd_1() {
+        let mut h = with_programs();
+        assert_eq!(h.spawning("t-args > /tmp/out").0, 3);
+        h.spawning("t-args >> /tmp/out");
+        assert_eq!(
+            h.programs.opened,
+            [("/tmp/out".into(), false, 4), ("/tmp/out".into(), true, 5)]
+        );
+        let fds: Vec<_> = h.programs.spawned.iter().map(|s| s.stdout).collect();
+        assert_eq!(fds, [Some(4), Some(5)]);
+        assert_eq!(h.programs.closed, [4, 5], "the shell keeps no copy");
+        // Opened before the program starts, and closed when it cannot.
+        assert_eq!(h.spawning("nosuch > /tmp/o").0, 127);
+        assert_eq!(h.programs.closed, [4, 5, 6]);
+    }
+
+    #[test]
+    fn a_redirection_that_cannot_open_starts_nothing() {
+        let mut h = with_programs();
+        h.programs.open_error = Some(Errno::EISDIR);
+        assert_eq!(
+            h.spawning("t-args > /tmp"),
+            (1, "relay-sh: /tmp: Is a directory\n".into())
+        );
+        assert!(h.programs.spawned.is_empty());
+        // A bare redirection is the shell's alone.
+        h.programs.open_error = None;
+        assert_eq!(h.spawning("> /tmp/new"), (0, String::new()));
+        assert!(h.exists("/tmp/new") && h.programs.opened.is_empty());
+    }
+
+    #[test]
+    fn what_cannot_start_says_why() {
+        let mut h = with_programs();
+        h.programs.refusals.push(("/root/text", Errno::ENOEXEC));
+        h.programs.refusals.push(("/root", Errno::EISDIR));
+        h.programs.refusals.push(("/bin/..", Errno::EISDIR));
+        for (line, status, said) in [
+            ("nosuch", 127, "relay-sh: nosuch: command not found\n"),
+            ("..", 127, "relay-sh: ..: command not found\n"),
+            (
+                "/root/nosuch",
+                127,
+                "relay-sh: /root/nosuch: No such file or directory\n",
+            ),
+            (
+                "/root/text",
+                126,
+                "relay-sh: /root/text: Exec format error\n",
+            ),
+            ("/root", 126, "relay-sh: /root: Is a directory\n"),
+        ] {
+            assert_eq!(h.spawning(line), (status, said.into()), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_killed_program_is_reported_and_ctrl_c_is_only_so() {
+        let mut h = Harness::new();
+        let fault = WaitStatus::fault(FAULT_PAGE, ACCESS_READ, 0, 0x40_1a2c);
+        h.programs.known.push(("/bin/t-fault", fault));
+        h.programs
+            .known
+            .push(("/bin/t-spin", WaitStatus::killed(KILLED_CTRL_C)));
+        assert_eq!(
+            h.spawning("t-fault null-read > /tmp/o"),
+            (
+                139,
+                "relay-sh: t-fault: killed (page fault at 0x0, read, ip 0x401a2c)\n".into()
+            )
+        );
+        assert_eq!(h.spawning("t-spin"), (130, "^C\n".into()));
+    }
+
+    #[test]
+    fn every_program_is_followed_by_a_sync() {
+        let mut h = with_programs();
+        h.spawning("t-args");
+        h.spawning("nosuch");
+        assert_eq!(h.spy.syncs.get(), 2);
+    }
 }
