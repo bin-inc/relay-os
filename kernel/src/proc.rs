@@ -96,6 +96,7 @@ fn no_lock_held() -> bool {
         && !tty::is_locked()
         && !tty::tees_locked()
         && !mm::is_locked()
+        && !crate::init::is_locked()
 }
 
 /// Gives the CPU to the next ready process, or to the idle task, and

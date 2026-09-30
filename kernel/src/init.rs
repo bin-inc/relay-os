@@ -47,7 +47,10 @@ pub fn is_locked() -> bool {
 
 /// Process 1 (spec §4.4 step 11). Never returns.
 pub extern "C" fn run(_: u64) -> ! {
-    if let Some(e) = SYSTEM.lock().take() {
+    // Taken out first: a guard made in the `if let` would stay locked
+    // through the error screen, which waits, and so switches.
+    let failed = SYSTEM.lock().take();
+    if let Some(e) = failed {
         error_screen::show(&Reason::System(e));
     }
     motd();
