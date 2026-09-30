@@ -1,6 +1,8 @@
-//! A heap allocator over one region of memory (spec §5.2 of milestone 1).
-//! The kernel's `#[global_allocator]` is one of these behind a lock
-//! (`kernel/src/mm/heap.rs`); user programs will get one too.
+//! A heap allocator over regions of memory (spec §5.2 of milestone 1, §8.1
+//! of the user-space gate). The kernel's `#[global_allocator]` is one of
+//! these over one region behind a lock (`kernel/src/mm/heap.rs`); a
+//! program's (`relay-rt`) starts empty and grows by regions it maps.
+//! Regions that meet are one: a block may span them.
 //!
 //! - **Small blocks** (size and alignment at most 2 KiB) come from size
 //!   classes 16 B to 2 KiB. Each class has a free list of blocks carved out
@@ -46,8 +48,12 @@ pub struct HeapStats {
 }
 
 pub struct Heap {
+    /// The lowest and highest address of any region, for the debug check
+    /// that a freed block is the heap's.
     start: usize,
     end: usize,
+    /// Bytes in all regions.
+    total: usize,
     classes: [Link<SmallBlock>; SIZE_CLASSES.len()],
     large: Link<FreeBlock>,
     used: usize,
@@ -68,8 +74,9 @@ fn large_size(layout: Layout) -> usize {
 impl Heap {
     pub const fn empty() -> Heap {
         Heap {
-            start: 0,
+            start: usize::MAX,
             end: 0,
+            total: 0,
             classes: [None; SIZE_CLASSES.len()],
             large: None,
             used: 0,
@@ -80,13 +87,26 @@ impl Heap {
     /// [start, start + size) must be writable memory owned by this heap for
     /// its whole life. `start` must be 16-byte aligned.
     pub unsafe fn new(start: usize, size: usize) -> Heap {
+        let mut h = Heap::empty();
+        unsafe { h.add(start, size) };
+        h
+    }
+
+    /// Adds [start, start + size) to the heap. A region that meets
+    /// another one merges with it.
+    ///
+    /// # Safety
+    /// As for `new`, and the region must not overlap one the heap has.
+    pub unsafe fn add(&mut self, start: usize, size: usize) {
         assert!(start.is_multiple_of(MIN_BLOCK));
         let size = size & !(MIN_BLOCK - 1);
-        let mut h = Heap::empty();
-        h.start = start;
-        h.end = start + size;
-        unsafe { h.insert_free(start, size) };
-        h
+        if size == 0 {
+            return;
+        }
+        self.start = self.start.min(start);
+        self.end = self.end.max(start + size);
+        self.total += size;
+        unsafe { self.insert_free(start, size) };
     }
 
     pub fn alloc(&mut self, layout: Layout) -> Option<NonNull<u8>> {
@@ -136,7 +156,7 @@ impl Heap {
             link = next;
         }
         HeapStats {
-            total: self.end - self.start,
+            total: self.total,
             used: self.used,
             free_large,
             largest_free,
@@ -324,12 +344,69 @@ mod tests {
         assert!(h.alloc(l(8 * 1024, 16)).is_some());
     }
 
+    /// `size` bytes of fresh 4 KiB-aligned host memory.
+    fn region(size: usize) -> usize {
+        let layout = Layout::from_size_align(size, 4096).unwrap();
+        let mem = unsafe { std::alloc::alloc(layout) } as usize;
+        assert_ne!(mem, 0);
+        mem
+    }
+
+    #[test]
+    fn an_empty_heap_has_nothing_until_a_region_is_added() {
+        let mut h = Heap::empty();
+        assert!(h.alloc(l(16, 8)).is_none());
+        assert_eq!(h.stats().total, 0);
+        unsafe { h.add(region(64 * 1024), 64 * 1024) };
+        assert!(h.alloc(l(16, 8)).is_some());
+        assert_eq!(h.stats().total, 64 * 1024);
+    }
+
+    #[test]
+    fn a_region_added_later_serves_what_the_first_cannot() {
+        let mut h = heap(64 * 1024);
+        let a = h.alloc(l(60 * 1024, 16)).unwrap();
+        assert!(h.alloc(l(8 * 1024, 16)).is_none());
+        let second = region(64 * 1024);
+        unsafe { h.add(second, 64 * 1024) };
+        let b = h.alloc(l(8 * 1024, 16)).unwrap();
+        assert!((second..second + 64 * 1024).contains(&(b.as_ptr() as usize)));
+        assert_eq!(h.stats().total, 128 * 1024);
+        unsafe {
+            h.dealloc(a, l(60 * 1024, 16));
+            h.dealloc(b, l(8 * 1024, 16));
+        }
+        assert_eq!(h.stats().used, 0);
+        assert_eq!(h.stats().free_large, 128 * 1024);
+    }
+
+    #[test]
+    fn regions_that_meet_are_one() {
+        // Mapped one after the other, as a program's heap grows.
+        let mem = region(3 * 64 * 1024);
+        let mut h = unsafe { Heap::new(mem, 64 * 1024) };
+        unsafe {
+            h.add(mem + 2 * 64 * 1024, 64 * 1024);
+            h.add(mem + 64 * 1024, 64 * 1024);
+        }
+        let s = h.stats();
+        assert_eq!((s.total, s.largest_free), (3 * 64 * 1024, 3 * 64 * 1024));
+        let big = h.alloc(l(150 * 1024, 16)).unwrap();
+        assert_eq!(big.as_ptr() as usize, mem, "one block across all three");
+        unsafe { h.dealloc(big, l(150 * 1024, 16)) };
+        assert_eq!(h.stats().largest_free, 3 * 64 * 1024);
+    }
+
     /// Seeded random alloc/free mix. Every block is filled with a tag byte
     /// and checked before it is freed, so any overlap between live blocks
     /// shows up.
     #[test]
     fn random_mix_never_overlaps() {
-        let mut h = heap(4 << 20);
+        // Four regions apart, as a program's heap may have.
+        let mut h = heap(1 << 20);
+        for _ in 0..3 {
+            unsafe { h.add(region(1 << 20), 1 << 20) };
+        }
         let mut seed = 0x2545_F491_4F6C_DD1Du64;
         let mut rnd = move || {
             seed ^= seed << 13;
