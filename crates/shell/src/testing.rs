@@ -3,7 +3,7 @@
 #![cfg(test)]
 
 use crate::Shell;
-use crate::io::{Console, MemInfo, Output, Programs, System};
+use crate::io::{Console, MemInfo, Output, Programs, Stdout, System};
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
@@ -11,7 +11,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::Cell;
 use relay_abi::WaitStatus;
-use vfs::{DirEntry, Env, Errno, FileSystem, FileType, Ino, MemFs, MountTable, Stat, StatFs, Vfs};
+use vfs::{
+    DirEntry, Env, Errno, FileSystem, FileType, Ino, MemFs, MountTable, Node, Stat, StatFs, Vfs,
+};
 
 /// The time every test runs at: Sat Sep 26 12:00:00 UTC 2026.
 pub const NOW: u64 = 1_790_424_000;
@@ -99,6 +101,21 @@ pub struct TestSystem {
     pub answers: Vec<Result<(), Errno>>,
     /// The program started and not yet waited for.
     child: Option<usize>,
+    /// What `reboot` and `poweroff` say, unforced, as a program's `power`
+    /// call does when the filesystems cannot be shut down.
+    pub power_error: Option<Errno>,
+    /// Whether each `reboot` and `poweroff` was forced.
+    pub forced: Vec<bool>,
+}
+
+impl TestSystem {
+    fn power(&mut self, force: bool) -> Result<(), Errno> {
+        self.forced.push(force);
+        match self.power_error {
+            Some(e) if !force => Err(e),
+            _ => Ok(()),
+        }
+    }
 }
 
 impl TestSystem {
@@ -114,6 +131,8 @@ impl TestSystem {
             spawned: Vec::new(),
             answers: Vec::new(),
             child: None,
+            power_error: None,
+            forced: Vec::new(),
         }
     }
 }
@@ -128,11 +147,15 @@ impl System for TestSystem {
     fn kernel_log(&self) -> Vec<u8> {
         self.log.clone()
     }
-    fn reboot(&mut self) {
+    fn reboot(&mut self, force: bool) -> Result<(), Errno> {
+        self.power(force)?;
         self.reboots += 1;
+        Ok(())
     }
-    fn poweroff(&mut self) {
+    fn poweroff(&mut self, force: bool) -> Result<(), Errno> {
+        self.power(force)?;
         self.poweroffs += 1;
+        Ok(())
     }
     /// As the kernel does: the file must exist and be a program.
     fn spawn(
@@ -264,6 +287,62 @@ impl Programs for FakePrograms {
             .position(|c| c.0 == pid)
             .ok_or(Errno::ECHILD)?;
         Ok(self.children.remove(i).1)
+    }
+}
+
+/// A program's fd 1: the console or a file, keeping every write whole.
+pub struct FakeStdout {
+    pub tty: bool,
+    pub node: Option<Node>,
+    pub writes: Vec<Vec<u8>>,
+    /// Writes fail with this once this many bytes were written.
+    pub fail_after: Option<(usize, Errno)>,
+}
+
+impl FakeStdout {
+    pub fn console() -> FakeStdout {
+        FakeStdout {
+            tty: true,
+            node: None,
+            writes: Vec::new(),
+            fail_after: None,
+        }
+    }
+
+    pub fn file(node: Option<Node>) -> FakeStdout {
+        FakeStdout {
+            tty: false,
+            ..FakeStdout::console()
+        }
+        .with_node(node)
+    }
+
+    fn with_node(mut self, node: Option<Node>) -> FakeStdout {
+        self.node = node;
+        self
+    }
+
+    /// Everything written.
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.writes.concat()).into_owned()
+    }
+}
+
+impl Stdout for FakeStdout {
+    fn write(&mut self, bytes: &[u8]) -> Result<(), Errno> {
+        if let Some((limit, e)) = self.fail_after
+            && self.writes.iter().map(Vec::len).sum::<usize>() + bytes.len() > limit
+        {
+            return Err(e);
+        }
+        self.writes.push(bytes.to_vec());
+        Ok(())
+    }
+    fn is_tty(&self) -> bool {
+        self.tty
+    }
+    fn node(&self) -> Option<Node> {
+        self.node
     }
 }
 
@@ -459,6 +538,23 @@ impl Harness {
             &mut self.programs,
         )
         .execute(line);
+        (status, self.console.take())
+    }
+
+    /// Runs `line` as the program named by its first word does, standard
+    /// output going to `stdout`; its status and what it said on the
+    /// console.
+    pub fn program(&mut self, line: &str, stdout: &mut FakeStdout) -> (i32, String) {
+        let words = crate::parser::parse(line).unwrap().words;
+        let status = crate::run_command(
+            &words[0],
+            crate::commands::find(&words[0]).unwrap().run,
+            &words[1..],
+            &mut self.vfs,
+            &mut self.console,
+            &mut self.system,
+            stdout,
+        );
         (status, self.console.take())
     }
 

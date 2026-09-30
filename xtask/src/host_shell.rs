@@ -107,8 +107,12 @@ impl System for HostSystem {
     fn kernel_log(&self) -> Vec<u8> {
         self.0.contents()
     }
-    fn reboot(&mut self) {}
-    fn poweroff(&mut self) {}
+    fn reboot(&mut self, _force: bool) -> Result<(), vfs::Errno> {
+        Ok(())
+    }
+    fn poweroff(&mut self, _force: bool) -> Result<(), vfs::Errno> {
+        Ok(())
+    }
 }
 
 /// Standard input and output.

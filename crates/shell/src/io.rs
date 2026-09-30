@@ -6,7 +6,7 @@
 
 use alloc::vec::Vec;
 use relay_abi::WaitStatus;
-use vfs::{Errno, Vfs};
+use vfs::{Errno, Node, Vfs};
 
 /// Where a program's output goes (`System::wait`): what it writes, on fd
 /// 1 or 2, and the write's error, if any.
@@ -47,12 +47,14 @@ pub trait System {
     fn memory(&self) -> Option<MemInfo>;
     /// The kernel log, for `dmesg`.
     fn kernel_log(&self) -> Vec<u8>;
-    /// Restarts the machine. Returns only where it cannot (on the host, in
-    /// tests); the shell then stops.
-    fn reboot(&mut self);
-    /// Turns the machine off. Returns only where it cannot; the shell then
-    /// stops.
-    fn poweroff(&mut self);
+    /// Restarts the machine, going ahead with `force` when the filesystems
+    /// cannot be shut down cleanly. Returns only where it cannot (on the
+    /// host, in tests), and the shell then stops; or with the error that
+    /// kept the machine up (a program's `power` call, which shuts the
+    /// filesystems down itself).
+    fn reboot(&mut self, force: bool) -> Result<(), Errno>;
+    /// Turns the machine off, as `reboot` restarts it.
+    fn poweroff(&mut self, force: bool) -> Result<(), Errno>;
     /// Starts the program at `path`, read through `vfs`, with `args`
     /// (argument 0 is the path); its pid. `None` where programs cannot run
     /// (on the host). The in-kernel shell's way to programs until the shell
@@ -71,6 +73,19 @@ pub trait System {
     fn wait(&mut self, _pid: u32, _out: &mut Output<'_>) -> Result<WaitStatus, Errno> {
         Err(Errno::ECHILD)
     }
+}
+
+/// A program's standard output, fd 1 (user-space gate §8.1): the console
+/// or a file the shell opened for it.
+pub trait Stdout {
+    /// Writes all of `bytes`; the error that stopped it (`ENOSPC` for a
+    /// write that took nothing).
+    fn write(&mut self, bytes: &[u8]) -> Result<(), Errno>;
+    /// Whether it is the console (`ls` lays out columns then).
+    fn is_tty(&self) -> bool;
+    /// The file it is, as the `Vfs` names files (`cat f >> f` must not
+    /// read its own output).
+    fn node(&self) -> Option<Node>;
 }
 
 /// Programs, for a shell that runs its commands as programs (`/bin/sh`,

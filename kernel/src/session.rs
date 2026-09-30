@@ -75,12 +75,13 @@ impl System for KernelSystem {
         klog::KLOG.lock().to_vec()
     }
 
-    // The shell has shut the filesystems down before these.
-    fn reboot(&mut self) {
+    // The shell has shut the filesystems down before these (or `-f` goes
+    // ahead without).
+    fn reboot(&mut self, _force: bool) -> Result<(), Errno> {
         power::reboot()
     }
 
-    fn poweroff(&mut self) {
+    fn poweroff(&mut self, _force: bool) -> Result<(), Errno> {
         power::poweroff(self.test_mode)
     }
 

@@ -12,17 +12,25 @@ mod stat;
 mod system;
 mod text;
 
+pub use basic::{clear, echo, pwd, uname};
+pub use change::{cp, mkdir, mv, rm, rmdir, touch};
+pub use ls::ls;
 pub(crate) use script::Script;
 pub use script::transcript_name;
+pub use stat::stat;
+pub use system::{date, df, dmesg, free, poweroff, reboot, sync};
+pub use text::{cat, head, tail, wc};
+
+/// A command function: runs the command with its arguments (without the
+/// name); returns the exit status.
+pub type Run = fn(&mut Ctx<'_>, &[String]) -> i32;
 
 /// One built-in command.
 pub struct Builtin {
     pub name: &'static str,
     /// One line for `help`.
     pub help: &'static str,
-    /// Runs the command with its arguments (without the name); returns the
-    /// exit status.
-    pub run: fn(&mut Ctx<'_>, &[String]) -> i32,
+    pub run: Run,
 }
 
 /// Every command, sorted by name.

@@ -15,6 +15,7 @@ pub mod editor;
 mod io;
 pub mod killed;
 pub mod parser;
+mod program;
 mod runner;
 mod shell;
 mod testing;
@@ -22,6 +23,7 @@ mod time;
 mod transcript;
 
 pub use ctx::Ctx;
-pub use io::{Console, MemInfo, Output, Programs, System};
+pub use io::{Console, MemInfo, Output, Programs, Stdout, System};
+pub use program::run_command;
 pub use shell::Shell;
 pub use vfs::Vfs;
