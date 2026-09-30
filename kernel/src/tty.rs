@@ -10,7 +10,7 @@
 //! the process table kills (`ctrl_c`). Plan 3b adds reading in line mode.
 
 use crate::input::InputQueue;
-use crate::{serial, usb};
+use crate::{serial, timer, usb};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use spin::Mutex;
 
@@ -47,12 +47,21 @@ static INPUT: Mutex<InputQueue> = Mutex::new(InputQueue::new());
 pub fn poll() {
     let mut input = INPUT.lock();
     usb::poll(&mut input);
+    let now = now_ms();
     for _ in 0..SERIAL_BURST {
         match serial::read_byte() {
-            Some(b) => input.push_serial(b),
+            Some(b) => input.push_serial(b, now),
             None => break,
         }
     }
+    input.expire(now);
+}
+
+/// Milliseconds since the machine started, for serial escape sequences:
+/// from the TSC, which runs even when the timer could not start.
+fn now_ms() -> u64 {
+    let t = timer::tsc_time().unwrap_or_else(timer::uptime);
+    u64::try_from(t.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// The oldest byte typed.

@@ -18,10 +18,17 @@ pub const QUEUE_MAX: usize = 4096;
 /// ones are garbage and dropped.
 const SEQUENCE_MAX: usize = 8;
 
+/// How long the rest of an escape sequence may take to arrive over serial.
+/// A terminal sends a sequence at once, so an `ESC` with nothing after it
+/// for this long is the Escape key (milestone 1's deferred finding).
+pub const ESC_TIMEOUT_MS: u64 = 50;
+
 pub struct InputQueue {
     bytes: VecDeque<u8>,
     /// An escape sequence arriving over serial, until it is complete.
     sequence: Vec<u8>,
+    /// When its `ESC` came, in milliseconds.
+    sequence_since: u64,
 }
 
 impl InputQueue {
@@ -29,19 +36,21 @@ impl InputQueue {
         InputQueue {
             bytes: VecDeque::new(),
             sequence: Vec::new(),
+            sequence_since: 0,
         }
     }
 
-    /// Adds one byte from COM1. An escape sequence (`ESC` and one byte, or
-    /// `ESC [` up to its final byte) waits until it is complete and then
-    /// goes in whole or not at all, like a key's; Ctrl-C ends it.
-    pub fn push_serial(&mut self, b: u8) {
-        if b == INTERRUPT {
-            self.sequence.clear();
-            self.push(&[b]);
-        } else if self.sequence.is_empty() && b != 0x1B {
+    /// Adds one byte from COM1 that came at `now` (milliseconds). An escape
+    /// sequence (`ESC` and one byte, or `ESC [` up to its final byte) waits
+    /// until it is complete and then goes in whole or not at all, like a
+    /// key's; Ctrl-C ends it, and so does `expire`.
+    pub fn push_serial(&mut self, b: u8, now: u64) {
+        if b == INTERRUPT || self.sequence.is_empty() && b != 0x1B {
             self.push(&[b]);
         } else {
+            if self.sequence.is_empty() {
+                self.sequence_since = now;
+            }
             self.sequence.push(b);
             let s = &self.sequence;
             let done = s.len() == 2 && s[1] != b'[' || s.len() > 2 && (0x40..=0x7E).contains(&b);
@@ -56,12 +65,27 @@ impl InputQueue {
         }
     }
 
+    /// Ends an escape sequence arriving over serial whose rest has not come
+    /// `ESC_TIMEOUT_MS` after its `ESC`: an `ESC` alone is the Escape key
+    /// and goes in; the start of a longer one is garbage and is dropped.
+    pub fn expire(&mut self, now: u64) {
+        if self.sequence.is_empty() || now.saturating_sub(self.sequence_since) < ESC_TIMEOUT_MS {
+            return;
+        }
+        let seq = core::mem::take(&mut self.sequence);
+        if seq == [0x1B] {
+            self.push(&seq);
+        }
+    }
+
     /// Adds input; what does not fit is dropped. A Ctrl-C always fits:
-    /// it drops what was typed before it, as `take_interrupt` would.
+    /// it drops what was typed before it, as `take_interrupt` would, and a
+    /// half-arrived serial sequence, wherever the Ctrl-C came from.
     pub fn push(&mut self, bytes: &[u8]) {
         let bytes = match bytes.iter().rposition(|&b| b == INTERRUPT) {
             Some(i) => {
                 self.bytes.clear();
+                self.sequence.clear();
                 &bytes[i..]
             }
             None => bytes,
@@ -273,7 +297,7 @@ mod tests {
 
     fn serial(q: &mut InputQueue, bytes: &[u8]) {
         for &b in bytes {
-            q.push_serial(b);
+            q.push_serial(b, 1000);
         }
     }
 
@@ -304,6 +328,46 @@ mod tests {
         serial(&mut q, b"ok");
         let got = drain(&mut q);
         assert!(!got.contains(&0x1b) && got.ends_with(b"1ok"), "{got:?}");
+    }
+
+    #[test]
+    fn an_escape_alone_over_serial_goes_in_once_nothing_follows() {
+        // Milestone 1's deferred finding: the Escape key over COM1 waited
+        // for the next byte, which it then swallowed.
+        let mut q = InputQueue::new();
+        q.push_serial(0x1B, 1000);
+        q.expire(1000 + ESC_TIMEOUT_MS - 1);
+        assert!(q.is_empty(), "the rest of a sequence may still come");
+        q.expire(1000 + ESC_TIMEOUT_MS);
+        assert_eq!(drain(&mut q), b"\x1b");
+        q.push_serial(b'x', 2000);
+        assert_eq!(drain(&mut q), b"x", "what follows is plain input");
+        // A sequence that arrives in time is not cut.
+        serial(&mut q, b"\x1b[");
+        q.expire(1000 + ESC_TIMEOUT_MS - 1);
+        serial(&mut q, b"A");
+        assert_eq!(drain(&mut q), b"\x1b[A");
+        // The start of a longer one that never ends is dropped, counting
+        // from its `ESC`.
+        q.push_serial(0x1B, 3000);
+        q.push_serial(b'[', 3000 + ESC_TIMEOUT_MS - 1);
+        q.expire(3000 + ESC_TIMEOUT_MS);
+        q.push_serial(b'y', 5000);
+        assert_eq!(drain(&mut q), b"y");
+        q.expire(0);
+        assert!(q.is_empty(), "nothing waits");
+    }
+
+    #[test]
+    fn a_ctrl_c_from_the_keyboard_ends_a_serial_sequence() {
+        // Milestone 1's deferred finding: the keyboard's Ctrl-C left the
+        // half sequence, and the next serial byte finished it.
+        let mut q = InputQueue::new();
+        serial(&mut q, b"\x1b[");
+        q.push_key(&press(Key::Char(b'c'), true));
+        serial(&mut q, b"A");
+        assert!(q.take_interrupt());
+        assert_eq!(drain(&mut q), b"A");
     }
 
     #[test]
