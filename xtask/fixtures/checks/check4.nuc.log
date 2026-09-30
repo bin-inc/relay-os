@@ -2,15 +2,15 @@
 + t-spawn fill
 filled the table with 60 children
 + t-spin 1
-4493148160 iterations
+4588568576 iterations
 + t-spawn 1000
-free frames before: 247463
-free frames after: 247463
+free frames before: 4071601
+free frames after: 4071601
 frames lost: 0
 + free
               total        used        free
-Mem:        1030532       40720      989812
-Heap:         32768        8524       24244
+Mem:       16328032       41668    16286364
+Heap:         32768        8543       24225
 + t-fault null-read
 relay-sh: t-fault: killed (page fault at 0x0, read, ip 0x4001e9)
 + t-fault null-write
@@ -42,8 +42,8 @@ relay-sh: t-fault: killed (invalid opcode, ip 0x40010a)
 t-args: kill
 + t-spawn orphan
 + t-spin 1
-2300575744 iterations
-2312110080 iterations
+2325741568 iterations
+2391801856 iterations
 + t-args a 'b c' ''
 [1] a
 [2] b c
@@ -102,5 +102,5 @@ two
 two
 + free
               total        used        free
-Mem:        1030532       40720      989812
-Heap:         32768        8524       24244
+Mem:       16328032       41668    16286364
+Heap:         32768        8544       24224
