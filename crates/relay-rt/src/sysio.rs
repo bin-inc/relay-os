@@ -21,22 +21,32 @@ use vfs::{Errno, Node};
 /// program's errors, and the shell's prompt and messages, as bash writes
 /// them).
 pub struct SysConsole {
-    /// The process group that takes the console before every read (an
-    /// interactive shell's own, spec §6.4).
-    owner: Option<u32>,
+    /// An interactive shell's: it takes the console back, in raw mode,
+    /// before every read.
+    interactive: bool,
+    /// The process group that takes it (the shell's own, spec §6.4).
+    group: Option<u32>,
 }
 
 impl SysConsole {
     /// The console of a program that does not read it.
     pub fn new() -> SysConsole {
-        SysConsole { owner: None }
+        SysConsole {
+            interactive: false,
+            group: None,
+        }
     }
 
-    /// The console of an interactive shell, whose process group `pgid`
-    /// takes it back, in raw mode, before every read, whatever a program
-    /// left it in (spec §6.4, §16 item 4).
-    pub fn owned_by(pgid: u32) -> SysConsole {
-        SysConsole { owner: Some(pgid) }
+    /// The console of an interactive shell, which takes it back, in raw
+    /// mode, before every read, whatever a program left it in (spec §6.4,
+    /// §16 item 4): for its process group `group` when it leads one, which
+    /// its commands' groups had; otherwise it shares a group, a script's,
+    /// with its commands, which never take the console from it.
+    pub fn interactive(group: Option<u32>) -> SysConsole {
+        SysConsole {
+            interactive: true,
+            group,
+        }
     }
 }
 
@@ -48,8 +58,10 @@ impl Default for SysConsole {
 
 impl Console for SysConsole {
     fn read_byte(&mut self) -> Option<u8> {
-        if let Some(pgid) = self.owner {
+        if self.interactive {
             let _ = sys::console_mode(MODE_RAW);
+        }
+        if let Some(pgid) = self.group {
             let _ = sys::console_foreground(pgid);
         }
         let mut byte = [0];
@@ -156,7 +168,18 @@ impl Stdout for SysStdout {
 
 /// `/bin/sh`'s way to its commands (user-space gate §8.2, §8.3): `spawn`,
 /// `wait`, and the tees of a script's transcript.
-pub struct SysPrograms;
+pub struct SysPrograms {
+    /// The shell leads a process group of its own, so a command at its
+    /// prompt may have one too, with the console; a shell in a script's
+    /// group keeps its commands there (and the console with them).
+    own_group: bool,
+}
+
+impl SysPrograms {
+    pub fn new(own_group: bool) -> SysPrograms {
+        SysPrograms { own_group }
+    }
+}
 
 /// `open`'s flags for a redirection: `>` empties the file, `>>` writes at
 /// its end.
@@ -195,7 +218,7 @@ impl Programs for SysPrograms {
         stdout: Option<u32>,
         foreground: bool,
     ) -> Result<u32, Errno> {
-        let flags = if foreground {
+        let flags = if foreground && self.own_group {
             NEW_GROUP | FOREGROUND
         } else {
             0
