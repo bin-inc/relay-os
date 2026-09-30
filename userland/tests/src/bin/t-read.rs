@@ -10,6 +10,8 @@
 //!   is not the console's, so it gets end of input at once.
 //! - `t-read size`: the console's columns and rows, and what
 //!   `console_mode` and `console_foreground` refuse.
+//! - `t-read leave`: leaves a child behind that puts the console in line
+//!   mode half a second later, while the shell waits at its prompt.
 #![no_std]
 #![no_main]
 
@@ -29,8 +31,20 @@ fn main(args: Args) -> u8 {
         Some(b"raw") => raw(),
         Some(b"apart") => apart(),
         Some(b"size") => size(),
+        Some(b"leave") => sys::spawn(
+            b"/bin/t-read",
+            b"t-read\0leave-child\0",
+            b"",
+            &[],
+            NEW_GROUP,
+        )
+        .map(|_| ()),
+        Some(b"leave-child") => {
+            sys::sleep(500);
+            sys::console_mode(MODE_LINE).map(|_| ())
+        }
         _ => {
-            let _ = sys::write_all(2, b"usage: t-read [raw|apart|size]\n");
+            let _ = sys::write_all(2, b"usage: t-read [raw|apart|size|leave]\n");
             return 2;
         }
     };

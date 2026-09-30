@@ -39,6 +39,12 @@ send-crlf t-read
 alive 1
 type {ctrl-d}
 expect t-read\nend of input\nroot@relay:~# $
+# A program that leaves the console in line mode, while the shell waits
+# at its prompt, does not keep the shell from reading.
+send t-read leave
+alive 2
+send echo ok
+expect \nok\nroot@relay:~# $
 # What is typed during a script is echoed once, as it is typed, not again
 # at every later command; the shell's line editor shows it at the prompt.
 send echo t-spin 2 > s.sh

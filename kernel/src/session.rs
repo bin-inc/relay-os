@@ -18,8 +18,12 @@ use vfs::{Env, Errno, Vfs};
 pub struct KernelConsole;
 
 impl Console for KernelConsole {
+    /// The shell reads at its prompt: the console is its own, in raw mode,
+    /// whatever another process left it in (a program may call
+    /// `console_mode` after its parent returned to the prompt).
     fn read_byte(&mut self) -> Option<u8> {
         loop {
+            proc::take_console();
             tty::poll();
             if let Some(b) = tty::pop() {
                 return Some(b);
