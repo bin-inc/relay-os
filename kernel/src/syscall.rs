@@ -81,6 +81,12 @@ pub trait Caller {
     fn console_size(&self) -> (u32, u32);
     /// Makes `pgid` the foreground group; `ESRCH` if no process is in it.
     fn console_foreground(&mut self, pgid: u32) -> Result<(), Errno>;
+    /// Pushes `file` as a console tee of the program (spec §6.5).
+    fn tee_push(&mut self, file: Arc<File>) -> Result<(), Errno>;
+    /// Pops the newest tee the program pushed.
+    fn tee_pop(&mut self) -> Result<(), Errno>;
+    /// Writes what waits for the tees, then syncs every filesystem.
+    fn sync(&mut self) -> Result<(), Errno>;
     /// Writes `bytes` to `file`, output `n` of the in-kernel shell (1 or
     /// 2), which sends them where the command line says; its error, if any.
     fn shell_output(&mut self, file: &Arc<File>, n: u32, bytes: &[u8]) -> Result<(), Errno>;
@@ -135,7 +141,7 @@ pub fn dispatch(caller: &mut impl Caller, number: u64, args: [u64; 6]) -> Outcom
         Some(Call::Readlink) => files::readlink(caller, args[0], args[1], args[2], args[3]),
         Some(Call::Rename) => files::rename(caller, [args[0], args[1], args[2], args[3]]),
         Some(Call::Statfs) => files::statfs(caller, args[0], args[1], args[2]),
-        Some(Call::Sync) => caller.with_vfs(|v| v.sync()).map(|()| 0),
+        Some(Call::Sync) => caller.sync().map(|()| 0),
         Some(Call::Chdir) => files::on_path(caller, args[0], args[1], |v, p| v.chdir(p)),
         Some(Call::Getcwd) => files::getcwd(caller, args[0], args[1]),
         Some(Call::ConsoleMode) => console_mode(caller, args[0]),
@@ -143,6 +149,10 @@ pub fn dispatch(caller: &mut impl Caller, number: u64, args: [u64; 6]) -> Outcom
             let (columns, rows) = caller.console_size();
             Ok(relay_abi::console::size_result(columns, rows))
         }
+        Some(Call::ConsoleTeePush) => file(caller, args[0])
+            .and_then(|f| caller.tee_push(f))
+            .map(|()| 0),
+        Some(Call::ConsoleTeePop) => caller.tee_pop().map(|()| 0),
         Some(Call::ConsoleForeground) => {
             let pgid = u32::try_from(args[0]).ok().filter(|&g| g != 0);
             pgid.ok_or(Errno::ESRCH)
@@ -794,6 +804,28 @@ mod tests {
     }
 
     #[test]
+    fn tees_are_pushed_by_fd_and_popped() {
+        let mut f = fake();
+        assert_eq!(call(&mut f, Call::ConsoleTeePush, [1, 0, 0]), Ok(0));
+        assert_eq!(f.tees.len(), 1);
+        assert!(
+            Arc::ptr_eq(&f.tees[0], f.fds.get(1).unwrap()),
+            "the fd's file"
+        );
+        assert_eq!(
+            call(&mut f, Call::ConsoleTeePush, [9, 0, 0]),
+            Err(errno::EBADF)
+        );
+        assert_eq!(call(&mut f, Call::ConsoleTeePop, [0, 0, 0]), Ok(0));
+        assert_eq!(
+            call(&mut f, Call::ConsoleTeePop, [0, 0, 0]),
+            Err(errno::EINVAL)
+        );
+        assert_eq!(call(&mut f, Call::Sync, [0, 0, 0]), Ok(0));
+        assert_eq!(f.syncs, 1);
+    }
+
+    #[test]
     fn every_other_call_is_enosys() {
         let mut f = fake();
         let served = [
@@ -826,6 +858,8 @@ mod tests {
             Call::ConsoleMode,
             Call::ConsoleSize,
             Call::ConsoleForeground,
+            Call::ConsoleTeePush,
+            Call::ConsoleTeePop,
             Call::Time,
             Call::Sleep,
             Call::SysInfo,

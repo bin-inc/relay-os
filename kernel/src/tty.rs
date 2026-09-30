@@ -10,10 +10,14 @@
 //! the process table kills (`ctrl_c`), and what is typed goes through the
 //! line discipline, which echoes it as it comes (`input`).
 
+use crate::fd::File;
 use crate::input::InputQueue;
-use crate::{console, serial, timer, usb};
+use crate::tee::TeeStack;
+use crate::{console, klogln, mounts, serial, timer, usb};
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, Ordering};
 use spin::Mutex;
+use vfs::{Change, Errno};
 
 /// The foreground process group; process 1's at first.
 static FOREGROUND: AtomicU32 = AtomicU32::new(1);
@@ -58,11 +62,92 @@ pub fn read(buf: &mut [u8]) -> Option<usize> {
     INPUT.lock().read(buf)
 }
 
-/// The line discipline's echo, to the screen.
+/// The line discipline's echo, to the screen and the tees. It may come
+/// from a tick, where no file can be written: the tees keep it for the
+/// next write.
 fn output(echo: &[u8]) {
     if !echo.is_empty() {
         console::write_output(echo);
+        TEES.lock().add(echo);
     }
+}
+
+/// The console's tees (spec §6.5).
+static TEES: Mutex<TeeStack<Arc<File>>> = Mutex::new(TeeStack::new());
+
+/// Writes what a process or the in-kernel shell gives the console: the
+/// screen, and a copy for every tee, written once 4 KiB of it waits.
+pub fn write(bytes: &[u8]) {
+    console::write_output(bytes);
+    let mut tees = TEES.lock();
+    if tees.is_copying() {
+        tees.add(bytes);
+        flush(&mut tees, false);
+    }
+}
+
+/// Writes what waits for the tees: all of it with `all` (a `sync`), or
+/// what is due.
+fn flush(tees: &mut TeeStack<Arc<File>>, all: bool) {
+    for (owner, e) in tees.flush(all, &mut write_tee) {
+        klogln!("pid {owner}: a console tee failed: {e}; it is removed");
+    }
+}
+
+/// A tee's copies to its file.
+fn write_tee(file: &Arc<File>, bytes: &[u8]) -> Result<(), Errno> {
+    match &**file {
+        File::Vfs(open) => mounts::with_nodes(|t| open.write_all(t, bytes)),
+        File::Console | File::ShellOutput(_) => Err(Errno::EINVAL),
+    }
+}
+
+/// Writes everything that waits for the tees (at every `sync`).
+pub fn sync_tees() {
+    flush(&mut TEES.lock(), true);
+}
+
+/// Pushes `file` as a tee of process `owner`: a file of the VFS it has
+/// open for writing (`EBADF` otherwise, `EINVAL` for the console or the
+/// shell's outputs); `EBUSY` if 4 are pushed.
+pub fn push_tee(owner: u32, file: Arc<File>) -> Result<(), Errno> {
+    match &*file {
+        File::Vfs(open) if open.is_writable() => {}
+        File::Vfs(_) => return Err(Errno::EBADF),
+        File::Console | File::ShellOutput(_) => return Err(Errno::EINVAL),
+    }
+    TEES.lock().push(owner, file)
+}
+
+/// Pops `owner`'s newest tee after writing what waits for it; the error of
+/// a write that failed for it, now or before.
+pub fn pop_tee(owner: u32) -> Result<(), Errno> {
+    TEES.lock().pop(owner, &mut write_tee)
+}
+
+/// Process `owner` ended: its tees end too (written at the next flush).
+pub fn end_tees(owner: u32) {
+    TEES.lock().end(owner);
+}
+
+/// A removal elsewhere freed an inode: a tee of it is gone.
+pub fn follow_tees(changes: &[Change]) {
+    let tees = TEES.lock();
+    for file in tees.files() {
+        for c in changes {
+            if let File::Vfs(open) = &**file
+                && c.removed() == Some(open.node())
+            {
+                open.mark_gone();
+            }
+        }
+    }
+}
+
+/// Whether the tee stack is locked now (for the kernel's checks that no
+/// lock is held across a switch).
+pub fn tees_locked() -> bool {
+    TEES.is_locked()
 }
 
 /// Bytes read from COM1 per poll at most, so a flood cannot starve the rest.

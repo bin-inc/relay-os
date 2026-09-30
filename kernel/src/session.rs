@@ -34,7 +34,7 @@ impl Console for KernelConsole {
     }
 
     fn write(&mut self, bytes: &[u8]) {
-        console::write_output(bytes);
+        tty::write(bytes);
     }
 
     fn columns(&self) -> usize {

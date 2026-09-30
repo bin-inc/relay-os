@@ -92,7 +92,11 @@ fn next(t: &Table<Res>) -> Next {
 /// A kernel bug if one of these is held when the CPU goes to another
 /// process: that one could wait for it for ever.
 fn no_lock_held() -> bool {
-    !PROCS.is_locked() && !mounts::is_locked() && !tty::is_locked() && !mm::is_locked()
+    !PROCS.is_locked()
+        && !mounts::is_locked()
+        && !tty::is_locked()
+        && !tty::tees_locked()
+        && !mm::is_locked()
 }
 
 /// Gives the CPU to the next ready process, or to the idle task, and
@@ -292,15 +296,18 @@ pub fn start(shell: extern "C" fn(u64) -> !, arg: u64, cwd: Cwd) -> ! {
 /// table changed itself) follows it, and every process's open files of an
 /// inode it freed are gone.
 pub fn follow_changes(changes: &[vfs::Change]) {
-    let mut t = PROCS.lock();
-    for p in t.iter_mut() {
-        for c in changes {
-            if let Some(cwd) = p.res.cwd.as_mut() {
-                cwd.follow(c);
+    {
+        let mut t = PROCS.lock();
+        for p in t.iter_mut() {
+            for c in changes {
+                if let Some(cwd) = p.res.cwd.as_mut() {
+                    cwd.follow(c);
+                }
+                p.res.fds.follow(c);
             }
-            p.res.fds.follow(c);
         }
     }
+    tty::follow_tees(changes);
 }
 
 /// Runs `f` with the running process's current directory, and keeps what
@@ -556,18 +563,20 @@ pub fn wait(pid: u32, out: &mut shell::Output<'_>) -> Result<WaitStatus, Errno> 
     }
 }
 
-/// The running process ends with `status` (spec §5.4): its memory and fds
-/// are given back at once, it stays a zombie until its parent waits for
-/// it, and the CPU goes to the next process for good.
+/// The running process ends with `status` (spec §5.4): its memory, fds and
+/// tees are given back at once, it stays a zombie until its parent waits
+/// for it, and the CPU goes to the next process for good.
 fn end(status: WaitStatus) -> ! {
-    let (space, fds) = {
+    let (me, space, fds) = {
         let mut t = PROCS.lock();
         let me = t.current();
         let p = t.get_mut(me).expect("a running process ends");
-        let taken = (p.res.space.take(), core::mem::take(&mut p.res.fds));
+        let (space, fds) = (p.res.space.take(), core::mem::take(&mut p.res.fds));
         t.end(me, status);
-        taken
+        (me, space, fds)
     };
+    // Its tees get nothing more; they are written at the next sync.
+    tty::end_tees(me);
     drop(fds);
     if let Some(space) = space {
         // Off its page tables before they go; the kernel stack is in the
@@ -656,7 +665,7 @@ impl Caller for Current {
     }
 
     fn console_write(&mut self, bytes: &[u8]) {
-        console::write_output(bytes);
+        tty::write(bytes);
     }
 
     fn console_read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
@@ -679,6 +688,18 @@ impl Caller for Current {
             // it.
             block(Blocked::Console);
         }
+    }
+
+    fn tee_push(&mut self, file: Arc<File>) -> Result<(), Errno> {
+        tty::push_tee(self.pid(), file)
+    }
+
+    fn tee_pop(&mut self) -> Result<(), Errno> {
+        tty::pop_tee(self.pid())
+    }
+
+    fn sync(&mut self) -> Result<(), Errno> {
+        KernelVfs.sync()
     }
 
     fn console_mode(&mut self, line: bool) -> bool {
@@ -707,7 +728,7 @@ impl Caller for Current {
         if out.is_null() || !shell_output_now(file, n) {
             // The shell waits for nobody, or for another command: this
             // goes to the screen.
-            console::write_output(bytes);
+            tty::write(bytes);
             return Ok(());
         }
         // SAFETY: set by the in-kernel shell's `wait`, which is blocked

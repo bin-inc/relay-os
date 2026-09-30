@@ -44,6 +44,13 @@ pub fn with<R>(cwd: &mut Cwd, f: impl FnOnce(&mut MountTable) -> R) -> R {
     r
 }
 
+/// Runs `f` on the mount table as it is, for work on nodes, which needs no
+/// current directory and removes nothing (a tee's writes).
+pub fn with_nodes<R>(f: impl FnOnce(&mut MountTable) -> R) -> R {
+    let mut guard = MOUNTS.lock();
+    f(guard.0.as_mut().expect("mounts::init has not run"))
+}
+
 /// Whether the mount table is locked now (for the kernel's checks that no
 /// lock is held across a switch).
 pub fn is_locked() -> bool {
@@ -112,7 +119,9 @@ impl Vfs for KernelVfs {
     fn statfs(&mut self, path: &[u8]) -> Result<StatFs, Errno> {
         self.with(|t| t.statfs(path))
     }
+    /// The tees, then every filesystem (spec §7.3).
     fn sync(&mut self) -> Result<(), Errno> {
+        crate::tty::sync_tees();
         self.with(|t| t.sync())
     }
     fn shutdown(&mut self) -> Result<(), Errno> {

@@ -57,6 +57,9 @@ pub struct Fake {
     /// The console's mode and foreground group (groups 1 and 42 exist).
     pub line_mode: bool,
     pub foreground: u32,
+    /// The tees pushed, and the syncs.
+    pub tees: Vec<Arc<File>>,
+    pub syncs: u32,
     pub written: Vec<(u64, Vec<u8>)>,
     pub slept: Vec<u64>,
     pub spawned: Vec<Spawn>,
@@ -119,6 +122,17 @@ impl Caller for Fake {
     }
     fn console_size(&self) -> (u32, u32) {
         (120, 33)
+    }
+    fn tee_push(&mut self, file: Arc<File>) -> Result<(), Errno> {
+        self.tees.push(file);
+        Ok(())
+    }
+    fn tee_pop(&mut self) -> Result<(), Errno> {
+        self.tees.pop().map(|_| ()).ok_or(Errno::EINVAL)
+    }
+    fn sync(&mut self) -> Result<(), Errno> {
+        self.syncs += 1;
+        self.vfs.sync()
     }
     fn console_foreground(&mut self, pgid: u32) -> Result<(), Errno> {
         if ![1, 42].contains(&pgid) {
@@ -198,6 +212,8 @@ pub fn fake() -> Fake {
         killed_while_reading: false,
         line_mode: false,
         foreground: 1,
+        tees: Vec::new(),
+        syncs: 0,
         written: Vec::new(),
         slept: Vec::new(),
         spawned: Vec::new(),

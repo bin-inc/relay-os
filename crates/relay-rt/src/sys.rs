@@ -32,6 +32,18 @@ pub fn console_size() -> (u32, u32) {
     relay_abi::console::size_of_result(call(Call::ConsoleSize, &[]).unwrap_or(0))
 }
 
+/// Pushes `fd`, a file open for writing, as a console tee (spec §6.5):
+/// it gets a copy of everything written to the console.
+pub fn console_tee_push(fd: u32) -> Result<(), u16> {
+    call(Call::ConsoleTeePush, &[u64::from(fd)]).map(|_| ())
+}
+
+/// Pops the newest tee this program pushed; the error of a write to it
+/// that failed.
+pub fn console_tee_pop() -> Result<(), u16> {
+    call(Call::ConsoleTeePop, &[]).map(|_| ())
+}
+
 /// Gives the console to process group `pgid`.
 pub fn console_foreground(pgid: u32) -> Result<(), u16> {
     call(Call::ConsoleForeground, &[u64::from(pgid)]).map(|_| ())
