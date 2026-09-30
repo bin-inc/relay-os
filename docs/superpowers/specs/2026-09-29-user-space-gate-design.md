@@ -1,7 +1,7 @@
 # Relay OS — User-Space Gate Design: programs, not built-ins (milestones 2 and 3)
 
 - **Date:** 2026-09-29
-- **Status:** Approved 2026-09-29; revised while planning milestone 2's plans 1, 2, 3a and 3b (see §16)
+- **Status:** Approved 2026-09-29; revised while planning milestone 2's plans 1, 2, 3a, 3b and 4a (see §16)
 - **Builds on:** milestone 1 (version 0.2.0,
   `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`,
   cited below as "M1 §n")
@@ -160,7 +160,7 @@ mode, its length, and the archive's build time as the file times.
 - **The kernel** keeps those frames reserved, checks the archive (§4.2) and
   its ABI version, and mounts `SysImgFs` at `/bin`. New startup step 10,
   before the shell (M1 §4.4 step 10 becomes step 11):
-  `[ ok ] system: 29 programs, ABI 1` or `[FAIL] system: <reason>`
+  `[ ok ] system: 33 programs, ABI 2` or `[FAIL] system: <reason>`
   (§11.2).
 
 ### 4.4 Mounting `/bin`
@@ -362,10 +362,11 @@ runs. §14 covers its cost.
 
 ### 6.6 Process 1
 
-The kernel prints `/etc/motd` (M1 §4.4 step 10) and starts `/bin/sh` as
-process 1 in `/root`. If process 1 ends, the kernel logs how and
-starts it again. If it ended three times within 10 s, or cannot be started
-at all, the kernel shows the error screen of §11.2 instead.
+Process 1 is the kernel's own ("init", §16 item 5). It prints `/etc/motd`
+(M1 §4.4 step 10) and starts `/bin/sh` in `/root` as its child. If the
+shell ends, init logs how and starts it again. If it ended three times
+within 10 s, or cannot be started at all, the kernel shows the error screen
+of §11.2 instead. Init collects every orphan as it ends.
 
 ## 7. The Relay system-call ABI (`crates/relay-abi`)
 
@@ -400,7 +401,7 @@ M3 are reserved in milestone 2 and return `ENOSYS` until milestone 3.
 | Call | Arguments → result | Notes |
 |---|---|---|
 | `exit` | code `u8` → never returns | |
-| `spawn` | `&SpawnArgs` → pid | `SpawnArgs`: path, argument bytes (NUL-separated), working directory, up to 8 `(child_fd, parent_fd)` pairs (unlisted child fds are closed), flags (`NEW_GROUP`) |
+| `spawn` | `&SpawnArgs` → pid | `SpawnArgs`: path, argument bytes (NUL-separated), working directory, up to 8 `(child_fd, parent_fd)` pairs (unlisted child fds are closed), flags (`NEW_GROUP`, `FOREGROUND`) |
 | `wait` | pid or −1 for any child, flags (`NOHANG`), `&mut WaitStatus` → pid, or 0 with `NOHANG` and nothing finished | `WaitStatus`: `Exited(code)` or `Killed(reason, fault kind, address, ip)`; `ECHILD` with no such child |
 | `kill` | pid, or −pgid for a group → 0 | `ESRCH`; `EPERM` for process 1 |
 | `getpid` | → pid | |
@@ -411,7 +412,7 @@ M3 are reserved in milestone 2 and return `ENOSYS` until milestone 3.
 | `close` | fd → 0 | |
 | `read`, `write` | fd, buffer → bytes | |
 | `seek` | fd, offset `i64`, whence (start, current, end) → new offset | on the console or a pipe: `EINVAL` |
-| `fstat` | fd, `&mut Stat` → 0 | |
+| `fstat` | fd, `&mut Stat` → 0 | `Stat::dev` is the file's filesystem, the mount's number from 1, and 0 for the console (§16 item 5) |
 | `stat` | path, `NOFOLLOW` flag, `&mut Stat` → 0 | |
 | `read_dir` | directory fd, buffer → bytes | packed `DirEntry` records (inode, type, name length, name), continuing where the last call stopped |
 | `mkdir`, `rmdir`, `unlink`, `truncate`, `touch`, `readlink` | as the `Vfs` trait | one call per `Vfs` operation |
@@ -436,7 +437,7 @@ with the current directory switched per process (§5.4).
 
 ### 7.4 Versioning
 
-`relay_abi::VERSION` (`u32`, 1 for 0.3.0) changes whenever a call's meaning
+`relay_abi::VERSION` (`u32`, 2 for 0.3.0, §16 item 5) changes whenever a call's meaning
 or a struct's layout changes; adding a call does not change it. It is
 written into `system.img`'s header (§4.2) and into every program's ELF note
 (§5.2); the kernel refuses a mismatch in either.
@@ -475,7 +476,7 @@ It gains a `Runner` trait with two implementations:
   `Console` and `System`. Used by the unit tests (with the in-memory `Vfs`)
   and by `cargo xtask host-shell`.
 - **Spawning** `/bin/<name>`: used by `/bin/sh`. A name that is not a
-  built-in and not in `/bin` is `sh: <name>: command not found` (status
+  built-in and not in `/bin` is `relay-sh: <name>: command not found` (status
   127); a path containing `/` is run as given.
 
 Redirections (`>`, `>>`) open the file in the shell and pass it to the child
@@ -602,7 +603,7 @@ The e2e runner (M1 §9.3) gains the steps it needs for the scenarios of
   into the guard page, and any other exception) kill only that process with
   `Killed(Fault)`. The kernel logs the process, the kind, the address and
   `rip`; the shell prints
-  `sh: <command>: killed (page fault at 0x0, read, ip 0x401a2c)`, and
+  `relay-sh: <command>: killed (page fault at 0x0, read, ip 0x401a2c)`, and
   `$?` is 128 + 11 for page faults and #GP, 128 + 4 for #UD, 128 + 8 for
   #DE and #NM (bash's numbers for SIGSEGV, SIGILL and SIGFPE); Ctrl-C gives
   128 + 2 and `kill` 128 + 9. Faults in
@@ -678,6 +679,8 @@ New ones:
 | 2 | `system_empty` | an empty `system.img`: `system.img: only 0 bytes`, not `no system.img` |
 | 2 | `stale_program` | `t-abi` copied to `/root`: running it prints `Exec format error` |
 | 2 | `respawn` | `exit` restarts the shell with a log line; three quick exits reach the error screen |
+| 2 | `utils` | every program of `/bin` prints what the shell's command of its name prints (§16 item 5) |
+| 2 | `sh` | `/bin/sh` runs its commands as programs, redirections into files, nested scripts with their transcripts (§16 item 5) |
 | 3 | `pipes` | `cat` of the 8 MiB file through `wc -c` gives the exact size; `cat big \| head -n 1` ends at once; `seq 5 \| grep -c .` prints 5 |
 | 3 | `jobs` | `sleep 5 &` and `t-spin &`; `jobs` and `ps` show both; `kill %2`; `wait`; the Done lines |
 | 3 | `script_vars` | a script run with arguments prints `$0`, `$1`, `$#`, `$@`, `$?` and variables, with and without quotes |
@@ -721,9 +724,11 @@ exists then. The expected plans:
      ring 3, SMEP/SMAP and CR0.TS. NUC check 3.
    - **3b.** The file, memory and remaining system calls, `relay-rt`'s
      allocator, the console's line discipline and calls, and tees.
-4. **The shell moves out.** `relay-rt`'s trait implementations, the
-   `Runner` split, `/bin/sh`, the programs, process 1 and its respawn rule;
-   the kernel drops `shell`; `check4.sh`. NUC check 4.
+4. **The shell moves out**, in two plans (§16 item 5):
+   - **4a.** `relay-rt`'s trait implementations, the `Runner` split,
+     `/bin/sh` and the programs, run by path from the in-kernel shell.
+   - **4b.** Process 1 and its respawn rule, the error screen; the kernel
+     drops `shell`; `check4.sh`. NUC check 4.
 5. **Hardening and 0.3.0.** Fixes from the NUC checks, the spec's §16 up to
    date, version 0.3.0.
 
@@ -1203,3 +1208,134 @@ does. Facts found before the spec was first merged are already in its body.
      and `t-read apart` (84 commands); a third step by hand types into `t-read`
      on the K120, with Backspace and Ctrl-D. The recorded NUC transcripts are
      those of plan 3b's NUC check.
+5. **Decisions made while planning milestone 2's plan 4a** (the shell and
+   its commands as programs):
+   - **Plan 4 is two plans** (§13). 4a brings the shell and its commands
+     as programs: the `Runner` split, `relay-rt`'s traits, `/bin/sh` and a
+     program per command, which the in-kernel shell, still process 1, runs
+     by path. 4b brings process 1, the error screen, the kernel without
+     `shell`, `check4.sh` and NUC check 4; it is written after 4a merges.
+     4a has no NUC check: of what the NUC runs it changes only the count
+     of `/bin` and the ABI version in check 3's startup lines, which the
+     check scripts' patterns allow; the recorded transcripts get `ABI 2`
+     by hand until 4b's NUC check records real ones.
+   - **Process 1** (§5.4, §6.6, corrected in its body; built by 4b). Process
+     1 stays a process of the kernel's own, "init", as the in-kernel shell
+     is now: it prints `/etc/motd`, starts `/bin/sh` in `/root` (or `/`
+     without one) as its child, and when the shell ends logs how and starts
+     another; three ends within 10 s, or a shell that cannot be started,
+     reach the error screen. It collects every orphan as it ends (plan 3a's
+     deferred finding), and `kill` still refuses it. So `/bin/sh` is not
+     process 1 and collects no orphans.
+   - **The shell's own commands and the runners** (§8.2, §8.3). The shell
+     runs `cd`, `exit` and `help` itself, over its `Vfs`; every other name
+     goes to its runner. The in-process runner runs the command table's
+     functions, and any other name through `System::spawn` (the tests,
+     `host-shell`, and the in-kernel shell until 4b). The spawning runner
+     (`/bin/sh`) starts `/bin/<name>`, or the path as given, through the
+     `shell::Programs` trait: it opens a redirection in the shell (created,
+     emptied or appended to) and passes it as fd 1, closing its own copy
+     once the child has it, and reports what cannot start, a killed
+     program and a Ctrl-C as the in-kernel shell does. `exit [code]` stops
+     the shell with the code modulo 256, or the last status, as bash does:
+     the code may have blanks around it and must fit in 64 bits (otherwise
+     it is status 2 and the shell stops anyway), `--` before it is
+     dropped, and more than one argument stops nothing. In a script `exit`
+     ends only the script, under either runner. `Shell::greet` (the motd, `/root`)
+     is apart from `Shell::run`.
+   - **Messages** (§8.2, §11.1, corrected in their bodies). `/bin/sh` names
+     itself `relay-sh`, as the in-kernel shell does, so every milestone 1
+     scenario and check script stays as it is (§1.4); `sh`'s own messages
+     keep `sh:`, as in milestone 1.
+   - **A command as a program** (§8.1, §8.4). `shell::run_command` runs a
+     command function with its standard output on the program's fd 1
+     (`shell::Stdout`), written at once to the console, so that it keeps
+     its place among the errors on fd 2, and in pieces of 4 KiB to a file;
+     a write error is `<name>: write error: <message>`, status 1, as the
+     shell said it in milestone 1. Each program names its own command
+     function, so it holds no other command's code. With the `user`
+     profile (debug assertions and overflow checks on) the programs are
+     71 to 133 KiB, `/bin/sh` 268 KiB, `system.img` about 2.7 MiB; the 24
+     build in about 10 s. `opt-level = "s"` would save a quarter and is not
+     used.
+   - **`SysVfs` goes by path** (§8.1). A `Node` is the file's filesystem
+     and inode, as `stat` gives them; `SysVfs` remembers the path it found
+     each node by and opens that path for each operation, so a command
+     holds no fd between calls and always reaches the file the path names
+     now. `read_dir`'s records give the entries' kinds. `SysVfs::shutdown`
+     does nothing: the kernel's `power` shuts the filesystems down.
+   - **`Stat::dev` and ABI 2** (§7.3, §7.4, corrected in its body).
+     `relay_abi::Stat` gains `dev` (offset 72, 80 bytes): the mount's number
+     from 1, and 0 for the console. With `ino` it names a file, so that
+     `cp`, `mv`, `rm -r` and `cat` tell a file of `/bin` from one of the
+     root, whose inode numbers overlap, as the in-kernel shell does. The
+     changed layout makes `relay_abi::VERSION` 2: `system: 33 programs,
+     ABI 2`, `ABI 99, kernel wants 2`.
+   - **`SysConsole`, `SysSystem`, `SysStdout`, `SysPrograms`** (§8.1).
+     `SysConsole` reads fd 0 and writes fd 2 (a program's errors, and a
+     shell's prompt and messages, as bash writes them); an interactive
+     shell's takes the console back, raw and for its own group, before
+     every read, whatever a program left it in (§16 item 4). An interactive
+     shell that does not lead a group (one a script starts, in the
+     script's group) takes back only raw mode and runs its commands in
+     that group, without `FOREGROUND`, so the console never leaves it (the
+     prototype's review found such a shell reading end of input after its
+     first command).
+     `Console::interrupted` is false, since Ctrl-C kills. `SysSystem` has
+     `time`, `sys_info`'s memory figures and log, and `power`:
+     `System::reboot` and `System::poweroff` take `-f` (`POWER_FORCE`) and
+     return the error that kept the machine up, from which `reboot` and
+     `poweroff` print milestone 1's two lines. `SysStdout` is fd 1, the
+     console when `fstat` says a character device. `SysPrograms` is
+     `/bin/sh`'s `Programs` over `open`, `spawn`, `wait` and the tee calls.
+   - **The console at the prompt** (§6.4, §7.3). `spawn` gains the flag
+     `FOREGROUND` (with `NEW_GROUP`, `EINVAL` otherwise): the child's new
+     group gets the console, in line mode, before the child runs. Without
+     it the scheduler could run a child that reads the console before its
+     parent handed it over, and the child would get end of input. A
+     script's commands run in the script shell's group, without it.
+   - **Scripts** (§6.5, §8.3). `sh FILE` in `/bin/sh` is a child `/bin/sh`,
+     which checks and reads the script as `sh` does in milestone 1 (its
+     operands, 64 KiB, UTF-8, a byte-order mark and CRLF, output not
+     redirected, the transcript emptied or created), pushes the transcript
+     as a console tee, traces, runs and syncs each line, and pops the tee.
+     So the transcript gets the output of the script's programs and of any
+     script it runs, whose own transcript is pushed on top, four deep at
+     most (a fifth is `sh: cannot write the transcript …: Device or
+     resource busy`). A write that failed is reported when the script ends:
+     `sh: <log>: <error>; the transcript ends here`. `sh` without an
+     operand starts an interactive shell, as bash's does (milestone 1's
+     built-in said `sh: missing operand`). A script's `cd` stays in it; Ctrl-C ends the script with its command, which share its
+     group, so its transcript has no `^C`. The in-process runner keeps
+     milestone 1's scripts, which cannot run scripts.
+   - **The in-kernel shell until 4b** (§16 item 3). It greets once, and
+     reads on at a new prompt after `exit`. While it waits for a command it
+     collects every orphan that ends (plan 3a's deferred finding, for the
+     in-kernel shell): the prototype's review found that under `/bin/sh`
+     each script stopped by Ctrl-C left its command's zombie to process 1,
+     and that 62 of them filled the process table.
+   - **Milestone 1's deferred findings** (plan 4's). The re-exports of
+     `commands/mod.rs` come after its module list. A command's big output
+     is no longer held whole under `/bin/sh`, whose transcripts are tees
+     written every 4 KiB; the in-process runner keeps its transcript, and
+     after 4b only the host uses it. A script that redirects into its own
+     transcript garbles it, as it would under bash: ruled, and `sh`'s
+     documentation says so.
+   - **Left to 4b.** The kernel's findings carried forward (polling the
+     console on the way back to ring 3, `console_foreground` of a group of
+     zombies, `open(READ|CREATE)` of a directory, `POWER_FORCE` and
+     `POWER_REBOOT` end to end, a host test of `push_tee`'s checks) come
+     with 4b's kernel work. The console calls refusing a caller outside the
+     foreground group wait for milestone 3's background jobs: no process of
+     milestone 2 runs in the background, and a rule that lets every shell,
+     nested ones too, take the console back needs job control.
+   - **Error numbers** (§7.2). `vfs::Errno::ALL` lists them, and
+     `Errno::from_number` turns a system call's number back into one.
+   - **Tests** (§12). Scenarios `utils` (every program by path under the
+     in-kernel shell, whose output hook is never a file) and `sh`
+     (`/bin/sh` under the in-kernel shell: redirections into files, the
+     console at once, Ctrl-C, nested scripts and their transcripts, `exit`);
+     `system` lists the new `/bin`. Host tests: the runners against
+     `FakePrograms`, `run_command` against `FakeStdout`, and `SysVfs`
+     against the file calls over a `MountTable`, where every command prints
+     what it prints over the table itself.
