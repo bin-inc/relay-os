@@ -98,6 +98,98 @@ t-fault flags-ac
 t-fault gsbase
 #> relay-sh: t-fault: killed \(invalid opcode, ip 0x4[0-9a-f]+\)
 
+# Files, memory and the console (milestone 2, plan 3b): programs open,
+# read, write and list files on the stick's ext2 root; a removal reaches
+# another process's working directory and open file, whose inodes new
+# files may get; memory from mem_map and a heap that grows; a console
+# tee; the system's names; a program outside the console's group reads
+# nothing.
+t-files basic
+#> create: 3
+#> exclusive: EEXIST
+#> no flags: EINVAL
+#> missing: ENOENT
+#> write: 13
+#> read a write-only fd: EBADF
+#> seek: 7
+#> overwrite: 6
+#> close: ok
+#> close again: EBADF
+#> read: "hello"
+#> fstat: 13 bytes, regular true
+#> seek to the end: 13
+#> read at the end: 0
+#> append: 5
+#> read what was appended: "more\\n"
+#> seek before the start: EINVAL
+#> seek the screen: EINVAL
+#> the child read: "hello, "
+#> read after the child: "files"
+#> fds up to 31, then EMFILE
+rm t-files.tmp
+t-files dir
+#> mkdir: ok
+#> mkdir again: EEXIST
+#> entries: \./ \.\./ a b sub/ \(5 calls\)
+#> read_dir at the end: 0
+#> read_dir of a file: ENOTDIR
+#> stat size: 3
+#> truncate: ok
+#> stat size: 10
+#> touch: ok
+#> touch a missing file: ENOENT
+#> rename: ok
+#> stat the old name: ENOENT
+#> readlink of a file: EINVAL
+#> rmdir a full directory: ENOTEMPTY
+#> unlink a directory: EISDIR
+#> statfs: some blocks, free ones among them true
+#> sync: ok
+#> rmdir: ok
+#> stat it: ENOENT
+t-files cwd
+#> getcwd: /root
+#> getcwd into 3 bytes: ERANGE
+#> chdir: ok
+#> getcwd: /root/t-files.c
+#> stat it from above: 4
+#> chdir to a file: ENOTDIR
+#> chdir to nothing: ENOENT
+#> my working directory: /root/t-files.c
+#> my working directory: /root
+#> getcwd: /root
+t-files gone
+#> read the removed file: ENOENT
+#> the child's working directory: /root/t-files.g
+#> the child creates x: ENOENT
+#> the child reads its file: ENOENT
+#> the child writes its file: ENOENT
+#> the new file holds: "new"
+#> the new directory holds x: ENOENT
+t-mem map
+#> at the area's start: true
+#> zeroed: true
+#> written: true
+#> map nothing: EINVAL
+#> map too much: ENOMEM
+#> unmap the middle: ok
+#> unmap it again: EINVAL
+#> unmap half a page in: EINVAL
+#> unmap the program's code: EINVAL
+#> the hole is filled first: true
+#> frames lost: 0
+t-mem grow 64
+#> \d+ blocks, 64 MiB, all there: true
+t-tee end
+#> before the end
+wc t-tee.end
+#> \s*1\s+3\s+15 t-tee.end
+rm t-tee.end
+t-sys uname
+#> Relay relay \d+\.\d+\.\d+ x86_64
+t-read apart
+#> end of input
+
 # The file operations of the fileops scenario.
 mkdir -p /root/notes/old
 echo remember me > /root/notes/a

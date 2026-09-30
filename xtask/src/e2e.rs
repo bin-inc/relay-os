@@ -92,8 +92,13 @@ pub enum Step {
         pattern: String,
     },
     Send(String),
-    /// Text typed on the emulated USB keyboard.
+    /// Text sent over the serial console with CR LF after it, as some
+    /// terminals send Enter.
+    SendCrLf(String),
+    /// Text typed on the emulated USB keyboard, then Enter.
     Key(String),
+    /// Text typed on the emulated USB keyboard, and nothing after it.
+    Type(String),
     ScreenshotNonblank,
     /// QEMU must still be running after this many seconds (for example after
     /// a loader error, which must not power the machine off).
@@ -107,8 +112,9 @@ pub enum Step {
     /// Restart the machine and boot again on the same disk; the pattern
     /// must appear in what the machine printed before it went down.
     Reboot(Option<String>),
-    /// Switch the machine off; no later step talks to it.
-    Poweroff,
+    /// Switch the machine off with a command (`poweroff` if none is
+    /// given); no later step talks to it.
+    Poweroff(String),
     /// Pull the USB stick out (QMP `device_del`), waiting until QEMU has
     /// removed it.
     Unplug,
@@ -222,9 +228,14 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
                 parse_expect_same(rest).with_context(|| format!("{name}:{line_no}"))?
             }
             "send" => Step::Send(rest.to_string()),
+            "send-crlf" => Step::SendCrLf(rest.to_string()),
             "key" => {
                 keys::presses(rest).with_context(|| format!("{name}:{line_no}"))?;
                 Step::Key(rest.to_string())
+            }
+            "type" => {
+                keys::typed(rest).with_context(|| format!("{name}:{line_no}"))?;
+                Step::Type(rest.to_string())
             }
             "screenshot-nonblank" => Step::ScreenshotNonblank,
             "screenshot-pixel" => {
@@ -236,7 +247,8 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
                 Regex::new(rest).with_context(|| format!("{name}:{line_no}: bad regex"))?;
                 Step::Reboot(Some(rest.to_string()))
             }
-            "poweroff" => Step::Poweroff,
+            "poweroff" if rest.is_empty() => Step::Poweroff("poweroff".to_string()),
+            "poweroff" => Step::Poweroff(rest.to_string()),
             "unplug" if rest.is_empty() => Step::Unplug,
             "check-script" if rest.starts_with('/') => Step::CheckScript(rest.to_string()),
             "file-lines" => parse_file_lines(rest).with_context(|| format!("{name}:{line_no}"))?,
@@ -644,8 +656,17 @@ fn run_step(
             r.stdin.write_all(b"\r")?;
             r.stdin.flush()?;
         }
-        Step::Key(text) => {
-            let presses = keys::presses(text)?;
+        Step::SendCrLf(text) => {
+            r.stdin.write_all(text.as_bytes())?;
+            r.stdin.write_all(b"\r\n")?;
+            r.stdin.flush()?;
+        }
+        Step::Key(_) | Step::Type(_) => {
+            let presses = match step {
+                Step::Key(text) => keys::presses(text)?,
+                Step::Type(text) => keys::typed(text)?,
+                _ => unreachable!(),
+            };
             for press in &presses {
                 let keys: Vec<_> = press
                     .iter()
@@ -698,8 +719,8 @@ fn run_step(
                 bail!("{path} {why}");
             }
         }
-        Step::Poweroff => {
-            exit_with(r, "poweroff", EXIT_POWEROFF, *timeout)?;
+        Step::Poweroff(command) => {
+            exit_with(r, command, EXIT_POWEROFF, *timeout)?;
             r.off = true;
         }
         Step::CheckScript(path) => {
@@ -949,6 +970,11 @@ mod tests {
         let s = parse_scenario("x", "key echo {up}").unwrap();
         assert_eq!(s.steps, vec![(1, Step::Key("echo {up}".into()))]);
         assert!(parse_scenario("x", "key {bogus}").is_err());
+        let s = parse_scenario("x", "send-crlf ls").unwrap();
+        assert_eq!(s.steps, vec![(1, Step::SendCrLf("ls".into()))]);
+        let s = parse_scenario("x", "type {ctrl-d}").unwrap();
+        assert_eq!(s.steps, vec![(1, Step::Type("{ctrl-d}".into()))]);
+        assert!(parse_scenario("x", "type {bogus}").is_err());
     }
 
     #[test]
@@ -959,13 +985,18 @@ mod tests {
 
     #[test]
     fn parses_reboot_and_poweroff_steps() {
-        let s = parse_scenario("x", "reboot\nreboot relay: restarting\npoweroff").unwrap();
+        let s = parse_scenario(
+            "x",
+            "reboot\nreboot relay: restarting\npoweroff\npoweroff t-sys poweroff",
+        )
+        .unwrap();
         assert_eq!(
             s.steps,
             vec![
                 (1, Step::Reboot(None)),
                 (2, Step::Reboot(Some("relay: restarting".into()))),
-                (3, Step::Poweroff)
+                (3, Step::Poweroff("poweroff".into())),
+                (4, Step::Poweroff("t-sys poweroff".into()))
             ]
         );
         assert!(parse_scenario("x", "reboot (").is_err());

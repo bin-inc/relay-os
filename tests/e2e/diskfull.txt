@@ -44,6 +44,9 @@ expect \necho: write error: No space left on device\n
 send t-files full > more
 expect \nwriting standard output: ENOSPC\n
 expect writing a file of its own: ENOSPC\nt-files: write error: No space left on device\n
+# A console tee that cannot be written: its pop says why.
+send t-tee full
+expect \npop: ENOSPC\nroot@relay:~# $
 send rm t
 send echo more > more
 send cat more

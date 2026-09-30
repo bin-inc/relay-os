@@ -71,6 +71,28 @@ pub trait Caller {
     fn mem_unmap(&mut self, addr: u64, pages: u64) -> Result<(), Errno>;
     /// Writes `bytes` to the screen.
     fn console_write(&mut self, bytes: &[u8]);
+    /// Reads the console into `buf` (spec §6.4, §6.5), waiting for input:
+    /// 0 at once for a process outside the foreground group, and at end of
+    /// input; `EINTR` if the program was killed while it waited.
+    fn console_read(&mut self, buf: &mut [u8]) -> Result<usize, Errno>;
+    /// Line mode (`true`) or raw mode; the previous one.
+    fn console_mode(&mut self, line: bool) -> bool;
+    /// The console's columns and rows.
+    fn console_size(&self) -> (u32, u32);
+    /// Makes `pgid` the foreground group; `ESRCH` if no process is in it.
+    fn console_foreground(&mut self, pgid: u32) -> Result<(), Errno>;
+    /// Pushes `file` as a console tee of the program (spec §6.5).
+    fn tee_push(&mut self, file: Arc<File>) -> Result<(), Errno>;
+    /// Pops the newest tee the program pushed.
+    fn tee_pop(&mut self) -> Result<(), Errno>;
+    /// Writes what waits for the tees, then syncs every filesystem.
+    fn sync(&mut self) -> Result<(), Errno>;
+    /// The kernel log.
+    fn kernel_log(&self) -> Vec<u8>;
+    /// Syncs and shuts the filesystems down, then restarts (`reboot`) or
+    /// switches the machine off; returns only the shutdown's error, unless
+    /// `force` goes ahead anyway (spec §7.3).
+    fn power(&mut self, reboot: bool, force: bool) -> Errno;
     /// Writes `bytes` to `file`, output `n` of the in-kernel shell (1 or
     /// 2), which sends them where the command line says; its error, if any.
     fn shell_output(&mut self, file: &Arc<File>, n: u32, bytes: &[u8]) -> Result<(), Errno>;
@@ -125,15 +147,31 @@ pub fn dispatch(caller: &mut impl Caller, number: u64, args: [u64; 6]) -> Outcom
         Some(Call::Readlink) => files::readlink(caller, args[0], args[1], args[2], args[3]),
         Some(Call::Rename) => files::rename(caller, [args[0], args[1], args[2], args[3]]),
         Some(Call::Statfs) => files::statfs(caller, args[0], args[1], args[2]),
-        Some(Call::Sync) => caller.with_vfs(|v| v.sync()).map(|()| 0),
+        Some(Call::Sync) => caller.sync().map(|()| 0),
         Some(Call::Chdir) => files::on_path(caller, args[0], args[1], |v, p| v.chdir(p)),
         Some(Call::Getcwd) => files::getcwd(caller, args[0], args[1]),
+        Some(Call::ConsoleMode) => console_mode(caller, args[0]),
+        Some(Call::ConsoleSize) => {
+            let (columns, rows) = caller.console_size();
+            Ok(relay_abi::console::size_result(columns, rows))
+        }
+        Some(Call::ConsoleTeePush) => file(caller, args[0])
+            .and_then(|f| caller.tee_push(f))
+            .map(|()| 0),
+        Some(Call::ConsoleTeePop) => caller.tee_pop().map(|()| 0),
+        Some(Call::ConsoleForeground) => {
+            let pgid = u32::try_from(args[0]).ok().filter(|&g| g != 0);
+            pgid.ok_or(Errno::ESRCH)
+                .and_then(|g| caller.console_foreground(g))
+                .map(|()| 0)
+        }
         Some(Call::Time) => time(caller, args[0]),
         Some(Call::Sleep) => {
             caller.sleep(args[0]);
             Ok(0)
         }
         Some(Call::SysInfo) => sys_info(caller, args[0], args[1], args[2]),
+        Some(Call::Power) => power(caller, args[0], args[1]),
         _ => Err(Errno::ENOSYS),
     };
     Outcome::Return(encode(result.map_err(Errno::number)))
@@ -260,6 +298,18 @@ fn write_to(caller: &mut impl Caller, file: &Arc<File>, bytes: &[u8]) -> Result<
     }
 }
 
+/// `console_mode(mode)` (spec §7.3): the previous mode.
+fn console_mode(caller: &mut impl Caller, mode: u64) -> Result<u64, Errno> {
+    use relay_abi::console::{MODE_LINE, MODE_RAW};
+    let line = match u32::try_from(mode) {
+        Ok(MODE_RAW) => false,
+        Ok(MODE_LINE) => true,
+        _ => return Err(Errno::EINVAL),
+    };
+    let was = caller.console_mode(line);
+    Ok(u64::from(if was { MODE_LINE } else { MODE_RAW }))
+}
+
 /// `mem_map(length)` (spec §7.3): fresh zeroed read-write pages, the
 /// length rounded up to whole pages; their address. `EINVAL` for nothing,
 /// `ENOMEM` when they do not fit or the frames would run too low.
@@ -289,12 +339,50 @@ fn time(caller: &mut impl Caller, addr: u64) -> Result<u64, Errno> {
     Ok(0)
 }
 
-/// `sys_info(kind, buffer, length)` (spec §7.3): the bytes written. Plan
-/// 3a has the memory figures (`MemInfo`); the `uname` fields and the kernel
-/// log come with plan 3b.
-fn sys_info(caller: &mut impl Caller, kind: u64, addr: u64, len: u64) -> Result<u64, Errno> {
-    if kind != u64::from(INFO_MEMORY) {
+/// `power(kind, flags)` (spec §7.3): returns only with the error that kept
+/// the machine up.
+fn power(caller: &mut impl Caller, kind: u64, flags: u64) -> Result<u64, Errno> {
+    use relay_abi::power::{POWER_FORCE, POWER_POWEROFF, POWER_REBOOT};
+    let reboot = match u32::try_from(kind) {
+        Ok(POWER_REBOOT) => true,
+        Ok(POWER_POWEROFF) => false,
+        _ => return Err(Errno::EINVAL),
+    };
+    if flags & !u64::from(POWER_FORCE) != 0 {
         return Err(Errno::EINVAL);
+    }
+    Err(caller.power(reboot, flags & u64::from(POWER_FORCE) != 0))
+}
+
+/// `sys_info(kind, buffer, length)` (spec §7.3): the bytes written. The
+/// memory figures and the names need room for their whole struct; the
+/// kernel log gives its newest bytes that fit.
+fn sys_info(caller: &mut impl Caller, kind: u64, addr: u64, len: u64) -> Result<u64, Errno> {
+    use relay_abi::info::{INFO_LOG, INFO_UNAME};
+    match u32::try_from(kind) {
+        Ok(INFO_MEMORY) => {}
+        Ok(INFO_UNAME) => {
+            let u = relay_abi::Uname::new(
+                b"Relay",
+                b"relay",
+                env!("CARGO_PKG_VERSION").as_bytes(),
+                crate::arch::MACHINE.as_bytes(),
+            );
+            let bytes = u.to_bytes();
+            if len < bytes.len() as u64 {
+                return Err(Errno::EINVAL);
+            }
+            caller.write(&UserSlice::new(addr, bytes.len() as u64)?, 0, &bytes)?;
+            return Ok(bytes.len() as u64);
+        }
+        Ok(INFO_LOG) => {
+            let slice = UserSlice::new(addr, len)?;
+            let log = caller.kernel_log();
+            let n = log.len().min(len as usize);
+            caller.write(&slice, 0, &log[log.len() - n..])?;
+            return Ok(n as u64);
+        }
+        _ => return Err(Errno::EINVAL),
     }
     let m = caller.memory();
     let mut bytes = [0u8; size_of::<MemInfo>()];
@@ -642,7 +730,7 @@ mod tests {
             call(&mut f, Call::SysInfo, [info, W, 31]),
             Err(errno::EINVAL)
         );
-        assert_eq!(call(&mut f, Call::SysInfo, [2, W, 32]), Err(errno::EINVAL));
+        assert_eq!(call(&mut f, Call::SysInfo, [4, W, 32]), Err(errno::EINVAL));
         assert_eq!(
             call(&mut f, Call::SysInfo, [info, U, 32]),
             Err(errno::EFAULT)
@@ -725,6 +813,134 @@ mod tests {
     }
 
     #[test]
+    fn the_console_s_mode_size_and_foreground() {
+        use relay_abi::console::{MODE_LINE, MODE_RAW, size_of_result};
+        let mut f = fake();
+        let line = u64::from(MODE_LINE);
+        assert_eq!(
+            call(&mut f, Call::ConsoleMode, [line, 0, 0]),
+            Ok(u64::from(MODE_RAW))
+        );
+        assert!(f.line_mode);
+        assert_eq!(
+            call(&mut f, Call::ConsoleMode, [0, 0, 0]),
+            Ok(line),
+            "the previous one"
+        );
+        assert!(!f.line_mode);
+        for bad in [2, 1 << 32, u64::MAX] {
+            assert_eq!(
+                call(&mut f, Call::ConsoleMode, [bad, 0, 0]),
+                Err(errno::EINVAL)
+            );
+        }
+        let size = call(&mut f, Call::ConsoleSize, [0, 0, 0]).unwrap();
+        assert_eq!(size_of_result(size), (120, 33));
+        assert_eq!(call(&mut f, Call::ConsoleForeground, [42, 0, 0]), Ok(0));
+        assert_eq!(f.foreground, 42);
+        for bad in [0, 7, 1 << 32 | 42, u64::MAX] {
+            assert_eq!(
+                call(&mut f, Call::ConsoleForeground, [bad, 0, 0]),
+                Err(errno::ESRCH),
+                "{bad}"
+            );
+        }
+        assert_eq!(f.foreground, 42);
+    }
+
+    #[test]
+    fn tees_are_pushed_by_fd_and_popped() {
+        let mut f = fake();
+        assert_eq!(call(&mut f, Call::ConsoleTeePush, [1, 0, 0]), Ok(0));
+        assert_eq!(f.tees.len(), 1);
+        assert!(
+            Arc::ptr_eq(&f.tees[0], f.fds.get(1).unwrap()),
+            "the fd's file"
+        );
+        assert_eq!(
+            call(&mut f, Call::ConsoleTeePush, [9, 0, 0]),
+            Err(errno::EBADF)
+        );
+        assert_eq!(call(&mut f, Call::ConsoleTeePop, [0, 0, 0]), Ok(0));
+        assert_eq!(
+            call(&mut f, Call::ConsoleTeePop, [0, 0, 0]),
+            Err(errno::EINVAL)
+        );
+        assert_eq!(call(&mut f, Call::Sync, [0, 0, 0]), Ok(0));
+        assert_eq!(f.syncs, 1);
+    }
+
+    #[test]
+    fn sys_info_names_the_system_and_gives_the_newest_of_the_log() {
+        use relay_abi::info::{INFO_LOG, INFO_UNAME};
+        let mut f = fake();
+        let uname = u64::from(INFO_UNAME);
+        assert_eq!(call(&mut f, Call::SysInfo, [uname, W, 256]), Ok(256));
+        let b = get(&mut f, W, 256);
+        assert_eq!(&b[..6], b"Relay\0");
+        assert_eq!(&b[64..70], b"relay\0");
+        assert_eq!(
+            &b[128..128 + 6],
+            concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes()
+        );
+        assert_eq!(&b[192..199], b"x86_64\0");
+        assert_eq!(
+            call(&mut f, Call::SysInfo, [uname, W, 255]),
+            Err(errno::EINVAL)
+        );
+        assert_eq!(
+            call(&mut f, Call::SysInfo, [uname, W + PAGE - 100, 256]),
+            Err(errno::EFAULT)
+        );
+        let log = u64::from(INFO_LOG);
+        assert_eq!(
+            call(&mut f, Call::SysInfo, [log, W, 1000]),
+            Ok(FAKE_LOG.len() as u64)
+        );
+        assert_eq!(get(&mut f, W, FAKE_LOG.len()), FAKE_LOG);
+        assert_eq!(call(&mut f, Call::SysInfo, [log, W, 5]), Ok(5));
+        assert_eq!(
+            get(&mut f, W, 5),
+            FAKE_LOG[FAKE_LOG.len() - 5..],
+            "the newest"
+        );
+        assert_eq!(call(&mut f, Call::SysInfo, [log, W, 0]), Ok(0));
+        assert_eq!(
+            call(&mut f, Call::SysInfo, [log, U, 10]),
+            Err(errno::EFAULT)
+        );
+        assert_eq!(
+            call(&mut f, Call::SysInfo, [4, W, 1000]),
+            Err(errno::EINVAL)
+        );
+        assert_eq!(
+            call(&mut f, Call::SysInfo, [1 << 32 | 1, W, 1000]),
+            Err(errno::EINVAL)
+        );
+    }
+
+    #[test]
+    fn power_returns_only_the_error_that_kept_the_machine_up() {
+        use relay_abi::power::{POWER_FORCE, POWER_POWEROFF, POWER_REBOOT};
+        let mut f = fake();
+        let (reboot, off, force) = (
+            u64::from(POWER_REBOOT),
+            u64::from(POWER_POWEROFF),
+            u64::from(POWER_FORCE),
+        );
+        assert_eq!(call(&mut f, Call::Power, [reboot, 0, 0]), Err(errno::EIO));
+        assert_eq!(call(&mut f, Call::Power, [off, force, 0]), Err(errno::EIO));
+        assert_eq!(f.powered, [(true, false), (false, true)]);
+        for (kind, flags) in [(0, 0), (3, 0), (reboot, 2), (1 << 32 | 1, 0)] {
+            assert_eq!(
+                call(&mut f, Call::Power, [kind, flags, 0]),
+                Err(errno::EINVAL)
+            );
+        }
+        assert_eq!(f.powered.len(), 2, "refused before anything was shut down");
+    }
+
+    #[test]
     fn every_other_call_is_enosys() {
         let mut f = fake();
         let served = [
@@ -754,9 +970,15 @@ mod tests {
             Call::Sync,
             Call::Chdir,
             Call::Getcwd,
+            Call::ConsoleMode,
+            Call::ConsoleSize,
+            Call::ConsoleForeground,
+            Call::ConsoleTeePush,
+            Call::ConsoleTeePop,
             Call::Time,
             Call::Sleep,
             Call::SysInfo,
+            Call::Power,
         ];
         for c in Call::ALL {
             if !served.contains(&c) {

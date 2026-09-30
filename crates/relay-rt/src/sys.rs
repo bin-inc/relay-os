@@ -21,6 +21,34 @@ fn call(c: Call, args: &[u64]) -> Result<u64, u16> {
     decode(unsafe { syscall(c, a) })
 }
 
+/// Sets the console's mode (`relay_abi::console`'s `MODE_RAW` or
+/// `MODE_LINE`); the previous one.
+pub fn console_mode(mode: u32) -> Result<u32, u16> {
+    call(Call::ConsoleMode, &[u64::from(mode)]).map(|m| m as u32)
+}
+
+/// The console's columns and rows.
+pub fn console_size() -> (u32, u32) {
+    relay_abi::console::size_of_result(call(Call::ConsoleSize, &[]).unwrap_or(0))
+}
+
+/// Pushes `fd`, a file open for writing, as a console tee (spec §6.5):
+/// it gets a copy of everything written to the console.
+pub fn console_tee_push(fd: u32) -> Result<(), u16> {
+    call(Call::ConsoleTeePush, &[u64::from(fd)]).map(|_| ())
+}
+
+/// Pops the newest tee this program pushed; the error of a write to it
+/// that failed.
+pub fn console_tee_pop() -> Result<(), u16> {
+    call(Call::ConsoleTeePop, &[]).map(|_| ())
+}
+
+/// Gives the console to process group `pgid`.
+pub fn console_foreground(pgid: u32) -> Result<(), u16> {
+    call(Call::ConsoleForeground, &[u64::from(pgid)]).map(|_| ())
+}
+
 /// Maps `len` bytes (rounded up to pages) of fresh zeroed memory; its
 /// address.
 pub fn mem_map(len: usize) -> Result<usize, u16> {
@@ -247,6 +275,36 @@ pub fn memory() -> Result<MemInfo, u16> {
     let args = [kind, &raw mut m as u64, len, 0, 0, 0];
     decode(unsafe { syscall(Call::SysInfo, args) })?;
     Ok(m)
+}
+
+/// The system's names, as `uname` prints them.
+pub fn uname() -> Result<relay_abi::Uname, u16> {
+    let mut u = relay_abi::Uname::new(b"", b"", b"", b"");
+    let len = relay_abi::Uname::SIZE as u64;
+    let kind = u64::from(relay_abi::info::INFO_UNAME);
+    call(Call::SysInfo, &[kind, &raw mut u as u64, len])?;
+    Ok(u)
+}
+
+/// The newest bytes of the kernel log that fit in `buf` (it holds at most
+/// `relay_abi::info::LOG_MAX`); how many.
+pub fn kernel_log(buf: &mut [u8]) -> Result<usize, u16> {
+    let kind = u64::from(relay_abi::info::INFO_LOG);
+    call(
+        Call::SysInfo,
+        &[kind, buf.as_mut_ptr() as u64, buf.len() as u64],
+    )
+    .map(|n| n as usize)
+}
+
+/// Restarts the machine or switches it off (`relay_abi::power`'s kinds and
+/// `POWER_FORCE`) after shutting the filesystems down; returns only with
+/// the error that kept it up.
+pub fn power(kind: u32, flags: u32) -> u16 {
+    match call(Call::Power, &[u64::from(kind), u64::from(flags)]) {
+        Err(e) => e,
+        Ok(_) => relay_abi::errno::EIO,
+    }
 }
 
 /// The wall clock and the time since the machine started.

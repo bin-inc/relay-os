@@ -15,6 +15,9 @@ send touch /root/g
 expect \nrelay-sh: sync failed: Input/output error\n
 send echo still here
 expect \nstill here\n
+# A program's power call keeps the machine up too, and says why.
+send t-sys poweroff
+expect \npower: EIO\n
 send poweroff
 expect \npoweroff: cannot shut the filesystems down cleanly: Input/output error\npoweroff: use 'poweroff -f' to go ahead anyway\n
 expect root@relay:~# $

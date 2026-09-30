@@ -3,7 +3,8 @@
 //! capital. `{name}` is a key without a character: `{up}`, `{down}`,
 //! `{left}`, `{right}`, `{home}`, `{end}`, `{delete}`, `{backspace}`,
 //! `{tab}`, `{esc}`, `{ret}`, `{caps_lock}` and `{ctrl-<letter>}`. Enter
-//! follows the text, as with `send`.
+//! follows the text, as with `send`, except for the `type` step
+//! (`typed`), which presses only what it says.
 
 use anyhow::{Result, bail};
 
@@ -92,6 +93,13 @@ fn special(name: &str) -> Option<Vec<&'static str>> {
 
 /// The presses that type `text` and then Enter.
 pub fn presses(text: &str) -> Result<Vec<Vec<&'static str>>> {
+    let mut out = typed(text)?;
+    out.push(vec!["ret"]);
+    Ok(out)
+}
+
+/// The presses that type `text`, and nothing after it.
+pub fn typed(text: &str) -> Result<Vec<Vec<&'static str>>> {
     let mut out = Vec::new();
     let mut rest = text;
     while let Some(c) = rest.chars().next() {
@@ -114,13 +122,20 @@ pub fn presses(text: &str) -> Result<Vec<Vec<&'static str>>> {
         }
         rest = &rest[c.len_utf8()..];
     }
-    out.push(vec!["ret"]);
     Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_text_has_no_enter_after_it() {
+        assert_eq!(typed("a{ctrl-d}").unwrap(), [vec!["a"], vec!["ctrl", "d"]]);
+        assert_eq!(typed("").unwrap(), Vec::<Vec<&str>>::new());
+        assert_eq!(presses("").unwrap(), [vec!["ret"]]);
+        assert!(typed("{bogus}").is_err());
+    }
 
     #[test]
     fn characters_become_keys_with_shift_where_needed() {

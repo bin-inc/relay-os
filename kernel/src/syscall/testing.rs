@@ -16,6 +16,8 @@ pub const W: u64 = U + 3 * PAGE;
 /// An fd whose file fails every write (the shell's output redirected to a
 /// full disk).
 pub const FULL: u64 = 7;
+/// What the fake kernel log holds.
+pub const FAKE_LOG: &[u8] = b"Relay OS 0.2.0\n[ ok ] everything\n";
 /// How much file data `/full` holds.
 pub const FULL_BYTES: u64 = 8192;
 
@@ -49,6 +51,19 @@ pub struct Fake {
     pub room: u64,
     /// What `mem_unmap` gave back (and the kernel would flush).
     pub unmapped: Vec<(u64, u64)>,
+    /// What each console read gets, then end of input; the lengths asked;
+    /// whether a read ends in a kill.
+    pub typed: alloc::collections::VecDeque<Vec<u8>>,
+    pub asked: Vec<usize>,
+    pub killed_while_reading: bool,
+    /// The console's mode and foreground group (groups 1 and 42 exist).
+    pub line_mode: bool,
+    pub foreground: u32,
+    /// The tees pushed, and the syncs.
+    pub tees: Vec<Arc<File>>,
+    pub syncs: u32,
+    /// The `power` calls: (reboot, force).
+    pub powered: Vec<(bool, bool)>,
     pub written: Vec<(u64, Vec<u8>)>,
     pub slept: Vec<u64>,
     pub spawned: Vec<Spawn>,
@@ -93,6 +108,51 @@ impl Caller for Fake {
     }
     fn console_write(&mut self, bytes: &[u8]) {
         self.written.push((0, bytes.to_vec()));
+    }
+    fn console_read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+        if self.killed_while_reading {
+            return Err(Errno::EINTR);
+        }
+        self.asked.push(buf.len());
+        let Some(line) = self.typed.pop_front() else {
+            return Ok(0);
+        };
+        let n = line.len().min(buf.len());
+        buf[..n].copy_from_slice(&line[..n]);
+        Ok(n)
+    }
+    fn console_mode(&mut self, line: bool) -> bool {
+        core::mem::replace(&mut self.line_mode, line)
+    }
+    fn console_size(&self) -> (u32, u32) {
+        (120, 33)
+    }
+    fn tee_push(&mut self, file: Arc<File>) -> Result<(), Errno> {
+        self.tees.push(file);
+        Ok(())
+    }
+    fn tee_pop(&mut self) -> Result<(), Errno> {
+        self.tees.pop().map(|_| ()).ok_or(Errno::EINVAL)
+    }
+    fn kernel_log(&self) -> Vec<u8> {
+        FAKE_LOG.to_vec()
+    }
+    /// A machine whose filesystems cannot be shut down (an unplugged
+    /// stick): the call comes back.
+    fn power(&mut self, reboot: bool, force: bool) -> Errno {
+        self.powered.push((reboot, force));
+        Errno::EIO
+    }
+    fn sync(&mut self) -> Result<(), Errno> {
+        self.syncs += 1;
+        self.vfs.sync()
+    }
+    fn console_foreground(&mut self, pgid: u32) -> Result<(), Errno> {
+        if ![1, 42].contains(&pgid) {
+            return Err(Errno::ESRCH);
+        }
+        self.foreground = pgid;
+        Ok(())
     }
     fn shell_output(&mut self, _: &Arc<File>, n: u32, bytes: &[u8]) -> Result<(), Errno> {
         if u64::from(n) == FULL {
@@ -160,6 +220,14 @@ pub fn fake() -> Fake {
         heap_room: usize::MAX,
         room: u64::MAX,
         unmapped: Vec::new(),
+        typed: alloc::collections::VecDeque::new(),
+        asked: Vec::new(),
+        killed_while_reading: false,
+        line_mode: false,
+        foreground: 1,
+        tees: Vec::new(),
+        syncs: 0,
+        powered: Vec::new(),
         written: Vec::new(),
         slept: Vec::new(),
         spawned: Vec::new(),

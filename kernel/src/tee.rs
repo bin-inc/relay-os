@@ -21,6 +21,11 @@ use vfs::Errno;
 pub const TEES: usize = 4;
 /// A tee's copies are written once this much waits.
 pub const CHUNK: usize = 4096;
+/// The echo a tee keeps while it waits: what the line discipline echoes
+/// comes from ticks, where no file can be written, so it waits for the
+/// next write, read or sync of a process; beyond this it is dropped, as a
+/// terminal drops what nobody reads.
+pub const ECHO_MAX: usize = 4 * CHUNK;
 
 struct Tee<F> {
     owner: u32,
@@ -77,6 +82,15 @@ impl<F> TeeStack<F> {
     pub fn add(&mut self, bytes: &[u8]) {
         for t in self.tees.iter_mut().filter(|t| t.file.is_some()) {
             t.pending.extend_from_slice(bytes);
+        }
+    }
+
+    /// A copy of the line discipline's echo, for every tee, as far as
+    /// `ECHO_MAX` of waiting copies allows.
+    pub fn add_echo(&mut self, bytes: &[u8]) {
+        for t in self.tees.iter_mut().filter(|t| t.file.is_some()) {
+            let room = ECHO_MAX.saturating_sub(t.pending.len());
+            t.pending.extend_from_slice(&bytes[..bytes.len().min(room)]);
         }
     }
 
@@ -277,6 +291,28 @@ mod tests {
         s.push(10, 1).unwrap();
         s.add(b"z");
         assert_eq!(s.pop(10, &mut files.writer()), Err(Errno::ENOSPC));
+    }
+
+    #[test]
+    fn echo_alone_waits_no_more_than_its_limit() {
+        // Found by the prototype's review: the line discipline's echo only
+        // waits (it comes from ticks, where no file can be written), so a
+        // tee of a program that reads and never writes grew without bound.
+        let mut s = TeeStack::new();
+        s.push(10, 1).unwrap();
+        for _ in 0..3 * ECHO_MAX {
+            s.add_echo(b"x\x08 \x08");
+        }
+        assert_eq!(s.tees[0].pending.len(), ECHO_MAX);
+        // Once written, it takes echo again.
+        let mut files = Files::default();
+        s.flush(false, &mut files.writer());
+        assert_eq!(files.of(1).len(), ECHO_MAX);
+        s.add_echo(b"y");
+        assert_eq!(s.tees[0].pending, b"y");
+        // What programs write is never dropped.
+        s.add(&[b'z'; 2 * ECHO_MAX]);
+        assert_eq!(s.tees[0].pending.len(), 2 * ECHO_MAX + 1);
     }
 
     #[test]

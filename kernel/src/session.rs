@@ -18,8 +18,12 @@ use vfs::{Env, Errno, Vfs};
 pub struct KernelConsole;
 
 impl Console for KernelConsole {
+    /// The shell reads at its prompt: the console is its own, in raw mode,
+    /// whatever another process left it in (a program may call
+    /// `console_mode` after its parent returned to the prompt).
     fn read_byte(&mut self) -> Option<u8> {
         loop {
+            proc::take_console();
             tty::poll();
             if let Some(b) = tty::pop() {
                 return Some(b);
@@ -30,7 +34,7 @@ impl Console for KernelConsole {
     }
 
     fn write(&mut self, bytes: &[u8]) {
-        console::write_output(bytes);
+        tty::write(bytes);
     }
 
     fn columns(&self) -> usize {
@@ -137,6 +141,7 @@ impl Env for KernelEnv {
 /// (the root at `/`, the programs at `/bin`); `test_mode` is 1 for
 /// `test=1`. Never returns.
 pub extern "C" fn shell(test_mode: u64) -> ! {
+    power::set_test_mode(test_mode != 0);
     let mut vfs = KernelVfs;
     let mut console = KernelConsole;
     let mut system = KernelSystem {
