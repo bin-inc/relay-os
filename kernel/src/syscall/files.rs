@@ -140,8 +140,8 @@ pub(super) fn stat(
     }
     let path = path(caller, addr, len)?;
     let slice = UserSlice::new(out, Stat::SIZE as u64)?;
-    let st = caller.with_vfs(|v| v.lookup(&path).and_then(|n| v.stat(n)))?;
-    caller.write(&slice, 0, &open_file::stat_of(&st).to_bytes())?;
+    let (node, st) = caller.with_vfs(|v| v.lookup(&path).and_then(|n| Ok((n, v.stat(n)?))))?;
+    caller.write(&slice, 0, &open_file::stat_of(node, &st).to_bytes())?;
     Ok(0)
 }
 
@@ -502,6 +502,21 @@ mod tests {
 
     fn u64_at(b: &[u8], i: usize) -> u64 {
         u64::from_ne_bytes(b[i..i + 8].try_into().unwrap())
+    }
+
+    #[test]
+    fn stat_and_fstat_name_the_filesystem() {
+        let mut f = fake();
+        let dev = |f: &mut Fake| u64_at(&get(f, W, relay_abi::Stat::SIZE), 72);
+        assert_eq!(on(&mut f, Call::Stat, b"/root/f", [0, W]), Ok(0));
+        assert_eq!(dev(&mut f), 1, "the root's");
+        assert_eq!(on(&mut f, Call::Stat, b"/full", [0, W]), Ok(0));
+        assert_eq!(dev(&mut f), 2, "the filesystem mounted at /full");
+        let fd = open(&mut f, b"/full", OPEN_READ).unwrap();
+        assert_eq!(call(&mut f, Call::Fstat, [fd, W, 0]), Ok(0));
+        assert_eq!(dev(&mut f), 2);
+        assert_eq!(call(&mut f, Call::Fstat, [0, W, 0]), Ok(0));
+        assert_eq!(dev(&mut f), 0, "the console's");
     }
 
     #[test]

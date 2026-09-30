@@ -2,7 +2,7 @@
 # (user-space gate spec §4.3, §7.4), and the line names both versions.
 system-abi 99
 timeout 30
-expect \[FAIL\] system: ABI 99, kernel wants 1
+expect \[FAIL\] system: ABI 99, kernel wants 2
 expect root@relay:~# $
 send ls /bin
 send echo done

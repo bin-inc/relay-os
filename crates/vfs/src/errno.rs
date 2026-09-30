@@ -52,6 +52,45 @@ pub enum Errno {
 }
 
 impl Errno {
+    /// Every error number.
+    pub const ALL: [Errno; 26] = [
+        Errno::ENOENT,
+        Errno::EEXIST,
+        Errno::ENOTDIR,
+        Errno::EISDIR,
+        Errno::ENOTEMPTY,
+        Errno::ENOSPC,
+        Errno::EIO,
+        Errno::EROFS,
+        Errno::EINVAL,
+        Errno::ENAMETOOLONG,
+        Errno::EXDEV,
+        Errno::EBUSY,
+        Errno::EFBIG,
+        Errno::E2BIG,
+        Errno::ENOEXEC,
+        Errno::EBADF,
+        Errno::ECHILD,
+        Errno::EAGAIN,
+        Errno::ENOMEM,
+        Errno::EFAULT,
+        Errno::ENOSYS,
+        Errno::ESRCH,
+        Errno::EPERM,
+        Errno::EINTR,
+        Errno::EMFILE,
+        Errno::ERANGE,
+    ];
+
+    /// The error with Linux's number `n` (a system call's error, in a
+    /// program); `EIO` for a number this list does not have.
+    pub fn from_number(n: u16) -> Errno {
+        Errno::ALL
+            .into_iter()
+            .find(|e| e.number() == n)
+            .unwrap_or(Errno::EIO)
+    }
+
     /// Linux's `strerror` text.
     pub const fn message(self) -> &'static str {
         match self {
@@ -147,41 +186,11 @@ mod tests {
         assert_eq!(Errno::EFBIG.to_string(), "File too large");
     }
 
-    /// Every variant, so the tests below cover each one.
-    const ALL: [Errno; 26] = [
-        Errno::ENOENT,
-        Errno::EEXIST,
-        Errno::ENOTDIR,
-        Errno::EISDIR,
-        Errno::ENOTEMPTY,
-        Errno::ENOSPC,
-        Errno::EIO,
-        Errno::EROFS,
-        Errno::EINVAL,
-        Errno::ENAMETOOLONG,
-        Errno::EXDEV,
-        Errno::EBUSY,
-        Errno::EFBIG,
-        Errno::E2BIG,
-        Errno::ENOEXEC,
-        Errno::EBADF,
-        Errno::ECHILD,
-        Errno::EAGAIN,
-        Errno::ENOMEM,
-        Errno::EFAULT,
-        Errno::ENOSYS,
-        Errno::ESRCH,
-        Errno::EPERM,
-        Errno::EINTR,
-        Errno::EMFILE,
-        Errno::ERANGE,
-    ];
-
     /// The name, number and message the host's C library gives: the real
     /// thing, independent of `relay_abi`'s table.
     #[test]
     fn each_number_and_message_is_the_host_s() {
-        for e in ALL {
+        for e in Errno::ALL {
             let n = e.number();
             let host = std::io::Error::from_raw_os_error(i32::from(n)).to_string();
             assert_eq!(
@@ -190,10 +199,19 @@ mod tests {
                 "{e:?} is {n}"
             );
         }
-        let mut numbers: Vec<u16> = ALL.iter().map(|e| e.number()).collect();
+        let mut numbers: Vec<u16> = Errno::ALL.iter().map(|e| e.number()).collect();
         numbers.sort();
         numbers.dedup();
-        assert_eq!(numbers.len(), ALL.len(), "numbers are unique");
+        assert_eq!(numbers.len(), Errno::ALL.len(), "numbers are unique");
+    }
+
+    #[test]
+    fn a_number_names_its_error() {
+        for e in Errno::ALL {
+            assert_eq!(Errno::from_number(e.number()), e);
+        }
+        assert_eq!(Errno::from_number(0), Errno::EIO);
+        assert_eq!(Errno::from_number(4095), Errno::EIO);
     }
 
     #[test]
