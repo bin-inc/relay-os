@@ -1,0 +1,106 @@
++ rm -f /root/check4.list /root/check4-a.sh /root/check4-a.log /root/check4-b.sh /root/check4-b.log
++ t-spawn fill
+filled the table with 60 children
++ t-spin 1
+4588568576 iterations
++ t-spawn 1000
+free frames before: 4071601
+free frames after: 4071601
+frames lost: 0
++ free
+              total        used        free
+Mem:       16328032       41668    16286364
+Heap:         32768        8543       24225
++ t-fault null-read
+relay-sh: t-fault: killed (page fault at 0x0, read, ip 0x4001e9)
++ t-fault null-write
+relay-sh: t-fault: killed (page fault at 0x0, write, ip 0x40026b)
++ t-fault write-code
+relay-sh: t-fault: killed (page fault at 0x400010, write, ip 0x400431)
++ t-fault exec-data
+relay-sh: t-fault: killed (page fault at 0x403000, execute, ip 0x403000)
++ t-fault ud
+relay-sh: t-fault: killed (invalid opcode, ip 0x400053)
++ t-fault div0
+relay-sh: t-fault: killed (divide error, ip 0x40008a)
++ t-fault sse
+relay-sh: t-fault: killed (FPU/SSE instruction, ip 0x40012b)
++ t-fault gsbase
+relay-sh: t-fault: killed (invalid opcode, ip 0x4002ed)
++ t-fault stack
+relay-sh: t-fault: killed (stack overflow at 0x7fffffeffff8, ip 0x4002a8)
++ t-fault kernel-read
+relay-sh: t-fault: killed (page fault at 0xffff800000000000, read, ip 0x40036e)
++ t-fault flags-exit
++ t-fault flags-ud
+relay-sh: t-fault: killed (invalid opcode, ip 0x400506)
++ t-fault flags-tf
+relay-sh: t-fault: killed (CPU exception 1, ip 0x40049d)
++ t-fault flags-ac
+relay-sh: t-fault: killed (invalid opcode, ip 0x40010a)
++ t-spawn kill-new
+t-args: kill
++ t-spawn orphan
++ t-spin 1
+2325741568 iterations
+2391801856 iterations
++ t-args a 'b c' ''
+[1] a
+[2] b c
+[3] 
++ t-abi
+relay-sh: t-abi: Exec format error
++ ls /bin > /root/check4.list
++ cat /root/check4.list
+cat
+clear
+cp
+date
+df
+dmesg
+echo
+free
+head
+ls
+mkdir
+mv
+poweroff
+pwd
+reboot
+rm
+rmdir
+sh
+stat
+sync
+t-abi
+t-args
+t-fault
+t-files
+t-mem
+t-read
+t-spawn
+t-spin
+t-sys
+t-tee
+tail
+touch
+uname
+wc
++ cat /root/check4.list >> /root/check4.list
+cat: /root/check4.list: input file is output file
++ echo 'echo one' > /root/check4-a.sh
++ echo 'sh /root/check4-b.sh' >> /root/check4-a.sh
++ echo 'echo two' > /root/check4-b.sh
++ sh /root/check4-a.sh
++ echo one
+one
++ sh /root/check4-b.sh
++ echo two
+two
++ cat /root/check4-b.log
++ echo two
+two
++ free
+              total        used        free
+Mem:       16328032       41668    16286364
+Heap:         32768        8544       24224
