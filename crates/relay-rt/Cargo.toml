@@ -10,3 +10,5 @@ build = "build.rs"
 
 [dependencies]
 relay-abi.workspace = true
+heap.workspace = true
+spin.workspace = true

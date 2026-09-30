@@ -65,6 +65,13 @@ struct LinearMem<'a>(&'a mut FrameAllocator<'static>);
 /// free.
 pub struct UserMem<'a>(LinearMem<'a>);
 
+impl UserMem<'_> {
+    /// Frames a program may still take: those free beyond the reserve.
+    pub fn room(&self) -> u64 {
+        self.0.0.free_frames().saturating_sub(USER_RESERVE_FRAMES)
+    }
+}
+
 impl PhysMem for UserMem<'_> {
     fn table(&mut self, phys: u64) -> &mut [u64; 512] {
         self.0.table(phys)
@@ -107,6 +114,18 @@ pub fn free_kernel_stack(stack: KernelStack) {
         .free(stack, &mut m.tables, &mut LinearMem(&mut m.frames));
     for virt in pages {
         x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(virt));
+    }
+}
+
+/// Drops the running program's TLB entries for `pages` pages from `virt`,
+/// which it no longer has: one by one for a few, all at once for many.
+pub fn flush_pages(virt: u64, pages: u64) {
+    if pages > 64 {
+        x86_64::instructions::tlb::flush_all();
+        return;
+    }
+    for k in 0..pages {
+        x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(virt + k * paging::PAGE));
     }
 }
 

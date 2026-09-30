@@ -1,0 +1,30 @@
+# Memory from mem_map (user-space gate §5.1, §7.3; milestone 2, plan 3b):
+# the area's first fit, zeroed pages, mem_unmap of whole pages of earlier
+# maps only, and no frame lost; a page given back is gone at once (its
+# TLB entry flushed), so touching it kills the program.
+timeout 60
+expect root@relay:~# $
+send t-mem map
+expect \nat the area's start: true\nzeroed: true\nwritten: true\nmap nothing: EINVAL\nmap too much: ENOMEM\n
+expect unmap the middle: ok\nunmap it again: EINVAL\nunmap half a page in: EINVAL\nunmap the program's code: EINVAL\n
+expect the hole is filled first: true\nframes lost: 0\nroot@relay:~# $
+send t-mem unmapped
+expect \nrelay-sh: t-mem: killed \(page fault at 0x100000000000, read, ip 0x[0-9a-f]+\)\n
+send t-mem unmapped-many
+expect \nrelay-sh: t-mem: killed \(page fault at 0x1000000ff000, read, ip 0x[0-9a-f]+\)\n
+send free
+expect-same mem \nMem:\s+\d+\s+(\d+)\s
+send t-mem map
+expect frames lost: 0\n
+send free
+expect-same mem \nMem:\s+\d+\s+(\d+)\s
+# The heap of relay-rt grows by mem_map (spec §8.1); when it cannot, the
+# program says so and exits with 134; either way its memory comes back.
+send t-mem grow 64
+expect \n\d+ blocks, 64 MiB, all there: true\nroot@relay:~# $
+send t-mem oom
+expect \nt-mem: out of memory\nthe hog: exited with 134\nroot@relay:~# $
+send free
+expect-same mem \nMem:\s+\d+\s+(\d+)\s
+send t-mem grow 1
+expect all there: true\n

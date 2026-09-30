@@ -1,6 +1,7 @@
 //! The runtime every Relay OS program links (spec §8.1 of the user-space
-//! gate): the entry point, the arguments, system-call wrappers, the panic
-//! handler and the ELF note that names the ABI.
+//! gate): the entry point, the arguments, system-call wrappers, the heap
+//! (`alloc` works in every program), the panic handler and the ELF note
+//! that names the ABI.
 //!
 //! A program is a `#![no_std]`, `#![no_main]` binary that names its main
 //! function with [`main!`]:
@@ -16,6 +17,7 @@
 //! `_start`) are in `arch`, built only for Relay OS; the rest is host-tested.
 #![cfg_attr(not(test), no_std)]
 
+mod allocator;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod arch;
 mod args;
