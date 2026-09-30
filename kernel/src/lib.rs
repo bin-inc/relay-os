@@ -27,6 +27,7 @@ pub mod session;
 pub mod storage;
 pub mod syscall;
 pub mod system;
+pub mod tee;
 pub mod timer;
 pub mod tty;
 pub mod usb;
