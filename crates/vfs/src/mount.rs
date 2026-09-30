@@ -77,12 +77,69 @@ type Trail = Vec<(Node, Vec<u8>)>;
 
 /// A current directory apart from the table: each process has its own
 /// (user-space gate §5.4), and the kernel puts it in with
-/// `MountTable::swap_cwd` while it works for that process. A removal marks
-/// only the current directory that is in the table at the time as gone.
+/// `MountTable::swap_cwd` while it works for that process. A removal or a
+/// move changes the current directory in the table at the time; the others
+/// learn of it from the table's [`Change`]s (`Cwd::follow`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cwd {
     trail: Trail,
     gone: bool,
+}
+
+impl Cwd {
+    /// Takes in a change made while another current directory was in the
+    /// table: a removed directory on the way to this one leaves it gone,
+    /// and a moved one takes its path along.
+    pub fn follow(&mut self, change: &Change) {
+        follow(&mut self.trail, &mut self.gone, change);
+    }
+}
+
+/// What a removal or a move did that current directories and open files
+/// elsewhere must learn of (user-space gate §16 item 4), since an inode a
+/// removal frees can be reused at once.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Change(What);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum What {
+    /// A directory, or a file's last name, was removed.
+    Removed(Node),
+    /// A directory moved; `to` is the trail to its new place.
+    Moved { node: Node, to: Trail },
+}
+
+impl Change {
+    /// The inode a removal freed, if this is one: an open file of it is
+    /// gone.
+    pub fn removed(&self) -> Option<Node> {
+        match self.0 {
+            What::Removed(node) => Some(node),
+            What::Moved { .. } => None,
+        }
+    }
+}
+
+/// Applies `change` to a current directory's trail. A gone one is not
+/// followed any more: its inodes may be other files' now.
+fn follow(trail: &mut Trail, gone: &mut bool, change: &Change) {
+    if *gone {
+        return;
+    }
+    match &change.0 {
+        What::Removed(node) => {
+            if trail.iter().any(|(n, _)| n == node) {
+                *gone = true;
+            }
+        }
+        What::Moved { node, to } => {
+            if let Some(k) = trail.iter().position(|(n, _)| n == node) {
+                let mut moved = to.clone();
+                moved.extend_from_slice(&trail[k + 1..]);
+                *trail = moved;
+            }
+        }
+    }
 }
 
 /// The mount table plus the current directory.
@@ -93,6 +150,8 @@ pub struct MountTable {
     /// nothing (as in Linux) until the next `chdir`. Its inode number may
     /// be reused, so the trail must not be followed any more.
     cwd_gone: bool,
+    /// The removals and moves since `take_changes`.
+    changes: Vec<Change>,
 }
 
 /// A path split into the directory holding its last name and that name.
@@ -115,7 +174,29 @@ impl MountTable {
             mounts: alloc::vec![Mount { fs: root, on: None }],
             cwd: alloc::vec![(node, Vec::new())],
             cwd_gone: false,
+            changes: Vec::new(),
         }
+    }
+
+    /// The removals and moves made since the last call, oldest first, for
+    /// the current directories and open files outside the table (the
+    /// kernel asks after every operation).
+    pub fn take_changes(&mut self) -> Vec<Change> {
+        core::mem::take(&mut self.changes)
+    }
+
+    /// Records `change` and applies it to the current directory.
+    fn changed(&mut self, change: What) {
+        let change = Change(change);
+        follow(&mut self.cwd, &mut self.cwd_gone, &change);
+        self.changes.push(change);
+    }
+
+    /// Whether removing a name of `node` frees it: a directory, or a file's
+    /// last link. One whose inode cannot be read counts as freed.
+    fn frees(&mut self, node: Node) -> bool {
+        self.stat(node)
+            .map_or(true, |st| st.kind == FileType::Directory || st.nlink <= 1)
     }
 
     /// The root, as a current directory to put in with `swap_cwd`.
@@ -229,10 +310,6 @@ impl MountTable {
         } else {
             Ok(self.cwd.clone())
         }
-    }
-
-    fn in_cwd(&self, node: Node) -> bool {
-        self.cwd.iter().any(|(n, _)| *n == node)
     }
 
     /// Takes one step from the directory at the end of `trail`.
@@ -417,13 +494,19 @@ impl Vfs for MountTable {
         if self.mounted_at_name(parent.dir, name).is_some() {
             return Err(Errno::EISDIR);
         }
+        let child = self.child(&parent)?;
         if parent.trailing_slash
-            && let Some(child) = self.child(&parent)?
+            && let Some(child) = child
             && !self.is_dir(child)?
         {
             return Err(Errno::ENOTDIR);
         }
-        self.fs(parent.dir.mount)?.unlink(parent.dir.ino, name)
+        let frees = child.is_some_and(|c| self.frees(c));
+        self.fs(parent.dir.mount)?.unlink(parent.dir.ino, name)?;
+        if let Some(c) = child.filter(|_| frees) {
+            self.changed(What::Removed(c));
+        }
+        Ok(())
     }
 
     fn rmdir(&mut self, path: &[u8]) -> Result<(), Errno> {
@@ -443,8 +526,8 @@ impl Vfs for MountTable {
             return Err(Errno::EBUSY);
         }
         self.fs(parent.dir.mount)?.rmdir(parent.dir.ino, name)?;
-        if child.is_some_and(|c| self.in_cwd(c)) {
-            self.cwd_gone = true;
+        if let Some(c) = child {
+            self.changed(What::Removed(c));
         }
         Ok(())
     }
@@ -467,24 +550,24 @@ impl Vfs for MountTable {
         if self.is_mount_point(moving) {
             return Err(Errno::EBUSY);
         }
-        let target = self.child(&dst)?;
+        let target = self.child(&dst)?.filter(|&t| t != moving);
         if target.is_some_and(|t| self.is_mount_point(t)) {
             return Err(Errno::EBUSY);
         }
+        let replaced = target.filter(|&t| self.frees(t));
+        let moves_dir = self.is_dir(moving)?;
         let (from_dir, to_dir) = (src.dir.ino, dst.dir.ino);
         self.fs(src.dir.mount)?
             .rename(from_dir, src_name, to_dir, dst_name)?;
-        // A directory replaced by the rename is gone; one moved takes the
-        // current directory's path along.
-        if target.is_some_and(|t| t != moving && self.in_cwd(t)) {
-            self.cwd_gone = true;
-        } else if let Some(k) = self.cwd.iter().position(|(n, _)| *n == moving) {
+        // What the rename replaced is gone; a directory moved takes the
+        // current directories on its way along.
+        if let Some(t) = replaced {
+            self.changed(What::Removed(t));
+        }
+        if moves_dir {
             match self.walk(to) {
-                Ok(mut trail) => {
-                    trail.extend_from_slice(&self.cwd[k + 1..]);
-                    self.cwd = trail;
-                }
-                Err(_) => self.cwd_gone = true,
+                Ok(to) => self.changed(What::Moved { node: moving, to }),
+                Err(_) => self.changed(What::Removed(moving)),
             }
         }
         Ok(())
@@ -723,6 +806,149 @@ mod tests {
         t.chdir(b"/tmp/e").unwrap();
         t.rename(b"/tmp/other", b"/tmp/e").unwrap();
         assert_eq!(t.lookup(b"."), Err(Errno::ENOENT));
+    }
+
+    /// A current directory put aside at `path`, with `/` in the table.
+    fn aside(t: &mut MountTable, path: &[u8]) -> Cwd {
+        t.chdir(path).unwrap();
+        t.swap_cwd(t.root_cwd())
+    }
+
+    /// `cwd` put in to resolve `path`, and put aside again.
+    fn from(t: &mut MountTable, cwd: &mut Cwd, path: &[u8]) -> Result<Node, Errno> {
+        let theirs = t.swap_cwd(cwd.clone());
+        let r = t.lookup(path);
+        *cwd = t.swap_cwd(theirs);
+        r
+    }
+
+    fn follow_all(t: &mut MountTable, cwd: &mut Cwd) {
+        for c in t.take_changes() {
+            cwd.follow(&c);
+        }
+    }
+
+    #[test]
+    fn a_removal_reaches_a_current_directory_put_aside() {
+        let mut t = table();
+        t.mkdir(b"/tmp/x").unwrap();
+        let mut other = aside(&mut t, b"/tmp/x");
+        let x = t.lookup(b"/tmp/x").unwrap();
+        t.rmdir(b"/tmp/x").unwrap();
+        let changes = t.take_changes();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].removed(), Some(x));
+        assert!(t.take_changes().is_empty(), "taken once");
+        other.follow(&changes[0]);
+        // Its inode is reused at once.
+        t.mkdir(b"/root/y").unwrap();
+        assert_eq!(t.lookup(b"/root/y").unwrap(), x);
+        assert_eq!(from(&mut t, &mut other, b"."), Err(Errno::ENOENT));
+        assert_eq!(t.swap_cwd(other.clone()), t.root_cwd());
+        assert_eq!(t.cwd(), b"/tmp/x", "the path it had");
+        t.swap_cwd(t.root_cwd());
+        // Gone for good: a move of the directory that has its inode now
+        // is not followed.
+        t.rename(b"/root/y", b"/root/z").unwrap();
+        follow_all(&mut t, &mut other);
+        t.swap_cwd(other.clone());
+        assert_eq!(t.cwd(), b"/tmp/x");
+        t.swap_cwd(t.root_cwd());
+        t.rename(b"/root/z", b"/root/y").unwrap();
+        // A directory not on its way changes nothing.
+        let mut home = aside(&mut t, b"/root");
+        follow_all(&mut t, &mut home);
+        t.rmdir(b"/root/y").unwrap();
+        follow_all(&mut t, &mut home);
+        assert!(from(&mut t, &mut home, b".").is_ok());
+    }
+
+    #[test]
+    fn a_move_takes_a_current_directory_put_aside_along() {
+        let mut t = table();
+        t.mkdir(b"/tmp/a").unwrap();
+        t.mkdir(b"/tmp/a/b").unwrap();
+        t.mkdir(b"/tmp/a/b/c").unwrap();
+        let mut other = aside(&mut t, b"/tmp/a/b/c");
+        t.rename(b"/tmp/a/b", b"/root/b").unwrap();
+        follow_all(&mut t, &mut other);
+        let theirs = t.swap_cwd(other.clone());
+        assert_eq!(t.cwd(), b"/root/b/c");
+        t.swap_cwd(theirs);
+        // Its old parent is empty now, and removing it leaves the moved
+        // directory alone; `..` goes along the new path.
+        t.rmdir(b"/tmp/a").unwrap();
+        follow_all(&mut t, &mut other);
+        assert!(from(&mut t, &mut other, b".").is_ok());
+        assert_eq!(
+            from(&mut t, &mut other, b"../..").unwrap(),
+            t.lookup(b"/root").unwrap()
+        );
+        // Moving a file changes no current directory.
+        t.create(b"/tmp/f").unwrap();
+        t.rename(b"/tmp/f", b"/tmp/g").unwrap();
+        assert!(t.take_changes().is_empty());
+    }
+
+    #[test]
+    fn the_last_name_of_a_file_going_frees_it() {
+        let mut t = table();
+        let motd = t.lookup(b"/etc/motd").unwrap();
+        t.unlink(b"/etc/motd").unwrap();
+        let changes = t.take_changes();
+        assert_eq!(
+            changes.iter().map(Change::removed).collect::<Vec<_>>(),
+            [Some(motd)]
+        );
+        // A rename over a file or an empty directory frees what it
+        // replaces; the moved directory itself is not removed.
+        let old = t.create(b"/tmp/old").unwrap();
+        t.create(b"/tmp/new").unwrap();
+        t.rename(b"/tmp/new", b"/tmp/old").unwrap();
+        let removed: Vec<_> = t
+            .take_changes()
+            .iter()
+            .filter_map(Change::removed)
+            .collect();
+        assert_eq!(removed, [old]);
+        t.mkdir(b"/tmp/d").unwrap();
+        let e = {
+            t.mkdir(b"/tmp/e").unwrap();
+            t.lookup(b"/tmp/e").unwrap()
+        };
+        t.rename(b"/tmp/d", b"/tmp/e").unwrap();
+        let removed: Vec<_> = t
+            .take_changes()
+            .iter()
+            .filter_map(Change::removed)
+            .collect();
+        assert_eq!(removed, [e]);
+        // A rename onto itself and a failed removal change nothing.
+        t.rename(b"/tmp/e", b"/tmp/e").unwrap();
+        assert_eq!(t.unlink(b"/tmp/missing"), Err(Errno::ENOENT));
+        assert_eq!(t.rmdir(b"/"), Err(Errno::EBUSY));
+        assert!(
+            t.take_changes().iter().all(|c| c.removed().is_none()),
+            "at most a move"
+        );
+    }
+
+    #[test]
+    fn a_file_with_another_name_lives_on() {
+        let mut fs = memfs();
+        let root = fs.root();
+        let two = fs.create(root, b"two").unwrap();
+        fs.link(root, b"also", two).unwrap();
+        let mut t = MountTable::new(Box::new(fs));
+        t.unlink(b"/two").unwrap();
+        assert!(t.take_changes().is_empty(), "/also still names it");
+        t.unlink(b"/also").unwrap();
+        let removed: Vec<_> = t
+            .take_changes()
+            .iter()
+            .filter_map(Change::removed)
+            .collect();
+        assert_eq!(removed, [Node { mount: 0, ino: two }]);
     }
 
     #[test]
