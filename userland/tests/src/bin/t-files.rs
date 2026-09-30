@@ -11,6 +11,11 @@
 //!   and `rmdir`, in `t-files.d`.
 //! - `t-files cwd`: `chdir` and `getcwd`, and the working directory a child
 //!   starts in.
+//! - `t-files gone`: a child keeps `t-files.g` as its working directory and
+//!   `t-files.g/f` open while this one removes both and makes a new
+//!   directory and file, which may get their inodes; the child finds its
+//!   directory gone and its file too (`ENOENT`), and the new ones keep
+//!   what they hold.
 //! - `t-files child`: reads 7 bytes from fd 3 and prints them (the child
 //!   of `basic`); `t-files pwd` prints its working directory (the children
 //!   of `cwd`).
@@ -38,8 +43,10 @@ fn main(args: Args) -> u8 {
         Some(b"dir") => dir(),
         Some(b"cwd") => cwd(),
         Some(b"pwd") => pwd("my working directory"),
+        Some(b"gone") => gone(),
+        Some(b"gone-child") => gone_child(),
         _ => {
-            let _ = sys::write_all(2, b"usage: t-files basic|dir|cwd\n");
+            let _ = sys::write_all(2, b"usage: t-files basic|dir|cwd|gone\n");
             return 2;
         }
     };
@@ -280,4 +287,62 @@ fn cwd() -> Result<(), u16> {
     pwd("getcwd")?;
     sys::unlink(b"t-files.c/x")?;
     sys::rmdir(b"t-files.c")
+}
+
+fn gone() -> Result<(), u16> {
+    sys::mkdir(b"t-files.g")?;
+    put(b"t-files.g/f", b"old")?;
+    let f = sys::open(b"t-files.g/f", OPEN_READ | OPEN_WRITE)?;
+    let fds = [
+        FdMap {
+            child: 1,
+            parent: 1,
+        },
+        FdMap {
+            child: 2,
+            parent: 2,
+        },
+        FdMap {
+            child: 3,
+            parent: f,
+        },
+    ];
+    let pid = sys::spawn(
+        b"/bin/t-files",
+        b"t-files\0gone-child\0",
+        b"t-files.g",
+        &fds,
+        0,
+    )?;
+    // While the child naps: remove its directory and file, and make new
+    // ones, which may get their inodes.
+    sys::unlink(b"t-files.g/f")?;
+    sys::rmdir(b"t-files.g")?;
+    sys::mkdir(b"t-files.n")?;
+    put(b"t-files.n/new", b"new")?;
+    show("read the removed file", sys::read(f, &mut [0; 4]));
+    sys::wait(i64::from(pid), false)?;
+    let r = sys::open(b"t-files.n/new", OPEN_READ)?;
+    let mut buf = [0u8; 16];
+    let n = sys::read(r, &mut buf)?;
+    show_text("the new file holds", &buf[..n]);
+    sys::close(r)?;
+    show(
+        "the new directory holds x",
+        sys::stat(b"t-files.n/x", 0).map(|s| s.size),
+    );
+    sys::unlink(b"t-files.n/new")?;
+    sys::rmdir(b"t-files.n")
+}
+
+fn gone_child() -> Result<(), u16> {
+    sys::sleep(300);
+    pwd("the child's working directory")?;
+    show(
+        "the child creates x",
+        sys::open(b"x", OPEN_WRITE | OPEN_CREATE),
+    );
+    show("the child reads its file", sys::read(3, &mut [0; 4]));
+    show("the child writes its file", sys::write(3, b"child"));
+    Ok(())
 }

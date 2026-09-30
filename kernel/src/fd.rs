@@ -8,7 +8,7 @@ use crate::file::OpenFile;
 use alloc::sync::Arc;
 use relay_abi::FdMap;
 use relay_abi::spawn::SPAWN_FDS;
-use vfs::Errno;
+use vfs::{Change, Errno};
 
 /// Slots per process (spec §5.4).
 pub const FDS: usize = 32;
@@ -85,6 +85,21 @@ impl FdTable {
     /// Every open file.
     pub fn files(&self) -> impl Iterator<Item = &Arc<File>> {
         self.slots.iter().flatten()
+    }
+
+    /// A removal elsewhere (spec §16 item 4): the open files of an inode it
+    /// freed are gone.
+    pub fn follow(&self, change: &Change) {
+        let Some(node) = change.removed() else {
+            return;
+        };
+        for file in self.files() {
+            if let File::Vfs(open) = &**file
+                && open.node() == node
+            {
+                open.mark_gone();
+            }
+        }
     }
 
     /// The file open as `fd`; `EBADF` if none is.
@@ -190,6 +205,51 @@ mod tests {
             assert_eq!(t.remove(fd).err(), Some(Errno::EBADF), "{fd}");
         }
         assert_eq!(t.insert(console()), Ok(31));
+    }
+
+    #[test]
+    fn the_open_files_of_a_freed_inode_are_gone() {
+        use crate::file;
+        use alloc::boxed::Box;
+        use relay_abi::file::{OPEN_CREATE, OPEN_READ, OPEN_WRITE};
+        use vfs::{Env, MemFs, MountTable, Vfs};
+        struct Clock;
+        impl Env for Clock {
+            fn now(&self) -> u64 {
+                0
+            }
+            fn log(&self, _: &str) {}
+        }
+        let mut t = MountTable::new(Box::new(MemFs::new(Box::new(Clock))));
+        let rw = OPEN_READ | OPEN_WRITE | OPEN_CREATE;
+        let a = Arc::new(File::Vfs(file::open(&mut t, b"/a", rw).unwrap()));
+        let b = Arc::new(File::Vfs(file::open(&mut t, b"/b", rw).unwrap()));
+        let mut fds = FdTable::shell();
+        fds.insert(Arc::clone(&a)).unwrap();
+        fds.insert(Arc::clone(&a)).unwrap();
+        fds.insert(Arc::clone(&b)).unwrap();
+        let freed = t.lookup(b"/a").unwrap();
+        t.unlink(b"/a").unwrap();
+        for c in t.take_changes() {
+            fds.follow(&c);
+        }
+        // The next file gets the freed inode: `a` must not reach it.
+        let c = t.create(b"/c").unwrap();
+        assert_eq!(c, freed);
+        t.write_at(c, 0, b"new").unwrap();
+        let read = |f: &File, t: &mut MountTable| match f {
+            File::Vfs(o) => o.read(t, &mut [0; 4]),
+            _ => unreachable!(),
+        };
+        assert_eq!(read(&a, &mut t), Err(Errno::ENOENT));
+        assert_eq!(read(&b, &mut t), Ok(0), "another file");
+        // A move frees nothing.
+        t.mkdir(b"/d").unwrap();
+        t.rename(b"/d", b"/e").unwrap();
+        for c in t.take_changes() {
+            fds.follow(&c);
+        }
+        assert_eq!(read(&b, &mut t), Ok(0));
     }
 
     #[test]

@@ -287,6 +287,22 @@ pub fn start(shell: extern "C" fn(u64) -> !, arg: u64, cwd: Cwd) -> ! {
     idle()
 }
 
+/// A removal or a move made through the mount table (spec §16 item 4): the
+/// current directory of every process but the running one (which the
+/// table changed itself) follows it, and every process's open files of an
+/// inode it freed are gone.
+pub fn follow_changes(changes: &[vfs::Change]) {
+    let mut t = PROCS.lock();
+    for p in t.iter_mut() {
+        for c in changes {
+            if let Some(cwd) = p.res.cwd.as_mut() {
+                cwd.follow(c);
+            }
+            p.res.fds.follow(c);
+        }
+    }
+}
+
 /// Runs `f` with the running process's current directory, and keeps what
 /// `f` makes of it.
 pub fn with_cwd<R>(f: impl FnOnce(&mut Cwd) -> R) -> R {

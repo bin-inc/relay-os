@@ -26,13 +26,21 @@ pub fn init(table: MountTable) -> Cwd {
 }
 
 /// Runs `f` on the mount table with `cwd` as its current directory, and
-/// keeps what `f` makes of it (a `chdir`) in `cwd`.
+/// keeps what `f` makes of it (a `chdir`) in `cwd`. What `f` removed or
+/// moved then reaches every process (spec §16 item 4): their current
+/// directories follow it, and their open files of a freed inode are gone.
 pub fn with<R>(cwd: &mut Cwd, f: impl FnOnce(&mut MountTable) -> R) -> R {
-    let mut guard = MOUNTS.lock();
-    let table = guard.0.as_mut().expect("mounts::init has not run");
-    let theirs = table.swap_cwd(cwd.clone());
-    let r = f(table);
-    *cwd = table.swap_cwd(theirs);
+    let (r, changes) = {
+        let mut guard = MOUNTS.lock();
+        let table = guard.0.as_mut().expect("mounts::init has not run");
+        let theirs = table.swap_cwd(cwd.clone());
+        let r = f(table);
+        *cwd = table.swap_cwd(theirs);
+        (r, table.take_changes())
+    };
+    if !changes.is_empty() {
+        crate::proc::follow_changes(&changes);
+    }
     r
 }
 

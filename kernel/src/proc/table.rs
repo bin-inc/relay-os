@@ -168,6 +168,10 @@ impl<R> Table<R> {
         self.procs.iter()
     }
 
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Process<R>> {
+        self.procs.iter_mut()
+    }
+
     /// Whether another process can start: an entry is free, and a pid is
     /// left. `insert` refuses exactly when it is not.
     pub fn has_room(&self) -> bool {
