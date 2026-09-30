@@ -3,9 +3,8 @@
 //! one that is not running is switched out on it (`arch::context`). The
 //! idle task is the context the kernel booted in, process 0: it runs when
 //! nothing is ready, polls the console and the USB hosts, and sleeps until
-//! the next tick. Process 1 is the in-kernel shell, a process without a
-//! program, which blocks in `wait` while its commands run and on the
-//! console while it waits for a line (plan 4 replaces it with `/bin/sh`).
+//! the next tick. Process 1 is init (`init.rs`), a process without a
+//! program, which blocks in `wait` while the shell it started runs.
 //!
 //! The kernel is not preemptible, and a switch happens only in the kernel
 //! with interrupts off and no lock held, so a blocked process never holds
@@ -239,10 +238,12 @@ pub fn give_console(pid: u32) {
     }
 }
 
-/// Gives the console back to the in-kernel shell: its own group, raw mode.
+/// Gives the console back to process 1: its own group, raw mode. A reader
+/// of another group that is still blocked wakes, to find it has lost it.
 pub fn take_console() {
     tty::set_line_mode(false);
     tty::set_foreground(table::INIT);
+    PROCS.lock().wake_all(Blocked::Console);
 }
 
 /// The running process blocks on `why` until something wakes it.
@@ -285,21 +286,21 @@ pub fn wait_for_input() {
     block(Blocked::Console);
 }
 
-/// Starts the in-kernel shell as process 1 in `cwd`, running
-/// `shell(arg)`, and becomes the idle task. Never returns.
-pub fn start(shell: extern "C" fn(u64) -> !, arg: u64, cwd: Cwd) -> ! {
+/// Starts process 1 in `cwd`, running `init(arg)`, with the console as its
+/// fds 0-2, and becomes the idle task. Never returns.
+pub fn start(init: extern "C" fn(u64) -> !, arg: u64, cwd: Cwd) -> ! {
     let stack = mm::alloc_kernel_stack().expect("a kernel stack for process 1");
-    prepare(&stack, shell, arg);
+    prepare(&stack, init, arg);
     let res = Res {
         stack,
         space: None,
         entry: None,
-        fds: FdTable::shell(),
+        fds: FdTable::console(),
         cwd: Some(cwd),
     };
     let pid = PROCS
         .lock()
-        .insert(0, true, String::from("relay-sh"), res)
+        .insert(0, true, String::from("init"), res)
         .unwrap_or_else(|_| unreachable!("the table is empty"));
     assert_eq!(pid, table::INIT);
     idle()
@@ -586,8 +587,8 @@ pub fn wait(pid: u32, out: &mut shell::Output<'_>) -> Result<WaitStatus, Errno> 
 }
 
 /// Waits for the child `pid`, collecting any other child that ends
-/// meanwhile.
-fn wait_collecting(pid: u32) -> Result<WaitStatus, Errno> {
+/// meanwhile: for process 1, the orphans that pass to it.
+pub fn wait_collecting(pid: u32) -> Result<WaitStatus, Errno> {
     // `ECHILD` before anything else is collected.
     if let Some((_, status)) = collect(Child::Pid(pid), true)? {
         return Ok(status);

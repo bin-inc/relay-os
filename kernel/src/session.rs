@@ -5,12 +5,11 @@
 //! for filesystems.
 
 use crate::mm::{self, MemStats, frame::FRAME_SIZE};
-use crate::mounts::KernelVfs;
 use crate::syscall::Spawn;
 use crate::{console, exec, klog, klogln, power, proc, rtc, tty};
 use alloc::vec::Vec;
 use relay_abi::{FdMap, WaitStatus};
-use shell::{Console, MemInfo, Output, Shell, System};
+use shell::{Console, MemInfo, Output, System};
 use vfs::{Env, Errno, Vfs};
 
 /// The screen and serial for output; the USB keyboards and COM1 for input.
@@ -136,25 +135,6 @@ impl Env for KernelEnv {
 
     fn log(&self, line: &str) {
         klogln!("{line}");
-    }
-}
-
-/// Process 1 (spec §4.4 step 11): the shell over the kernel's mount table
-/// (the root at `/`, the programs at `/bin`); `test_mode` is 1 for
-/// `test=1`. Never returns.
-pub extern "C" fn shell(test_mode: u64) -> ! {
-    power::set_test_mode(test_mode != 0);
-    let mut vfs = KernelVfs;
-    let mut console = KernelConsole;
-    let mut system = KernelSystem {
-        test_mode: test_mode != 0,
-    };
-    let mut shell = Shell::new(&mut vfs, &mut console, &mut system);
-    shell.greet();
-    // `run` returns after `exit` (or if `reboot` or `poweroff` did, which
-    // they do not): the in-kernel shell reads on at a new prompt.
-    loop {
-        shell.run();
     }
 }
 

@@ -1,5 +1,6 @@
 # /bin/sh, the shell as a program (user-space gate §8.2, §8.3; milestone
-# 2, plan 4a), started here from the in-kernel shell. Every command but cd,
+# 2, plan 4a), started here by path from the /bin/sh that init started
+# (so a shell of its own, and the one init waits for). Every command but cd,
 # exit and help is a program; a redirection is a file the program writes
 # as its fd 1; at the prompt the shell takes the console and gives it to
 # each command (spawn's FOREGROUND); a script's commands run in its own
@@ -7,10 +8,10 @@
 timeout 30
 expect root@relay:~# $
 # Every kernel-stack slot's page tables made first (they stay), so memory
-# in use compares after them (and after the in-kernel shell collected the
-# orphans, which it does before it starts a program).
+# in use compares after them (and after init collected the orphans, which
+# it does as each ends): init, /bin/sh and t-spawn leave room for 61.
 send t-spawn fill
-expect \nfilled the table with 62 children\n
+expect \nfilled the table with 61 children\n
 alive 1
 send t-args collected
 expect \n\[1\] collected\n
@@ -94,14 +95,14 @@ send sh /root/spin.sh
 alive 1
 key {ctrl-c}
 expect \+ t-spin\n(pid \d+ \(/bin/(t-spin|sh)\): killed: Ctrl-C\n){2}\^C\nroot@relay:~# 
-# Orphans that end while the in-kernel shell waits for /bin/sh are
-# collected as they end (a Ctrl-C'd script leaves its command's zombie to
-# process 1 too): the table is as empty the second time.
+# Orphans that end while init waits for its shell are collected as they
+# end (a Ctrl-C'd script leaves its command's zombie to process 1 too):
+# the table is as empty the second time, with two shells in it now.
 send t-spawn fill
-expect \nfilled the table with 61 children\n
+expect \nfilled the table with 60 children\n
 alive 1
 send t-spawn fill
-expect \nfilled the table with 61 children\n
+expect \nfilled the table with 60 children\n
 alive 1
 send rm -r /root/a /root/list /root/s.sh /root/s.log /root/t.sh /root/t.log /root/spin.sh /root/spin.log /root/i.sh /root/i.log /root/j.sh /root/j.log
 send cd /tmp

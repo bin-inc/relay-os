@@ -1,9 +1,10 @@
 # An archive built for another ABI is refused before anything runs from it
-# (user-space gate spec §4.3, §7.4), and the line names both versions.
+# (user-space gate spec §4.3, §7.4), and the line names both versions; the
+# error screen says the same (§11.2), and a key restarts the machine.
 system-abi 99
 timeout 30
 expect \[FAIL\] system: ABI 99, kernel wants 2
-expect root@relay:~# $
-send ls /bin
-send echo done
-expect \ndone\n
+expect \*\*\* Relay OS cannot run its shell \*\*\*\n\nsystem: ABI 99, kernel wants 2\n
+expect \nPress any key to reboot\.\n
+reset
+expect Relay OS \d+\.\d+\.\d+

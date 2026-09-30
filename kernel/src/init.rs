@@ -5,11 +5,19 @@
 //! Three ends within 10 s, or a shell that cannot be started, reach the
 //! error screen instead.
 
+use crate::error_screen::{self, Reason};
+use crate::mounts::KernelVfs;
+use crate::syscall::Spawn;
+use crate::system::SystemError;
+use crate::{kprintln, proc, timer, tty};
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::time::Duration;
-use relay_abi::WaitStatus;
 use relay_abi::wait::EXITED;
+use relay_abi::{FdMap, WaitStatus};
+use spin::Mutex;
+use vfs::{Errno, Vfs};
 
 /// The program init starts.
 pub const SHELL: &str = "/bin/sh";
@@ -17,6 +25,82 @@ pub const SHELL: &str = "/bin/sh";
 pub const ENDS: usize = 3;
 /// See [`ENDS`].
 pub const WINDOW: Duration = Duration::from_secs(10);
+/// Where the shell starts (spec §6.6).
+const HOME: &[u8] = b"/root";
+/// The most of `/etc/motd` shown.
+const MOTD_MAX: usize = 16 * 1024;
+
+/// Why `system.img` could not be mounted, if it could not (startup step
+/// 10): init shows the error screen for it instead of starting a shell.
+static SYSTEM: Mutex<Option<SystemError>> = Mutex::new(None);
+
+/// The system archive could not be mounted: there is no `/bin/sh`.
+pub fn system_failed(e: SystemError) {
+    *SYSTEM.lock() = Some(e);
+}
+
+/// Whether init's record of the archive is locked now (for the kernel's
+/// checks that no lock is held across a switch).
+pub fn is_locked() -> bool {
+    SYSTEM.is_locked()
+}
+
+/// Process 1 (spec §4.4 step 11). Never returns.
+pub extern "C" fn run(_: u64) -> ! {
+    if let Some(e) = SYSTEM.lock().take() {
+        error_screen::show(&Reason::System(e));
+    }
+    motd();
+    let mut respawn = Respawn::default();
+    loop {
+        let pid = start_shell().unwrap_or_else(|e| error_screen::show(&Reason::CannotStart(e)));
+        // Every orphan that ends meanwhile is collected too. The next
+        // shell's `FOREGROUND` gives it the console, whatever this one left
+        // it in.
+        let status = proc::wait_collecting(pid).expect("init waits for its own child");
+        let again = respawn.ended(timer::tsc_time().unwrap_or_else(timer::uptime));
+        kprintln!("{}", ended_line(pid, &status, again));
+        if !again {
+            error_screen::show(&Reason::Ended);
+        }
+    }
+}
+
+/// Shows `/etc/motd`, as the shell did in milestone 1.
+fn motd() {
+    let mut vfs = KernelVfs;
+    if let Ok(node) = vfs.lookup(b"/etc/motd") {
+        let mut buf = alloc::vec![0; MOTD_MAX];
+        if let Ok(n) = vfs.read_at(node, 0, &mut buf) {
+            tty::write(&buf[..n]);
+        }
+    }
+}
+
+/// Starts `/bin/sh` without arguments in `/root`, or in `/` without one
+/// (the empty read-only root the kernel falls back to), as a group of its
+/// own with the console, its fds 0-2 the console; its pid.
+fn start_shell() -> Result<u32, Errno> {
+    let mut vfs = KernelVfs;
+    if vfs.chdir(HOME).is_err() {
+        let _ = vfs.chdir(b"/");
+    }
+    let fds = [0, 1, 2].map(|fd| FdMap {
+        child: fd,
+        parent: fd,
+    });
+    let mut args: Vec<u8> = SHELL.into();
+    args.push(0);
+    proc::spawn(&Spawn {
+        path: SHELL.into(),
+        args,
+        argc: 1,
+        cwd: Vec::new(),
+        fds: fds.to_vec(),
+        new_group: true,
+        foreground: true,
+    })
+}
 
 /// When the shell ended lately, to tell whether to start it again (spec
 /// §6.6): not after its [`ENDS`]th end within [`WINDOW`], since a shell

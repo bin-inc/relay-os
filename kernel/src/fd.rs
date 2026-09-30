@@ -45,6 +45,16 @@ impl FdTable {
         }
     }
 
+    /// Process 1's fds: the console as 0, 1 and 2, which the shell it
+    /// starts gets.
+    pub fn console() -> FdTable {
+        let mut t = FdTable::new();
+        for slot in &mut t.slots[..3] {
+            *slot = Some(Arc::new(File::Console));
+        }
+        t
+    }
+
     /// The in-kernel shell's fds: the console to read, and its standard
     /// output and error.
     pub fn shell() -> FdTable {
@@ -155,6 +165,15 @@ mod tests {
         for fd in [3, 31, 32, 1 << 32, u64::MAX] {
             assert_eq!(t.get(fd).err(), Some(Errno::EBADF), "{fd}");
         }
+    }
+
+    #[test]
+    fn process_1_has_the_console_as_0_1_and_2() {
+        let t = FdTable::console();
+        for fd in 0..3 {
+            assert_eq!(**t.get(fd).unwrap(), File::Console);
+        }
+        assert_eq!(t.open(), 3);
     }
 
     #[test]

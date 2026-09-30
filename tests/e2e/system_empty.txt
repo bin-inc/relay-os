@@ -1,6 +1,10 @@
 # An empty \EFI\RELAY\system.img (a copy cut short) is named as such, not
-# reported missing (user-space gate spec §4.3).
+# reported missing (user-space gate spec §4.3), on the startup line and the
+# error screen (§11.2).
 esp-write /EFI/RELAY/system.img
 timeout 30
 expect \[FAIL\] system: system\.img: only 0 bytes
-expect root@relay:~# $
+expect \*\*\* Relay OS cannot run its shell \*\*\*\n\nsystem: system\.img: only 0 bytes\n
+expect \nPress any key to reboot\.\n
+reset
+expect Relay OS \d+\.\d+\.\d+
