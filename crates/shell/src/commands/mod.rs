@@ -9,11 +9,11 @@ mod change;
 mod ls;
 mod script;
 mod stat;
+mod system;
+mod text;
 
 pub(crate) use script::Script;
 pub use script::transcript_name;
-mod system;
-mod text;
 
 /// One built-in command.
 pub struct Builtin {
@@ -66,6 +66,11 @@ pub const COMMANDS: &[Builtin] = &[
         name: "echo",
         help: "print the arguments",
         run: basic::echo,
+    },
+    Builtin {
+        name: "exit",
+        help: "leave the shell",
+        run: basic::exit,
     },
     Builtin {
         name: "free",
@@ -159,8 +164,17 @@ pub const COMMANDS: &[Builtin] = &[
     },
 ];
 
+/// The shell's own commands (user-space gate §8.3); every other one is a
+/// program of its own in `/bin`.
+pub const BUILTINS: &[&str] = &["cd", "exit", "help"];
+
 pub fn find(name: &str) -> Option<&'static Builtin> {
     COMMANDS.iter().find(|b| b.name == name)
+}
+
+/// One of the shell's own commands.
+pub fn builtin(name: &str) -> Option<&'static Builtin> {
+    find(name).filter(|b| BUILTINS.contains(&b.name))
 }
 
 #[cfg(test)]
@@ -179,5 +193,16 @@ mod tests {
         }
         assert!(find("cd").is_some());
         assert!(find("CD").is_none());
+    }
+
+    #[test]
+    fn the_shell_s_own_commands_are_cd_exit_and_help() {
+        let own: alloc::vec::Vec<_> = COMMANDS
+            .iter()
+            .filter(|b| builtin(b.name).is_some())
+            .map(|b| b.name)
+            .collect();
+        assert_eq!(own, ["cd", "exit", "help"]);
+        assert!(builtin("cat").is_none() && builtin("sh").is_none());
     }
 }

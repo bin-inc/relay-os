@@ -20,7 +20,8 @@ pub struct Ctx<'a> {
     pub system: &'a mut dyn System,
     console: &'a mut dyn Console,
     out: Output,
-    /// Set by `reboot` and `poweroff` when the machine did not go away.
+    /// Set by `exit`, and by `reboot` and `poweroff` when the machine did
+    /// not go away: the shell stops.
     pub(crate) exit: bool,
     /// Ctrl-C stopped the command.
     pub(crate) cancelled: bool,
@@ -30,6 +31,8 @@ pub struct Ctx<'a> {
     pub(crate) in_script: bool,
     /// A running script's transcript, which gets what the screen gets.
     pub(crate) transcript: Option<Transcript>,
+    /// The last command's exit status, for `exit`.
+    pub(crate) status: i32,
 }
 
 enum Output {
@@ -70,6 +73,7 @@ impl<'a> Ctx<'a> {
             script: None,
             in_script: false,
             transcript: None,
+            status: 0,
         }
     }
 

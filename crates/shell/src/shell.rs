@@ -3,16 +3,15 @@
 //! (spec §7.3, §8.3; user-space gate §8.2).
 
 use crate::commands::{self, Script};
-use crate::ctx::Ctx;
 use crate::editor::{Feed, LineEditor};
 use crate::io::{Console, System};
-use crate::killed;
-use crate::parser::{self, HOME, Redirect};
+use crate::parser::{self, HOME};
+use crate::runner::{self, Parts, Ran, Runners};
 use crate::transcript::Transcript;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use vfs::{Errno, FileType, Node, Vfs, path};
+use vfs::{Vfs, path};
 
 /// The name the shell uses in its own messages.
 pub const NAME: &str = "relay-sh";
@@ -31,6 +30,7 @@ pub struct Shell<'a> {
     vfs: &'a mut dyn Vfs,
     console: &'a mut dyn Console,
     system: &'a mut dyn System,
+    runner: Runners,
     editor: LineEditor,
     status: i32,
     stopped: bool,
@@ -41,15 +41,27 @@ pub struct Shell<'a> {
 }
 
 impl<'a> Shell<'a> {
+    /// A shell that runs every command in its own process (the in-process
+    /// runner, user-space gate §8.2).
     pub fn new(
         vfs: &'a mut dyn Vfs,
         console: &'a mut dyn Console,
         system: &'a mut dyn System,
     ) -> Shell<'a> {
+        Shell::with_runner(vfs, console, system, Runners::InProcess(runner::InProcess))
+    }
+
+    fn with_runner(
+        vfs: &'a mut dyn Vfs,
+        console: &'a mut dyn Console,
+        system: &'a mut dyn System,
+        runner: Runners,
+    ) -> Shell<'a> {
         Shell {
             vfs,
             console,
             system,
+            runner,
             editor: LineEditor::new(),
             status: 0,
             stopped: false,
@@ -74,10 +86,10 @@ impl<'a> Shell<'a> {
         format!("root@relay:{dir}# ")
     }
 
-    /// Shows `/etc/motd`, goes to `/root`, then reads and runs commands
-    /// until the input ends or `reboot`/`poweroff` return.
+    /// Reads and runs commands until the input ends, `exit` or
+    /// `reboot`/`poweroff` return.
     pub fn run(&mut self) {
-        self.greet();
+        self.stopped = false;
         while !self.stopped {
             let mut out = Vec::new();
             let prompt = self.prompt();
@@ -105,7 +117,9 @@ impl<'a> Shell<'a> {
         }
     }
 
-    fn greet(&mut self) {
+    /// Shows `/etc/motd` and goes to `/root`, as the shell does when the
+    /// machine starts.
+    pub fn greet(&mut self) {
         if let Ok(node) = self.vfs.lookup(b"/etc/motd") {
             let mut buf = alloc::vec![0; MOTD_MAX];
             if let Ok(n) = self.vfs.read_at(node, 0, &mut buf) {
@@ -127,107 +141,39 @@ impl<'a> Shell<'a> {
         if cmd.words.is_empty() && cmd.redirect.is_none() {
             return self.status;
         }
-        let file = match &cmd.redirect {
-            Some(r) => match self.open_redirect(r) {
-                Ok(file) => Some(file),
-                Err(e) => return self.finish(1, format!("{NAME}: {}: {e}\n", r.path)),
+        let parts = Parts {
+            vfs: &mut *self.vfs,
+            console: &mut *self.console,
+            system: &mut *self.system,
+            transcript: &mut self.transcript,
+            in_script: self.in_script,
+            status: self.status,
+        };
+        let ran = match cmd.words.split_first() {
+            Some((name, args)) => match commands::builtin(name) {
+                Some(builtin) => {
+                    match runner::redirect_to(&mut *parts.vfs, cmd.redirect.as_ref()) {
+                        Ok(file) => runner::run_function(parts, builtin, args, file),
+                        Err(ran) => ran,
+                    }
+                }
+                None => self
+                    .runner
+                    .get()
+                    .run(parts, name, args, cmd.redirect.as_ref()),
             },
-            None => None,
-        };
-        let Some(name) = cmd.words.first() else {
             // A bare `> file` just creates or empties the file.
-            return self.finish(0, String::new());
+            None => match runner::redirect_to(&mut *parts.vfs, cmd.redirect.as_ref()) {
+                Ok(_) => Ran::said(0, String::new()),
+                Err(ran) => ran,
+            },
         };
-        let Some(builtin) = commands::find(name) else {
-            return self.run_program(name, &cmd.words[1..], file);
-        };
-        let mut ctx = Ctx::new(&mut *self.vfs, &mut *self.system, &mut *self.console, file);
-        ctx.in_script = self.in_script;
-        ctx.transcript = self.transcript.take();
-        let mut status = (builtin.run)(&mut ctx, &cmd.words[1..]);
-        let mut message = String::new();
-        if let Err(e) = ctx.finish() {
-            message = format!("{name}: write error: {e}\n");
-            status = 1;
-        }
-        if ctx.cancelled {
-            message = String::from("^C\n");
-            status = CANCELLED;
-        }
-        self.transcript = ctx.transcript.take();
-        self.stopped = ctx.exit;
-        if let Some(script) = ctx.script.take() {
+        self.stopped = ran.stop;
+        let mut status = ran.status;
+        if let Some(script) = ran.script {
             status = self.run_script(script);
         }
-        self.finish(status, message)
-    }
-
-    /// Runs a program (user-space gate §8.2): `/bin/<name>`, or `name`
-    /// itself when it holds a `/`, with `name` as argument 0 and the words
-    /// after it as the others, as bash does. Its fd 1 is standard output
-    /// (the redirection file, if any), its fd 2 the screen; a running
-    /// script's transcript gets both.
-    fn run_program(&mut self, name: &str, words: &[String], file: Option<(Node, u64)>) -> i32 {
-        let path = if name.contains('/') {
-            String::from(name)
-        } else {
-            format!("/bin/{name}")
-        };
-        let mut args: Vec<&[u8]> = alloc::vec![name.as_bytes()];
-        args.extend(words.iter().map(|w| w.as_bytes()));
-        let started = self.system.spawn(&mut *self.vfs, path.as_bytes(), &args);
-        let pid = match started {
-            Some(Ok(pid)) => pid,
-            // No programs here (the host), or none by that name in /bin:
-            // `..`, `.` and `''` name directories there, which a search
-            // for a command skips, as bash's does.
-            None => return self.finish(NOT_FOUND, format!("{NAME}: {name}: command not found\n")),
-            // A name too long for a file name is no file in /bin either.
-            Some(Err(Errno::ENOENT | Errno::EISDIR | Errno::ENAMETOOLONG))
-                if !name.contains('/') =>
-            {
-                return self.finish(NOT_FOUND, format!("{NAME}: {name}: command not found\n"));
-            }
-            Some(Err(e)) => {
-                let status = if e == Errno::ENOENT {
-                    NOT_FOUND
-                } else {
-                    CANNOT_RUN
-                };
-                return self.finish(status, format!("{NAME}: {name}: {e}\n"));
-            }
-        };
-        let mut ctx = Ctx::new(&mut *self.vfs, &mut *self.system, &mut *self.console, file);
-        ctx.transcript = self.transcript.take();
-        let ended = ctx.wait_program(pid);
-        let mut message = String::new();
-        let mut status = match ended {
-            Ok(w) if w.how == relay_abi::wait::EXITED => w.code as i32,
-            Ok(w) => {
-                let (what, status) = killed::killed(&w);
-                // Ctrl-C says only `^C`, as for a built-in, and stops a
-                // script (spec §6.4).
-                message = if status == CANCELLED {
-                    String::from("^C\n")
-                } else {
-                    format!("{NAME}: {name}: {what}\n")
-                };
-                status
-            }
-            Err(e) => {
-                message = format!("{NAME}: {name}: {e}\n");
-                CANNOT_RUN
-            }
-        };
-        if let Err(e) = ctx.finish() {
-            // A program that did not exit keeps its report and status.
-            if message.is_empty() {
-                status = 1;
-            }
-            message.insert_str(0, &format!("{name}: write error: {e}\n"));
-        }
-        self.transcript = ctx.transcript.take();
-        self.finish(status, message)
+        self.finish(status, ran.message)
     }
 
     /// Writes to the screen and, while a script runs, its transcript.
@@ -250,7 +196,7 @@ impl<'a> Shell<'a> {
         }
     }
 
-    fn end_transcript(&mut self, e: Errno) {
+    fn end_transcript(&mut self, e: vfs::Errno) {
         if let Some(t) = self.transcript.take() {
             self.console.write(t.ended(e).as_bytes());
         }
@@ -258,8 +204,9 @@ impl<'a> Shell<'a> {
 
     /// Runs a script's lines (spec §15 item 12): each command is shown as
     /// `+ <line>`, then runs and is synced as if typed. Blank and comment
-    /// lines are skipped. Ctrl-C, or `reboot`/`poweroff` returning, ends
-    /// the script; failing commands do not. Returns the last status.
+    /// lines are skipped. Ctrl-C, `exit`, or `reboot`/`poweroff`
+    /// returning, ends the script; failing commands do not. Returns the
+    /// last status.
     fn run_script(&mut self, script: Script) -> i32 {
         self.in_script = true;
         self.transcript = Some(Transcript::new(script.transcript, script.transcript_name));
@@ -288,31 +235,6 @@ impl<'a> Shell<'a> {
         self.transcript = None;
         self.in_script = false;
         status
-    }
-
-    /// Opens a redirection target: created if missing, emptied for `>`,
-    /// written at its end for `>>`.
-    fn open_redirect(&mut self, r: &Redirect) -> Result<(Node, u64), Errno> {
-        let path = r.path.as_bytes();
-        let node = match self.vfs.lookup(path) {
-            Ok(node) => {
-                if self.vfs.stat(node)?.kind == FileType::Directory {
-                    return Err(Errno::EISDIR);
-                }
-                if !r.append {
-                    self.vfs.truncate(node, 0)?;
-                }
-                node
-            }
-            Err(Errno::ENOENT) => self.vfs.create(path)?,
-            Err(e) => return Err(e),
-        };
-        let offset = if r.append {
-            self.vfs.stat(node)?.size
-        } else {
-            0
-        };
-        Ok((node, offset))
     }
 
     /// Prints `message`, adds the line's output to a running script's
@@ -694,13 +616,21 @@ mod tests {
     }
 
     #[test]
-    fn run_greets_goes_home_and_reads_lines_until_input_ends() {
+    fn greet_shows_the_motd_and_goes_home() {
+        let mut h = Harness::new();
+        Shell::new(&mut h.vfs, &mut h.console, &mut h.system).greet();
+        assert_eq!(h.console.take(), "Welcome to Relay OS.\n");
+        assert_eq!(h.run("pwd").1, "/root\n");
+    }
+
+    #[test]
+    fn run_reads_lines_until_input_ends() {
         let mut h = Harness::new();
         h.console.type_in(b"echo hi\rpwd\r");
         Shell::new(&mut h.vfs, &mut h.console, &mut h.system).run();
         assert_eq!(
             h.console.text(),
-            "Welcome to Relay OS.\nroot@relay:~# echo hi\nhi\nroot@relay:~# pwd\n/root\nroot@relay:~# "
+            "root@relay:/# echo hi\nhi\nroot@relay:/# pwd\n/\nroot@relay:/# "
         );
     }
 
@@ -714,7 +644,7 @@ mod tests {
         assert!(
             h.console
                 .text()
-                .contains("echo no^C\nroot@relay:~# pwd\n/root\n")
+                .contains("echo no^C\nroot@relay:/# pwd\n/\n")
         );
     }
 
@@ -722,7 +652,9 @@ mod tests {
     fn without_motd_or_root_the_shell_starts_in_slash() {
         let mut h = Harness::empty();
         h.console.type_in(b"pwd\r");
-        Shell::new(&mut h.vfs, &mut h.console, &mut h.system).run();
+        let mut shell = Shell::new(&mut h.vfs, &mut h.console, &mut h.system);
+        shell.greet();
+        shell.run();
         assert_eq!(h.console.text(), "root@relay:/# pwd\n/\nroot@relay:/# ");
     }
 }

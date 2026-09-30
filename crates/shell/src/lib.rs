@@ -15,6 +15,7 @@ pub mod editor;
 mod io;
 pub mod killed;
 pub mod parser;
+mod runner;
 mod shell;
 mod testing;
 mod time;

@@ -247,10 +247,7 @@ mod tests {
         Shell::new(&mut h.vfs, &mut h.console, &mut h.system).run();
         assert_eq!(h.spy.shutdowns.get(), 1);
         assert_eq!(h.system.reboots, 1);
-        assert_eq!(
-            h.console.take(),
-            "Welcome to Relay OS.\nroot@relay:~# reboot\n"
-        );
+        assert_eq!(h.console.take(), "root@relay:/# reboot\n");
         assert_eq!(h.run("poweroff"), (0, "".into()));
         assert_eq!(h.system.poweroffs, 1);
     }

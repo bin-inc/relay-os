@@ -229,14 +229,16 @@ pub fn session(img: &Path, console: &mut dyn Console) -> Result<()> {
     console.write(&log.contents());
     let mut vfs = MountTable::new(Box::new(fs));
     let mut system = HostSystem(log);
-    Shell::new(&mut vfs, console, &mut system).run();
+    let mut shell = Shell::new(&mut vfs, console, &mut system);
+    shell.greet();
+    shell.run();
     vfs.shutdown()
         .map_err(|e| anyhow!("cannot unmount {} cleanly: {e}", img.display()))
 }
 
 pub fn run(img: &Path) -> Result<()> {
     eprintln!(
-        "host-shell: {} (ext2 root partition). Type `poweroff` to leave.",
+        "host-shell: {} (ext2 root partition). Type `exit` to leave.",
         img.display()
     );
     let mut terminal = Terminal {
