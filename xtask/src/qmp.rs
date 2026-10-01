@@ -14,6 +14,8 @@ pub struct Qmp {
     writer: UnixStream,
     /// Events that arrived while a command waited for its answer.
     events: Vec<Value>,
+    /// The start of a message whose read timed out, for the next read.
+    partial: Vec<u8>,
 }
 
 impl Qmp {
@@ -36,18 +38,22 @@ impl Qmp {
             reader: BufReader::new(stream.try_clone()?),
             writer: stream,
             events: Vec::new(),
+            partial: Vec::new(),
         };
         q.read_message()?; // greeting
         q.execute("qmp_capabilities", json!({}))?;
         Ok(q)
     }
 
+    /// The next message. A read that times out keeps what came of the
+    /// message so far (`read_until` leaves every byte it read in the
+    /// buffer), so the next read goes on where it stopped.
     fn read_message(&mut self) -> Result<Value> {
-        let mut line = String::new();
-        if self.reader.read_line(&mut line)? == 0 {
+        if self.reader.read_until(b'\n', &mut self.partial)? == 0 {
             bail!("QMP connection closed");
         }
-        Ok(serde_json::from_str(&line)?)
+        let line = std::mem::take(&mut self.partial);
+        Ok(serde_json::from_slice(&line)?)
     }
 
     /// Runs a command and returns its `return` value. Events are kept for
@@ -92,9 +98,10 @@ impl Qmp {
             if left.is_zero() {
                 bail!("no QMP event {name} within {timeout:?}");
             }
-            self.writer.set_read_timeout(Some(left))?;
+            self.reader.get_ref().set_read_timeout(Some(left))?;
             let read = self.read_message();
-            self.writer
+            self.reader
+                .get_ref()
                 .set_read_timeout(Some(Duration::from_secs(10)))?;
             match read {
                 Ok(v) if v.get("event").is_some() => self.events.push(v),
@@ -125,6 +132,60 @@ mod tests {
     use crate::util::out_dir;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
+
+    /// A fake QEMU on a socket of its own in `name`'s directory: greets,
+    /// accepts `qmp_capabilities`, then runs `then` on its end.
+    fn fake_qemu(
+        name: &str,
+        then: impl FnOnce(UnixStream) + Send + 'static,
+    ) -> (Qmp, std::thread::JoinHandle<()>) {
+        let dir = out_dir().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("qmp.sock");
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut w = stream.try_clone().unwrap();
+            let mut r = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            writeln!(w, r#"{{"QMP": {{"version": {{}}, "capabilities": []}}}}"#).unwrap();
+            r.read_line(&mut line).unwrap();
+            writeln!(w, r#"{{"return": {{}}}}"#).unwrap();
+            then(stream);
+        });
+        (
+            Qmp::connect(&socket, Duration::from_secs(5)).unwrap(),
+            server,
+        )
+    }
+
+    #[test]
+    fn an_event_cut_at_the_deadline_is_read_whole_later() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let (mut q, server) = fake_qemu("qmp-selftest-cut", move |mut w| {
+            write!(w, r#"{{"event": "RESET", "da"#).unwrap();
+            // The rest after the client gave up waiting.
+            rx.recv().unwrap();
+            writeln!(w, r#"ta": {{"guest": true}}}}"#).unwrap();
+            writeln!(w, r#"{{"event": "SHUTDOWN"}}"#).unwrap();
+            let _ = rx.recv();
+        });
+        assert!(
+            q.wait_event("RESET", |_| true, Duration::from_millis(200))
+                .is_err(),
+            "only half of it came"
+        );
+        tx.send(()).unwrap();
+        let e = q
+            .wait_event("RESET", |_| true, Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(e["data"]["guest"], true);
+        q.wait_event("SHUTDOWN", |_| true, Duration::from_secs(5))
+            .unwrap();
+        drop((q, tx));
+        server.join().unwrap();
+    }
 
     /// A fake QEMU: greets, accepts `qmp_capabilities`, sends an event, then
     /// answers one command. Its socket is deeper than a Unix socket address
