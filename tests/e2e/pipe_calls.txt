@@ -23,7 +23,7 @@ expect-same sum sent 1048576 bytes, checksum (\d+)\n
 send t-pipe eof
 expect \nend of data once the child ended: 0\n
 send t-pipe epipe
-expect \nwrite with no reader: EPIPE\n
+expect \nwrite with no reader: EPIPE\nt-args with nobody reading: exited with 141\n
 send t-pipe killed
 expect \na reader blocked on an empty pipe: kill\n
 expect \na writer blocked on a full pipe: kill\n

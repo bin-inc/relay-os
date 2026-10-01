@@ -203,7 +203,14 @@ pub fn getcwd(buf: &mut [u8]) -> Result<usize, u16> {
     call(Call::Getcwd, &[buf.as_mut_ptr() as u64, buf.len() as u64]).map(|n| n as usize)
 }
 
-/// Writes some of `bytes` to `fd`; returns how many.
+/// The status a program ends with once nobody reads its standard output
+/// (spec §8.1): bash's for a program SIGPIPE ended, 128 + 13.
+pub const BROKEN_PIPE: u8 = 141;
+
+/// Writes some of `bytes` to `fd`; returns how many. A write to fd 1 that
+/// fails with `EPIPE` ends the program at once with [`BROKEN_PIPE`] and no
+/// message, as SIGPIPE ends one on Linux: nobody reads its output any
+/// more (`cat big | head -n 1`).
 pub fn write(fd: u32, bytes: &[u8]) -> Result<usize, u16> {
     let args = [
         u64::from(fd),
@@ -213,7 +220,17 @@ pub fn write(fd: u32, bytes: &[u8]) -> Result<usize, u16> {
         0,
         0,
     ];
-    decode(unsafe { syscall(Call::Write, args) }).map(|n| n as usize)
+    let r = decode(unsafe { syscall(Call::Write, args) }).map(|n| n as usize);
+    if ends_quietly(fd, r) {
+        exit(BROKEN_PIPE);
+    }
+    r
+}
+
+/// Whether a write's result ends the program: a broken pipe on standard
+/// output. Any other fd's `EPIPE` is the program's to see.
+fn ends_quietly(fd: u32, r: Result<usize, u16>) -> bool {
+    fd == 1 && r == Err(relay_abi::errno::EPIPE)
 }
 
 /// Writes all of `bytes` to `fd`, however many calls that takes.
@@ -370,6 +387,17 @@ mod tests {
     use super::*;
     use alloc::vec::Vec;
     use relay_abi::errno::{EIO, ENOSPC};
+
+    #[test]
+    fn only_a_broken_pipe_on_standard_output_ends_the_program() {
+        use relay_abi::errno::EPIPE;
+        assert!(ends_quietly(1, Err(EPIPE)));
+        assert!(!ends_quietly(3, Err(EPIPE)), "a pipe of its own");
+        assert!(!ends_quietly(2, Err(EPIPE)));
+        assert!(!ends_quietly(1, Err(EIO)));
+        assert!(!ends_quietly(1, Ok(0)));
+        assert_eq!(BROKEN_PIPE, 128 + 13);
+    }
 
     #[test]
     fn a_write_that_takes_nothing_is_enospc() {

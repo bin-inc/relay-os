@@ -12,7 +12,8 @@
 //!   (`drain`), both blocking in turn; both print a checksum.
 //! - `t-pipe eof`: the write end is held by a child that naps, so the end
 //!   of the data comes only when it ends.
-//! - `t-pipe epipe`: a write once the read end is closed.
+//! - `t-pipe epipe`: a write once the read end is closed; and `t-args`
+//!   writing to a pipe nobody reads, which ends it quietly with 141.
 //! - `t-pipe killed`: a child blocked reading an empty pipe, and one
 //!   blocked writing a full one, are killed.
 //! - `t-pipe many`: pipes until the fds run out (`EMFILE`, no fd taken).
@@ -209,7 +210,20 @@ fn epipe() -> Result<(), u16> {
     let (r, w) = sys::pipe()?;
     sys::close(r)?;
     show("write with no reader", sys::write(w, b"x"));
-    sys::close(w)
+    let args = b"t-args\0to nobody\0";
+    let fds = [
+        FdMap {
+            child: 1,
+            parent: w,
+        },
+        FdMap {
+            child: 2,
+            parent: 2,
+        },
+    ];
+    let pid = sys::spawn(b"/bin/t-args", args, b"", &fds, 0, 0)?;
+    sys::close(w)?;
+    reap("t-args with nobody reading", pid)
 }
 
 /// Writes to fd 3 until stopped: 64 MiB at most.
