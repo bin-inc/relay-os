@@ -317,7 +317,9 @@ impl Programs for FakePrograms {
             .ok_or(Errno::ECHILD)?;
         Ok(self.children.remove(i).status)
     }
-    /// Its children end at once, killed; process 1 is refused, and any
+    /// Its children end at once, killed, as the kernel's `kill` ends them;
+    /// one that has ended already and is not yet collected counts, but
+    /// keeps how it ended, as a zombie does. Process 1 is refused, and any
     /// other pid or group is none.
     fn kill(&mut self, target: i64) -> Result<(), Errno> {
         self.kills.push(target);
@@ -329,9 +331,12 @@ impl Programs for FakePrograms {
             t => i64::from(c.pid) == t,
         };
         let mut found = false;
+        let round = self.round;
         for c in self.children.iter_mut().filter(|c| hit(c)) {
-            c.status = WaitStatus::killed(relay_abi::wait::KILLED_KILL);
-            c.ends_at = self.round;
+            if c.ends_at > round {
+                c.status = WaitStatus::killed(relay_abi::wait::KILLED_KILL);
+                c.ends_at = round;
+            }
             found = true;
         }
         if found { Ok(()) } else { Err(Errno::ESRCH) }

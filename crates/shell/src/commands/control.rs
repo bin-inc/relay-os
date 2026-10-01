@@ -666,4 +666,21 @@ mod tests {
             )
         );
     }
+
+    #[test]
+    fn kill_of_a_job_that_has_ended_says_it_is_no_process_as_bash_s_does() {
+        // bash 5.2: `true &`, a moment, `kill %1`: `(pid) - No such
+        // process`, status 1, then the Done line. The job ended while the
+        // line was typed, and is collected before it runs.
+        let mut h = with_jobs();
+        let (status, out) = typed_status(&mut h, &["sleep 1 &", "kill %1"]);
+        assert!(
+            out.ends_with(
+                "# kill %1\nrelay-sh: kill: (101) - No such process\n\
+                 [1]+  Done                    sleep 1\nroot@relay:/# "
+            ),
+            "{out}"
+        );
+        assert_eq!(status, 1);
+    }
 }
