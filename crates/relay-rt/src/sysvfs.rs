@@ -466,7 +466,7 @@ mod tests {
     /// Runs `line` as its program does over `vfs`: the status, the errors
     /// and the output.
     fn run(vfs: &mut dyn Vfs, line: &str) -> (i32, String, String) {
-        let words = shell::parser::parse(line).unwrap().words;
+        let words = shell::parser::parse(line).unwrap().remove(0).words;
         let (mut errors, mut out) = (Screen::default(), Screen::default());
         let run = shell::commands::find(&words[0]).unwrap().run;
         let status = shell::run_command(

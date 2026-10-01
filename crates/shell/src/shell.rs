@@ -151,10 +151,14 @@ impl<'a> Shell<'a> {
     /// status. Every command is followed by a sync, so its changes are on
     /// the disk when the prompt comes back.
     pub fn execute(&mut self, line: &str) -> i32 {
-        let cmd = match parser::parse(line) {
-            Ok(cmd) => cmd,
+        let mut pipeline = match parser::parse(line) {
+            Ok(pipeline) => pipeline,
             Err(e) => return self.finish(SYNTAX, format!("{NAME}: {e}\n")),
         };
+        if pipeline.len() > 1 {
+            return self.finish(SYNTAX, format!("{NAME}: unsupported syntax: |\n"));
+        }
+        let cmd = pipeline.remove(0);
         if cmd.words.is_empty() && cmd.redirect.is_none() {
             return self.status;
         }
@@ -282,7 +286,8 @@ impl<'a> Shell<'a> {
         self.in_script = true;
         let mut status = 0;
         for line in text.lines() {
-            if matches!(parser::parse(line), Ok(c) if c.words.is_empty() && c.redirect.is_none()) {
+            if matches!(parser::parse(line), Ok(p) if p.len() == 1 && p[0].words.is_empty() && p[0].redirect.is_none())
+            {
                 continue;
             }
             if self.console.interrupted() {

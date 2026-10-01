@@ -508,7 +508,7 @@ impl Harness {
     /// output going to `stdout`; its status and what it said on the
     /// console.
     pub fn program(&mut self, line: &str, stdout: &mut FakeStdout) -> (i32, String) {
-        let words = crate::parser::parse(line).unwrap().words;
+        let words = crate::parser::parse(line).unwrap().remove(0).words;
         let status = crate::run_command(
             &words[0],
             crate::commands::find(&words[0]).unwrap().run,

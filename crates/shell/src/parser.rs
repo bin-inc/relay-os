@@ -7,10 +7,13 @@
 //! literal. `> file` and `>> file` redirect standard output (at most one
 //! per command). An unquoted `~` alone or before `/` at the start of a word
 //! means `/root`, as in Linux. An unquoted `#` at the start of a word
-//! begins a comment, which runs to the end of the line. Every other
-//! shell feature is refused: an unquoted `|`, `;`, `&`, `$`, `*`, `?`, `<`,
-//! `` ` ``, `(` or `)` is an error naming the character, instead of being
-//! passed on as if it were plain text; so is `2>` (another stream).
+//! begins a comment, which runs to the end of the line. An unquoted `|`
+//! joins commands into a pipeline (user-space gate §9.1); only the last
+//! may redirect its output, and bash's syntax errors name a `|` with no
+//! command before it or none after. Every other shell feature is refused:
+//! an unquoted `;`, `&`, `$`, `*`, `?`, `<`, `` ` ``, `(` or `)` is an
+//! error naming the character, instead of being passed on as if it were
+//! plain text; so are `||` and `2>` (another stream).
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -18,6 +21,10 @@ use core::fmt;
 
 /// The home directory `~` stands for.
 pub const HOME: &str = "/root";
+
+/// A line's commands: one, or several joined by `|`, each one's output the
+/// next one's input. A blank line is one command without words.
+pub type Pipeline = Vec<Command>;
 
 /// One command: its words and where its output goes.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,8 +48,11 @@ pub enum ParseError {
     UnterminatedQuote,
     /// A `\` with nothing after it.
     TrailingBackslash,
-    /// A redirection without a file name; holds what came instead.
+    /// A redirection without a file name, or a `|` without a command
+    /// before it; holds what came instead.
     MissingTarget(&'static str),
+    /// A `|` without a command after it.
+    UnexpectedEnd,
 }
 
 impl fmt::Display for ParseError {
@@ -52,11 +62,12 @@ impl fmt::Display for ParseError {
             ParseError::UnterminatedQuote => f.write_str("syntax error: unterminated quote"),
             ParseError::TrailingBackslash => f.write_str("syntax error: nothing after \\"),
             ParseError::MissingTarget(t) => write!(f, "syntax error near unexpected token `{t}'"),
+            ParseError::UnexpectedEnd => f.write_str("syntax error: unexpected end of file"),
         }
     }
 }
 
-const UNSUPPORTED: &[char] = &['|', ';', '&', '$', '*', '?', '<', '`', '(', ')'];
+const UNSUPPORTED: &[char] = &[';', '&', '$', '*', '?', '<', '`', '(', ')'];
 
 /// A word being built.
 #[derive(Default)]
@@ -107,9 +118,25 @@ impl Parts {
         }
         Ok(())
     }
+
+    /// The command so far, ended by a `|`, which needs one before it.
+    fn take_before_pipe(&mut self) -> Result<Command, ParseError> {
+        if self.pending.is_some() || self.words.is_empty() {
+            return Err(ParseError::MissingTarget("|"));
+        }
+        if self.redirect.is_some() {
+            return Err(ParseError::Unsupported("> before |".into()));
+        }
+        let p = core::mem::take(self);
+        Ok(Command {
+            words: p.words,
+            redirect: None,
+        })
+    }
 }
 
-pub fn parse(line: &str) -> Result<Command, ParseError> {
+pub fn parse(line: &str) -> Result<Pipeline, ParseError> {
+    let mut pipeline = Vec::new();
     let mut parts = Parts::default();
     let mut word = Word::default();
     let mut chars = line.chars().peekable();
@@ -126,6 +153,13 @@ pub fn parse(line: &str) -> Result<Command, ParseError> {
                     return Err(ParseError::MissingTarget(">"));
                 }
                 parts.pending = Some(chars.next_if_eq(&'>').is_some());
+            }
+            '|' => {
+                if chars.next_if_eq(&'|').is_some() {
+                    return Err(ParseError::Unsupported("||".into()));
+                }
+                parts.end_word(&mut word)?;
+                pipeline.push(parts.take_before_pipe()?);
             }
             '\'' => {
                 word.started = true;
@@ -177,18 +211,30 @@ pub fn parse(line: &str) -> Result<Command, ParseError> {
     if parts.pending.is_some() {
         return Err(ParseError::MissingTarget("newline"));
     }
-    Ok(Command {
+    if !pipeline.is_empty() && parts.words.is_empty() && parts.redirect.is_none() {
+        return Err(ParseError::UnexpectedEnd);
+    }
+    pipeline.push(Command {
         words: parts.words,
         redirect: parts.redirect,
-    })
+    });
+    Ok(pipeline)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The one command of a line that has no `|`.
+    fn one(line: &str) -> Result<Command, ParseError> {
+        parse(line).map(|mut p| {
+            assert_eq!(p.len(), 1, "{line}");
+            p.remove(0)
+        })
+    }
+
     fn words(line: &str) -> Vec<String> {
-        let c = parse(line).unwrap();
+        let c = one(line).unwrap();
         assert_eq!(c.redirect, None);
         c.words
     }
@@ -211,10 +257,10 @@ mod tests {
             ["echo", "a#b", "#", "#", "#"]
         );
         assert_eq!(
-            parse("echo x >> # f"),
+            one("echo x >> # f"),
             Err(ParseError::MissingTarget("newline"))
         );
-        let c = parse("echo x > f # to f").unwrap();
+        let c = one("echo x > f # to f").unwrap();
         assert_eq!(c.words, ["echo", "x"]);
         assert_eq!(c.redirect.unwrap().path, "f");
     }
@@ -246,15 +292,15 @@ mod tests {
         // Bash expands them there too; passing them on as text would
         // print something bash never prints.
         assert_eq!(
-            parse(r#"echo "$HOME""#),
+            one(r#"echo "$HOME""#),
             Err(ParseError::Unsupported("$".into()))
         );
         assert_eq!(
-            parse(r#"echo "a $ b""#),
+            one(r#"echo "a $ b""#),
             Err(ParseError::Unsupported("$".into()))
         );
         assert_eq!(
-            parse(r#"echo "`date`""#),
+            one(r#"echo "`date`""#),
             Err(ParseError::Unsupported("`".into()))
         );
         assert_eq!(words(r"echo '$HOME `x`'"), ["echo", "$HOME `x`"]);
@@ -266,12 +312,12 @@ mod tests {
             words(r"echo a\ b \| \> \\"),
             ["echo", "a b", "|", ">", r"\"]
         );
-        assert_eq!(parse(r"echo a\"), Err(ParseError::TrailingBackslash));
+        assert_eq!(one(r"echo a\"), Err(ParseError::TrailingBackslash));
     }
 
     #[test]
     fn redirections_truncate_or_append() {
-        let c = parse("echo hi > out.txt").unwrap();
+        let c = one("echo hi > out.txt").unwrap();
         assert_eq!(c.words, ["echo", "hi"]);
         assert_eq!(
             c.redirect,
@@ -280,7 +326,7 @@ mod tests {
                 append: false
             })
         );
-        let c = parse("echo hi>>'my log'").unwrap();
+        let c = one("echo hi>>'my log'").unwrap();
         assert_eq!(
             c.redirect,
             Some(Redirect {
@@ -289,33 +335,33 @@ mod tests {
             })
         );
         // The redirection can come first.
-        let c = parse(">f echo x").unwrap();
+        let c = one(">f echo x").unwrap();
         assert_eq!(c.words, ["echo", "x"]);
         assert_eq!(c.redirect.unwrap().path, "f");
     }
 
     #[test]
     fn redirection_errors() {
-        assert_eq!(parse("echo >"), Err(ParseError::MissingTarget("newline")));
-        assert_eq!(parse("echo > > f"), Err(ParseError::MissingTarget(">")));
+        assert_eq!(one("echo >"), Err(ParseError::MissingTarget("newline")));
+        assert_eq!(one("echo > > f"), Err(ParseError::MissingTarget(">")));
         assert_eq!(
-            parse("echo > a > b"),
+            one("echo > a > b"),
             Err(ParseError::Unsupported(">".into()))
         );
         // Other streams are not supported; a quoted or spaced digit is a word.
         assert_eq!(
-            parse("cat f 2>err"),
+            one("cat f 2>err"),
             Err(ParseError::Unsupported("2>".into()))
         );
         assert_eq!(
-            parse("echo a 2>>g"),
+            one("echo a 2>>g"),
             Err(ParseError::Unsupported("2>".into()))
         );
-        assert_eq!(parse("echo 2 > g").unwrap().words, ["echo", "2"]);
-        assert_eq!(parse("echo '2'> g").unwrap().words, ["echo", "2"]);
-        assert_eq!(parse("echo x2> g").unwrap().words, ["echo", "x2"]);
+        assert_eq!(one("echo 2 > g").unwrap().words, ["echo", "2"]);
+        assert_eq!(one("echo '2'> g").unwrap().words, ["echo", "2"]);
+        assert_eq!(one("echo x2> g").unwrap().words, ["echo", "x2"]);
         assert_eq!(
-            parse("echo >").unwrap_err().to_string(),
+            one("echo >").unwrap_err().to_string(),
             "syntax error near unexpected token `newline'"
         );
     }
@@ -323,7 +369,6 @@ mod tests {
     #[test]
     fn unsupported_syntax_names_the_character() {
         for (line, c) in [
-            ("ls | wc", '|'),
             ("a; b", ';'),
             ("a && b", '&'),
             ("echo $HOME", '$'),
@@ -333,22 +378,73 @@ mod tests {
             ("echo `x`", '`'),
             ("(ls)", '('),
         ] {
+            assert_eq!(one(line), Err(ParseError::Unsupported(c.into())), "{line}");
+        }
+        assert_eq!(
+            one("echo a 2>f").unwrap_err().to_string(),
+            "unsupported syntax: 2>"
+        );
+    }
+
+    #[test]
+    fn a_bar_joins_commands_into_a_pipeline() {
+        let p = parse("cat f | grep -c 'a | b' |wc -l>out").unwrap();
+        let words: Vec<&[String]> = p.iter().map(|c| &c.words[..]).collect();
+        assert_eq!(
+            words,
+            [&["cat", "f"][..], &["grep", "-c", "a | b"], &["wc", "-l"]]
+        );
+        assert_eq!(p[0].redirect, None);
+        assert_eq!(p[2].redirect.as_ref().unwrap().path, "out");
+        // Quoted, escaped or in a comment it is a character.
+        assert_eq!(
+            parse(r#"echo '|' "|" \| # | x"#).unwrap()[0].words,
+            ["echo", "|", "|", "|"]
+        );
+        assert_eq!(
+            parse("").unwrap(),
+            [Command {
+                words: Vec::new(),
+                redirect: None
+            }]
+        );
+    }
+
+    #[test]
+    fn a_bar_needs_a_command_on_each_side() {
+        // bash's messages (`bash -c '| a'`, `bash -c 'a |'`).
+        for line in ["| a", "a | | b", "a || | b", "echo > | b", " |"] {
+            let e = parse(line).unwrap_err();
+            if line.contains("||") {
+                assert_eq!(e, ParseError::Unsupported("||".into()), "{line}");
+            } else {
+                assert_eq!(
+                    e.to_string(),
+                    "syntax error near unexpected token `|'",
+                    "{line}"
+                );
+            }
+        }
+        for line in ["a |", "a | b |  ", "a | # b"] {
             assert_eq!(
-                parse(line),
-                Err(ParseError::Unsupported(c.into())),
+                parse(line).unwrap_err().to_string(),
+                "syntax error: unexpected end of file",
                 "{line}"
             );
         }
+        assert_eq!(parse("a || b"), Err(ParseError::Unsupported("||".into())));
+        // Only the last command redirects (spec §9.1): bash would send the
+        // first one's output into the file and the second nothing.
         assert_eq!(
-            parse("ls | wc").unwrap_err().to_string(),
-            "unsupported syntax: |"
+            parse("a > f | b").unwrap_err().to_string(),
+            "unsupported syntax: > before |"
         );
     }
 
     #[test]
     fn unterminated_quotes_are_errors() {
-        assert_eq!(parse("echo 'abc"), Err(ParseError::UnterminatedQuote));
-        assert_eq!(parse("echo \"abc\\\""), Err(ParseError::UnterminatedQuote));
+        assert_eq!(one("echo 'abc"), Err(ParseError::UnterminatedQuote));
+        assert_eq!(one("echo \"abc\\\""), Err(ParseError::UnterminatedQuote));
     }
 
     #[test]
@@ -358,7 +454,7 @@ mod tests {
             words("ls ~/notes a~ ~x '~' \\~"),
             ["ls", "/root/notes", "a~", "~x", "~", "~"]
         );
-        let c = parse("echo x > ~/out").unwrap();
+        let c = one("echo x > ~/out").unwrap();
         assert_eq!(c.redirect.unwrap().path, "/root/out");
     }
 }
