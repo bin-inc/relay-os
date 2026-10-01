@@ -84,6 +84,12 @@ If a scenario fails, its serial log and screenshot are attached to the run as
 the `e2e-logs` artefact. Hardware checks on the NUC stay manual
 (`docs/hardware-test.md`); the pull-request template asks about them.
 
+## Contributing
+
+Commit messages and pull-request titles follow Conventional Commits
+(`feat(kernel): …`, `fix(usb): …`); the types, scopes and rules are in
+`CONTRIBUTING.md`.
+
 ## Layout
 
 | Path | Contents |
@@ -108,3 +114,4 @@ the `e2e-logs` artefact. Hardware checks on the NUC stay manual
 | `tests/e2e/` | QEMU end-to-end scenarios |
 | `docs/hardware-test.md` | Manual checklist for the NUC |
 | `.github/` | CI workflow and pull-request template |
+| `CONTRIBUTING.md` | Commit-message and pull-request rules |

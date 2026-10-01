@@ -2,6 +2,10 @@
 
 <!-- One or two sentences. Name the plan and tasks, e.g. "Milestone 1, plan 1, tasks 4–5". -->
 
+## Format
+
+- [ ] The title and every commit subject follow `CONTRIBUTING.md` (`type(scope): description`)
+
 ## How it was tested
 
 - [ ] `cargo xtask ci` passes locally (lint, unit tests, QEMU scenarios)
