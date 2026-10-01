@@ -1,0 +1,75 @@
+# Script arguments and variables (user-space gate §9.4; milestone 3, plan
+# 3): sh FILE ARG... gives the script $0, $1 on, $# and $@; NAME=value sets
+# a variable, which $NAME and ${NAME} read, at the prompt too; $? is the
+# last status. A value is never split into words, where bash splits an
+# unquoted one (said where they differ), and a script's variables are its
+# own.
+timeout 30
+expect root@relay:~# $
+send echo 'echo "0=$0 1=$1 #=$#"' > /root/v.sh
+send echo 't-args "$@"' >> /root/v.sh
+send echo 't-args $@' >> /root/v.sh
+send echo 'false' >> /root/v.sh
+send echo 'echo "?=$?"' >> /root/v.sh
+send echo 'A="a  b"' >> /root/v.sh
+send echo 't-args $A "$A" "$UNSET" $UNSET' >> /root/v.sh
+send echo 'exit 3' >> /root/v.sh
+send sh /root/v.sh one 'two three' ''
+expect \n\+ echo "0=\$0 1=\$1 #=\$#"\n0=/root/v.sh 1=one #=3\n
+expect \A\+ t-args "\$@"\n\[1\] one\n\[2\] two three\n\[3\] \n
+# bash would split `two three` into two words here.
+expect \A\+ t-args \$@\n\[1\] one\n\[2\] two three\n
+expect \A\+ false\n\+ echo "\?=\$\?"\n\?=1\n
+# And `a  b` into `a` and `b` here.
+expect \A\+ A="a  b"\n\+ t-args \$A "\$A" "\$UNSET" \$UNSET\n\[1\] a  b\n\[2\] a  b\n\[3\] \n
+expect \A\+ exit 3\n
+# The shell gets the script's status, and none of its variables.
+send echo $? "[$A]"
+expect \n3 \[\]\n
+# The transcript holds the lines as written.
+send cat /root/v.log
+expect \n\+ echo "0=\$0 1=\$1 #=\$#"\n0=/root/v.sh 1=one #=3\n\+ t-args "\$@"\n
+# At the prompt: variables, in a pipeline and in a redirection.
+send B='hi  there'
+send t-args $B "$B" ${B}!
+expect \n\[1\] hi  there\n\[2\] hi  there\n\[3\] hi  there!\n
+send echo $B | wc -c
+expect \n10\n
+send echo x > $NONE
+expect \nrelay-sh: \$NONE: ambiguous redirect\n
+send echo $0 $# [$1]
+expect \n/bin/sh 0 \[\]\n
+# $? after a program that is not found, a Ctrl-C, a job and a wait.
+send nosuch
+send echo $?
+expect \n127\n
+key echo no{ctrl-c}
+expect \^C\n
+send echo $?
+expect \n130\n
+send t-spin &
+expect \n\[1\] \d+\n
+send echo $?
+expect \n0\n
+send kill %1
+send wait %1
+expect \n(pid \d+ \(/bin/t-spin\): killed: kill\n)?\[1\]\+  Killed                  t-spin\n
+send echo $?
+expect \n137\n
+# A shell started at the prompt has its own variables and name.
+send sh
+expect \nroot@relay:~# $
+send echo "$0 [$B]"
+expect \nsh \[\]\n
+send exit
+expect \nroot@relay:~# $
+# A shell reading a pipe takes no more than each line, as bash's: cat
+# gets the line after it.
+send echo cat > /root/in.txt
+send echo 'echo "[$B]" no' >> /root/in.txt
+send cat /root/in.txt | sh
+expect \necho "\[\$B\]" no\n
+send echo 'echo $0 $#' | sh
+expect \nsh 0\n
+send echo $B
+expect \nhi  there\n
