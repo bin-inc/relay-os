@@ -1,10 +1,10 @@
 + rm -rf /root/notes
 + uname -a
-Relay relay 0.3.0 x86_64
+Relay relay 0.4.0 x86_64
 + date
 Thu Oct  1 02:24:04 UTC 2026
 + dmesg
-Relay OS 0.3.0
+Relay OS 0.4.0
 [[32m ok [0m] console 1920x1200 (120x33 cells)
 [[32m ok [0m] cpu tables
 cpu: SMEP on, SMAP on
@@ -241,7 +241,7 @@ before the end
  1  3 15 t-tee.end
 + rm t-tee.end
 + t-sys uname
-Relay relay 0.3.0 x86_64
+Relay relay 0.4.0 x86_64
 + t-read apart
 end of input
 + mkdir -p /root/notes/old
