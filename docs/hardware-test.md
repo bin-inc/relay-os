@@ -313,6 +313,7 @@ every pull request.
 | `verify-usb` reports errors | A write was lost or wrong | Do not flash again: keep the stick as it is and report the output |
 | `verify-usb`: `check3-a.sh: FAILED` (or another script) | A command printed something else than the script expects | The line after it names the command, the expectation and the line it printed instead; the whole transcript is `/root/checks/check3-a.log` on the stick (`cat checks/check3-a.log` on the NUC) |
 | `verify-usb`: `the transcript is older than the system on the stick` | The script ran before the last `flash --kernel` | Run the script again on the NUC |
+| `verify-usb`: `system.img: FAILED, …` | The stick's `\EFI\RELAY\system.img` cannot be read, or is no archive: no transcript can be compared with it | Do not flash yet: report the line; `cargo xtask flash --kernel` writes it again, and the scripts must then run again |
 | `verify-usb`: `… are not in the transcript` | The script stopped (Ctrl-C, a hang, a restart) before that command | Photograph the screen where it stopped; the transcript ends with the last command that ran |
 | `sh: cannot write the transcript …` | `/` is read-only (see the `mount /` line) | Nothing ran; fix the mount first |
 
