@@ -177,6 +177,8 @@ pub struct FakePrograms {
     children: Vec<FakeChild>,
     /// The rounds of `collect` so far.
     round: u32,
+    /// How many children were not yet collected at each `spawn`.
+    pub alive_at_spawn: Vec<usize>,
     /// The tees pushed and not popped, by path.
     pub tees: Vec<String>,
     /// Every tee pushed.
@@ -203,6 +205,7 @@ impl FakePrograms {
             lives: Vec::new(),
             children: Vec::new(),
             round: 0,
+            alive_at_spawn: Vec::new(),
             tees: Vec::new(),
             pushed: Vec::new(),
             push_error: None,
@@ -262,6 +265,7 @@ impl Programs for FakePrograms {
         group: Group,
     ) -> Result<u32, Errno> {
         let path = String::from_utf8_lossy(path).into_owned();
+        self.alive_at_spawn.push(self.children.len());
         let life = self
             .lives
             .iter()

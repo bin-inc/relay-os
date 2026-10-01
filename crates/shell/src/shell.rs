@@ -151,6 +151,10 @@ impl<'a> Shell<'a> {
                         break;
                     }
                     Feed::Line(line) => {
+                        // What ended while it was typed frees its slot in
+                        // the process table before the line runs; it is
+                        // reported at the next prompt.
+                        self.collect_jobs();
                         self.execute(&line);
                         break;
                     }
@@ -739,6 +743,22 @@ mod tests {
             "without the console"
         );
         assert!(h.programs.children().is_empty(), "every one collected");
+    }
+
+    #[test]
+    fn a_job_that_ended_while_a_line_was_typed_is_collected_before_it_runs() {
+        let mut h = with_jobs();
+        let out = typed(&mut h, &["sleep 5 &", "t-args"]);
+        assert_eq!(
+            h.programs.alive_at_spawn,
+            [0, 0],
+            "sleep's slot was free when t-args started"
+        );
+        // Reported at the next prompt, as bash's.
+        assert!(
+            out.ends_with("# t-args\n[1]+  Done                    sleep 5\nroot@relay:/# "),
+            "{out}"
+        );
     }
 
     #[test]
