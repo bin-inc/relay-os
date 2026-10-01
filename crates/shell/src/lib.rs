@@ -15,6 +15,7 @@ pub mod editor;
 mod io;
 pub mod killed;
 pub mod parser;
+mod pattern;
 mod program;
 mod runner;
 mod shell;

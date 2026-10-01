@@ -32,7 +32,7 @@ pub fn run_command(name: &str, run: Run, args: &[String], io: CommandIo<'_>) -> 
     let mut status = run(&mut ctx, args);
     if let Err(e) = ctx.finish() {
         ctx.err(format!("{name}: write error: {e}\n").as_bytes());
-        status = 1;
+        status = ctx.write_error_status;
     }
     status
 }

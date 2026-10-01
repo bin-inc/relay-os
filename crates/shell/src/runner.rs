@@ -406,7 +406,7 @@ pub(crate) fn run_function(
     let mut message = String::new();
     if let Err(e) = ctx.finish() {
         message = format!("{}: write error: {e}\n", command.name);
-        status = 1;
+        status = ctx.write_error_status;
     }
     if ctx.cancelled {
         message = String::from("^C\n");

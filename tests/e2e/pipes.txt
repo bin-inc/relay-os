@@ -1,10 +1,10 @@
 # Pipelines under /bin/sh (user-space gate §9.1, §12.3; milestone 3, plan
 # 1): every stage a program in one process group, each one's output the
-# next one's input. 8 MiB through cat and wc arrive whole; head ends a
-# pipeline at once, its writer ending quietly; the console goes to the
-# first stage in line mode, and Ctrl-C ends every stage; a script's
-# pipeline is traced and its output in the transcript; and free shows the
-# same memory in use before and after.
+# next one's input. 8 MiB through cat and wc arrive whole; seq and grep
+# work in a pipeline (§12.3); head ends a pipeline at once, its writer
+# ending quietly; the console goes to the first stage in line mode, and
+# Ctrl-C ends every stage; a script's pipeline is traced and its output in
+# the transcript; and free shows the same memory in use before and after.
 timeout 120
 expect root@relay:~# $
 # Every kernel-stack slot's page tables made first (they stay), so memory
@@ -30,6 +30,17 @@ expect \n0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde\nroot@r
 # A first stage that ends before the next starts still leads the group.
 send t-args first | cat
 expect \n\[1\] first\nroot@relay:~# $
+# seq and grep (§12.3); seq ends quietly once head has its lines.
+send seq 5 | grep -c .
+expect \n5\n
+send seq 1000 | grep 7 | wc -l
+expect \n271\n
+send seq 3 | grep -v 2
+expect \n1\n3\nroot@relay:~# $
+send seq 1000000 | head -n 2
+expect \n1\n2\nroot@relay:~# $
+send sleep 1 | t-args slept
+expect \n\[1\] slept\nroot@relay:~# $
 # Not the screen: one name a line; the last stage's redirection.
 send ls /etc | cat > out
 send cat out

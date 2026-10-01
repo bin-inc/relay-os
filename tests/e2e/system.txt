@@ -5,7 +5,7 @@ timeout 30
 expect \[ ok \] system: \d+ programs?, ABI 3
 expect root@relay:~# $
 send ls /bin
-expect \ncat    date   echo  ls     poweroff  rm     stat   t-args   t-mem   t-spawn  t-tee  uname\nclear  df     free  mkdir  pwd       rmdir  sync   t-fault  t-pipe  t-spin   tail   wc\ncp     dmesg  head  mv     reboot    sh     t-abi  t-files  t-read  t-sys    touch\n
+expect \ncat    date   echo   grep  mkdir     pwd     rmdir  sleep  t-abi    t-files  t-read   t-sys  touch  wc\nclear  df     false  head  mv        reboot  seq    stat   t-args   t-mem    t-spawn  t-tee  true\ncp     dmesg  free   ls    poweroff  rm      sh     sync   t-fault  t-pipe   t-spin   tail   uname\n
 send ls -l /bin/t-args
 expect \n-rwxr-xr-x 1 root root +\d+ \w{3} [ \d]\d \d\d:\d\d /bin/t-args\n
 send cp /bin/t-args /root/t-args
@@ -26,4 +26,4 @@ send pwd
 expect \n/bin\n
 send cd ..
 send ls /bin
-expect \ncat    date   echo  ls     poweroff  rm     stat   t-args   t-mem   t-spawn  t-tee  uname\nclear  df     free  mkdir  pwd       rmdir  sync   t-fault  t-pipe  t-spin   tail   wc\ncp     dmesg  head  mv     reboot    sh     t-abi  t-files  t-read  t-sys    touch\n
+expect \ncat    date   echo   grep  mkdir     pwd     rmdir  sleep  t-abi    t-files  t-read   t-sys  touch  wc\nclear  df     false  head  mv        reboot  seq    stat   t-args   t-mem    t-spawn  t-tee  true\ncp     dmesg  free   ls    poweroff  rm      sh     sync   t-fault  t-pipe   t-spin   tail   uname\n

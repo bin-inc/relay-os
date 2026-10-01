@@ -86,6 +86,8 @@ pub struct TestSystem {
     pub power_error: Option<Errno>,
     /// Whether each `reboot` and `poweroff` was forced.
     pub forced: Vec<bool>,
+    /// Every `sleep`, in milliseconds.
+    pub slept: Vec<u64>,
 }
 
 impl TestSystem {
@@ -108,6 +110,7 @@ impl TestSystem {
             poweroffs: 0,
             power_error: None,
             forced: Vec::new(),
+            slept: Vec::new(),
         }
     }
 }
@@ -121,6 +124,9 @@ impl System for TestSystem {
     }
     fn kernel_log(&self) -> Vec<u8> {
         self.log.clone()
+    }
+    fn sleep(&mut self, ms: u64) {
+        self.slept.push(ms);
     }
     fn reboot(&mut self, force: bool) -> Result<(), Errno> {
         self.power(force)?;
@@ -663,9 +669,15 @@ pub fn host_tool(args: &[&str], files: &[(&str, &[u8])], stdin: &[u8]) -> (i32, 
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("the host's {} is needed: {e}", args[0]));
-    // A tool that stops reading early (head) closes the pipe: not an error.
-    let _ = child.stdin.take().unwrap().write_all(stdin);
+    // From a thread: a tool that writes much before it has read all would
+    // otherwise wait on its full output while this waits on its input. A
+    // tool that stops reading early (head) closes the pipe: not an error.
+    let (mut pipe, data) = (child.stdin.take().unwrap(), stdin.to_vec());
+    let writer = std::thread::spawn(move || {
+        let _ = pipe.write_all(&data);
+    });
     let out = child.wait_with_output().unwrap();
+    let _ = writer.join();
     let _ = std::fs::remove_dir_all(&dir);
     let text = |b: Vec<u8>| String::from_utf8_lossy(&b).into_owned();
     (

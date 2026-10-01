@@ -43,6 +43,8 @@ pub trait System {
     fn memory(&self) -> Option<MemInfo>;
     /// The kernel log, for `dmesg`.
     fn kernel_log(&self) -> Vec<u8>;
+    /// Waits `ms` milliseconds (`sleep`).
+    fn sleep(&mut self, ms: u64);
     /// Restarts the machine, going ahead with `force` when the filesystems
     /// cannot be shut down cleanly. Returns only where it cannot (on the
     /// host, in tests), and the shell then stops; or with the error that

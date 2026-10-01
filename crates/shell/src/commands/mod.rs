@@ -6,19 +6,23 @@ use alloc::string::String;
 
 mod basic;
 mod change;
+mod grep;
 mod ls;
 mod script;
+mod seq;
 mod stat;
 mod system;
 mod text;
 
-pub use basic::{clear, echo, pwd, uname};
+pub use basic::{clear, echo, r#false, pwd, r#true, uname};
 pub use change::{cp, mkdir, mv, rm, rmdir, touch};
+pub use grep::grep;
 pub use ls::ls;
 pub(crate) use script::Script;
 pub use script::{SCRIPT_MAX, transcript_name};
+pub use seq::seq;
 pub use stat::stat;
-pub use system::{date, df, dmesg, free, poweroff, reboot, sync};
+pub use system::{date, df, dmesg, free, poweroff, reboot, sleep, sync};
 pub use text::{cat, head, tail, wc};
 
 /// A command function: runs the command with its arguments (without the
@@ -81,9 +85,19 @@ pub const COMMANDS: &[Builtin] = &[
         run: basic::exit,
     },
     Builtin {
+        name: "false",
+        help: "do nothing, unsuccessfully",
+        run: basic::r#false,
+    },
+    Builtin {
         name: "free",
         help: "show memory use",
         run: system::free,
+    },
+    Builtin {
+        name: "grep",
+        help: "print the lines that match a pattern",
+        run: grep::grep,
     },
     Builtin {
         name: "head",
@@ -136,9 +150,19 @@ pub const COMMANDS: &[Builtin] = &[
         run: change::rmdir,
     },
     Builtin {
+        name: "seq",
+        help: "print a sequence of whole numbers",
+        run: seq::seq,
+    },
+    Builtin {
         name: "sh",
         help: "run the commands in a file",
         run: script::sh,
+    },
+    Builtin {
+        name: "sleep",
+        help: "wait for a number of seconds",
+        run: system::sleep,
     },
     Builtin {
         name: "stat",
@@ -159,6 +183,11 @@ pub const COMMANDS: &[Builtin] = &[
         name: "touch",
         help: "create files or update their times",
         run: change::touch,
+    },
+    Builtin {
+        name: "true",
+        help: "do nothing, successfully",
+        run: basic::r#true,
     },
     Builtin {
         name: "uname",

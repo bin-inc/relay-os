@@ -78,6 +78,16 @@ pub fn pwd(ctx: &mut Ctx<'_>, _: &[String]) -> i32 {
     0
 }
 
+/// `true`: nothing, successfully; its arguments are ignored, as GNU's are.
+pub fn r#true(_: &mut Ctx<'_>, _: &[String]) -> i32 {
+    0
+}
+
+/// `false`: nothing, unsuccessfully.
+pub fn r#false(_: &mut Ctx<'_>, _: &[String]) -> i32 {
+    1
+}
+
 /// `echo [-n] args…`: the arguments separated by spaces; `-n` drops the
 /// newline. Anything else starting with `-` is printed.
 pub fn echo(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
@@ -127,6 +137,15 @@ pub fn uname(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use crate::testing::Harness;
+
+    #[test]
+    fn true_and_false_ignore_their_arguments() {
+        let mut h = Harness::new();
+        assert_eq!(h.run("true"), (0, "".into()));
+        assert_eq!(h.run("true --help x"), (0, "".into()));
+        assert_eq!(h.run("false"), (1, "".into()));
+        assert_eq!(h.run("false -x"), (1, "".into()));
+    }
 
     #[test]
     fn cd_goes_home_without_an_argument() {
