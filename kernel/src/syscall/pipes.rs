@@ -6,7 +6,7 @@
 //! and ends before its program sees it.
 
 use super::Caller;
-use crate::fd::{FDS, File};
+use crate::fd::{FDS, FdTable, File};
 use crate::mm::paging::PAGE;
 use crate::mm::user::UserSlice;
 use crate::pipe::{self, End, Side};
@@ -25,12 +25,31 @@ pub(super) fn pipe(caller: &mut impl Caller, addr: u64) -> Result<u64, Errno> {
     }
     let (read, write) = caller.new_pipe()?;
     let (read, write) = (Arc::new(File::Pipe(read)), Arc::new(File::Pipe(write)));
-    let fds = caller.with_fds(|t| Ok::<_, Errno>([t.insert(read)?, t.insert(write)?]))?;
+    let fds = caller.with_fds(|t| insert_ends(t, &read, &write));
+    // Here, outside `with_fds` (the kernel's holds `PROCS`), go the last
+    // references to the ends if they did not go in: dropping an end wakes.
+    drop((read, write));
+    let fds = fds?;
     let mut bytes = [0u8; 8];
     bytes[..4].copy_from_slice(&fds[0].to_ne_bytes());
     bytes[4..].copy_from_slice(&fds[1].to_ne_bytes());
     caller.write(&slice, 0, &bytes)?;
     Ok(0)
+}
+
+/// Puts both ends of a new pipe in `t`, at its lowest free fds, or neither:
+/// what goes in, and what is taken out again, are copies, so the table
+/// never holds the last reference to an end and dropping none of them
+/// closes the pipe (and wakes its waiters) while it is locked.
+fn insert_ends(t: &mut FdTable, read: &Arc<File>, write: &Arc<File>) -> Result<[u32; 2], Errno> {
+    let r = t.insert(read.clone())?;
+    match t.insert(write.clone()) {
+        Ok(w) => Ok([r, w]),
+        Err(e) => {
+            let _ = t.remove(u64::from(r));
+            Err(e)
+        }
+    }
 }
 
 /// Reads a read end into the program's buffer: what the pipe holds, up to
@@ -149,6 +168,34 @@ mod tests {
         f.no_pipe_memory = true;
         assert_eq!(call(&mut f, Call::Pipe, [W, 0, 0]), Err(errno::ENOMEM));
         assert_eq!(f.fds.open(), 30);
+    }
+
+    #[test]
+    fn a_new_pipe_s_ends_go_in_both_or_neither_and_never_close_inside() {
+        let mut f = fake();
+        let (read, write) = f.new_pipe().unwrap();
+        let (read, write) = (Arc::new(File::Pipe(read)), Arc::new(File::Pipe(write)));
+        for _ in 3..31 {
+            open_any(&mut f);
+        }
+        assert_eq!(f.fds.open(), 31);
+        assert_eq!(
+            super::insert_ends(&mut f.fds, &read, &write),
+            Err(Errno::EMFILE)
+        );
+        assert_eq!(f.fds.open(), 31, "neither end stays");
+        assert_eq!(
+            (Arc::strong_count(&read), Arc::strong_count(&write)),
+            (1, 1),
+            "the caller has the last references"
+        );
+        assert_eq!(call(&mut f, Call::Close, [30, 0, 0]), Ok(0));
+        assert_eq!(call(&mut f, Call::Close, [29, 0, 0]), Ok(0));
+        assert_eq!(super::insert_ends(&mut f.fds, &read, &write), Ok([29, 30]));
+        assert_eq!(
+            (Arc::strong_count(&read), Arc::strong_count(&write)),
+            (2, 2)
+        );
     }
 
     /// Opens `/root/f` as the next fd.
