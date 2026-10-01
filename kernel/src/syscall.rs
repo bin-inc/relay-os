@@ -184,9 +184,12 @@ fn spawn(caller: &mut impl Caller, addr: u64) -> Result<u64, Errno> {
     caller.read(&UserSlice::new(addr, raw.len() as u64)?, 0, &mut raw)?;
     let a = SpawnArgs::from_bytes(&raw);
     let foreground = a.flags & FOREGROUND != 0;
+    // A group to join comes with milestone 3's pipelines.
     if a.flags & !(NEW_GROUP | FOREGROUND) != 0
         || (foreground && a.flags & NEW_GROUP == 0)
         || a.fd_count as usize > SPAWN_FDS
+        || a.pgid != 0
+        || a.reserved != 0
     {
         return Err(Errno::EINVAL);
     }
@@ -436,6 +439,8 @@ mod tests {
             fds,
             fd_count: 2,
             flags: NEW_GROUP,
+            pgid: 0,
+            reserved: 0,
         };
         edit(&mut a);
         // SAFETY: `SpawnArgs` is `repr(C)` of integers with no padding.
@@ -593,6 +598,12 @@ mod tests {
             "the console goes to a group of the child's own"
         );
         assert_eq!(refused(&mut f, b"x\0", |a| a.flags = 4), Err(errno::EINVAL));
+        assert_eq!(refused(&mut f, b"x\0", |a| a.pgid = 2), Err(errno::EINVAL));
+        assert_eq!(
+            refused(&mut f, b"x\0", |a| a.reserved = 1),
+            Err(errno::EINVAL),
+            "reserved"
+        );
         assert_eq!(
             refused(&mut f, b"x\0", |a| a.fd_count = 9),
             Err(errno::EINVAL)

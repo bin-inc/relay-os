@@ -2,7 +2,7 @@
 # spec §4.3, §4.4): its programs are listed and read like other files, and
 # nothing in it can be changed or removed.
 timeout 30
-expect \[ ok \] system: \d+ programs?, ABI 2
+expect \[ ok \] system: \d+ programs?, ABI 3
 expect root@relay:~# $
 send ls /bin
 expect \ncat    date   echo  ls     poweroff  rm     stat   t-args   t-mem    t-spin  tail   wc\nclear  df     free  mkdir  pwd       rmdir  sync   t-fault  t-read   t-sys   touch\ncp     dmesg  head  mv     reboot    sh     t-abi  t-files  t-spawn  t-tee   uname\n

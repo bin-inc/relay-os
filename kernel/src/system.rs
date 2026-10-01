@@ -1,7 +1,7 @@
 //! The system archive (spec §4.3 of the user-space gate): the programs the
 //! loader read from `\EFI\RELAY\system.img`, checked and mounted read-only
 //! at `/bin`. Startup step 10 reports how that went, as `[ ok ] system:
-//! 34 programs, ABI 2` or `[FAIL] system: <reason>`; without an archive
+//! 34 programs, ABI 3` or `[FAIL] system: <reason>`; without an archive
 //! there is no shell to run, and init shows the error screen (§11.2).
 
 use crate::console;
@@ -165,13 +165,13 @@ mod tests {
     fn the_archive_is_mounted_at_bin() {
         let mut vfs = table(true);
         let text = mount_into(&mut vfs, archive(relay_abi::VERSION, &["t-args", "cat"])).unwrap();
-        assert_eq!(text, "2 programs, ABI 2");
+        assert_eq!(text, "2 programs, ABI 3");
         let node = vfs.lookup(b"/bin/t-args").unwrap();
         assert_eq!(vfs.stat(node).unwrap().perm, 0o755);
         let mut one = table(true);
         assert_eq!(
             mount_into(&mut one, archive(relay_abi::VERSION, &["t-args"])).unwrap(),
-            "1 program, ABI 2"
+            "1 program, ABI 3"
         );
     }
 
@@ -193,7 +193,7 @@ mod tests {
         assert_eq!(e.to_string(), "system.img: not a system archive");
         let e = mount_into(&mut vfs, archive(99, &["t-args"])).unwrap_err();
         assert_eq!(e, SystemError::Abi(99));
-        assert_eq!(e.to_string(), "ABI 99, kernel wants 2");
+        assert_eq!(e.to_string(), "ABI 99, kernel wants 3");
         assert_eq!(
             vfs.lookup(b"/bin/t-args"),
             Err(Errno::ENOENT),

@@ -225,7 +225,7 @@ mod tests {
     fn each_reason_is_named() {
         assert_eq!(
             Reason::System(SystemError::Abi(99)).to_string(),
-            "system: ABI 99, kernel wants 2"
+            "system: ABI 99, kernel wants 3"
         );
         assert_eq!(
             Reason::CannotStart(Errno::ENOEXEC).to_string(),
