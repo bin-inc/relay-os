@@ -43,6 +43,9 @@ pub trait System {
     fn memory(&self) -> Option<MemInfo>;
     /// The kernel log, for `dmesg`.
     fn kernel_log(&self) -> Vec<u8>;
+    /// Every process, by pid, for `ps`; `None` where there are none to
+    /// show (on the host).
+    fn processes(&self) -> Option<Vec<relay_abi::ProcInfo>>;
     /// Waits `ms` milliseconds (`sleep`).
     fn sleep(&mut self, ms: u64);
     /// Restarts the machine, going ahead with `force` when the filesystems

@@ -455,6 +455,9 @@ mod tests {
         fn kernel_log(&self) -> Vec<u8> {
             Vec::new()
         }
+        fn processes(&self) -> Option<Vec<relay_abi::ProcInfo>> {
+            None
+        }
         fn sleep(&mut self, _: u64) {}
         fn reboot(&mut self, _: bool) -> Result<(), Errno> {
             Ok(())

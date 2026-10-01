@@ -1,7 +1,7 @@
 # Background jobs (user-space gate §9.2, §9.3; milestone 3, plan 2): a
 # line that ends with & starts a job in a process group of its own,
-# without the console; jobs, wait and kill work on them, and the shell
-# says how each ended, in bash's words.
+# without the console; jobs, ps, wait and kill show and end them, and the
+# shell says how each ended, in bash's words.
 timeout 60
 expect root@relay:~# $
 send sleep 4 &
@@ -10,6 +10,10 @@ send t-spin &
 expect \n\[2\] \d+\n
 send jobs
 expect \n\[1\]-  Running                 sleep 4 &\n\[2\]\+  Running                 t-spin &\n
+# ps shows them both, with init and the shell; t-spin shares the CPU.
+send ps
+expect \n  PID  PPID STATE      MEM  TIME CMD\n    1     0 wait         0  0:00 init\n    2     1 wait +\d+  0:00 /bin/sh\n
+expect \A +\d+     2 sleep +\d+  0:00 /bin/sleep\n +\d+     2 (ready|run) +\d+  0:0\d /bin/t-spin\n +\d+     2 run +\d+  0:00 /bin/ps\n
 # Ctrl-C at the prompt only cancels the line typed: the jobs run on.
 key echo nope{ctrl-c}
 expect \^C\n
@@ -80,8 +84,10 @@ expect \n\[4\] \d+\n
 send echo 'echo hello' > b.sh
 send sh b.sh
 expect \+ echo hello\nhello\n
+# A bare wait says how the jobs it waited for ended (those that ended
+# before it were told of at the prompt).
 send wait
-expect root@relay:~# wait\nroot@relay:~# $
+expect root@relay:~# wait\n(\[\d\][-+ ]  Done                    sh a\.sh\n){0,4}root@relay:~# $
 # exit leaves a running job to process 1, which collects it when it ends.
 send t-spin 1 &
 expect \n\[1\] \d+\n

@@ -88,6 +88,8 @@ pub struct TestSystem {
     pub forced: Vec<bool>,
     /// Every `sleep`, in milliseconds.
     pub slept: Vec<u64>,
+    /// What `processes` says.
+    pub processes: Option<Vec<relay_abi::ProcInfo>>,
 }
 
 impl TestSystem {
@@ -111,6 +113,7 @@ impl TestSystem {
             power_error: None,
             forced: Vec::new(),
             slept: Vec::new(),
+            processes: None,
         }
     }
 }
@@ -124,6 +127,9 @@ impl System for TestSystem {
     }
     fn kernel_log(&self) -> Vec<u8> {
         self.log.clone()
+    }
+    fn processes(&self) -> Option<Vec<relay_abi::ProcInfo>> {
+        self.processes.clone()
     }
     fn sleep(&mut self, ms: u64) {
         self.slept.push(ms);
