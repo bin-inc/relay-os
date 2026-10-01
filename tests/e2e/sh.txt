@@ -105,13 +105,31 @@ send t-spawn fill
 expect \nfilled the table with 60 children\n
 alive 1
 # An interactive shell in the background has no console to read: it ends
-# before its first prompt, and its job is done (milestone 3).
+# before its first prompt, and its job is done (milestone 3). It may end
+# before this shell's next prompt, which then says so first: the screen
+# shows one prompt and one Done line, and `jobs` that it was reported.
 send sh &
-expect \n\[1\] \d+\nroot@relay:\S+# $
+expect \n\[1\] \d+\n
 alive 1
+expect \A(\[1\]\+  Done {20}sh\n)?root@relay:\S+# $
 send echo next
-expect \Aecho next\nnext\n\[1\]\+  Done                    sh\n
-send rm -r /root/a /root/list /root/s.sh /root/s.log /root/t.sh /root/t.log /root/spin.sh /root/spin.log /root/i.sh /root/i.log /root/j.sh /root/j.log
+expect \Aecho next\nnext\n(\[1\]\+  Done {20}sh\n)?root@relay:\S+# $
+send jobs
+expect \Ajobs\nroot@relay:\S+# $
+# Nor does one a background script starts: it ends before its prompt, so
+# the screen shows the script's trace and this shell's one prompt
+# (milestone 3, plan 4).
+send echo sh > /root/k.sh
+expect root@relay:~# $
+send sh /root/k.sh &
+expect \n\[1\] \d+\n
+alive 1
+expect \A(root@relay:~# \+ sh\n|\+ sh\n(\[1\]\+  Done {20}sh /root/k\.sh\n)?root@relay:~# )$
+send echo next
+expect \Aecho next\nnext\n(\[1\]\+  Done {20}sh /root/k\.sh\n)?root@relay:\S+# $
+send jobs
+expect \Ajobs\nroot@relay:\S+# $
+send rm -r /root/a /root/list /root/s.sh /root/s.log /root/t.sh /root/t.log /root/spin.sh /root/spin.log /root/i.sh /root/i.log /root/j.sh /root/j.log /root/k.sh /root/k.log
 send cd /tmp
 expect root@relay:/tmp# $
 send exit 3
