@@ -2,7 +2,7 @@
 
 - **Date:** 2026-09-29
 - **Status:** Approved 2026-09-29; revised while planning milestone 2's plans 1, 2, 3a, 3b, 4a, 4b and 5
-  and milestone 3's plans 1, 2 and 3 (see §16)
+  and milestone 3's plans 1, 2, 3 and 4 (see §16)
 - **Builds on:** milestone 1 (version 0.2.0,
   `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`,
   cited below as "M1 §n")
@@ -521,19 +521,22 @@ Shipped in every `system.img`, because the NUC checks use them too:
 |---|---|
 | `t-fault KIND` | faults on purpose: `null-read`, `null-write`, `write-code`, `exec-data`, `ud`, `div0`, `stack`, `kernel-read` (reads a kernel address), `sse`; and `flags-exit`, `flags-ud`, `flags-ac`, `flags-tf` (the flags a program sets never reach the kernel) and `gsbase` (a program cannot set its own `gs` base) |
 | `t-spin [secs]` | spins without system calls, forever or for `secs` seconds (reading the clock only every 2^20 iterations), then prints how many iterations it made |
-| `t-spawn N` | starts N children that exit at once and waits for each; prints the free frames before and after, and how many were lost. Also `kill` (kills a spinning child while it sleeps), `kill-new` (kills one before it has run), `orphan`, `fill` (fills the process table with napping orphans), `sleepers` (a group blocked in `wait` and `sleep`, for Ctrl-C) and, in milestone 3, `join` (children in another child's group, §16 item 8) and `ctrl-c` (a wait a raw Ctrl-C ends, §16 item 9) |
+| `t-spawn N` | starts N children that exit at once and waits for each; prints the free frames before and after, and how many were lost. Also `kill` (kills a spinning child while it sleeps), `kill-new` (kills one before it has run), `orphan`, `fill` (fills the process table with napping orphans), `sleepers` (a group blocked in `wait` and `sleep`, for Ctrl-C) and, in milestone 3, `join` (children in another child's group, §16 item 8), `ctrl-c` (a wait a raw Ctrl-C ends, §16 item 9) and `ctrl-c-apart` (a wait apart from the console never takes its Ctrl-C) |
 | `t-abi` | a program whose ELF note has the wrong ABI version (built by xtask) |
 | `t-args` | prints its arguments one per line, as `[n] <arg>` |
 | `t-files KIND` | the file calls: `basic` (`open`'s flags, `read`, `write`, `seek`, `fstat`, `close`, an offset shared with a child, 32 fds), `dir` (the calls on paths and `read_dir`), `cwd` (`chdir`, `getcwd`, a child's working directory), `gone` (another process removes its working directory and open file), `full` (write errors on a full disk) |
 | `t-mem KIND` | memory: `map` (`mem_map` and `mem_unmap`), `unmapped` and `unmapped-many` (a page read after it was given back is killed), `grow N` (N MiB of heap), `oom` (a child takes memory until there is none), `churn` (maps and gives back nearly all free memory over and over, in the kernel almost all the time) |
 | `t-read [KIND]` | reads the console and prints each read: in line mode, `raw`, `apart` (outside the foreground group), `refused` (a group never given the console may not change it, §16 item 9), `size` (and the console calls' refusals), `leave` (a child left behind that may not set line mode) |
-| `t-tee KIND` | console tees: `basic`, `end` (left by a process that ends), `gone` (its file removed), `typed` (a reader's), `full` (on a full disk) |
+| `t-tee KIND` | console tees: `basic`, `end` (left by a process that ends), `gone` (its file removed), `typed` (a reader's), `full` (on a full disk), `owners` (five processes with a tee each at once, §16 item 9) |
 | `t-pipe KIND` | milestone 3's `pipe` call (§16 item 8): `basic` (the fds, a write and a read, `fstat`, what an end is not), `room` (16 KiB of a bigger write), `child` (1 MiB to a child, both blocking in turn), `eof` (the end of the data once the last writer ends), `epipe` (a write with no reader; `t-args` writing to one ends with 141), `killed` (a blocked reader and a blocked writer killed), `many` (pipes until `EMFILE`) |
 | `t-sys KIND` | `sys_info`'s names (`uname`) and kernel log (`log`), and the `power` call (`poweroff` and `reboot`, each with or without `-f`) |
 | `t-proc KIND` | milestone 3's `proc_list` call (§16 item 9): `list` (process 1, the shell, itself and children sleeping, ended, on a pipe and reading the console), `short` (a buffer of one entry, and of none), `long` (a name cut at 64 bytes), `end-shell` (a child kills the shell while it reads the console in line mode) |
 
 The kinds a program runs its own children with (`t-files child`, `pwd` and
-`gone-child`, `t-mem hog`, `t-read leave-child`) are left out.
+`gone-child`, `t-mem hog`, `t-pipe drain`, `hold` and `flood`, `t-proc
+kill-grandparent`, `t-read leave-child` and `refused-child`, `t-spawn
+child`, `nap`, `doze` and `ctrl-c-child`, `t-tee owner`) are left out
+(§16 item 11).
 
 ## 9. Milestone 3: pipes, jobs, `ps`/`kill`, script variables
 
@@ -717,12 +720,14 @@ New ones:
   space.
 - `check4.sh` (milestone 2): the `t-fault` kinds, `t-spawn`, `free` before
   and after, `t-args`, and a script that runs another. Two manual steps
-  follow: `exit` at the prompt, which init answers with a new shell
-  (§16 item 6; `t-spin` and Ctrl-C are one of check 3's steps by hand),
-  and, after a `reboot`, three quick `exit`s, which reach the error screen,
-  where a key on the K120 restarts the machine (§16 item 7).
+  follow (since milestone 3, after `check5.sh`): `exit` at the prompt,
+  which init answers with a new shell (§16 item 6; `t-spin` and Ctrl-C
+  are one of check 3's steps by hand), and, after a `reboot`, three quick
+  `exit`s, which reach the error screen, where a key on the K120 restarts
+  the machine (§16 item 7).
 - `check5.sh` (milestone 3): pipes, a background job and `kill`, script
-  arguments and variables.
+  arguments and variables, in 29 commands whose lines are the same on the
+  NUC and in QEMU (§16 item 11).
 - `cargo xtask verify-usb` checks their transcripts, as in M1 §15 item 12.
 
 ### 12.5 CI
@@ -1839,7 +1844,8 @@ does. Facts found before the spec was first merged are already in its body.
      refused at a full table), and says how each finished job ended
      before the next prompt (after a foreground command too); a
      script and `X | sh` collect before each line and say neither, as
-     bash's non-interactive shells do. A job none of whose commands
+     bash's non-interactive shells do (nor how a job a signal ended, which
+     bash's do say, §16 item 11). A job none of whose commands
      started is no job (the status the last one's, 127); once one
      started the status is 0. `cd`, `exit`, `help`, `jobs`, `wait` and
      `kill` cannot run in the background (`relay-sh: cd: cannot be used in
@@ -1977,9 +1983,11 @@ does. Facts found before the spec was first merged are already in its body.
       the expanded words): the transcripts keep milestone 1's form. Every
       command of a pipeline is expanded before any starts. A `~` is
       `/root` only alone or before a `/` in the same unquoted piece, as
-      bash's is, so `~"/x"`, `~\/x` and `~''` keep it, where milestone 1
-      made them `/root`, and so does `~$A`; a `~` that a variable holds
-      never expands.
+      bash's is at a word's start, so `~"/x"`, `~\/x` and `~''` keep it,
+      where milestone 1 made them `/root`, and so does `~$A`; a `~` that a
+      variable holds never expands. bash also expands one after the `=` of
+      an argument shaped like an assignment (`echo A=~/x`), as its POSIX
+      mode and this shell do not (§16 item 11).
     - **Assignments** (§9.4). A line of only `NAME=value` words sets each
       in turn (`A=1 B=$A`), with status 0. The value expands as a word does
       but always makes one, empty or not (`A=`, `A="a b"`, `A=$B`); an
@@ -2036,3 +2044,105 @@ does. Facts found before the spec was first merged are already in its body.
       named in each test; the shell's variables, `$?` and scripts' scope
       under both runners; the scenario `script_vars` (a script with
       arguments, the prompt, a nested `sh` and `X | sh`).
+11. **Decisions made while planning milestone 3's plan 4** (hardening and
+    0.4.0):
+    - **Plan 4 is one plan** (§13) in four pull requests: this plan; the
+      shell's deferred fixes; xtask's and the source scans' deferred
+      fixes; `check5.sh`, version 0.4.0 and the docs, with NUC checks 3, 4
+      and 5 on a stick written by `flash --full`. It ends milestone 3 and
+      the user-space gate.
+    - **`check5.sh`** (§12.4, corrected in its body). 29 commands, run
+      after `check4.sh` and before check 4's `exit` by hand, whose lines
+      are the same on the NUC and in QEMU: pipes (`seq 1000000 | wc -c`,
+      6.9 MB through a 16 KiB pipe; `seq 1000000 | head -n 1`, a reader
+      that ends first; `seq 1000 | grep 7 | wc -l`; a pipeline's status;
+      `X | sh`), a background job (`t-spin &`, `jobs`, `ps | grep -c
+      t-spin`, `kill %1`, `wait %1` and its 137), and a script given an
+      empty argument and one with two blanks that passes `"$@"` on to
+      another (`$0`, `$#`, `cd "$9"` away from home, a value with blanks
+      never split, an unquoted empty one no word, `$?`). A script prints no `[1] <pid>`, no
+      Done line and no line for a job a signal ended, and the kernel's
+      `killed` lines go to its log only, so nothing in the transcript races
+      the prompt; `ps` is read through `grep -c`, whose count holds no pid
+      or time. It needs no file of the earlier checks. The `checks`
+      scenario runs it after `check4.sh`, its QEMU transcript is recorded,
+      and tests check that every check script on the stick has both
+      transcripts and that the README and `docs/hardware-test.md` type it
+      (the prototype's review found the README's quick start running
+      three).
+    - **A script says nothing about its jobs** (§9.2; item 9 corrected).
+      Item 9 said a script and `X | sh` report no job "as bash's
+      non-interactive shells do". That holds for `[1] <pid>` and the Done
+      lines, but bash 5.2's script does say how a job a signal ended
+      (`s.sh: line 3: 2805657 Killed  sleep 100`, on standard error, when
+      it collects the job). This shell stays silent there too (the user
+      chose): the line would come wherever the job is collected, with its
+      pid, so a transcript could not expect it.
+    - **The shell's deferred findings** (§9.4; items 8–10). `$[`, bash's
+      old arithmetic (`$[1+1]` is 2 there), is `unsupported syntax: $[`,
+      quoted or not, rather than text. Inside `${…}`, quotes, escapes and
+      further `${…}` are read whole while the `}` is looked for, as bash
+      reads them: `${A"}"}` and `${A\}}` are one bad substitution,
+      `${A:-${B}}` one refusal, and a quote left open there (`"${A"`) is
+      this shell's `syntax error: unterminated quote` (bash: matching
+      `` `"' ``) rather than a missing `}`. A parameter's value is
+      borrowed, not copied, before its room is taken, and `$@` is no value
+      of its own. `cd ""`, and so a script's `cd "$1"` without an
+      argument, stays where it is with status 0, as bash's does (`cd $E`
+      unquoted is `cd` alone). `seq` refuses a zero increment as soon as
+      it has read it, in any form (`0.0`, `-0`, `0x0`), and an operand that
+      is no number before one that is not whole, in GNU's order (`seq 1 0
+      x`: `invalid Zero increment value: '0'`). A `-` after a range at a
+      pattern's end is `Invalid range end` (`[a-a-`), as GNU grep 3.11
+      says. An interactive `/bin/sh` whose group was never given the
+      console ends before its prompt whether it leads a group (`sh &`) or
+      is in a background script's, where it printed one stray prompt: it
+      asks first to set the console's mode, which only a group holding the
+      console may.
+    - **Two findings ruled out** (the user agreed). bash expands a `~`
+      after the `=` of an argument shaped like an assignment, and after a
+      `:` in it (`echo A=~/x` prints `A=/root/x`); bash's POSIX mode and
+      milestone 1 do not, nor does this shell, as item 10 now says. bash's
+      job lines add `(wd: DIR)` when a job's directory is not the shell's,
+      and its notices a line `(wd now: DIR)`: that needs each job's
+      directory and a second line, for a job that outlives a `cd`, and is
+      left out. Of the prototype's review's nits, two are left too, each
+      still refused as bash refuses it: an increment GNU's `long double`
+      takes as zero (`seq 1 1e-5000 5`: `not a whole number` here,
+      `invalid Zero increment value` there), and a few rare `${…}`
+      (`${$${A}`, ``${A`}`}``) that get another error than bash's.
+    - **xtask's and the scans' deferred findings** (§10; item 7).
+      `verify-usb` shows a transcript's time as `date` shows one, as it
+      shows `system.img`'s build time (`(run Mon Sep 28 14:09:17 UTC
+      2026)`), and fails when the stick's `system.img` cannot be read or
+      is no archive (`system.img: FAILED, …`, the check's first line),
+      since no transcript can then be compared with it. The loader-rules
+      test reads raw strings as Rust does (`r#"…"#`), so its scanner no
+      longer assumes there are none; the scan that keeps the TLB in
+      `arch/` sees `invpcid` too, and either instruction in any case
+      (`mm::init`'s CR3 write stays, as item 7 says).
+    - **§8.5's table** (corrected in its body): `t-spawn ctrl-c-apart` and
+      `t-tee owners`, and among the kinds left out those only a program's
+      children run (`t-pipe drain`, `hold` and `flood`, `t-proc
+      kill-grandparent`, `t-read refused-child`, `t-spawn child`, `nap`,
+      `doze` and `ctrl-c-child`, `t-tee owner`).
+    - **Version 0.4.0** (§1.4, §2). The workspace's version, `uname -a` in
+      `shell` (milestone 1's scenario, changed only by the version) and in
+      `check3-a.sh`, and the recorded transcripts' version lines. A spike
+      bumped it first and ran every scenario with a draft `check5.sh`:
+      nothing else depends on it. The README says the gate is done; the
+      stick's `/root/README` names the built-ins as built-ins and shows a
+      pipeline, a job, a script's arguments and a variable. The error
+      screen's visit by hand stays in check 4.
+    - **Milestone 3's definition of done** (§1.4). Item 1: `cargo xtask
+      ci` runs 47 scenarios, milestone 1's unchanged but for the startup
+      lines and `shell`'s version, with §12.3's milestone 3 scenarios
+      (`pipe_calls`, `pipes`, `proc_calls`, `screen_console`, `jobs`,
+      `script_vars`). Item 2: NUC checks 3, 4 and 5 in plan 4's last pull
+      request, their transcripts checked by `verify-usb`. Item 3: an
+      xtask test walks the resolved graph (since plan 4b), and every
+      command but the six built-ins runs from `/bin`. Nothing is unmet.
+    - **Earlier deferred findings, settled.** Milestone 2's plan 5's
+      minors 3–7 and the deferred findings of plans 1–3 (above); `|&`,
+      `X | sh`'s reads and `pipe()`'s inserts were settled by plans 2 and
+      3. What stays out of the gate is §15's list.
