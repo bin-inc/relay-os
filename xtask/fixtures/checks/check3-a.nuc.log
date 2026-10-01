@@ -1,10 +1,10 @@
 + rm -rf /root/notes
 + uname -a
-Relay relay 0.2.0 x86_64
+Relay relay 0.3.0 x86_64
 + date
-Wed Sep 30 14:43:08 UTC 2026
+Thu Oct  1 02:24:04 UTC 2026
 + dmesg
-Relay OS 0.2.0
+Relay OS 0.3.0
 [[32m ok [0m] console 1920x1200 (120x33 cells)
 [[32m ok [0m] cpu tables
 cpu: SMEP on, SMAP on
@@ -14,7 +14,7 @@ acpi: tables FACP FIDT SSDT SSDT SSDT SSDT SSDT HPET APIC MCFG SSDT SSDT UEFI NH
 acpi: FADT reset io 0xcf9 <- 0x6, PM1a_CNT io 0x1804, PM1b_CNT none, century register 0x32
 [[32m ok [0m] acpi: 30 tables, ECAM 0xc0000000 buses 0-255, HPET 0xfed00000, S5 7/0
 [[32m ok [0m] timer: TSC 2496.000 MHz (CPUID 0x15), 1000 Hz tick (xAPIC)
-[[32m ok [0m] rtc: 2026-09-30 14:42:17 UTC
+[[32m ok [0m] rtc: 2026-10-01 02:23:44 UTC
 pci: 00:00.0 8086:4621 060000 host bridge
 pci: 00:02.0 8086:46a6 030000 display, bar0 mem64 0x603c000000 16M, bar2 mem64 0x4000000000 256M pf, bar4 io 0x3000 64
 pci: 00:06.0 8086:464d 060400 PCI bridge
@@ -97,45 +97,45 @@ usb: 00:14.0 port 15: 0951:1666 SuperSpeed, disk Kingston DataTraveler 3.0, 14.4
 [[32m ok [0m] usb: 2 controllers, 4 devices
 [[32m ok [0m] keyboard: 2 keyboards
 storage: 00:14.0 port 15: GPT with 2 partitions
-storage: root on 00:14.0 port 15, the disk with the boot partition ECE92360-87A6-49E9-943C-4046DCD70E12
+storage: root on 00:14.0 port 15, the disk with the boot partition 1A986FFA-A474-4233-B2D4-ECB7E558BA2C
 [[32m ok [0m] mount /: ext2 on 00:14.0 port 15 partition 2, 2.0 GiB
 [[32m ok [0m] system: 34 programs, ABI 2
 + ls -l /bin
 total 2467
--rwxr-xr-x 1 root root  90824 Sep 30 13:39 cat
--rwxr-xr-x 1 root root  71096 Sep 30 13:39 clear
--rwxr-xr-x 1 root root  84616 Sep 30 13:39 cp
--rwxr-xr-x 1 root root  80600 Sep 30 13:39 date
--rwxr-xr-x 1 root root  80720 Sep 30 13:39 df
--rwxr-xr-x 1 root root  76168 Sep 30 13:39 dmesg
--rwxr-xr-x 1 root root  81392 Sep 30 13:39 echo
--rwxr-xr-x 1 root root  80336 Sep 30 13:39 free
--rwxr-xr-x 1 root root  90856 Sep 30 13:39 head
--rwxr-xr-x 1 root root 133000 Sep 30 13:39 ls
--rwxr-xr-x 1 root root  80416 Sep 30 13:39 mkdir
--rwxr-xr-x 1 root root  80304 Sep 30 13:39 mv
--rwxr-xr-x 1 root root  76264 Sep 30 13:39 poweroff
--rwxr-xr-x 1 root root  71152 Sep 30 13:39 pwd
--rwxr-xr-x 1 root root  76264 Sep 30 13:39 reboot
--rwxr-xr-x 1 root root 114720 Sep 30 13:39 rm
--rwxr-xr-x 1 root root  76088 Sep 30 13:39 rmdir
--rwxr-xr-x 1 root root 269264 Sep 30 13:39 sh
--rwxr-xr-x 1 root root  84800 Sep 30 13:39 stat
--rwxr-xr-x 1 root root  76088 Sep 30 13:39 sync
--rwxr-xr-x 1 root root  19688 Sep 30 13:39 t-abi
--rwxr-xr-x 1 root root  19688 Sep 30 13:39 t-args
--rwxr-xr-x 1 root root  19296 Sep 30 13:39 t-fault
--rwxr-xr-x 1 root root  50616 Sep 30 13:39 t-files
--rwxr-xr-x 1 root root  43368 Sep 30 13:39 t-mem
--rwxr-xr-x 1 root root  28232 Sep 30 13:39 t-read
--rwxr-xr-x 1 root root  28904 Sep 30 13:39 t-spawn
--rwxr-xr-x 1 root root  19552 Sep 30 13:39 t-spin
--rwxr-xr-x 1 root root  29496 Sep 30 13:39 t-sys
--rwxr-xr-x 1 root root  36904 Sep 30 13:39 t-tee
--rwxr-xr-x 1 root root  90864 Sep 30 13:39 tail
--rwxr-xr-x 1 root root  76088 Sep 30 13:39 touch
--rwxr-xr-x 1 root root  76336 Sep 30 13:39 uname
--rwxr-xr-x 1 root root  95064 Sep 30 13:39 wc
+-rwxr-xr-x 1 root root  90832 Oct  1 02:21 cat
+-rwxr-xr-x 1 root root  71096 Oct  1 02:21 clear
+-rwxr-xr-x 1 root root  84616 Oct  1 02:21 cp
+-rwxr-xr-x 1 root root  80608 Oct  1 02:21 date
+-rwxr-xr-x 1 root root  80728 Oct  1 02:21 df
+-rwxr-xr-x 1 root root  76176 Oct  1 02:21 dmesg
+-rwxr-xr-x 1 root root  81392 Oct  1 02:21 echo
+-rwxr-xr-x 1 root root  80336 Oct  1 02:21 free
+-rwxr-xr-x 1 root root  90864 Oct  1 02:21 head
+-rwxr-xr-x 1 root root 133000 Oct  1 02:21 ls
+-rwxr-xr-x 1 root root  80416 Oct  1 02:21 mkdir
+-rwxr-xr-x 1 root root  80312 Oct  1 02:21 mv
+-rwxr-xr-x 1 root root  76272 Oct  1 02:21 poweroff
+-rwxr-xr-x 1 root root  71160 Oct  1 02:21 pwd
+-rwxr-xr-x 1 root root  76264 Oct  1 02:21 reboot
+-rwxr-xr-x 1 root root 114728 Oct  1 02:21 rm
+-rwxr-xr-x 1 root root  76096 Oct  1 02:21 rmdir
+-rwxr-xr-x 1 root root 269272 Oct  1 02:21 sh
+-rwxr-xr-x 1 root root  84808 Oct  1 02:21 stat
+-rwxr-xr-x 1 root root  76096 Oct  1 02:21 sync
+-rwxr-xr-x 1 root root  19688 Oct  1 02:21 t-abi
+-rwxr-xr-x 1 root root  19688 Oct  1 02:21 t-args
+-rwxr-xr-x 1 root root  19296 Oct  1 02:21 t-fault
+-rwxr-xr-x 1 root root  50616 Oct  1 02:21 t-files
+-rwxr-xr-x 1 root root  43368 Oct  1 02:21 t-mem
+-rwxr-xr-x 1 root root  28232 Oct  1 02:21 t-read
+-rwxr-xr-x 1 root root  28904 Oct  1 02:21 t-spawn
+-rwxr-xr-x 1 root root  19560 Oct  1 02:21 t-spin
+-rwxr-xr-x 1 root root  29496 Oct  1 02:21 t-sys
+-rwxr-xr-x 1 root root  36904 Oct  1 02:21 t-tee
+-rwxr-xr-x 1 root root  90864 Oct  1 02:21 tail
+-rwxr-xr-x 1 root root  76096 Oct  1 02:21 touch
+-rwxr-xr-x 1 root root  76344 Oct  1 02:21 uname
+-rwxr-xr-x 1 root root  95064 Oct  1 02:21 wc
 + t-args a 'b c' ''
 [1] a
 [2] b c
@@ -145,8 +145,8 @@ relay-sh: t-fault: killed (page fault at 0x0, read, ip 0x4001e9)
 + t-spin 1
 4594860032 iterations
 + t-spawn 100
-free frames before: 4071604
-free frames after: 4071604
+free frames before: 4071603
+free frames after: 4071603
 frames lost: 0
 + t-spawn kill
 t-spin: kill
@@ -241,7 +241,7 @@ before the end
  1  3 15 t-tee.end
 + rm t-tee.end
 + t-sys uname
-Relay relay 0.2.0 x86_64
+Relay relay 0.3.0 x86_64
 + t-read apart
 end of input
 + mkdir -p /root/notes/old
@@ -252,8 +252,8 @@ remember me
 and me
 + ls -l /root/notes
 total 8
--rw-r--r-- 1 root root   19 Sep 30 14:43 a
-drwxr-xr-x 2 root root 4096 Sep 30 14:43 old
+-rw-r--r-- 1 root root   19 Oct  1 02:24 a
+drwxr-xr-x 2 root root 4096 Oct  1 02:24 old
 + cp /root/notes/a /root/notes/b
 + mv /root/notes/b /root/notes/old/c
 + ls /root/notes /root/notes/old
@@ -273,9 +273,9 @@ a
   Size: 0         	Blocks: 0          IO Block: 4096   regular empty file
 Inode: 8195        Links: 1
 Access: (0644/-rw-r--r--)  Uid: (    0/    root)   Gid: (    0/    root)
-Access: 2026-09-30 14:43:19.000000000 +0000
-Modify: 2026-09-30 14:43:19.000000000 +0000
-Change: 2026-09-30 14:43:19.000000000 +0000
+Access: 2026-10-01 02:24:15.000000000 +0000
+Modify: 2026-10-01 02:24:15.000000000 +0000
+Change: 2026-10-01 02:24:15.000000000 +0000
  Birth: -
 + head -n 1 /root/notes/a
 remember me

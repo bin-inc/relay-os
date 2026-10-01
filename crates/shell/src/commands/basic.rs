@@ -284,8 +284,9 @@ mod tests {
     fn uname_prints_the_system() {
         let mut h = Harness::new();
         assert_eq!(h.run("uname"), (0, "Relay\n".into()));
-        // Milestone 1 is version 0.2.0 (spec §15 item 12), from Cargo.toml.
-        assert_eq!(h.run("uname -a"), (0, "Relay relay 0.2.0 x86_64\n".into()));
+        // Milestone 2 is version 0.3.0 (user-space gate §16 item 7), from
+        // Cargo.toml.
+        assert_eq!(h.run("uname -a"), (0, "Relay relay 0.3.0 x86_64\n".into()));
         assert_eq!(
             h.run("uname -r"),
             (1, "uname: invalid option -- 'r'\n".into())

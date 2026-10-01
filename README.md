@@ -17,6 +17,9 @@ boot and again whenever it ends, and a machine that cannot run its shell
 (no `system.img`, or a shell that keeps ending) shows an error screen and
 restarts at a key. The kernel holds no shell of its own any more.
 
+Milestone 1 is version 0.2.0 and milestone 2 version 0.3.0; milestone 3
+(pipes, background jobs, `ps` and `kill`, script variables) comes next.
+
 Design: `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`
 (milestone 1) and `docs/superpowers/specs/2026-09-29-user-space-gate-design.md`
 (milestones 2 and 3: the shell and its commands as programs in ring 3).
