@@ -27,7 +27,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use relay_abi::{MemInfo, Time, WaitStatus};
+use relay_abi::{MemInfo, ProcInfo, Time, WaitStatus};
 use spin::Mutex;
 use table::{Blocked, Group, Table, Want};
 use vfs::{Cwd, Errno, FileType, Vfs};
@@ -787,6 +787,12 @@ impl Caller for Current {
 
     fn pid(&self) -> u32 {
         PROCS.lock().current()
+    }
+
+    /// `PROCS` before `MEMORY`, as everywhere.
+    fn processes(&mut self) -> Vec<ProcInfo> {
+        let t = PROCS.lock();
+        mm::with_user_memory(|mem, _| t.list(|p| p.res.space.as_ref().map_or(0, |s| s.frames(mem))))
     }
 
     fn memory(&self) -> MemInfo {

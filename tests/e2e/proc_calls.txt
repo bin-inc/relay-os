@@ -1,0 +1,15 @@
+# The proc_list call from ring 3 (user-space gate §9.3; milestone 3, plan
+# 2): t-proc's kinds. Every process is listed by pid with its parent, its
+# group, what it waits for and whether it holds memory; a buffer too
+# short gets what fits and the count of all; a name is cut at 64 bytes.
+timeout 30
+expect root@relay:~# $
+send t-proc list
+expect \ninit: ppid 0, group 1\ninit: init, wait, no frames\nparent: /bin/sh, wait, frames\nme: /bin/t-proc, run, frames\n
+expect \Asleeping child: /bin/sleep, sleep, frames\nended child: /bin/true, zombie, no frames\nchild on a pipe: /bin/cat, pipe, frames\nchild reading: /bin/cat, read, frames\nchildren in my group: true\nby pid: true\n
+# The children it killed, in the order they ran next.
+expect \A(pid \d+ \(/bin/(sleep|cat)\): killed: kill\n){3}root@relay:~# $
+send t-proc short
+expect \none entry: pid 1, of more than one: true\nno entry: the same count: true\n
+send t-proc long
+expect \na name of 90 bytes: 64 bytes, its start: true\n

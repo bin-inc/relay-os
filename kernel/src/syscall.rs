@@ -3,8 +3,7 @@
 //! and it answers with the result register's value or with the program's
 //! exit. It checks and copies what the program passes (`UserSlice`,
 //! `UserStr`) and leaves the rest to the `Caller`, the kernel's side of
-//! the process. The file calls are in `files`, the pipe's in `pipes`;
-//! `proc_list` is `ENOSYS` until milestone 3's jobs.
+//! the process. The file calls are in `files`, the pipe's in `pipes`.
 
 use crate::exec::ARGS_MAX;
 use crate::fd::{FdTable, File};
@@ -15,7 +14,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use relay_abi::info::INFO_MEMORY;
 use relay_abi::spawn::{FOREGROUND, NEW_GROUP, SPAWN_FDS, WAIT_ANY, WAIT_NOHANG};
-use relay_abi::{Call, FdMap, MemInfo, SpawnArgs, Time, WaitStatus, encode};
+use relay_abi::{Call, FdMap, MemInfo, ProcInfo, SpawnArgs, Time, WaitStatus, encode};
 use vfs::{Errno, Vfs};
 
 mod files;
@@ -114,6 +113,8 @@ pub trait Caller {
     /// Kills a process, or a group for a negative `target`.
     fn kill(&mut self, target: i64) -> Result<(), Errno>;
     fn pid(&self) -> u32;
+    /// Every process, by pid, as `ps` shows it (spec §9.3).
+    fn processes(&mut self) -> Vec<ProcInfo>;
     /// The memory figures of `free`.
     fn memory(&self) -> MemInfo;
     /// The wall clock and the uptime.
@@ -139,6 +140,7 @@ pub fn dispatch(caller: &mut impl Caller, number: u64, args: [u64; 6]) -> Outcom
         Some(Call::Wait) => wait(caller, args[0] as i64, args[1], args[2]),
         Some(Call::Kill) => caller.kill(args[0] as i64).map(|()| 0),
         Some(Call::Getpid) => Ok(u64::from(caller.pid())),
+        Some(Call::ProcList) => proc_list(caller, args[0], args[1]),
         Some(Call::MemMap) => mem_map(caller, args[0]),
         Some(Call::MemUnmap) => mem_unmap(caller, args[0], args[1]),
         Some(Call::Open) => files::open(caller, args[0], args[1], args[2]),
@@ -272,6 +274,25 @@ fn wait(caller: &mut impl Caller, pid: i64, flags: u64, addr: u64) -> Result<u64
         caller.write(slice, 0, &bytes)?;
     }
     Ok(u64::from(pid))
+}
+
+/// `proc_list(buffer, length)` (spec §7.3, §9.3): a `ProcInfo` for each
+/// process, by pid, as many as the buffer holds; how many processes there
+/// are, so a caller whose buffer was too short knows. Nothing is written
+/// unless all that fits can be (`EFAULT`).
+fn proc_list(caller: &mut impl Caller, addr: u64, len: u64) -> Result<u64, Errno> {
+    let procs = caller.processes();
+    let size = ProcInfo::SIZE as u64;
+    let fit = (len / size).min(procs.len() as u64);
+    if fit > 0 {
+        let slice = UserSlice::new(addr, fit * size)?;
+        let bytes: Vec<u8> = procs[..fit as usize]
+            .iter()
+            .flat_map(|p| p.to_bytes())
+            .collect();
+        caller.write(&slice, 0, &bytes)?;
+    }
+    Ok(procs.len() as u64)
 }
 
 /// The file open as `fd`.
@@ -723,6 +744,66 @@ mod tests {
     }
 
     #[test]
+    fn proc_list_gives_what_fits_and_how_many_there_are() {
+        use relay_abi::proc::{STATE_RUN, STATE_SLEEP, STATE_WAIT};
+        let mut f = fake();
+        f.procs = alloc::vec![
+            ProcInfo::new(1, 0, 1, STATE_WAIT, 0, 5, b"init"),
+            ProcInfo::new(2, 1, 2, STATE_WAIT, 300, 70, b"/bin/sh"),
+            ProcInfo::new(9, 2, 9, STATE_RUN, 41, 2, b"/bin/ps"),
+            ProcInfo::new(12, 2, 12, STATE_SLEEP, 40, 0, b"/bin/sleep"),
+        ];
+        let size = ProcInfo::SIZE as u64;
+        let all: Vec<u8> = f.procs.iter().flat_map(|p| p.to_bytes()).collect();
+        assert_eq!(call(&mut f, Call::ProcList, [W, 4 * size, 0]), Ok(4));
+        assert_eq!(get(&mut f, W, all.len()), all);
+        // A buffer too short gets what fits, whole entries only, and the
+        // count of all.
+        put(&mut f, W, &[0xAA; 4 * 96]);
+        assert_eq!(call(&mut f, Call::ProcList, [W, 3 * size - 1, 0]), Ok(4));
+        assert_eq!(get(&mut f, W, 2 * 96), all[..2 * 96]);
+        assert_eq!(
+            get(&mut f, W + 2 * size, 96),
+            [0xAA; 96],
+            "nothing of the third"
+        );
+        assert_eq!(
+            call(&mut f, Call::ProcList, [0, 0, 0]),
+            Ok(4),
+            "just the count"
+        );
+        assert_eq!(call(&mut f, Call::ProcList, [0, size - 1, 0]), Ok(4));
+        // More room than processes takes only what they need.
+        assert_eq!(call(&mut f, Call::ProcList, [W, 40 * size, 0]), Ok(4));
+    }
+
+    #[test]
+    fn proc_list_writes_nothing_into_memory_that_is_not_all_the_program_s() {
+        let mut f = fake();
+        f.procs = (1..=3)
+            .map(|pid| ProcInfo::new(pid, 0, pid, 1, 0, 0, b"p"))
+            .collect();
+        let size = ProcInfo::SIZE as u64;
+        assert_eq!(
+            call(&mut f, Call::ProcList, [U, size, 0]),
+            Err(errno::EFAULT),
+            "read-only"
+        );
+        let end = W + PAGE - size - 10;
+        put(&mut f, end, &[0xAA; 96]);
+        assert_eq!(
+            call(&mut f, Call::ProcList, [end, 2 * size, 0]),
+            Err(errno::EFAULT),
+            "the second runs past the page"
+        );
+        assert_eq!(get(&mut f, end, 96), [0xAA; 96], "not even the first");
+        assert_eq!(
+            call(&mut f, Call::ProcList, [0xFFFF_8000_0000_0000, size, 0]),
+            Err(errno::EFAULT)
+        );
+    }
+
+    #[test]
     fn a_bad_status_pointer_loses_no_child() {
         let mut f = fake();
         f.ended = vec![(7, WaitStatus::exited(3))];
@@ -1002,6 +1083,7 @@ mod tests {
             Call::Wait,
             Call::Kill,
             Call::Getpid,
+            Call::ProcList,
             Call::MemMap,
             Call::MemUnmap,
             Call::Open,

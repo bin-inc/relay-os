@@ -74,6 +74,8 @@ pub struct Fake {
     pub no_pipe_memory: bool,
     pub waits: Vec<u64>,
     pub woken: Vec<u64>,
+    /// What `proc_list` reports.
+    pub procs: Vec<ProcInfo>,
 }
 
 /// A pipe's ring on the heap.
@@ -212,6 +214,9 @@ impl Caller for Fake {
     fn pid(&self) -> u32 {
         42
     }
+    fn processes(&mut self) -> Vec<ProcInfo> {
+        self.procs.clone()
+    }
     fn memory(&self) -> MemInfo {
         MEM
     }
@@ -258,6 +263,7 @@ pub fn fake() -> Fake {
         no_pipe_memory: false,
         waits: Vec::new(),
         woken: Vec::new(),
+        procs: Vec::new(),
     }
 }
 

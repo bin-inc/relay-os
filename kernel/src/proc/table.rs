@@ -23,7 +23,10 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use relay_abi::WaitStatus;
+use relay_abi::proc::{
+    STATE_PIPE, STATE_READ, STATE_READY, STATE_RUN, STATE_SLEEP, STATE_WAIT, STATE_ZOMBIE,
+};
+use relay_abi::{ProcInfo, WaitStatus};
 use vfs::Errno;
 
 /// The most processes that exist at once (spec §5.4).
@@ -65,6 +68,21 @@ pub enum State {
     Running,
     Blocked(Blocked),
     Zombie(WaitStatus),
+}
+
+impl State {
+    /// Its number in `ProcInfo::state` (spec §9.3): what `ps` says.
+    pub fn number(self) -> u32 {
+        match self {
+            State::Running => STATE_RUN,
+            State::Ready => STATE_READY,
+            State::Blocked(Blocked::Wait) => STATE_WAIT,
+            State::Blocked(Blocked::Console) => STATE_READ,
+            State::Blocked(Blocked::Sleep(_)) => STATE_SLEEP,
+            State::Blocked(Blocked::Pipe(_)) => STATE_PIPE,
+            State::Zombie(_) => STATE_ZOMBIE,
+        }
+    }
 }
 
 pub struct Process<R> {
@@ -188,6 +206,27 @@ impl<R> Table<R> {
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Process<R>> {
         self.procs.iter_mut()
+    }
+
+    /// Every process, by pid (the table keeps them in the order they
+    /// came, and pids only count up), as `proc_list` reports it (spec
+    /// §9.3), with the frames `frames` says it holds.
+    pub fn list(&self, mut frames: impl FnMut(&Process<R>) -> u64) -> Vec<ProcInfo> {
+        self.procs
+            .iter()
+            .map(|p| {
+                let state = p.state.number();
+                ProcInfo::new(
+                    p.pid,
+                    p.ppid,
+                    p.pgid,
+                    state,
+                    frames(p),
+                    p.ticks,
+                    p.name.as_bytes(),
+                )
+            })
+            .collect()
     }
 
     /// Whether a process of group `pgid` still runs (or waits): the console
@@ -816,6 +855,52 @@ mod tests {
         assert_eq!(t.get(init).unwrap().killed, None, "not process 1");
         assert_eq!(t.get(zombie).unwrap().killed, None, "it has ended already");
         assert_eq!(state(&t, zombie), State::Zombie(WaitStatus::exited(0)));
+    }
+
+    #[test]
+    fn the_list_has_every_process_by_pid_with_its_state() {
+        let mut t = table();
+        let init = add(&mut t, 0, true);
+        let a = t
+            .insert(init, Group::New, String::from("/bin/a"), ())
+            .unwrap();
+        let b = add(&mut t, a, false);
+        let c = add(&mut t, a, true);
+        let d = add(&mut t, a, true);
+        let e = add(&mut t, init, true);
+        assert_eq!(t.schedule(), init);
+        t.block(Blocked::Wait);
+        assert_eq!(t.schedule(), a);
+        t.tick();
+        t.tick();
+        t.block(Blocked::Console);
+        assert_eq!(t.schedule(), b);
+        t.block(Blocked::Sleep(99));
+        assert_eq!(t.schedule(), c);
+        t.block(Blocked::Pipe(7));
+        assert_eq!(t.schedule(), d);
+        t.end(d, WaitStatus::exited(0));
+        assert_eq!(t.schedule(), e);
+        let list = t.list(|p| u64::from(p.pid) * 10);
+        let got: Vec<(u32, u32, u32, u32, u64, u64)> = list
+            .iter()
+            .map(|p| (p.pid, p.ppid, p.pgid, p.state, p.frames, p.ticks))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (init, 0, init, STATE_WAIT, 10, 0),
+                (a, init, a, STATE_READ, 20, 2),
+                (b, a, a, STATE_SLEEP, 30, 0),
+                (c, a, c, STATE_PIPE, 40, 0),
+                (d, a, d, STATE_ZOMBIE, 50, 0),
+                (e, init, e, STATE_RUN, 60, 0),
+            ]
+        );
+        assert_eq!(list[1].name(), b"/bin/a");
+        t.block(Blocked::Wait);
+        t.wake(e);
+        assert_eq!(t.list(|_| 0)[5].state, STATE_READY);
     }
 
     #[test]
