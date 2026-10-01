@@ -1,0 +1,65 @@
++ rm -f /root/check5-a.sh /root/check5-a.log /root/check5-b.sh /root/check5-b.log
++ seq 1000000 | wc -c
+6888896
++ seq 1000000 | head -n 1
+1
++ seq 1000 | grep 7 | wc -l
+271
++ seq 5 | grep -c 9
+0
++ echo $?
+1
++ echo 'echo piped $#' | sh
+piped 0
++ t-spin &
++ jobs
+[1]+  Running                 t-spin &
++ ps | grep -c t-spin
+1
++ kill %1
++ wait %1
++ echo $?
+137
++ jobs
++ ps | grep -c t-spin
+0
++ echo 'echo "$0: $# arguments"' > /root/check5-a.sh
++ echo 't-args "$@"' >> /root/check5-a.sh
++ echo 'sh /root/check5-b.sh "$@" last' >> /root/check5-a.sh
++ echo 'echo "b: $#, [$1] [$2] [$3] [$4]"' > /root/check5-b.sh
++ echo 'cd "$9"' >> /root/check5-b.sh
++ echo 'echo "cd: $?"' >> /root/check5-b.sh
++ echo 'pwd' >> /root/check5-b.sh
++ sh /root/check5-a.sh one '' 'two  words'
++ echo "$0: $# arguments"
+/root/check5-a.sh: 3 arguments
++ t-args "$@"
+[1] one
+[2] 
+[3] two  words
++ sh /root/check5-b.sh "$@" last
++ echo "b: $#, [$1] [$2] [$3] [$4]"
+b: 4, [one] [] [two  words] [last]
++ cd "$9"
++ echo "cd: $?"
+cd: 0
++ pwd
+/root
++ cat /root/check5-b.log
++ echo "b: $#, [$1] [$2] [$3] [$4]"
+b: 4, [one] [] [two  words] [last]
++ cd "$9"
++ echo "cd: $?"
+cd: 0
++ pwd
+/root
++ A='a  b'
++ t-args $A "$A" '$A' ${A}c $E "$E"
+[1] a  b
+[2] a  b
+[3] $A
+[4] a  bc
+[5] 
++ false
++ echo $?
+1

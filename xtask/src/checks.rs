@@ -525,28 +525,47 @@ free
     fn the_check_scripts_pass_on_both_machines() {
         let parts = [
             (
+                "check3-a.sh",
                 include_str!("../../rootfs/root/checks/check3-a.sh"),
                 include_str!("../fixtures/checks/check3-a.qemu.log"),
                 include_str!("../fixtures/checks/check3-a.nuc.log"),
             ),
             (
+                "check3-b.sh",
                 include_str!("../../rootfs/root/checks/check3-b.sh"),
                 include_str!("../fixtures/checks/check3-b.qemu.log"),
                 include_str!("../fixtures/checks/check3-b.nuc.log"),
             ),
             (
+                "check4.sh",
                 include_str!("../../rootfs/root/checks/check4.sh"),
                 include_str!("../fixtures/checks/check4.qemu.log"),
                 include_str!("../fixtures/checks/check4.nuc.log"),
             ),
+            (
+                "check5.sh",
+                include_str!("../../rootfs/root/checks/check5.sh"),
+                include_str!("../fixtures/checks/check5.qemu.log"),
+                include_str!("../fixtures/checks/check5.nuc.log"),
+            ),
         ];
-        for (i, (script, qemu, nuc)) in parts.iter().enumerate() {
+        // Every check script on the stick has its two transcripts here.
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../rootfs/root/checks");
+        let mut scripts: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        scripts.sort();
+        let named: Vec<&str> = parts.iter().map(|p| p.0).collect();
+        assert_eq!(scripts, named);
+        for (i, (_, script, qemu, nuc)) in parts.iter().enumerate() {
             for (machine, log) in [(Machine::Qemu, qemu), (Machine::Nuc, nuc)] {
                 let r = check(&parse(script, machine).unwrap(), log);
                 assert!(r.ok(), "part {i} on {machine:?}: {:?}", r.failures);
             }
             // The NUC's own lines are checked there: QEMU's transcript is
-            // not the NUC's (check 4 has none: it runs programs only).
+            // not the NUC's (checks 4 and 5 have none: they run programs
+            // only).
             if script.contains("#nuc>") {
                 let r = check(&parse(script, Machine::Nuc).unwrap(), qemu);
                 assert!(!r.ok(), "part {i}");
