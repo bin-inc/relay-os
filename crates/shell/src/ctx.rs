@@ -4,7 +4,8 @@
 //! for errors; plus the helpers every command shares for options and
 //! GNU-style messages.
 
-use crate::io::{Console, Stdin, Stdout, System};
+use crate::io::{Console, Programs, Stdin, Stdout, System};
+use crate::jobs::Jobs;
 use crate::transcript::Transcript;
 use alloc::format;
 use alloc::string::String;
@@ -41,6 +42,24 @@ pub struct Ctx<'a> {
     /// Set by `exit`: in a script the shell runs itself, only the script
     /// stops.
     pub(crate) exited: bool,
+    /// The shell's jobs, for its own commands `jobs`, `wait` and `kill`.
+    pub(crate) control: Option<JobControl<'a>>,
+}
+
+/// What the shell's job commands work with: its jobs, and its programs
+/// (none in the in-process runner, which starts no job).
+pub(crate) struct JobControl<'a> {
+    pub jobs: &'a mut Jobs,
+    pub programs: Option<&'a mut dyn Programs>,
+}
+
+impl JobControl<'_> {
+    /// Collects what has ended of the jobs.
+    pub fn collect(&mut self) {
+        if let Some(programs) = self.programs.as_deref_mut() {
+            self.jobs.collect(programs);
+        }
+    }
 }
 
 enum Output<'a> {
@@ -121,6 +140,7 @@ impl<'a> Ctx<'a> {
             transcript: None,
             status: 0,
             exited: false,
+            control: None,
         }
     }
 

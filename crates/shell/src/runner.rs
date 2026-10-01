@@ -8,7 +8,7 @@
 //! (`/bin/sh`).
 
 use crate::commands::{self, Builtin, Script};
-use crate::ctx::Ctx;
+use crate::ctx::{Ctx, JobControl};
 use crate::io::{Bytes, Console, Group, Programs, Stdin, Stdout, System};
 use crate::killed;
 use crate::parser::{Command, Redirect};
@@ -133,7 +133,7 @@ impl Runner for InProcess {
             Err(ran) => return ran,
         };
         match commands::find(name) {
-            Some(command) => run_function(parts, command, args, file),
+            Some(command) => run_function(parts, command, args, file, None),
             None => not_found(name),
         }
     }
@@ -467,13 +467,15 @@ fn open_redirect(vfs: &mut dyn Vfs, r: &Redirect) -> Result<(Node, u64), Errno> 
 
 /// Runs a command function with its standard output going to `file`, if
 /// any.
-pub(crate) fn run_function(
-    parts: Parts<'_>,
+pub(crate) fn run_function<'s>(
+    parts: Parts<'s>,
     command: &Builtin,
     args: &[String],
     file: Option<(Node, u64)>,
+    control: Option<JobControl<'s>>,
 ) -> Ran {
     let mut ctx = Ctx::new(parts.vfs, parts.system, parts.console, file);
+    ctx.control = control;
     if let Some(input) = parts.input {
         ctx.set_input(input);
     }

@@ -6,6 +6,7 @@ use alloc::string::String;
 
 mod basic;
 mod change;
+mod control;
 mod grep;
 mod ls;
 mod script;
@@ -16,6 +17,7 @@ mod text;
 
 pub use basic::{clear, echo, r#false, pwd, r#true, uname};
 pub use change::{cp, mkdir, mv, rm, rmdir, touch};
+pub use control::jobs;
 pub use grep::grep;
 pub use ls::ls;
 pub(crate) use script::Script;
@@ -108,6 +110,11 @@ pub const COMMANDS: &[Builtin] = &[
         name: "help",
         help: "list the commands",
         run: basic::help,
+    },
+    Builtin {
+        name: "jobs",
+        help: "list the background jobs",
+        run: control::jobs,
     },
     Builtin {
         name: "ls",
@@ -203,7 +210,7 @@ pub const COMMANDS: &[Builtin] = &[
 
 /// The shell's own commands (user-space gate §8.3); every other one is a
 /// program of its own in `/bin`.
-pub const BUILTINS: &[&str] = &["cd", "exit", "help"];
+pub const BUILTINS: &[&str] = &["cd", "exit", "help", "jobs"];
 
 pub fn find(name: &str) -> Option<&'static Builtin> {
     COMMANDS.iter().find(|b| b.name == name)
@@ -233,13 +240,13 @@ mod tests {
     }
 
     #[test]
-    fn the_shell_s_own_commands_are_cd_exit_and_help() {
+    fn the_shell_s_own_commands_are_cd_exit_help_and_the_job_commands() {
         let own: alloc::vec::Vec<_> = COMMANDS
             .iter()
             .filter(|b| builtin(b.name).is_some())
             .map(|b| b.name)
             .collect();
-        assert_eq!(own, ["cd", "exit", "help"]);
+        assert_eq!(own, ["cd", "exit", "help", "jobs"]);
         assert!(builtin("cat").is_none() && builtin("sh").is_none());
     }
 }

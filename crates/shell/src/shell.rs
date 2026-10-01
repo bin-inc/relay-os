@@ -3,7 +3,7 @@
 //! (spec §7.3, §8.3; user-space gate §8.2).
 
 use crate::commands::{self, SCRIPT_MAX, Script};
-use crate::ctx::{Ctx, quote_if_needed};
+use crate::ctx::{Ctx, JobControl, quote_if_needed};
 use crate::editor::{Feed, LineEditor};
 use crate::io::{Console, Programs, Stdin, Stdout, System};
 use crate::jobs::Jobs;
@@ -210,8 +210,12 @@ impl<'a> Shell<'a> {
         let ran = match cmd.words.split_first() {
             Some((name, args)) => match commands::builtin(name) {
                 Some(builtin) => {
+                    let control = JobControl {
+                        jobs: &mut self.jobs,
+                        programs: self.runner.programs(),
+                    };
                     match runner::redirect_to(&mut *parts.vfs, cmd.redirect.as_ref()) {
-                        Ok(file) => runner::run_function(parts, builtin, args, file),
+                        Ok(file) => runner::run_function(parts, builtin, args, file, Some(control)),
                         Err(ran) => ran,
                     }
                 }
@@ -294,20 +298,10 @@ impl<'a> Shell<'a> {
         self.finish(started.ran.status, started.ran.message)
     }
 
-    /// Collects the background jobs' processes that have ended, at most
-    /// as many as can exist (`relay_abi::proc::PROC_MAX`).
+    /// Collects the background jobs' processes that have ended.
     fn collect_jobs(&mut self) {
-        if self.jobs.is_empty() {
-            return;
-        }
-        let Some(programs) = self.runner.programs() else {
-            return;
-        };
-        for _ in 0..relay_abi::proc::PROC_MAX {
-            let Some((pid, status)) = programs.collect() else {
-                break;
-            };
-            self.jobs.ended(pid, status);
+        if let Some(programs) = self.runner.programs() {
+            self.jobs.collect(programs);
         }
     }
 

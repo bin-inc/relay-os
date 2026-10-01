@@ -10,6 +10,7 @@
 //! - A line is bash's: `[1]+  Done                    sleep 5`, the state
 //!   padded to 24 columns, a running job's text followed by ` &`.
 
+use crate::io::Programs;
 use crate::killed;
 use alloc::format;
 use alloc::string::String;
@@ -68,6 +69,20 @@ impl Jobs {
         number
     }
 
+    /// Collects what has ended of the jobs' processes from `programs`, at
+    /// most as many as can exist (`relay_abi::proc::PROC_MAX`).
+    pub fn collect(&mut self, programs: &mut dyn Programs) {
+        if self.jobs.is_empty() {
+            return;
+        }
+        for _ in 0..relay_abi::proc::PROC_MAX {
+            let Some((pid, status)) = programs.collect() else {
+                break;
+            };
+            self.ended(pid, status);
+        }
+    }
+
     /// Records how `pid` ended; whether it was a job's.
     pub fn ended(&mut self, pid: u32, status: WaitStatus) -> bool {
         for job in &mut self.jobs {
@@ -123,11 +138,16 @@ impl Jobs {
         job.last().map(|w| status_of(&w))
     }
 
-    /// The lines `jobs` prints, by number; the jobs that have ended are
-    /// reported there, and leave the table.
-    pub fn list(&mut self) -> Vec<String> {
-        let lines = (0..self.jobs.len()).map(|i| self.line(i)).collect();
-        self.jobs.retain(|j| !j.finished());
+    /// The lines `jobs` prints, by number, of every job or of those named;
+    /// the jobs listed that have ended are reported there, and leave the
+    /// table.
+    pub fn list(&mut self, named: Option<&[u32]>) -> Vec<String> {
+        let listed = |j: &Job| named.is_none_or(|n| n.contains(&j.number));
+        let lines = (0..self.jobs.len())
+            .filter(|&i| listed(&self.jobs[i]))
+            .map(|i| self.line(i))
+            .collect();
+        self.jobs.retain(|j| !(listed(j) && j.finished()));
         lines
     }
 
@@ -199,6 +219,15 @@ fn signal_words(status: i32) -> &'static str {
     }
 }
 
+/// The job number `n` names (`1`, `27`), as `%n` does: decimal digits only
+/// (no job is 0).
+pub fn number(n: &str) -> Option<u32> {
+    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    n.parse().ok()
+}
+
 /// The status bash gives for a process that ended so.
 pub fn status_of(w: &WaitStatus) -> i32 {
     if w.how == EXITED {
@@ -248,14 +277,14 @@ mod tests {
         j.add(23, &[23], "true");
         j.ended(23, WaitStatus::exited(0));
         assert_eq!(
-            j.list(),
+            j.list(None),
             [
                 "[1]   Running                 sleep 0.5 &\n",
                 "[2]-  Running                 sleep 30 | cat &\n",
                 "[3]+  Done                    true\n",
             ]
         );
-        assert_eq!(j.list().len(), 2, "a finished job is listed once");
+        assert_eq!(j.list(None).len(), 2, "a finished job is listed once");
         j.ended(20, WaitStatus::exited(0));
         assert_eq!(j.report(), ["[1]-  Done                    sleep 0.5\n"]);
         j.add(24, &[24], "false");
