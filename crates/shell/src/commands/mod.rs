@@ -14,7 +14,7 @@ mod stat;
 mod system;
 mod text;
 
-pub use basic::{clear, echo, pwd, uname};
+pub use basic::{clear, echo, r#false, pwd, r#true, uname};
 pub use change::{cp, mkdir, mv, rm, rmdir, touch};
 pub use grep::grep;
 pub use ls::ls;
@@ -22,7 +22,7 @@ pub(crate) use script::Script;
 pub use script::{SCRIPT_MAX, transcript_name};
 pub use seq::seq;
 pub use stat::stat;
-pub use system::{date, df, dmesg, free, poweroff, reboot, sync};
+pub use system::{date, df, dmesg, free, poweroff, reboot, sleep, sync};
 pub use text::{cat, head, tail, wc};
 
 /// A command function: runs the command with its arguments (without the
@@ -83,6 +83,11 @@ pub const COMMANDS: &[Builtin] = &[
         name: "exit",
         help: "leave the shell",
         run: basic::exit,
+    },
+    Builtin {
+        name: "false",
+        help: "do nothing, unsuccessfully",
+        run: basic::r#false,
     },
     Builtin {
         name: "free",
@@ -155,6 +160,11 @@ pub const COMMANDS: &[Builtin] = &[
         run: script::sh,
     },
     Builtin {
+        name: "sleep",
+        help: "wait for a number of seconds",
+        run: system::sleep,
+    },
+    Builtin {
         name: "stat",
         help: "show everything about a file",
         run: stat::stat,
@@ -173,6 +183,11 @@ pub const COMMANDS: &[Builtin] = &[
         name: "touch",
         help: "create files or update their times",
         run: change::touch,
+    },
+    Builtin {
+        name: "true",
+        help: "do nothing, successfully",
+        run: basic::r#true,
     },
     Builtin {
         name: "uname",

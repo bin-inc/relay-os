@@ -107,6 +107,9 @@ impl System for HostSystem {
     fn kernel_log(&self) -> Vec<u8> {
         self.0.contents()
     }
+    fn sleep(&mut self, ms: u64) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
     fn reboot(&mut self, _force: bool) -> Result<(), vfs::Errno> {
         Ok(())
     }

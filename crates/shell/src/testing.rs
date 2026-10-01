@@ -86,6 +86,8 @@ pub struct TestSystem {
     pub power_error: Option<Errno>,
     /// Whether each `reboot` and `poweroff` was forced.
     pub forced: Vec<bool>,
+    /// Every `sleep`, in milliseconds.
+    pub slept: Vec<u64>,
 }
 
 impl TestSystem {
@@ -108,6 +110,7 @@ impl TestSystem {
             poweroffs: 0,
             power_error: None,
             forced: Vec::new(),
+            slept: Vec::new(),
         }
     }
 }
@@ -121,6 +124,9 @@ impl System for TestSystem {
     }
     fn kernel_log(&self) -> Vec<u8> {
         self.log.clone()
+    }
+    fn sleep(&mut self, ms: u64) {
+        self.slept.push(ms);
     }
     fn reboot(&mut self, force: bool) -> Result<(), Errno> {
         self.power(force)?;

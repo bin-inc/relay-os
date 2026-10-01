@@ -114,6 +114,10 @@ impl System for SysSystem {
         buf
     }
 
+    fn sleep(&mut self, ms: u64) {
+        sys::sleep(ms);
+    }
+
     /// `power` returns only when the machine stays up.
     fn reboot(&mut self, force: bool) -> Result<(), Errno> {
         Err(Errno::from_number(sys::power(

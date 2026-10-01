@@ -20,6 +20,56 @@ fn no_operands(
     }
 }
 
+/// `sleep NUMBER[SUFFIX]...`: waits for the sum of the times given, each in
+/// seconds, or with GNU's suffixes `s`, `m`, `h` or `d`; a number may have
+/// a fraction, which counts to the millisecond.
+pub fn sleep(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
+    let opts = match getopt(args, "", "") {
+        Ok(o) => o,
+        Err(e) => return ctx.fail("sleep", format_args!("{e}")),
+    };
+    if opts.operands.is_empty() {
+        return ctx.fail("sleep", format_args!("missing operand"));
+    }
+    let mut total: u64 = 0;
+    for op in &opts.operands {
+        match millis(op) {
+            Some(ms) => total = total.saturating_add(ms),
+            None => return ctx.fail("sleep", format_args!("invalid time interval {}", quote(op))),
+        }
+    }
+    ctx.system.sleep(total);
+    0
+}
+
+/// `NUMBER[SUFFIX]` in milliseconds, at most `u64::MAX`.
+fn millis(s: &str) -> Option<u64> {
+    let (number, unit): (&str, u128) = match s.as_bytes().last()? {
+        b's' => (&s[..s.len() - 1], 1000),
+        b'm' => (&s[..s.len() - 1], 60_000),
+        b'h' => (&s[..s.len() - 1], 3_600_000),
+        b'd' => (&s[..s.len() - 1], 86_400_000),
+        _ => (s, 1000),
+    };
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+    let digits = |t: &str| t.bytes().all(|b| b.is_ascii_digit());
+    if (whole.is_empty() && fraction.is_empty()) || !digits(whole) || !digits(fraction) {
+        return None;
+    }
+    // Beyond 20 digits a number is more than u64 milliseconds anyway, and
+    // beyond 9 a fraction is less than one.
+    let value = |t: &str| {
+        t.bytes().fold(0u128, |n, b| {
+            n.saturating_mul(10).saturating_add(u128::from(b - b'0'))
+        })
+    };
+    let fraction = &fraction[..fraction.len().min(9)];
+    let ms = value(&whole[..whole.len().min(30)])
+        .saturating_mul(unit)
+        .saturating_add(value(fraction) * unit / 10u128.pow(fraction.len() as u32));
+    Some(u64::try_from(ms).unwrap_or(u64::MAX))
+}
+
 /// `date`: the wall clock in UTC. `-u` is accepted (it is UTC anyway).
 pub fn date(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     if let Err(status) = no_operands(ctx, "date", args, "u") {
@@ -197,6 +247,45 @@ mod tests {
     use crate::Shell;
     use crate::testing::Harness;
     use vfs::Errno;
+
+    #[test]
+    fn sleep_waits_for_the_sum_of_its_times_to_the_millisecond() {
+        let mut h = Harness::new();
+        for (line, ms) in [
+            ("sleep 2", 2000),
+            ("sleep 1.5 2m", 121_500),
+            ("sleep .25", 250),
+            ("sleep 5.", 5000),
+            ("sleep 0.0004", 0),
+            ("sleep 1h 1d 0s", 90_000_000),
+            ("sleep 0.123456789987", 123),
+            ("sleep 0.0001m 0.00001h", 6 + 36),
+            ("sleep 99999999999999999999 1", u64::MAX),
+            ("sleep -- 1", 1000),
+        ] {
+            h.system.slept.clear();
+            assert_eq!(h.run(line), (0, "".into()), "{line}");
+            assert_eq!(h.system.slept, [ms], "{line}");
+        }
+    }
+
+    #[test]
+    fn what_sleep_refuses() {
+        let mut h = Harness::new();
+        for (line, said) in [
+            ("sleep", "sleep: missing operand\n"),
+            ("sleep x", "sleep: invalid time interval 'x'\n"),
+            ("sleep 1x", "sleep: invalid time interval '1x'\n"),
+            ("sleep .", "sleep: invalid time interval '.'\n"),
+            ("sleep 1.2.3", "sleep: invalid time interval '1.2.3'\n"),
+            ("sleep s", "sleep: invalid time interval 's'\n"),
+            ("sleep 1 y", "sleep: invalid time interval 'y'\n"),
+            ("sleep -1", "sleep: invalid option -- '1'\n"),
+        ] {
+            assert_eq!(h.run(line), (1, said.into()), "{line}");
+        }
+        assert!(h.system.slept.is_empty(), "nothing is waited for");
+    }
 
     #[test]
     fn date_prints_utc() {
