@@ -31,6 +31,20 @@ mod tests {
         }
     }
 
+    /// Whether `code` names the TLB other than through `arch::tlb`: a
+    /// `tlb` path however it is imported, or the `invlpg` instruction.
+    fn flushes_the_tlb(code: &str) -> bool {
+        let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        code.contains("invlpg")
+            || code.match_indices("tlb").any(|(i, _)| {
+                let before = code[..i].chars().next_back();
+                let after = code[i + 3..].chars().next();
+                !before.is_some_and(word)
+                    && !after.is_some_and(word)
+                    && !code[..i].ends_with("arch::")
+            })
+    }
+
     #[test]
     fn only_arch_flushes_the_tlb() {
         let mut files = Vec::new();
@@ -43,10 +57,28 @@ mod tests {
             "the walk found the sources"
         );
         for (path, text) in files {
-            assert!(
-                !text.contains("instructions::tlb"),
-                "{path} flushes the TLB itself"
-            );
+            assert!(!flushes_the_tlb(&text), "{path} flushes the TLB itself");
+        }
+    }
+
+    #[test]
+    fn the_scan_sees_every_way_to_name_the_tlb() {
+        // The prototype's review: a `tlb` imported in braces passed the
+        // first scan, which looked for `instructions::tlb` only.
+        for code in [
+            "x86_64::instructions::tlb::flush(v);",
+            "use x86_64::instructions::{interrupts, tlb};\ntlb::flush(v);",
+            "use x86_64::instructions::tlb as t;",
+            "unsafe { asm!(\"invlpg [{}]\", in(reg) v) };",
+        ] {
+            assert!(flushes_the_tlb(code), "{code}");
+        }
+        for code in [
+            "arch::tlb::flush(virt);",
+            "arch::tlb::flush_all();",
+            "let tlbs = 1;",
+        ] {
+            assert!(!flushes_the_tlb(code), "{code}");
         }
     }
 }
