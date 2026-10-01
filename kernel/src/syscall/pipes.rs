@@ -184,6 +184,37 @@ mod tests {
     }
 
     #[test]
+    fn a_buffer_not_all_the_program_s_loses_no_byte_and_doubles_none() {
+        let mut f = fake();
+        let (r, w) = new_pipe(&mut f);
+        // `U` holds the pattern 0, 1, 2, ...; the page after `W` is no one's.
+        let pattern: Vec<u8> = (0..300).map(|i| (i % 251) as u8).collect();
+        assert_eq!(call(&mut f, Call::Write, [w, U, 300]), Ok(300));
+        // A read whose buffer runs out of the program's memory takes nothing.
+        assert_eq!(
+            call(&mut f, Call::Read, [r, W + PAGE - 100, 200]),
+            Err(errno::EFAULT)
+        );
+        assert_eq!(
+            call(&mut f, Call::Read, [r, W, 1000]),
+            Ok(300),
+            "all still there"
+        );
+        assert_eq!(get(&mut f, W, 300), pattern);
+        // A write whose second page is no one's puts the first page's bytes,
+        // and says so, so that a program never writes them twice.
+        put(&mut f, W + PAGE - 100, &[7; 100]);
+        assert_eq!(call(&mut f, Call::Write, [w, W + PAGE - 100, 200]), Ok(100));
+        assert_eq!(call(&mut f, Call::Read, [r, W, 1000]), Ok(100));
+        assert_eq!(get(&mut f, W, 100), [7; 100]);
+        assert_eq!(
+            call(&mut f, Call::Read, [r, W, 1000]),
+            Err(errno::EINTR),
+            "nothing more: the fake's wait"
+        );
+    }
+
+    #[test]
     fn an_empty_pipe_waits_and_a_killed_wait_is_eintr() {
         let mut f = fake();
         let (r, w) = new_pipe(&mut f);
