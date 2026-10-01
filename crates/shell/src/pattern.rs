@@ -236,9 +236,9 @@ fn parse_set(p: &[u8], mut i: usize) -> Result<(Item, usize), PatternError> {
             }
             ranges.push((b, end));
             i += 3;
-            // A range cannot start where one ended (`[a-z-9]`); a last `-`
-            // is a member.
-            if p.get(i) == Some(&b'-') && p.get(i + 1).is_some_and(|&e| e != b']') {
+            // A range cannot start where one ended (`[a-z-9]`, and `[a-z-`
+            // at the pattern's end); a last `-` is a member.
+            if p.get(i) == Some(&b'-') && p.get(i + 1) != Some(&b']') {
                 return Err(PatternError::InvalidRangeEnd);
             }
         } else {
@@ -452,6 +452,13 @@ mod tests {
             "[]-a]",
             "[a-b]-",
             "[a-c-e-g]",
+            // A `-` after a range at the pattern's end starts another,
+            // without its end.
+            "[a-a-",
+            "[a-b-",
+            "[a-z-",
+            "[^a-b-",
+            "[a-",
         ]
         .iter()
         .map(|p| String::from(*p))
