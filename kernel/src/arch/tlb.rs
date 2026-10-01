@@ -32,10 +32,12 @@ mod tests {
     }
 
     /// Whether `code` names the TLB other than through `arch::tlb`: a
-    /// `tlb` path however it is imported, or the `invlpg` instruction.
+    /// `tlb` path however it is imported, or the `invlpg` or `invpcid`
+    /// instruction.
     fn flushes_the_tlb(code: &str) -> bool {
         let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
         code.contains("invlpg")
+            || code.contains("invpcid")
             || code.match_indices("tlb").any(|(i, _)| {
                 let before = code[..i].chars().next_back();
                 let after = code[i + 3..].chars().next();
@@ -70,6 +72,9 @@ mod tests {
             "use x86_64::instructions::{interrupts, tlb};\ntlb::flush(v);",
             "use x86_64::instructions::tlb as t;",
             "unsafe { asm!(\"invlpg [{}]\", in(reg) v) };",
+            // Milestone 2's plan 5's deferred finding: `invpcid` drops
+            // entries too (and `invlpga`, `invlpgb` hold `invlpg`).
+            "unsafe { asm!(\"invpcid {}, [{}]\", in(reg) kind, in(reg) d) };",
         ] {
             assert!(flushes_the_tlb(code), "{code}");
         }
