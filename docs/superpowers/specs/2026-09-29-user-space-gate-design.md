@@ -2,7 +2,7 @@
 
 - **Date:** 2026-09-29
 - **Status:** Approved 2026-09-29; revised while planning milestone 2's plans 1, 2, 3a, 3b, 4a, 4b and 5
-  and milestone 3's plans 1 and 2 (see §16)
+  and milestone 3's plans 1, 2 and 3 (see §16)
 - **Builds on:** milestone 1 (version 0.2.0,
   `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`,
   cited below as "M1 §n")
@@ -583,9 +583,9 @@ The kinds a program runs its own children with (`t-files child`, `pwd` and
 
 ### 9.4 Script arguments and variables
 
-- `sh FILE a b` sets `$0` (the script's path), `$1`…`$9`, `$#` and `$@`
-  (all arguments, each one word). `$?` is the status of the last command or
-  pipeline.
+- `sh FILE a b` sets `$0` (the script's path), `$1`…`$9` (and `${10}` on),
+  `$#` and `$@` (all arguments, each one word). `$?` is the status of the
+  last command or pipeline (§16 item 10).
 - `NAME=value` alone on a line sets a shell variable (a name is
   `[A-Za-z_][A-Za-z0-9_]*`); `$NAME` and `${NAME}` read it; an unset
   variable reads as empty. Variables work at the prompt too.
@@ -594,8 +594,9 @@ The kinds a program runs its own children with (`t-files child`, `pwd` and
   stays one argument (unlike bash). An unquoted expansion that is empty
   produces no word; a quoted one produces an empty word.
 - Variables belong to the shell; programs get no environment.
-- Still refused: `` ` ``, `$(`, `$((`. Not supported: `&&`, `||`, `if`,
-  loops, `export`.
+- Still refused: `` ` ``, `$(`, `$((`, and bash's other parameters and
+  operators (`$*`, `$$`, `$!`, `$-`, `${NAME:-x}`, …) and `NAME=value cmd`
+  (§16 item 10). Not supported: `&&`, `||`, `if`, loops, `export`.
 
 ## 10. Tooling (`xtask`)
 
@@ -1930,3 +1931,108 @@ does. Facts found before the spec was first merged are already in its body.
      `check3-a.sh` runs on the NUC, prints what it printed). Host tests: the chain of
      holders, the job table against bash 5.2's own lines, and the shell's
      jobs over `FakePrograms`, whose children can outlive a prompt.
+10. **Decisions made while planning milestone 3's plan 3** (script
+    arguments and variables):
+    - **Plan 3 is one plan** (§13) in three pull requests: this plan; the
+      parser's parameters and the shell's variables and `$?`; script
+      arguments and the scenario `script_vars`. It has no NUC check: no
+      check script holds a `$`, so their transcripts do not change, and
+      plan 4's `check5.sh` runs variables and script arguments there. A
+      spike first expanded every parameter to nothing and ran every
+      scenario and check script: all passed, and only the two host tests
+      that pinned `$`'s refusal failed.
+    - **What expands** (§9.4). Outside single quotes, `$NAME` and `${NAME}`
+      (a name is `[A-Za-z_][A-Za-z0-9_]*`, the longest that follows), `$0`
+      to `$9`, `${N}` for any argument (`$10` is `$1` and a `0`, as in
+      bash), `$#`, `$@` and `$?`. A `$` alone, or before a character no
+      parameter starts with, is a `$`. bash's other parameters, `$*`, `$$`,
+      `$!`, `$-` and `$_`, are unsupported (`unsupported syntax: $*`), as
+      are `$(`, `$((` and `` ` ``, and bash's other quotes `$'…'` and
+      `$"…"`; so are `${NAME:-x}` and bash's other operators, `${#NAME}`
+      and `${!NAME}` (`unsupported syntax: ${NAME:-x}`); a
+      `${…}` that holds no name, number or special parameter is bash's
+      `relay-sh: ${1A}: bad substitution` (status 1), and one without its
+      `}` a syntax error (``syntax error: unexpected EOF while looking for
+      matching `}'``, status 2). These end only their line: bash ends a
+      non-interactive shell at them, but a failing line does not stop a
+      script here.
+    - **No word splitting** (§9.4). An expansion is never split: a value
+      with spaces stays one word, where bash splits an unquoted one. An
+      unquoted expansion that leaves a word empty removes it; a quoted one
+      leaves an empty word. `$@` and `"$@"` give each argument as one word,
+      none with no arguments; an empty argument is kept only quoted; text
+      joined to them goes with the first and the last argument (`"a$@b"`),
+      as bash's `"$@"` does. No variable is set when a shell starts: bash
+      sets `HOME`, `PWD`, `PATH` and others, here they read as empty (`~`
+      is `/root`). A command whose words expand to nothing runs nothing,
+      with status 0, and a redirection after it still makes its file, as
+      bash's do; in a pipeline it reads nothing and gives the next command
+      an end, and in the background it starts no job.
+    - **Where it expands** (§9.4). In command names, arguments and
+      redirection targets, so `$C` may name a built-in; an unquoted target
+      that expands to nothing is bash's `relay-sh: $f: ambiguous redirect`
+      (status 1). Not in comments, nor in a background job's text, which
+      stays as typed (as bash's `jobs` shows it), nor in a script's trace,
+      `+ <line>`, which shows the line as written (bash's `set -x` shows
+      the expanded words): the transcripts keep milestone 1's form. Every
+      command of a pipeline is expanded before any starts. A `~` is
+      `/root` only alone or before a `/` in the same unquoted piece, as
+      bash's is, so `~"/x"`, `~\/x` and `~''` keep it, where milestone 1
+      made them `/root`, and so does `~$A`; a `~` that a variable holds
+      never expands.
+    - **Assignments** (§9.4). A line of only `NAME=value` words sets each
+      in turn (`A=1 B=$A`), with status 0. The value expands as a word does
+      but always makes one, empty or not (`A=`, `A="a b"`, `A=$B`); an
+      unquoted `~` at its start or after a `:` is `/root`, as in bash. A
+      word is an assignment only if its name and `=` are unquoted; `1A=x`,
+      `A-B=x` and `"A"=x` are command names, as in bash. A redirection
+      after the assignments makes its file, and they are made even when it
+      cannot be (status 1), as in bash. `A=1 cmd`, which gives bash's
+      command an environment, is unsupported (programs get none:
+      `unsupported syntax: A=1 before a command`), and so is bash's
+      `NAME+=value`, which appends (`unsupported syntax: A+=2`; the review
+      found it run as a command, and the user chose the refusal); in a
+      pipeline or with
+      `&`, where bash's assignment changes nothing in the shell, it is
+      refused as a built-in is (`relay-sh: A=1: cannot be used in a
+      pipeline`, `… in the background`, status 1).
+    - **`$?`** (§9.4). The status of the last line that ran: a pipeline's
+      last command's, a background job's start (0, or 127 when nothing of
+      it started), `wait`'s, `kill`'s and `jobs`', 130 after Ctrl-C, 2
+      after a syntax error, 126 and 127; a blank or comment line keeps it.
+      A script starts with 0, and the shell that ran it gets the script's
+      status.
+    - **Whose variables** (§8.3, §9.4). Variables and arguments belong to
+      one shell: a script, `X | sh` and a nested `sh` start with none, and
+      nothing passes in or out (bash's, without `export`); the in-process
+      runner keeps its own and a script's apart, as `/bin/sh` does. `$0` is
+      a script's path as `sh` was given it, and outside a script the
+      shell's argument 0, as bash's (`/bin/sh` for the one init starts,
+      `sh` for one typed), and `relay-sh` in the in-process runner.
+    - **Script arguments** (§8.3). `sh FILE [ARG]...` gives the script its
+      arguments under both runners; `/bin/sh` passes them to the child
+      shell, which reads them as `$1` on, where milestone 1's `sh` said
+      `extra operand`. Options come only before the file, as bash's do, so
+      what follows it is the script's (`sh f -x`), and `--` lets a file's
+      name start with `-`.
+    - **Limits.** A shell's variables, names and values together, hold at
+      most 64 KiB, and a line expands to at most 64 KiB, counting one for
+      each word as well as their bytes (`spawn` takes at most 64 KiB of
+      arguments, §11.1). Beyond either the line stops there, with status 1:
+      `relay-sh: B: the variables would hold more than 64 KiB`, `relay-sh:
+      the line would expand to more than 64 KiB`. `/bin/sh`'s heap ends the
+      program when it runs out, so nothing a person types may grow it
+      without bound (`"$@"` many times over many arguments could).
+    - **`X | sh` reads a byte at a time** (plan 1's deferred minor). It
+      reads a pipe one byte at a time, as bash does, so a command it runs
+      reads the rest of the input after its line, not what the shell took
+      ahead of it.
+    - **Plan 2's deferred minors.** `|&` (bash: both outputs into the pipe)
+      is `unsupported syntax: |&` again, rather than bash's syntax error at
+      `&`. The stray prompt of an interactive `sh` in a background script
+      and bash's `(wd: …)` note go to plan 4, with plan 1's and plan 5's.
+    - **Tests** (§12). The parser's parameters, refusals and assignments;
+      the expansion against bash 5.2's words for each case, the departures
+      named in each test; the shell's variables, `$?` and scripts' scope
+      under both runners; the scenario `script_vars` (a script with
+      arguments, the prompt, a nested `sh` and `X | sh`).
