@@ -228,17 +228,86 @@ struct Counts {
     bytes: u64,
 }
 
-/// `wc file…`: lines, words and bytes, and a total for several files.
+impl Counts {
+    /// Counts `bytes`, the next piece of an input; `in_word` says whether
+    /// the piece before ended inside a word.
+    fn add(&mut self, bytes: &[u8], in_word: &mut bool) {
+        self.bytes += bytes.len() as u64;
+        for &b in bytes {
+            if b == b'\n' {
+                self.lines += 1;
+            }
+            let space = matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0B | 0x0C);
+            if !space && !*in_word {
+                self.words += 1;
+            }
+            *in_word = !space;
+        }
+    }
+
+    fn plus(self, o: Counts) -> Counts {
+        Counts {
+            lines: self.lines.saturating_add(o.lines),
+            words: self.words.saturating_add(o.words),
+            bytes: self.bytes.saturating_add(o.bytes),
+        }
+    }
+}
+
+/// Which counts `wc` prints: those its options name (`-l`, `-w`, `-c`), or
+/// all three, always in that order.
+#[derive(Clone, Copy)]
+struct Shown {
+    lines: bool,
+    words: bool,
+    bytes: bool,
+}
+
+impl Shown {
+    fn how_many(self) -> usize {
+        [self.lines, self.words, self.bytes]
+            .iter()
+            .filter(|&&s| s)
+            .count()
+    }
+
+    /// The shown counts, each right-aligned to `width`, then the name.
+    fn line(self, c: Counts, width: usize, name: Option<&str>) -> String {
+        let mut parts: Vec<String> = [
+            (self.lines, c.lines),
+            (self.words, c.words),
+            (self.bytes, c.bytes),
+        ]
+        .iter()
+        .filter(|(shown, _)| *shown)
+        .map(|(_, n)| alloc::format!("{n:>width$}"))
+        .collect();
+        parts.extend(name.map(String::from));
+        parts.join(" ")
+    }
+}
+
+/// `wc [-clw] [file…]`: lines, words and bytes, and a total for several
+/// files; standard input without a file.
 pub fn wc(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
-    let opts = match getopt(args, "", "") {
+    let opts = match getopt(args, "clw", "") {
         Ok(o) => o,
         Err(e) => return ctx.fail("wc", format_args!("{e}")),
     };
+    let (lines, words, bytes) = (opts.has('l'), opts.has('w'), opts.has('c'));
+    let any = lines || words || bytes;
+    let shown = Shown {
+        lines: lines || !any,
+        words: words || !any,
+        bytes: bytes || !any,
+    };
     if opts.operands.is_empty() {
-        return ctx.fail("wc", format_args!("missing operand"));
+        return wc_input(ctx, shown);
     }
-    // GNU wc sizes the columns from the files' total size, with at least
-    // 7 digits when something is not a regular file.
+    // GNU's widths: one count of one file is not padded; otherwise the
+    // columns fit the regular files' total size, with at least 7 digits
+    // when one of the files is something else. A file that cannot be found
+    // takes no part (milestone 1 counted it as something else).
     let mut total_size = 0;
     let mut odd = false;
     let mut found = Vec::new();
@@ -254,14 +323,16 @@ pub fn wc(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
                 }
                 found.push(Ok(n));
             }
-            Err(e) => {
-                odd = true;
-                found.push(Err(e));
-            }
+            Err(e) => found.push(Err(e)),
         }
     }
     let digits = total_size.max(1).ilog10() as usize + 1;
-    let width = if odd { digits.max(7) } else { digits };
+    let unpadded = found.len() == 1 && shown.how_many() == 1;
+    let width = match (unpadded, odd) {
+        (true, _) => 1,
+        (false, true) => digits.max(7),
+        (false, false) => digits,
+    };
     let mut status = 0;
     let mut total = Counts::default();
     for (op, node) in opts.operands.iter().zip(found) {
@@ -277,28 +348,36 @@ pub fn wc(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
                 continue;
             }
         };
-        total.lines = total.lines.saturating_add(counts.lines);
-        total.words = total.words.saturating_add(counts.words);
-        total.bytes = total.bytes.saturating_add(counts.bytes);
-        let c = counts;
-        outln!(
-            ctx,
-            "{:>width$} {:>width$} {:>width$} {name}",
-            c.lines,
-            c.words,
-            c.bytes
-        );
+        total = total.plus(counts);
+        outln!(ctx, "{}", shown.line(counts, width, Some(&name)));
     }
     if opts.operands.len() > 1 {
-        let c = total;
-        outln!(
-            ctx,
-            "{:>width$} {:>width$} {:>width$} total",
-            c.lines,
-            c.words,
-            c.bytes
-        );
+        outln!(ctx, "{}", shown.line(total, width, Some("total")));
     }
+    status
+}
+
+/// `wc` of standard input, which is never a regular file here (the
+/// console or a pipe): 7 digits, unless only one count is shown.
+fn wc_input(ctx: &mut Ctx<'_>, shown: Shown) -> i32 {
+    let mut buf = vec![0; CHUNK];
+    let (mut c, mut in_word) = (Counts::default(), false);
+    let mut status = 0;
+    loop {
+        if ctx.interrupted() {
+            return 0;
+        }
+        match ctx.read_input(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => c.add(&buf[..n], &mut in_word),
+            Err(e) => {
+                status = ctx.fail("wc", format_args!("-: {e}"));
+                break;
+            }
+        }
+    }
+    let width = if shown.how_many() == 1 { 1 } else { 7 };
+    outln!(ctx, "{}", shown.line(c, width, None));
     status
 }
 
@@ -306,17 +385,7 @@ fn count(ctx: &mut Ctx<'_>, node: Node) -> Result<Counts, Errno> {
     let mut c = Counts::default();
     let mut in_word = false;
     stream(ctx, node, 0, |_, bytes| {
-        c.bytes += bytes.len() as u64;
-        for &b in bytes {
-            if b == b'\n' {
-                c.lines += 1;
-            }
-            let space = matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0B | 0x0C);
-            if !space && !in_word {
-                c.words += 1;
-            }
-            in_word = !space;
-        }
+        c.add(bytes, &mut in_word);
         true
     })?;
     Ok(c)
@@ -593,6 +662,51 @@ mod tests {
                 " 2  5 29 /tmp/a\n 0  2  7 /tmp/b\n 2  7 36 total\n".into()
             )
         );
+    }
+
+    #[test]
+    fn wc_prints_what_gnu_wc_prints() {
+        let a: &[u8] = b"hello world\nsecond line here\n";
+        let b: &[u8] = b"  x\ty  ";
+        let files = [("a", a), ("b", b), ("d/", &b""[..])];
+        let cases: &[(&[&str], &[u8])] = &[
+            (&["wc"], a),
+            (&["wc", "-c"], a),
+            (&["wc", "-l"], a),
+            (&["wc", "-w"], b),
+            (&["wc", "-lw"], a),
+            (&["wc", "-cl"], b),
+            (&["wc", "-l", "-c", "-w"], a),
+            (&["wc"], b""),
+            (&["wc", "-c"], b""),
+            (&["wc", "a"], b""),
+            (&["wc", "-c", "a"], b""),
+            (&["wc", "a", "b"], b""),
+            (&["wc", "-l", "a", "b"], b""),
+            (&["wc", "-wc", "b", "a"], b""),
+            (&["wc", "a", "nope"], b""),
+            (&["wc", "nope", "a"], b""),
+            (&["wc", "-c", "nope", "a"], b""),
+            (&["wc", "-l", "nope"], b""),
+            (&["wc", "-l", "d", "a"], b""),
+            (&["wc", "a", "d", "nope"], b"not read"),
+        ];
+        for (args, stdin) in cases {
+            let mut h = Harness::new();
+            assert_eq!(
+                h.like_host(args, &files, stdin),
+                crate::testing::host_tool(args, &files, stdin),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wc_of_standard_input_stops_at_ctrl_c() {
+        let mut h = Harness::new();
+        h.stdin = numbered(20_000).into_bytes();
+        h.console.interrupt_after = Some(1);
+        assert_eq!(h.run("wc -l"), (130, "^C\n".into()));
     }
 
     #[test]

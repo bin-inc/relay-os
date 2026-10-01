@@ -545,6 +545,38 @@ impl Harness {
         (status, self.console.take())
     }
 
+    /// Runs `args` (the command's name first) as its program does, in a
+    /// fresh directory holding `files` (a name ending in `/` is a
+    /// directory), with `stdin` as its input: its exit
+    /// status, standard output and standard error, to compare with
+    /// [`host_tool`]'s.
+    pub fn like_host(
+        &mut self,
+        args: &[&str],
+        files: &[(&str, &[u8])],
+        stdin: &[u8],
+    ) -> (i32, String, String) {
+        let dir = std::format!("/tmp/host{}", next_dir());
+        self.dir(&dir);
+        for (name, data) in files {
+            match name.strip_suffix('/') {
+                Some(d) => self.dir(&std::format!("{dir}/{d}")),
+                None => self.put(&std::format!("{dir}/{name}"), data),
+            }
+        }
+        self.vfs.chdir(dir.as_bytes()).unwrap();
+        self.stdin = stdin.to_vec();
+        let mut out = FakeStdout::file(None);
+        let line = args
+            .iter()
+            .map(|a| crate::ctx::quote_if_needed(a))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let (status, errors) = self.program(&line, &mut out);
+        self.vfs.chdir(b"/").unwrap();
+        (status, out.text(), errors)
+    }
+
     /// Creates (or replaces) a file.
     pub fn put(&mut self, path: &str, data: &[u8]) {
         let node = match self.vfs.lookup(path.as_bytes()) {
@@ -573,4 +605,51 @@ impl Harness {
     pub fn exists(&mut self, path: &str) -> bool {
         self.vfs.lookup(path.as_bytes()).is_ok()
     }
+}
+
+/// A number for each fresh directory a test asks for.
+fn next_dir() -> usize {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// What the host's own tool prints for `args` (its name first), run in a
+/// fresh directory under the workspace's `target/` holding `files` (a name
+/// ending in `/` is a directory), with
+/// `stdin` as its input and `LC_ALL=C`: its exit status, standard output
+/// and standard error, to compare with [`Harness::like_host`]'s. A tool
+/// that is missing fails the test.
+pub fn host_tool(args: &[&str], files: &[(&str, &[u8])], stdin: &[u8]) -> (i32, String, String) {
+    use std::io::Write;
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/like-host")
+        .join(std::format!("{}-{}", std::process::id(), next_dir()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, data) in files {
+        match name.strip_suffix('/') {
+            Some(d) => std::fs::create_dir(dir.join(d)).unwrap(),
+            None => std::fs::write(dir.join(name), data).unwrap(),
+        }
+    }
+    let mut child = std::process::Command::new(args[0])
+        .args(&args[1..])
+        .current_dir(&dir)
+        .env("LC_ALL", "C")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("the host's {} is needed: {e}", args[0]));
+    // A tool that stops reading early (head) closes the pipe: not an error.
+    let _ = child.stdin.take().unwrap().write_all(stdin);
+    let out = child.wait_with_output().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    let text = |b: Vec<u8>| String::from_utf8_lossy(&b).into_owned();
+    (
+        out.status.code().unwrap_or(-1),
+        text(out.stdout),
+        text(out.stderr),
+    )
 }
