@@ -87,11 +87,13 @@ pub trait Caller {
     fn pipe_wait(&mut self, id: u64) -> Result<(), Errno>;
     /// Wakes whoever waits on the pipe `id`.
     fn pipe_wake(&mut self, id: u64);
-    /// Line mode (`true`) or raw mode; the previous one.
-    fn console_mode(&mut self, line: bool) -> bool;
+    /// Line mode (`true`) or raw mode; the previous one. `EPERM` unless
+    /// the program's group holds the console (spec §16 item 9).
+    fn console_mode(&mut self, line: bool) -> Result<bool, Errno>;
     /// The console's columns and rows.
     fn console_size(&self) -> (u32, u32);
-    /// Makes `pgid` the foreground group; `ESRCH` if no process is in it.
+    /// Makes `pgid` the foreground group: `ESRCH` if no process is in
+    /// `pgid`, `EPERM` unless the program's group holds the console.
     fn console_foreground(&mut self, pgid: u32) -> Result<(), Errno>;
     /// Pushes `file` as a console tee of the program (spec §6.5).
     fn tee_push(&mut self, file: Arc<File>) -> Result<(), Errno>;
@@ -350,7 +352,7 @@ fn console_mode(caller: &mut impl Caller, mode: u64) -> Result<u64, Errno> {
         Ok(MODE_LINE) => true,
         _ => return Err(Errno::EINVAL),
     };
-    let was = caller.console_mode(line);
+    let was = caller.console_mode(line)?;
     Ok(u64::from(if was { MODE_LINE } else { MODE_RAW }))
 }
 
@@ -980,6 +982,32 @@ mod tests {
             );
         }
         assert_eq!(f.foreground, 42);
+    }
+
+    #[test]
+    fn the_console_is_changed_only_by_a_group_that_holds_it() {
+        use relay_abi::console::MODE_LINE;
+        let mut f = fake();
+        f.holds_console = false;
+        let line = u64::from(MODE_LINE);
+        assert_eq!(
+            call(&mut f, Call::ConsoleMode, [line, 0, 0]),
+            Err(errno::EPERM)
+        );
+        assert!(!f.line_mode, "the mode stays");
+        assert_eq!(
+            call(&mut f, Call::ConsoleMode, [7, 0, 0]),
+            Err(errno::EINVAL),
+            "a mode that is none, first"
+        );
+        assert_eq!(
+            call(&mut f, Call::ConsoleForeground, [42, 0, 0]),
+            Err(errno::EPERM)
+        );
+        assert_eq!(f.foreground, 1, "the group stays");
+        // The tees are not the console's state: anyone may push one.
+        assert_eq!(call(&mut f, Call::ConsoleTeePush, [1, 0, 0]), Ok(0));
+        assert_eq!(call(&mut f, Call::ConsoleTeePop, [0, 0, 0]), Ok(0));
     }
 
     #[test]

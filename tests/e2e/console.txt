@@ -44,16 +44,20 @@ expect \[\d+\] xy
 expect root@relay:~# $
 send t-read apart
 expect \nend of input\nroot@relay:~# $
+# Nor may it change the console's mode or group, or give it to a child of
+# its own: its group was never given the console (milestone 3).
+send t-read refused
+expect \nmode: EPERM\nforeground of my own group: EPERM\na child with the console: EPERM\nroot@relay:~# $
 # A terminal that sends CR LF for Enter: the LF after the shell's line
 # is not an empty line for the command.
 send-crlf t-read
 alive 1
 type {ctrl-d}
 expect t-read\nend of input\nroot@relay:~# $
-# A program that leaves the console in line mode, while the shell waits
-# at its prompt, does not keep the shell from reading.
+# A program outside the console's groups cannot put it in line mode
+# while the shell waits at its prompt (milestone 3).
 send t-read leave
-alive 2
+expect \nroot@relay:~# line mode from outside: EPERM\n
 send echo ok
 expect \nok\nroot@relay:~# $
 # What is typed during a script is echoed once, as it is typed, not again

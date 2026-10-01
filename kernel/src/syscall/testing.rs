@@ -52,9 +52,11 @@ pub struct Fake {
     pub typed: alloc::collections::VecDeque<Vec<u8>>,
     pub asked: Vec<usize>,
     pub killed_while_reading: bool,
-    /// The console's mode and foreground group (groups 1 and 42 exist).
+    /// The console's mode and foreground group (groups 1 and 42 exist),
+    /// and whether the program's group may change them.
     pub line_mode: bool,
     pub foreground: u32,
+    pub holds_console: bool,
     /// The tees pushed, and the syncs.
     pub tees: Vec<Arc<File>>,
     pub syncs: u32,
@@ -135,8 +137,11 @@ impl Caller for Fake {
         buf[..n].copy_from_slice(&line[..n]);
         Ok(n)
     }
-    fn console_mode(&mut self, line: bool) -> bool {
-        core::mem::replace(&mut self.line_mode, line)
+    fn console_mode(&mut self, line: bool) -> Result<bool, Errno> {
+        if !self.holds_console {
+            return Err(Errno::EPERM);
+        }
+        Ok(core::mem::replace(&mut self.line_mode, line))
     }
     fn console_size(&self) -> (u32, u32) {
         (120, 33)
@@ -179,6 +184,9 @@ impl Caller for Fake {
         self.vfs.sync()
     }
     fn console_foreground(&mut self, pgid: u32) -> Result<(), Errno> {
+        if !self.holds_console {
+            return Err(Errno::EPERM);
+        }
         if ![1, 42].contains(&pgid) {
             return Err(Errno::ESRCH);
         }
@@ -250,6 +258,7 @@ pub fn fake() -> Fake {
         killed_while_reading: false,
         line_mode: false,
         foreground: 1,
+        holds_console: true,
         tees: Vec::new(),
         syncs: 0,
         powered: Vec::new(),

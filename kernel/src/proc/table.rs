@@ -21,6 +21,7 @@
 //! - `kill` and Ctrl-C only mark a process and wake it if it is blocked; it
 //!   ends itself the next time it runs, before any more of its code runs.
 
+use super::holders::Holders;
 use alloc::string::String;
 use alloc::vec::Vec;
 use relay_abi::proc::{
@@ -160,6 +161,8 @@ pub struct Table<R> {
     current: u32,
     /// Ticks left of the running process's slice.
     slice_left: u32,
+    /// The groups that may change the console (spec §16 item 9).
+    console: Holders,
 }
 
 impl<R> Default for Table<R> {
@@ -176,6 +179,7 @@ impl<R> Table<R> {
             ready: Queue::new(),
             current: 0,
             slice_left: SLICE,
+            console: Holders::new(),
         }
     }
 
@@ -236,6 +240,33 @@ impl<R> Table<R> {
         self.procs
             .iter()
             .any(|p| p.pgid == pgid && !matches!(p.state, State::Zombie(_)))
+    }
+
+    /// The group that has the console, as the processes handed it on (spec
+    /// §6.4, §16 item 9): process 1's at first.
+    pub fn console_group(&self) -> u32 {
+        self.console.foreground()
+    }
+
+    /// Whether the process `pid` may change the console (its mode and
+    /// group, and a child's with `FOREGROUND`): its group was given it, and
+    /// has not handed it back.
+    pub fn may_change_console(&self, pid: u32) -> bool {
+        self.get(pid).is_some_and(|p| self.console.holds(p.pgid))
+    }
+
+    /// The process `pid`'s group gives the console to the group `to` (its
+    /// own takes it back); `EPERM` if it may not change the console.
+    pub fn give_console(&mut self, pid: u32, to: u32) -> Result<(), Errno> {
+        let by = self.get(pid).ok_or(Errno::EPERM)?.pgid;
+        let procs = &self.procs;
+        self.console
+            .give(by, to, |g| procs.iter().any(|p| p.pgid == g))
+    }
+
+    /// Process 1 takes the console back (the error screen's).
+    pub fn take_console(&mut self) {
+        self.console.reset();
     }
 
     /// Whether another process can start: an entry is free, and a pid is
@@ -901,6 +932,35 @@ mod tests {
         t.block(Blocked::Wait);
         t.wake(e);
         assert_eq!(t.list(|_| 0)[5].state, STATE_READY);
+    }
+
+    #[test]
+    fn the_console_is_changed_by_the_groups_it_was_handed_to() {
+        let mut t = table();
+        let init = add(&mut t, 0, true);
+        let sh = add(&mut t, init, true);
+        assert!(t.may_change_console(init) && !t.may_change_console(sh));
+        t.give_console(init, sh).unwrap();
+        let cmd = add(&mut t, sh, true);
+        let bg = add(&mut t, sh, true);
+        let script_cmd = add(&mut t, cmd, false);
+        t.give_console(sh, cmd).unwrap();
+        assert_eq!(t.console_group(), cmd);
+        assert!(t.may_change_console(script_cmd), "the group's every member");
+        assert!(t.may_change_console(sh) && t.may_change_console(init));
+        assert!(!t.may_change_console(bg), "a background job's");
+        assert_eq!(t.give_console(bg, bg), Err(Errno::EPERM));
+        assert_eq!(t.give_console(99, sh), Err(Errno::EPERM), "no such process");
+        // The command ends and is collected: the shell takes it back.
+        t.end(script_cmd, WaitStatus::exited(0));
+        t.end(cmd, WaitStatus::exited(0));
+        assert!(t.reap(sh, Want::Pid(cmd)).unwrap().is_some());
+        assert!(t.reap(init, Want::Pid(script_cmd)).unwrap().is_some());
+        t.give_console(sh, sh).unwrap();
+        assert_eq!(t.console_group(), sh);
+        t.take_console();
+        assert_eq!(t.console_group(), init);
+        assert!(!t.may_change_console(sh));
     }
 
     #[test]

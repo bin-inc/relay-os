@@ -10,6 +10,7 @@
 //! with interrupts off and no lock held, so a blocked process never holds
 //! a lock another one needs.
 
+pub mod holders;
 pub mod table;
 
 use crate::arch::context::{self, Next};
@@ -227,8 +228,10 @@ fn end_if_killed() {
 /// of another group that is still blocked wakes, to find it has lost it.
 pub fn take_console() {
     tty::set_line_mode(false);
-    tty::set_foreground(table::INIT);
-    PROCS.lock().wake_all(Blocked::Console);
+    let mut t = PROCS.lock();
+    t.take_console();
+    tty::set_foreground(t.console_group());
+    t.wake_all(Blocked::Console);
 }
 
 /// Kills every process but process 1 (the error screen's, so that none
@@ -448,6 +451,10 @@ pub fn spawn(s: &Spawn) -> Result<u32, Errno> {
         {
             return Err(Errno::EPERM);
         }
+        // Only a group that holds the console gives it to a child's.
+        if s.foreground && !t.may_change_console(t.current()) {
+            return Err(Errno::EPERM);
+        }
         let parent = t.get(t.current()).expect("a process spawns");
         (parent.res.fds.for_child(&s.fds)?, parent.res.cwd.clone())
     };
@@ -512,11 +519,12 @@ pub fn spawn(s: &Spawn) -> Result<u32, Errno> {
     let pid = t
         .insert(me, s.group, name.into_owned(), res)
         .unwrap_or_else(|e| unreachable!("room and group were checked under this lock: {e}"));
-    drop(t);
     // Before the child can run: the kernel is not preemptible, and it has
-    // not been switched to yet.
-    if s.foreground {
+    // not been switched to yet. Its parent's group held the console when
+    // it was checked above, and nothing ran since.
+    if s.foreground && t.give_console(me, pid).is_ok() {
         tty::set_foreground(pid);
+        drop(t);
         tty::set_line_mode(true);
         PROCS.lock().wake_all(Blocked::Console);
     }
@@ -752,10 +760,17 @@ impl Caller for Current {
         }
     }
 
-    fn console_mode(&mut self, line: bool) -> bool {
+    fn console_mode(&mut self, line: bool) -> Result<bool, Errno> {
+        {
+            let t = PROCS.lock();
+            if !t.may_change_console(t.current()) {
+                return Err(Errno::EPERM);
+            }
+        }
+        // Not under `PROCS`: the switch echoes, which may write the tees.
         let was = tty::set_line_mode(line);
         PROCS.lock().wake_all(Blocked::Console);
-        was
+        Ok(was)
     }
 
     fn console_size(&self) -> (u32, u32) {
@@ -768,7 +783,10 @@ impl Caller for Current {
         if !t.has_group(pgid) {
             return Err(Errno::ESRCH);
         }
-        tty::set_foreground(pgid);
+        // `EPERM` unless the caller's group holds the console.
+        let me = t.current();
+        t.give_console(me, pgid)?;
+        tty::set_foreground(t.console_group());
         t.wake_all(Blocked::Console);
         Ok(())
     }
