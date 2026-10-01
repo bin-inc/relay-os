@@ -14,6 +14,7 @@ use crate::{console, klog, power, proc, tty};
 use alloc::format;
 use alloc::vec::Vec;
 use core::fmt;
+use term::ansi::Action;
 use vfs::{Errno, Vfs};
 
 /// Lines of the kernel log it shows at most: with its own 7 lines, 27 of
@@ -60,6 +61,11 @@ pub fn text(reason: &Reason, tail: &[u8], size: (usize, usize)) -> Vec<u8> {
     let mut tail = tail.to_vec();
     let n = klog::strip_ansi_in_place(&mut tail);
     tail.truncate(n);
+    // Any other escape a program's bytes put in the log (`ESC c` resets
+    // the terminal) is shown, not obeyed.
+    for b in tail.iter_mut().filter(|b| **b == 0x1B) {
+        *b = b'?';
+    }
     if !tail.is_empty() && !tail.ends_with(b"\n") {
         tail.push(b'\n');
     }
@@ -75,18 +81,48 @@ pub fn text(reason: &Reason, tail: &[u8], size: (usize, usize)) -> Vec<u8> {
     out
 }
 
-/// The rows `text`'s lines take on a console `cols` wide: each line at
-/// least one, a line of more characters than that one more per `cols`.
+/// The rows `text` takes on a console `cols` wide, as the terminal moves
+/// its cursor (`term`'s parser, and `Terminal`'s rules): each line at
+/// least one, and one more each time a character comes after the last
+/// column. A tab moves to the next multiple of 8 but never past the last
+/// column, a carriage return to the first, a backspace one back.
 fn rows_of(text: &[u8], cols: usize) -> usize {
     let cols = cols.max(1);
-    text.split_inclusive(|&b| b == b'\n')
-        .map(|line| {
-            let line = line.strip_suffix(b"\n").unwrap_or(line);
-            // Characters, not bytes: a UTF-8 continuation byte adds none.
-            let chars = line.iter().filter(|&&b| b & 0xC0 != 0x80).count();
-            chars.div_ceil(cols).max(1)
-        })
-        .sum()
+    let mut parser = term::ansi::Parser::new();
+    let (mut rows, mut cx, mut open) = (0, 0, false);
+    for &b in text {
+        parser.advance(b, &mut |action| match action {
+            Action::Print(_) => {
+                if cx >= cols {
+                    rows += 1;
+                    cx = 0;
+                }
+                cx += 1;
+                open = true;
+            }
+            Action::Control(b'\n') => {
+                rows += 1;
+                cx = 0;
+                open = false;
+            }
+            Action::Control(b'\r') => {
+                cx = 0;
+                open = true;
+            }
+            Action::Control(0x08) => {
+                cx = cx.min(cols - 1).saturating_sub(1);
+                open = true;
+            }
+            Action::Control(b'\t') => {
+                if cx < cols {
+                    cx = ((cx / 8 + 1) * 8).min(cols - 1);
+                }
+                open = true;
+            }
+            Action::Control(_) | Action::Csi { .. } | Action::Reset => {}
+        });
+    }
+    rows + usize::from(open)
 }
 
 /// The newest whole lines of `tail` that take at most `rows` rows.
@@ -241,6 +277,90 @@ storage: root on 00:14.0 port 15, the disk with the boot partition 4A7D166A-7C33
             .map(|l| l.chars().count().div_ceil(cols).max(1))
             .sum::<usize>()
             + 1
+    }
+
+    /// A console of the NUC's size, 120 by 33, after `text` was written to
+    /// the real terminal: its rows, blanks at the end cut, and the
+    /// cursor's row.
+    fn on_the_nuc(text: &[u8]) -> (Vec<String>, usize) {
+        use term::{Cell, PixelFormat, Terminal};
+        let (w, h) = (1920, 1080);
+        assert_eq!(term::geometry(w, h), (120, 33, 2));
+        let mut cells = alloc::vec![Cell::BLANK; 120 * 33];
+        let mut shadow = alloc::vec![0u32; w * h];
+        let mut t = Terminal::new(w, h, PixelFormat::Bgr, &mut cells, &mut shadow);
+        t.write_bytes(text);
+        let rows = (0..t.rows())
+            .map(|r| {
+                let row: String = (0..t.cols()).map(|c| t.cell(c, r).ch as char).collect();
+                row.trim_end().to_string()
+            })
+            .collect();
+        (rows, t.cursor().1)
+    }
+
+    /// Lines a program's path can put in the kernel log, each one where a
+    /// rule of the terminal's makes a difference: tabs, which move to the
+    /// next multiple of 8 but never past the last column; a carriage
+    /// return; backspaces after the last column; exactly one character
+    /// too many; bytes that are no UTF-8; a terminal reset (`ESC c`) the
+    /// colour strip leaves in.
+    fn awkward_lines() -> Vec<Vec<u8>> {
+        let mut bad_utf8 = b"\xC3".to_vec();
+        bad_utf8.extend("\u{e9}".repeat(119).bytes());
+        [
+            "x\t".repeat(20),
+            "\t".repeat(16) + "y",
+            "a".repeat(100) + "\r" + &"b".repeat(100),
+            "b".repeat(120) + "\x08\x08cc",
+            "c".repeat(121),
+            "\u{e9}".repeat(121),
+            "pid 7 (/root/\x1bc): killed: kill".to_string(),
+        ]
+        .into_iter()
+        .map(String::into_bytes)
+        .chain([bad_utf8])
+        .map(|mut l| {
+            l.push(b'\n');
+            l
+        })
+        .collect()
+    }
+
+    #[test]
+    fn a_line_takes_the_rows_the_terminal_gives_it() {
+        for line in awkward_lines() {
+            let mut shown = line.clone();
+            let n = klog::strip_ansi_in_place(&mut shown);
+            shown.truncate(n);
+            shown
+                .iter_mut()
+                .filter(|b| **b == 0x1B)
+                .for_each(|b| *b = b'?');
+            let (_, row) = on_the_nuc(&shown);
+            assert_eq!(
+                rows_of(&shown, 120),
+                row,
+                "{:?}",
+                String::from_utf8_lossy(&line)
+            );
+        }
+    }
+
+    #[test]
+    fn the_heading_stays_on_the_nuc_s_terminal_whatever_the_log_holds() {
+        for line in awkward_lines() {
+            let (screen, _) = on_the_nuc(&text(&Reason::Ended, &line.repeat(20), NUC));
+            assert_eq!(
+                screen[0], "*** Relay OS cannot run its shell ***",
+                "{screen:?}"
+            );
+            assert!(
+                screen.iter().any(|r| r == "Press any key to reboot."),
+                "{screen:?}"
+            );
+            assert!(!screen.iter().any(|r| r.contains('\x1b')));
+        }
     }
 
     #[test]
