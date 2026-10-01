@@ -33,12 +33,5 @@ pub fn wait_for_interrupt() {
     }
 }
 
-/// Waits for interrupts forever: the CPU sleeps between timer ticks.
-pub fn idle_forever() -> ! {
-    loop {
-        x86_64::instructions::interrupts::enable_and_hlt();
-    }
-}
-
 /// `e_machine` of the programs this kernel runs.
 pub const ELF_MACHINE: u16 = elf::EM_X86_64;
