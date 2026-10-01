@@ -105,6 +105,13 @@ impl<'a> Shell<'a> {
         }
     }
 
+    /// The same shell, its `$0` `name`: its argument 0, as bash's is
+    /// (`relay-sh` otherwise).
+    pub fn named(mut self, name: &str) -> Shell<'a> {
+        self.vars = Vars::new(name);
+        self
+    }
+
     /// The same shell, its in-process commands reading `input`.
     pub fn with_input(mut self, input: &'a mut dyn Stdin) -> Shell<'a> {
         self.input = Some(input);
@@ -1084,6 +1091,22 @@ mod tests {
             h.programs.spawned[0].args,
             ["t-args", "0", "", "x", "~/", "/root/"]
         );
+    }
+
+    #[test]
+    fn a_shell_s_name_is_its_argument_0() {
+        let mut h = spawning();
+        Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+            .named("/bin/sh")
+            .execute("t-args $0 $#");
+        assert_eq!(h.programs.spawned[0].args, ["t-args", "/bin/sh", "0"]);
+        // A script's is its file, whatever the shell's.
+        h.put("/tmp/s.sh", b"t-args $0\n");
+        let mut out = FakeStdout::console();
+        Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+            .named("sh")
+            .run_file(&["/tmp/s.sh".into()], &mut out);
+        assert_eq!(h.programs.spawned[1].args, ["t-args", "/tmp/s.sh"]);
     }
 
     #[test]
