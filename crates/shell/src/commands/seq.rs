@@ -1,15 +1,25 @@
 //! `seq [FIRST [INCREMENT]] LAST` (user-space gate §9.1): the whole numbers
 //! from FIRST (1) to LAST, INCREMENT (1) apart, one a line, as GNU seq
-//! prints them. GNU's also take decimals; these do not, and say so.
+//! prints them. GNU's also takes decimals, `inf`, hexadecimal and numbers
+//! beyond 64 bits, and the options `-f`, `-s` and `-w`; this one says it
+//! does not. What GNU's refuses, it refuses with GNU's first line.
 
 use crate::ctx::{Ctx, outln, quote};
 use alloc::string::String;
 use alloc::vec::Vec;
 
 pub fn seq(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
-    // Numbers may start with `-`: there are no options, only a `--`.
+    // Options come before the first operand, as GNU's; a number may start
+    // with `-`.
     let ops = match args.split_first() {
         Some((first, rest)) if first == "--" => rest,
+        Some((first, _)) if first.starts_with("--") => {
+            return ctx.fail("seq", format_args!("unrecognized option {}", quote(first)));
+        }
+        Some((first, _)) if is_option(first) => {
+            let c = first[1..].chars().next().unwrap_or('-');
+            return ctx.fail("seq", format_args!("invalid option -- '{c}'"));
+        }
         _ => args,
     };
     if let Some(extra) = ops.get(3) {
@@ -19,7 +29,19 @@ pub fn seq(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     for op in ops {
         match whole(op) {
             Some(n) => numbers.push(n),
-            None => return ctx.fail("seq", format_args!("not a whole number: {}", quote(op))),
+            None if is_nan(op) => {
+                return ctx.fail(
+                    "seq",
+                    format_args!("invalid 'not-a-number' argument: {}", quote(op)),
+                );
+            }
+            None if is_number(op) => {
+                return ctx.fail("seq", format_args!("not a whole number: {}", quote(op)));
+            }
+            None => {
+                let message = format_args!("invalid floating point argument: {}", quote(op));
+                return ctx.fail("seq", message);
+            }
         }
     }
     let (first, step, last) = match numbers[..] {
@@ -45,6 +67,55 @@ pub fn seq(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
         }
     }
     0
+}
+
+/// An option: `-` and something that cannot start a number.
+fn is_option(s: &str) -> bool {
+    s.strip_prefix('-')
+        .and_then(|rest| rest.bytes().next())
+        .is_some_and(|b| !b.is_ascii_digit() && b != b'.')
+}
+
+/// A number GNU's seq takes: decimal with a fraction or an exponent,
+/// hexadecimal, or `inf`, each with a sign or none (leading blanks allowed).
+fn is_number(s: &str) -> bool {
+    let s = s.trim_start_matches([' ', '\t']);
+    let s = s.strip_prefix(['+', '-']).unwrap_or(s).to_ascii_lowercase();
+    if s == "inf" || s == "infinity" {
+        return true;
+    }
+    let (digits, exponent_mark): (&str, char) = match s.strip_prefix("0x") {
+        Some(hex) => (hex, 'p'),
+        None => (&s, 'e'),
+    };
+    let is_digit = |c: char| {
+        if exponent_mark == 'p' {
+            c.is_ascii_hexdigit()
+        } else {
+            c.is_ascii_digit()
+        }
+    };
+    let (mantissa, exponent) = match digits.split_once(exponent_mark) {
+        Some((m, e)) => (m, Some(e)),
+        None => (digits, None),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let mantissa_ok = !(whole.is_empty() && fraction.is_empty())
+        && whole.chars().all(is_digit)
+        && fraction.chars().all(is_digit);
+    let exponent_ok = exponent.is_none_or(|e| {
+        let e = e.strip_prefix(['+', '-']).unwrap_or(e);
+        !e.is_empty() && e.bytes().all(|b| b.is_ascii_digit())
+    });
+    mantissa_ok && exponent_ok
+}
+
+/// GNU's not-a-number (`nan`, either case, with a sign or none).
+fn is_nan(s: &str) -> bool {
+    let s = s.trim_start_matches([' ', '\t']);
+    s.strip_prefix(['+', '-'])
+        .unwrap_or(s)
+        .eq_ignore_ascii_case("nan")
 }
 
 /// A whole number: a sign or none, then digits (leading blanks allowed,
@@ -108,15 +179,45 @@ mod tests {
             ("seq", "seq: missing operand\n"),
             ("seq 1 2 3 4", "seq: extra operand '4'\n"),
             ("seq 1 0 5", "seq: invalid Zero increment value: '0'\n"),
-            ("seq x", "seq: not a whole number: 'x'\n"),
             ("seq 1.5 3", "seq: not a whole number: '1.5'\n"),
             (
                 "seq 99999999999999999999",
                 "seq: not a whole number: '99999999999999999999'\n",
             ),
-            ("seq - 3", "seq: not a whole number: '-'\n"),
+            ("seq 1e3", "seq: not a whole number: '1e3'\n"),
+            ("seq -.5 1", "seq: not a whole number: '-.5'\n"),
+            ("seq inf", "seq: not a whole number: 'inf'\n"),
+            ("seq 0x10", "seq: not a whole number: '0x10'\n"),
+            // GNU's options are not this seq's.
+            ("seq -w 3", "seq: invalid option -- 'w'\n"),
         ] {
             assert_eq!(h.run(line), (1, String::from(said)), "{line}");
+        }
+    }
+
+    /// What GNU seq refuses, it refuses with its first line here too.
+    #[test]
+    fn seq_refuses_what_gnu_seq_refuses_as_it_does() {
+        for args in [
+            &["seq", "x"][..],
+            &["seq", "1", "x"],
+            &["seq", "-"],
+            &["seq", "+"],
+            &["seq", "."],
+            &["seq", "1e"],
+            &["seq", "1", "-x"],
+            &["seq", "-x", "3"],
+            &["seq", "--foo", "3"],
+            &["seq", "nan"],
+        ] {
+            let mut h = Harness::new();
+            let (status, out, err) = host_tool(args, &[], b"");
+            let first = err.lines().next().unwrap_or("");
+            assert_eq!(
+                h.like_host(args, &[], b""),
+                (status, out, alloc::format!("{first}\n")),
+                "{args:?}"
+            );
         }
     }
 
