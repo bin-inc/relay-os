@@ -5,7 +5,7 @@ expect root@relay:~# $
 send echo hello, world
 expect \nhello, world\n
 send uname -a
-expect \nRelay relay 0\.2\.0 x86_64\n
+expect \nRelay relay 0\.3\.0 x86_64\n
 send cat /etc/hostname
 expect \nrelay\n
 send ls /

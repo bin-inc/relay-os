@@ -24,7 +24,7 @@ normally.
 1. In Mint: `cargo xtask flash --full` and type `ERASE` when asked.
 2. Boot the stick (see above).
 3. Within about 5 s the monitor must show, on black:
-   - `Relay OS 0.2.0`
+   - `Relay OS 0.3.0`
    - `[ ok ] console WxH (CxR cells)` — note W×H. It should be the monitor's
      native resolution (1920×1200 on the ASUS PA248QV); the terminal uses at
      most the top-left 1920×1080 of it, so wider or taller screens have a

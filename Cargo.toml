@@ -4,7 +4,7 @@ members = ["boot", "kernel", "userland/tests", "userland/utils", "userland/sh", 
 default-members = ["crates/boot-info", "crates/term", "crates/vfs", "crates/shell", "crates/ext2", "crates/usb", "crates/heap", "crates/relay-abi", "crates/crc32", "crates/sysimg", "crates/relay-rt", "crates/elf", "xtask"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
