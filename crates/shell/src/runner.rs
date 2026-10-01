@@ -1,15 +1,17 @@
 //! How the shell runs a command that is not one of its own built-ins
-//! (user-space gate §8.2): the `Runner`. The in-process runner runs the
-//! command functions against the shell's `Vfs`, `Console` and `System`, as
-//! milestone 1 does (the unit tests and `cargo xtask host-shell`, where
-//! there are no programs); the spawning runner starts `/bin/<name>` for
-//! every one (`/bin/sh`).
+//! (user-space gate §8.2), and a pipeline (§9.1): the `Runner`. The
+//! in-process runner runs the command functions against the shell's `Vfs`,
+//! `Console` and `System`, as milestone 1 does (the unit tests and `cargo
+//! xtask host-shell`, where there are no programs), a pipeline's stages one
+//! after another, each one's output kept in memory as the next one's
+//! input; the spawning runner starts `/bin/<name>` for every one
+//! (`/bin/sh`).
 
 use crate::commands::{self, Builtin, Script};
 use crate::ctx::Ctx;
-use crate::io::{Console, Programs, Stdin, System};
+use crate::io::{Bytes, Console, Programs, Stdin, Stdout, System};
 use crate::killed;
-use crate::parser::Redirect;
+use crate::parser::{Command, Redirect};
 use crate::shell::{CANCELLED, CANNOT_RUN, NAME, NOT_FOUND};
 use crate::transcript::Transcript;
 use alloc::format;
@@ -69,6 +71,10 @@ pub(crate) trait Runner {
         args: &[String],
         redirect: Option<&Redirect>,
     ) -> Ran;
+
+    /// Runs a pipeline of two or more commands, none of them a built-in,
+    /// the last one's output going to its redirection if it has one.
+    fn pipeline(&mut self, parts: Parts<'_>, stages: &[Command]) -> Ran;
 }
 
 /// The runners a shell may have. (A shell holds its runner in this rather
@@ -117,6 +123,91 @@ impl Runner for InProcess {
             None => not_found(name),
         }
     }
+
+    /// Each stage runs to its end before the next starts, its output kept
+    /// as the next one's input; a stage that is not found says so and
+    /// gives the next one nothing, as bash's does. Ctrl-C stops the rest.
+    fn pipeline(&mut self, parts: Parts<'_>, stages: &[Command]) -> Ran {
+        // `sh` reads a script for this shell to run after the command.
+        if stages.iter().any(|c| c.words[0] == "sh") {
+            return in_a_pipeline("sh");
+        }
+        let Parts {
+            vfs,
+            console,
+            system,
+            transcript,
+            in_script,
+            status,
+            mut input,
+        } = parts;
+        let (last, before) = stages.split_last().expect("a pipeline has stages");
+        let mut piped: Option<Bytes> = None;
+        for stage in before {
+            let (name, args) = (&stage.words[0], &stage.words[1..]);
+            let mut out = Collected(Vec::new());
+            if let Some(command) = commands::find(name) {
+                let mut ctx = Ctx::program(&mut *vfs, &mut *system, &mut *console, &mut out);
+                match (&mut piped, &mut input) {
+                    (Some(bytes), _) => ctx.set_input(bytes),
+                    (None, Some(first)) => ctx.set_input(&mut **first),
+                    (None, None) => {}
+                }
+                ctx.transcript = transcript.take();
+                (command.run)(&mut ctx, args);
+                let _ = ctx.finish();
+                let cancelled = ctx.cancelled;
+                *transcript = ctx.transcript.take();
+                if cancelled {
+                    return Ran::said(CANCELLED, String::from("^C\n"));
+                }
+            } else {
+                let message = not_found(name).message;
+                console.write(message.as_bytes());
+                if let Some(t) = transcript.as_mut() {
+                    let _ = t.add(&mut *vfs, message.as_bytes());
+                }
+            }
+            piped = Some(Bytes::new(out.0));
+        }
+        let mut piped = piped.expect("a stage before the last");
+        let parts = Parts {
+            vfs,
+            console,
+            system,
+            transcript,
+            in_script,
+            status,
+            input: Some(&mut piped),
+        };
+        self.run(
+            parts,
+            &last.words[0],
+            &last.words[1..],
+            last.redirect.as_ref(),
+        )
+    }
+}
+
+/// A stage's output in the in-process runner: kept whole for the next.
+struct Collected(Vec<u8>);
+
+impl Stdout for Collected {
+    fn write(&mut self, bytes: &[u8]) -> Result<(), Errno> {
+        self.0.extend_from_slice(bytes);
+        Ok(())
+    }
+    fn is_tty(&self) -> bool {
+        false
+    }
+    fn node(&self) -> Option<Node> {
+        None
+    }
+}
+
+/// A command the shell runs itself, refused in a pipeline (§9.1).
+pub(crate) fn in_a_pipeline(name: &str) -> Ran {
+    Ran::said(1, format!("{NAME}: {name}: cannot be used in a pipeline\n"))
 }
 
 /// Every command a program: `/bin/<name>`, or the path as given.
@@ -160,6 +251,13 @@ impl Runner for Spawning<'_> {
             },
             Err(e) => cannot_start(name, e),
         }
+    }
+
+    fn pipeline(&mut self, _parts: Parts<'_>, _stages: &[Command]) -> Ran {
+        Ran::said(
+            crate::shell::SYNTAX,
+            format!("{NAME}: unsupported syntax: |\n"),
+        )
     }
 }
 

@@ -180,13 +180,13 @@ mod tests {
     #[test]
     fn a_line_that_does_not_parse_does_not_stop_the_script() {
         let mut h = Harness::new();
-        h.put("/tmp/s.sh", b"echo 'open\nls | wc\necho after\n");
+        h.put("/tmp/s.sh", b"echo 'open\nls; wc\necho after\n");
         assert_eq!(
             h.run("sh /tmp/s.sh"),
             (
                 0,
                 "+ echo 'open\nrelay-sh: syntax error: unterminated quote\n\
-                 + ls | wc\nrelay-sh: unsupported syntax: |\n+ echo after\nafter\n"
+                 + ls; wc\nrelay-sh: unsupported syntax: ;\n+ echo after\nafter\n"
                     .into()
             )
         );

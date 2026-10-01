@@ -167,7 +167,7 @@ impl<'a> Shell<'a> {
             Err(e) => return self.finish(SYNTAX, format!("{NAME}: {e}\n")),
         };
         if pipeline.len() > 1 {
-            return self.finish(SYNTAX, format!("{NAME}: unsupported syntax: |\n"));
+            return self.pipeline(&pipeline);
         }
         let cmd = pipeline.remove(0);
         if cmd.words.is_empty() && cmd.redirect.is_none() {
@@ -211,6 +211,32 @@ impl<'a> Shell<'a> {
             status = self.run_script(script);
         }
         self.finish(status, ran.message)
+    }
+
+    /// Runs a pipeline (user-space gate §9.1): its status is the last
+    /// command's. The shell's own commands cannot be in one.
+    fn pipeline(&mut self, stages: &[parser::Command]) -> i32 {
+        let builtin = stages
+            .iter()
+            .find(|c| commands::builtin(&c.words[0]).is_some());
+        if let Some(c) = builtin {
+            let ran = runner::in_a_pipeline(&c.words[0]);
+            return self.finish(ran.status, ran.message);
+        }
+        let parts = Parts {
+            vfs: &mut *self.vfs,
+            console: &mut *self.console,
+            system: &mut *self.system,
+            transcript: &mut self.transcript,
+            in_script: self.in_script,
+            status: self.status,
+            input: match &mut self.input {
+                Some(input) => Some(&mut **input),
+                None => None,
+            },
+        };
+        let ran = self.runner.get().pipeline(parts, stages);
+        self.finish(ran.status, ran.message)
     }
 
     /// Writes to the screen and, while a script runs, its transcript.
@@ -367,6 +393,80 @@ mod tests {
     }
 
     #[test]
+    fn a_pipeline_hands_each_command_s_output_to_the_next() {
+        let mut h = Harness::new();
+        h.put("/tmp/f", b"one\ntwo\nthree\n");
+        // What bash prints for each (`bash -c '…'`).
+        assert_eq!(h.run("echo hello world | wc -c"), (0, "12\n".into()));
+        assert_eq!(
+            h.run("cat /tmp/f | head -n 2 | tail -n 1"),
+            (0, "two\n".into())
+        );
+        // Not the screen: one name a line.
+        assert_eq!(h.run("ls /etc | cat"), (0, "hostname\nmotd\n".into()));
+        // The last command's redirection; and its status is the line's.
+        assert_eq!(h.run("cat /tmp/f | wc -l > /tmp/n"), (0, "".into()));
+        assert_eq!(h.get("/tmp/n"), b"3\n");
+        assert_eq!(
+            h.run("cat /nope | wc -l"),
+            (0, "cat: /nope: No such file or directory\n0\n".into())
+        );
+        assert_eq!(
+            h.run("echo x | cat /nope"),
+            (1, "cat: /nope: No such file or directory\n".into())
+        );
+        // A command that is not found gives the next nothing, as in bash.
+        assert_eq!(
+            h.run("nosuch | wc -l"),
+            (0, "relay-sh: nosuch: command not found\n0\n".into())
+        );
+        assert_eq!(
+            h.run("echo x | nosuch"),
+            (127, "relay-sh: nosuch: command not found\n".into())
+        );
+        // The first command reads the shell's standard input.
+        h.stdin = b"a\nb\n".to_vec();
+        assert_eq!(h.run("cat | wc -l"), (0, "2\n".into()));
+    }
+
+    #[test]
+    fn the_shell_s_own_commands_cannot_be_in_a_pipeline() {
+        let mut h = Harness::new();
+        for (line, name) in [
+            ("cd /tmp | cat", "cd"),
+            ("echo a | exit 3", "exit"),
+            ("help | wc", "help"),
+            ("ls | sh x | wc", "sh"),
+        ] {
+            assert_eq!(
+                h.run(line),
+                (
+                    1,
+                    alloc::format!("relay-sh: {name}: cannot be used in a pipeline\n")
+                ),
+                "{line}"
+            );
+        }
+        // Nothing ran: not even the commands before it.
+        assert_eq!(h.run("pwd"), (0, "/\n".into()));
+        h.put("/tmp/x", b"");
+        assert_eq!(
+            h.run("echo a > /tmp/x | cd /"),
+            (2, "relay-sh: unsupported syntax: > before |\n".into())
+        );
+    }
+
+    #[test]
+    fn ctrl_c_stops_a_pipeline() {
+        let mut h = Harness::new();
+        h.put("/tmp/big", &alloc::vec![b'x'; 300_000]);
+        h.console.interrupt = true;
+        assert_eq!(h.run("cat /tmp/big | wc -c"), (130, "^C\n".into()));
+        // The rest does not run, even what would not have asked.
+        assert_eq!(h.run("cat /tmp/big | echo after"), (130, "^C\n".into()));
+    }
+
+    #[test]
     fn unknown_commands_and_syntax_errors() {
         let mut h = Harness::new();
         assert_eq!(
@@ -374,8 +474,12 @@ mod tests {
             (127, "relay-sh: frobnicate: command not found\n".into())
         );
         assert_eq!(
-            h.run("ls | wc"),
-            (2, "relay-sh: unsupported syntax: |\n".into())
+            h.run("ls | ;"),
+            (2, "relay-sh: unsupported syntax: ;\n".into())
+        );
+        assert_eq!(
+            h.run("ls |"),
+            (2, "relay-sh: syntax error: unexpected end of file\n".into())
         );
         assert_eq!(
             h.run("echo 'open"),
