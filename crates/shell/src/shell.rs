@@ -162,8 +162,14 @@ impl<'a> Shell<'a> {
     /// status. Every command is followed by a sync, so its changes are on
     /// the disk when the prompt comes back.
     pub fn execute(&mut self, line: &str) -> i32 {
-        let mut pipeline = match parser::parse(line) {
-            Ok(pipeline) => pipeline,
+        let mut pipeline = match parser::parse_line(line) {
+            Ok(parser::Line {
+                background: Some(_),
+                ..
+            }) => {
+                return self.finish(SYNTAX, format!("{NAME}: unsupported syntax: &\n"));
+            }
+            Ok(line) => line.pipeline,
             Err(e) => return self.finish(SYNTAX, format!("{NAME}: {e}\n")),
         };
         if pipeline.len() > 1 {
