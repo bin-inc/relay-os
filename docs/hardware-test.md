@@ -160,19 +160,20 @@ The NUC has no serial port, so a keyboard that does not work cannot run
 
 ## Check 3 — files on the stick (plans 5 and 6; milestone 2), and check 4
 
-The full checklist of spec §9.4. The K120 and the stick sit on the ports of
-check 2 (the stick on bus 4 port 3 in Mint's `lsusb -t`). Since plan 6 the
-commands come from two scripts on the stick, `/root/checks/check3-a.sh` and
-`check3-b.sh` (in the repository under `rootfs/root/checks/`), and since
-milestone 2's plan 4b a third, `check4.sh` (NUC check 4 of the user-space
-gate, spec §12.4). Every command is a program now, and `/bin/sh` runs
-them, which the kernel's init starts as process 2: `sh` runs
-each line as if it were typed, shows it as `+ <command>` before its output,
-and writes everything it shows into a transcript next to the script
-(`check3-a.log`). `verify-usb` checks the transcripts in Mint against the
-output the scripts expect (their `#>` lines), so only the boot screen needs
-a look. The QEMU scenario `checks` runs the same scripts on every pull
-request.
+The full checklist of spec §9.4. The K120 and the stick sit on the ports
+of check 2 (the stick on bus 4 port 3 in Mint's `lsusb -t`). Since plan 6
+the commands come from two scripts on the stick,
+`/root/checks/check3-a.sh` and `check3-b.sh` (in the repository under
+`rootfs/root/checks/`), and since milestone 2's plan 4b a third,
+`check4.sh` (NUC check 4 of the user-space gate, spec §12.4), after which
+the error screen is visited by hand (plan 5). Every command is a program
+now, and `/bin/sh` runs them, which the kernel's init starts as process 2:
+`sh` runs each line as if it were typed, shows it as `+ <command>` before
+its output, and writes everything it shows into a transcript next to the
+script (`check3-a.log`). `verify-usb` checks the transcripts in Mint
+against the output the scripts expect (their `#>` lines), so only the boot
+screen needs a look. The QEMU scenario `checks` runs the same scripts on
+every pull request.
 
 1. In Mint: `cargo xtask flash --full` and type `ERASE` when asked (this
    erases the files of earlier runs and writes the current scripts;
@@ -252,20 +253,34 @@ request.
    `init: /bin/sh (pid <n>) exited with 0; starting it again` and a new
    prompt `root@relay:~# ` come at once, without the motd: the shell is a
    program, and process 1 starts another. Photograph the screen.
-8. `poweroff`: the NUC switches itself off (`relay: powering off`). If the
+8. The error screen (milestone 2, plan 5): `reboot`, and choose the stick
+   again with F10, so that the kernel log's last lines are the boot's. At
+   the prompt type `exit` three times within 10 s. After the first two,
+   init's line and a new prompt; after the third,
+   `init: /bin/sh (pid <n>) exited with 0` and the error screen: `*** Relay
+   OS cannot run its shell ***`, `/bin/sh ended 3 times within 10 s`, the
+   kernel log's last 20 lines, from the `xhci 00:14.0: port 15:` lines to
+   init's three, and `Press any key to reboot.`
+   The line `xhci 00:14.0: slot 4: interface 0 class 8/6/80, …` is wider
+   than the screen and takes two rows, and the heading stays at the top.
+   Photograph it, wait a few seconds (it waits for the key, however long),
+   then press a key on the K120: the NUC restarts. Choose the stick again
+   with F10: the motd and the prompt.
+9. `poweroff`: the NUC switches itself off (`relay: powering off`). If the
    screen says `System halted. It is now safe to power off.` instead, note
    the `relay:` line above it and hold the power button.
-9. Boot Mint and run `cargo xtask verify-usb`: `e2fsck: clean`, the tree
+10. Boot Mint and run `cargo xtask verify-usb`: `e2fsck: clean`, the tree
    lists `/root/notes/a`, `/root/notes/big` (8388608 bytes) and
    `/root/notes/t`, and the last lines are
    `/root/checks/check3-a.sh: ok, 84 of 84 commands as expected (run <time>)`,
    `/root/checks/check3-b.sh: ok, 5 of 5 commands as expected (run <time>)`
    and `/root/checks/check4.sh: ok, 33 of 33 commands as expected (run
-   <time>)`, with the UTC times of the three runs (after `flash --kernel` the
-   transcripts of an earlier run stay on the stick, so check the times). A
-   `FAILED` line is followed by the script line, the expectation that
-   failed and what the command printed there; a script that was not run is
-   `FAILED, not run`.
+   <time>)`, with the UTC times of the three runs, after the line
+   `system.img: built <time>`. A transcript older than the stick's
+   `system.img` (a run before the last `flash --kernel`, which keeps the
+   transcripts; `flash --full` erases them) fails. A `FAILED` line is
+   followed by the script line, the expectation that failed and what the
+   command printed there; a script that was not run is `FAILED, not run`.
 
 ### If it fails
 
@@ -280,6 +295,8 @@ request.
 | `exit` at the prompt gives no new prompt, or the error screen | Init does not see the shell end, or its clock runs fast (three ends within 10 s) | Photograph the screen: the log's lines on it end with init's `init: /bin/sh (pid N) …` lines |
 | `check4.sh`: `t-spawn fill` fills the table with fewer than 60 children, or the second `free` differs | A process of an earlier command was left over (a zombie init did not collect, or a program still running) | `verify-usb` names the line; `dmesg` shows the `pid N (…)` lines of the programs killed |
 | The error screen with `/bin/sh cannot start: …` or `/bin/sh ended 3 times within 10 s` | The shell cannot be loaded, or ends as soon as it starts (its `init: /bin/sh (pid N) …` lines, in the log's lines on the screen, say how) | Photograph the screen; a key restarts the machine |
+| A key on the K120 at the error screen does nothing | The keyboard is not polled while init waits (the idle task polls it) | Photograph the screen and hold the power button |
+| The error screen's heading has scrolled away, or a program's line shows under `Press any key` | A log line takes more rows than counted, or a process still ran | Photograph the screen |
 | The panic screen just after `+ t-args` or `+ t-fault` | Entering ring 3, a system call or a fault in ring 3 goes wrong on this CPU, where QEMU's works | Photograph the panic screen: its vector, `rip`, `cr2` and registers say which |
 | `t-spin 1` never ends, or the keyboard stops during `t-spin 5` | The LAPIC timer's ticks do not reach ring 3 on this machine, or the tick's poll of the xHCI keyboard fails there | Photograph the screen; after a reboot, `dmesg` shows the `timer:` and `usb:` lines |
 | The panic screen during `t-spawn` or `t-fault flags-ac` | A context switch, or an interrupt taken in ring 3, goes wrong on this CPU: the panic's message names the check that failed (`a program's flags reached a switch`, `TSS rsp0 and the syscall stack differ`, `an interrupt with the program's gs`) | Photograph the panic screen |
@@ -295,6 +312,7 @@ request.
 | `reboot` leaves the screen as it is | No reset method worked (unlikely: the last is a triple fault) | Photograph the screen; hold the power button |
 | `verify-usb` reports errors | A write was lost or wrong | Do not flash again: keep the stick as it is and report the output |
 | `verify-usb`: `check3-a.sh: FAILED` (or another script) | A command printed something else than the script expects | The line after it names the command, the expectation and the line it printed instead; the whole transcript is `/root/checks/check3-a.log` on the stick (`cat checks/check3-a.log` on the NUC) |
+| `verify-usb`: `the transcript is older than the system on the stick` | The script ran before the last `flash --kernel` | Run the script again on the NUC |
 | `verify-usb`: `… are not in the transcript` | The script stopped (Ctrl-C, a hang, a restart) before that command | Photograph the screen where it stopped; the transcript ends with the last command that ran |
 | `sh: cannot write the transcript …` | `/` is read-only (see the `mount /` line) | Nothing ran; fix the mount first |
 
