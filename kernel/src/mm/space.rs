@@ -229,6 +229,12 @@ impl AddressSpace {
         &self.maps
     }
 
+    /// The frames it holds: its pages, their tables and its PML4, for
+    /// `ps` (spec §9.3).
+    pub fn frames(&self, mem: &mut impl PhysMem) -> u64 {
+        1 + self.tables.lower_half_frames(mem)
+    }
+
     /// Gives back every page, table and the PML4. The kernel must not be
     /// running on this space's tables (CR3) any more.
     pub fn destroy(mut self, mem: &mut impl PhysMem) {
@@ -308,6 +314,24 @@ mod tests {
         assert!(m.frames() > before + 258);
         s.destroy(&mut m);
         assert_eq!(m.frames(), before, "every frame came back");
+    }
+
+    #[test]
+    fn a_space_counts_every_frame_it_holds() {
+        let mut m = FakeMem::new();
+        let k = kernel(&mut m);
+        let before = m.frames() as u64;
+        let mut s = AddressSpace::new(&mut m, &k).unwrap();
+        assert_eq!(s.frames(&mut m), 1, "only its PML4");
+        s.map_zeroed(&mut m, U, 3, Perm::ReadExec).unwrap();
+        // Another table of each level for a page far away.
+        s.map_zeroed(&mut m, 0x7FFF_FFF0_0000, 1, Perm::ReadWrite)
+            .unwrap();
+        let a = s.map_area(&mut m, 600, u64::MAX).unwrap();
+        assert_eq!(s.frames(&mut m), m.frames() as u64 - before);
+        s.unmap_area(&mut m, a, 600).unwrap();
+        assert_eq!(s.frames(&mut m), m.frames() as u64 - before);
+        s.destroy(&mut m);
     }
 
     #[test]

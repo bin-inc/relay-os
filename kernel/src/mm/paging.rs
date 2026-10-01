@@ -335,6 +335,20 @@ impl PageTables {
         }
     }
 
+    /// The frames of the lower half: every page `map_user` put there and
+    /// every table below its PML4 entries (not the PML4 itself), as
+    /// `free_lower_half` would give them back.
+    pub fn lower_half_frames(&self, mem: &mut impl PhysMem) -> u64 {
+        let mut frames = 0;
+        for i in 0..256 {
+            let pdpt = mem.table(self.pml4)[i];
+            if pdpt & PRESENT != 0 {
+                frames += table_frames(mem, pdpt & ADDR, 2);
+            }
+        }
+        frames
+    }
+
     /// Maps one 2 MiB page. `Ok(false)` if that slot already holds a table
     /// of 4 KiB pages; the caller then maps page by page.
     fn map_huge(
@@ -427,6 +441,23 @@ fn free_table(mem: &mut impl PhysMem, table: u64, level: u32) {
         }
     }
     mem.free_frame(table);
+}
+
+/// The frames `free_table` would give back for the table at `table` of
+/// `level`: it, the tables below it and, from a PT, the pages it maps.
+fn table_frames(mem: &mut impl PhysMem, table: u64, level: u32) -> u64 {
+    let mut frames = 1;
+    for i in 0..512 {
+        let e = mem.table(table)[i];
+        if e & PRESENT == 0 {
+            continue;
+        }
+        frames += match level {
+            0 => 1,
+            _ => table_frames(mem, e & ADDR, level - 1),
+        };
+    }
+    frames
 }
 
 /// The physical ranges the kernel's linear map covers: every RAM-type

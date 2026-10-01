@@ -1,6 +1,9 @@
 //! The console's tees (user-space gate §6.5): files that get a copy of
-//! everything written to the console. At most 4 are pushed at a time; a
-//! process pops the newest one it pushed. What they get is buffered and
+//! everything written to the console. A process pushes at most 4 at a
+//! time, and the stack holds at most 64, one for each process the table
+//! can hold, so a background script's transcript never keeps another
+//! script from starting (milestone 3); a process pops the newest one it
+//! pushed. What they get is buffered and
 //! written once 4 KiB wait, and all of it at every `sync` and when the tee
 //! is popped, so a big `cat` is never held whole.
 //!
@@ -17,8 +20,10 @@
 use alloc::vec::Vec;
 use vfs::Errno;
 
-/// Tees on the stack at most.
-pub const TEES: usize = 4;
+/// Tees on the stack at most: one for each process the table can hold.
+pub const TEES: usize = 64;
+/// Tees one process may have pushed at a time.
+pub const TEES_EACH: usize = 4;
 /// A tee's copies are written once this much waits.
 pub const CHUNK: usize = 4096;
 /// The echo a tee keeps while it waits: what the line discipline echoes
@@ -59,9 +64,11 @@ impl<F> TeeStack<F> {
         }
     }
 
-    /// Pushes `file` for process `owner`. `EBUSY` if 4 tees are pushed.
+    /// Pushes `file` for process `owner`. `EBUSY` if `owner` has 4 tees
+    /// pushed, or the stack holds 64.
     pub fn push(&mut self, owner: u32, file: F) -> Result<(), Errno> {
-        if self.tees.len() >= TEES {
+        let mine = self.tees.iter().filter(|t| t.owner == owner).count();
+        if mine >= TEES_EACH || self.tees.len() >= TEES {
             return Err(Errno::EBUSY);
         }
         self.tees.push(Tee {
@@ -201,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn at_most_4_tees_and_each_gets_a_copy() {
+    fn at_most_4_tees_a_process_and_each_gets_a_copy() {
         let mut s = TeeStack::new();
         assert!(!s.is_copying());
         for f in 1..=4 {
@@ -215,6 +222,24 @@ mod tests {
         for f in 1..=4 {
             assert_eq!(files.of(f), b"hello\n");
         }
+    }
+
+    #[test]
+    fn other_processes_push_theirs_until_64_are_pushed() {
+        let mut s = TeeStack::new();
+        for f in 1..=4 {
+            s.push(10, f).unwrap();
+        }
+        // Background scripts, one tee each (the review found the fifth
+        // script refused at a stack of 4 for the whole machine).
+        for owner in 11..71 {
+            s.push(owner, owner).unwrap();
+        }
+        assert_eq!(s.push(71, 71), Err(Errno::EBUSY), "64 in all");
+        let mut files = Files::default();
+        s.pop(70, &mut files.writer()).unwrap();
+        s.push(71, 71).unwrap();
+        assert_eq!(s.push(10, 5), Err(Errno::EBUSY), "still 4 for 10");
     }
 
     #[test]

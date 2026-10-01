@@ -10,6 +10,7 @@
 //! with interrupts off and no lock held, so a blocked process never holds
 //! a lock another one needs.
 
+pub mod holders;
 pub mod table;
 
 use crate::arch::context::{self, Next};
@@ -27,7 +28,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use relay_abi::{MemInfo, Time, WaitStatus};
+use relay_abi::{MemInfo, ProcInfo, Time, WaitStatus};
 use spin::Mutex;
 use table::{Blocked, Group, Table, Want};
 use vfs::{Cwd, Errno, FileType, Vfs};
@@ -161,6 +162,11 @@ fn console_input(t: &mut Table<Res>) {
     if tty::has_input() {
         t.wake_all(Blocked::Console);
     }
+    // A Ctrl-C at a shell's `wait` (`WAIT_CTRL_C`): the shell's group has
+    // the console, in raw mode.
+    if tty::has_raw_ctrl_c() {
+        t.wake_waiting(tty::foreground());
+    }
 }
 
 /// A tick interrupted a program (spec §6.1, §6.3): the kernel holds nothing
@@ -227,8 +233,10 @@ fn end_if_killed() {
 /// of another group that is still blocked wakes, to find it has lost it.
 pub fn take_console() {
     tty::set_line_mode(false);
-    tty::set_foreground(table::INIT);
-    PROCS.lock().wake_all(Blocked::Console);
+    let mut t = PROCS.lock();
+    t.take_console();
+    tty::set_foreground(t.console_group());
+    t.wake_all(Blocked::Console);
 }
 
 /// Kills every process but process 1 (the error screen's, so that none
@@ -448,6 +456,10 @@ pub fn spawn(s: &Spawn) -> Result<u32, Errno> {
         {
             return Err(Errno::EPERM);
         }
+        // Only a group that holds the console gives it to a child's.
+        if s.foreground && !t.may_change_console(t.current()) {
+            return Err(Errno::EPERM);
+        }
         let parent = t.get(t.current()).expect("a process spawns");
         (parent.res.fds.for_child(&s.fds)?, parent.res.cwd.clone())
     };
@@ -512,11 +524,12 @@ pub fn spawn(s: &Spawn) -> Result<u32, Errno> {
     let pid = t
         .insert(me, s.group, name.into_owned(), res)
         .unwrap_or_else(|e| unreachable!("room and group were checked under this lock: {e}"));
-    drop(t);
     // Before the child can run: the kernel is not preemptible, and it has
-    // not been switched to yet.
-    if s.foreground {
+    // not been switched to yet. Its parent's group held the console when
+    // it was checked above, and nothing ran since.
+    if s.foreground && t.give_console(me, pid).is_ok() {
         tty::set_foreground(pid);
+        drop(t);
         tty::set_line_mode(true);
         PROCS.lock().wake_all(Blocked::Console);
     }
@@ -526,8 +539,10 @@ pub fn spawn(s: &Spawn) -> Result<u32, Errno> {
 /// A child of the running process that has ended, taken out of the table
 /// with its kernel stack given back; `None` with `nohang` when none has.
 /// `ECHILD` if there is no such child; `EINTR` if the running process was
-/// killed while it waited (it ends on its way back to ring 3).
-fn collect(child: Child, nohang: bool) -> Result<Option<(u32, WaitStatus)>, Errno> {
+/// killed while it waited (it ends on its way back to ring 3), or, with
+/// `ctrl_c`, once a Ctrl-C is typed while its group has the console in raw
+/// mode (the Ctrl-C is taken).
+fn collect(child: Child, nohang: bool, ctrl_c: bool) -> Result<Option<(u32, WaitStatus)>, Errno> {
     let want = match child {
         Child::Any => Want::Any,
         Child::Pid(pid) => Want::Pid(pid),
@@ -550,9 +565,23 @@ fn collect(child: Child, nohang: bool) -> Result<Option<(u32, WaitStatus)>, Errn
                 return Ok(Some((p.pid, status)));
             }
             None if nohang => return Ok(None),
+            None if ctrl_c && holds_ctrl_c() => return Err(Errno::EINTR),
+            None if ctrl_c => block(Blocked::WaitCtrlC),
             None => block(Blocked::Wait),
         }
     }
+}
+
+/// Whether a Ctrl-C typed in raw mode is the running process's, its group
+/// having the console: then it is taken.
+fn holds_ctrl_c() -> bool {
+    let mine = {
+        let t = PROCS.lock();
+        t.get(t.current())
+            .is_some_and(|p| p.pgid == tty::foreground())
+    };
+    tty::poll();
+    mine && tty::take_raw_ctrl_c()
 }
 
 /// Waits for the child `pid`, collecting any other child that ends
@@ -561,11 +590,11 @@ fn collect(child: Child, nohang: bool) -> Result<Option<(u32, WaitStatus)>, Errn
 /// not a child of the running process.
 pub fn wait_collecting(pid: u32) -> Result<WaitStatus, Errno> {
     // `ECHILD` before anything else is collected.
-    if let Some((_, status)) = collect(Child::Pid(pid), true)? {
+    if let Some((_, status)) = collect(Child::Pid(pid), true, false)? {
         return Ok(status);
     }
     loop {
-        match collect(Child::Any, false)? {
+        match collect(Child::Any, false, false)? {
             Some((ended, status)) if ended == pid => return Ok(status),
             Some(_) => {}
             None => unreachable!("wait without nohang collects a child"),
@@ -752,10 +781,17 @@ impl Caller for Current {
         }
     }
 
-    fn console_mode(&mut self, line: bool) -> bool {
+    fn console_mode(&mut self, line: bool) -> Result<bool, Errno> {
+        {
+            let t = PROCS.lock();
+            if !t.may_change_console(t.current()) {
+                return Err(Errno::EPERM);
+            }
+        }
+        // Not under `PROCS`: the switch echoes, which may write the tees.
         let was = tty::set_line_mode(line);
         PROCS.lock().wake_all(Blocked::Console);
-        was
+        Ok(was)
     }
 
     fn console_size(&self) -> (u32, u32) {
@@ -768,7 +804,10 @@ impl Caller for Current {
         if !t.has_group(pgid) {
             return Err(Errno::ESRCH);
         }
-        tty::set_foreground(pgid);
+        // `EPERM` unless the caller's group holds the console.
+        let me = t.current();
+        t.give_console(me, pgid)?;
+        tty::set_foreground(t.console_group());
         t.wake_all(Blocked::Console);
         Ok(())
     }
@@ -777,8 +816,13 @@ impl Caller for Current {
         spawn(s)
     }
 
-    fn wait(&mut self, child: Child, nohang: bool) -> Result<Option<(u32, WaitStatus)>, Errno> {
-        collect(child, nohang)
+    fn wait(
+        &mut self,
+        child: Child,
+        nohang: bool,
+        ctrl_c: bool,
+    ) -> Result<Option<(u32, WaitStatus)>, Errno> {
+        collect(child, nohang, ctrl_c)
     }
 
     fn kill(&mut self, target: i64) -> Result<(), Errno> {
@@ -787,6 +831,12 @@ impl Caller for Current {
 
     fn pid(&self) -> u32 {
         PROCS.lock().current()
+    }
+
+    /// `PROCS` before `MEMORY`, as everywhere.
+    fn processes(&mut self) -> Vec<ProcInfo> {
+        let t = PROCS.lock();
+        mm::with_user_memory(|mem, _| t.list(|p| p.res.space.as_ref().map_or(0, |s| s.frames(mem))))
     }
 
     fn memory(&self) -> MemInfo {

@@ -1,0 +1,23 @@
+# The error screen takes the console back (user-space gate §11.2, §16
+# items 6 and 9; milestone 3, plan 2): the shell ends for the third time
+# within 10 s while its command holds the console in line mode (t-proc
+# reads it while a child of its own kills the shell). The screen ends
+# every other process, gives the console to process 1 in raw mode, and a
+# key alone restarts the machine: in line mode it would wait in the line
+# discipline, where the screen never sees it.
+timeout 40
+expect root@relay:~# $
+send exit
+expect \ninit: /bin/sh \(pid 2\) exited with 0; starting it again\nroot@relay:~# $
+send exit
+expect \ninit: /bin/sh \(pid \d+\) exited with 0; starting it again\nroot@relay:~# $
+send t-proc end-shell
+expect \nreading the console\nkilling pid \d+\n
+expect \ninit: /bin/sh \(pid \d+\) killed: kill\n
+expect \*\*\* Relay OS cannot run its shell \*\*\*\n\n/bin/sh ended 3 times within 10 s\n\n--- last kernel log lines ---\n
+expect \nPress any key to reboot\.\n
+expect pid \d+ \(/bin/t-proc\): killed: kill\n
+alive 1
+reset
+expect Relay OS \d+\.\d+\.\d+
+expect root@relay:~# $

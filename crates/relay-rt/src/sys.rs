@@ -3,7 +3,7 @@
 
 use core::fmt;
 use relay_abi::spawn::{SPAWN_FDS, WAIT_NOHANG};
-use relay_abi::{Call, FdMap, MemInfo, SpawnArgs, Stat, StatFs, WaitStatus, decode};
+use relay_abi::{Call, FdMap, MemInfo, ProcInfo, SpawnArgs, Stat, StatFs, WaitStatus, decode};
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 use crate::arch::syscall;
@@ -291,8 +291,14 @@ pub fn spawn(
 /// end: its pid and how it ended. With `nohang`, `None` at once if none
 /// has.
 pub fn wait(pid: i64, nohang: bool) -> Result<Option<(u32, WaitStatus)>, u16> {
+    wait_with(pid, if nohang { WAIT_NOHANG } else { 0 })
+}
+
+/// [`wait`] with `relay_abi::spawn`'s `WAIT_*` flags: with `WAIT_CTRL_C`,
+/// a Ctrl-C typed while this program's group has the console in raw mode
+/// ends the wait with `EINTR`.
+pub fn wait_with(pid: i64, flags: u32) -> Result<Option<(u32, WaitStatus)>, u16> {
     let mut w = WaitStatus::default();
-    let flags = if nohang { WAIT_NOHANG } else { 0 };
     let args = [pid as u64, u64::from(flags), &raw mut w as u64, 0, 0, 0];
     match decode(unsafe { syscall(Call::Wait, args) })? {
         0 => Ok(None),
@@ -303,6 +309,14 @@ pub fn wait(pid: i64, nohang: bool) -> Result<Option<(u32, WaitStatus)>, u16> {
 /// Kills the process `target`, or the process group `-target`.
 pub fn kill(target: i64) -> Result<(), u16> {
     decode(unsafe { syscall(Call::Kill, [target as u64, 0, 0, 0, 0, 0]) }).map(|_| ())
+}
+
+/// Fills `buf` with a `ProcInfo` per process, by pid, as many as fit
+/// (`relay_abi::proc::PROC_MAX` entries always hold them all); how many
+/// processes there are.
+pub fn proc_list(buf: &mut [ProcInfo]) -> Result<usize, u16> {
+    let len = core::mem::size_of_val(buf) as u64;
+    call(Call::ProcList, &[buf.as_mut_ptr() as u64, len]).map(|n| n as usize)
 }
 
 /// This program's pid.

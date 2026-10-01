@@ -14,6 +14,9 @@
 //!   nothing: the tee gets their echo as they are read, 4 KiB at a time.
 //! - `t-tee full`, on a full disk: a tee that cannot be written is removed,
 //!   and its pop says `ENOSPC`.
+//! - `t-tee owners`: five children push a tee each, all pushed at once (as
+//!   background scripts' transcripts are): each gets its own; a process
+//!   may push four (milestone 3).
 #![no_std]
 #![no_main]
 
@@ -33,8 +36,10 @@ fn main(args: Args) -> u8 {
         Some(b"gone") => gone(),
         Some(b"full") => full(),
         Some(b"typed") => typed(),
+        Some(b"owners") => owners(),
+        Some(b"owner") => owner(),
         _ => {
-            let _ = sys::write_all(2, b"usage: t-tee basic|end|gone|typed|full\n");
+            let _ = sys::write_all(2, b"usage: t-tee basic|end|gone|typed|full|owners\n");
             return 2;
         }
     };
@@ -204,4 +209,39 @@ fn typed() -> Result<(), u16> {
     let _ = writeln!(Fd(1), "written as it was typed: {written}");
     sys::close(log)?;
     sys::unlink(b"t-tee.typed")
+}
+
+fn owners() -> Result<(), u16> {
+    let fds = [
+        FdMap {
+            child: 1,
+            parent: 1,
+        },
+        FdMap {
+            child: 2,
+            parent: 2,
+        },
+    ];
+    let mut pids = [0u32; 5];
+    for pid in &mut pids {
+        *pid = sys::spawn(b"/bin/t-tee", b"t-tee\0owner\0", b"", &fds, 0, 0)?;
+    }
+    for pid in pids {
+        sys::wait(i64::from(pid), false)?;
+    }
+    Ok(())
+}
+
+/// One of `owners`' children: a tee of its own while its siblings have
+/// theirs.
+fn owner() -> Result<(), u16> {
+    let fd = create(b"t-tee.owner")?;
+    let pushed = sys::console_tee_push(fd);
+    sys::close(fd)?;
+    sys::sleep(500);
+    show_ok("a tee of its own", pushed);
+    if pushed.is_ok() {
+        sys::console_tee_pop()?;
+    }
+    Ok(())
 }

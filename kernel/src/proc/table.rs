@@ -21,9 +21,13 @@
 //! - `kill` and Ctrl-C only mark a process and wake it if it is blocked; it
 //!   ends itself the next time it runs, before any more of its code runs.
 
+use super::holders::Holders;
 use alloc::string::String;
 use alloc::vec::Vec;
-use relay_abi::WaitStatus;
+use relay_abi::proc::{
+    STATE_PIPE, STATE_READ, STATE_READY, STATE_RUN, STATE_SLEEP, STATE_WAIT, STATE_ZOMBIE,
+};
+use relay_abi::{ProcInfo, WaitStatus};
 use vfs::Errno;
 
 /// The most processes that exist at once (spec §5.4).
@@ -50,6 +54,9 @@ pub const SLICE: u32 = 10;
 pub enum Blocked {
     /// A child to end.
     Wait,
+    /// A child to end, or a Ctrl-C typed in raw mode while its group has
+    /// the console (`WAIT_CTRL_C`).
+    WaitCtrlC,
     /// Console input.
     Console,
     /// The tick count to reach this value.
@@ -65,6 +72,21 @@ pub enum State {
     Running,
     Blocked(Blocked),
     Zombie(WaitStatus),
+}
+
+impl State {
+    /// Its number in `ProcInfo::state` (spec §9.3): what `ps` says.
+    pub fn number(self) -> u32 {
+        match self {
+            State::Running => STATE_RUN,
+            State::Ready => STATE_READY,
+            State::Blocked(Blocked::Wait | Blocked::WaitCtrlC) => STATE_WAIT,
+            State::Blocked(Blocked::Console) => STATE_READ,
+            State::Blocked(Blocked::Sleep(_)) => STATE_SLEEP,
+            State::Blocked(Blocked::Pipe(_)) => STATE_PIPE,
+            State::Zombie(_) => STATE_ZOMBIE,
+        }
+    }
 }
 
 pub struct Process<R> {
@@ -142,6 +164,8 @@ pub struct Table<R> {
     current: u32,
     /// Ticks left of the running process's slice.
     slice_left: u32,
+    /// The groups that may change the console (spec §16 item 9).
+    console: Holders,
 }
 
 impl<R> Default for Table<R> {
@@ -158,6 +182,7 @@ impl<R> Table<R> {
             ready: Queue::new(),
             current: 0,
             slice_left: SLICE,
+            console: Holders::new(),
         }
     }
 
@@ -190,6 +215,27 @@ impl<R> Table<R> {
         self.procs.iter_mut()
     }
 
+    /// Every process, by pid (the table keeps them in the order they
+    /// came, and pids only count up), as `proc_list` reports it (spec
+    /// §9.3), with the frames `frames` says it holds.
+    pub fn list(&self, mut frames: impl FnMut(&Process<R>) -> u64) -> Vec<ProcInfo> {
+        self.procs
+            .iter()
+            .map(|p| {
+                let state = p.state.number();
+                ProcInfo::new(
+                    p.pid,
+                    p.ppid,
+                    p.pgid,
+                    state,
+                    frames(p),
+                    p.ticks,
+                    p.name.as_bytes(),
+                )
+            })
+            .collect()
+    }
+
     /// Whether a process of group `pgid` still runs (or waits): the console
     /// can be given to it. A group whose members are all zombies is none,
     /// since nothing of it can read the console again.
@@ -197,6 +243,33 @@ impl<R> Table<R> {
         self.procs
             .iter()
             .any(|p| p.pgid == pgid && !matches!(p.state, State::Zombie(_)))
+    }
+
+    /// The group that has the console, as the processes handed it on (spec
+    /// §6.4, §16 item 9): process 1's at first.
+    pub fn console_group(&self) -> u32 {
+        self.console.foreground()
+    }
+
+    /// Whether the process `pid` may change the console (its mode and
+    /// group, and a child's with `FOREGROUND`): its group was given it, and
+    /// has not handed it back.
+    pub fn may_change_console(&self, pid: u32) -> bool {
+        self.get(pid).is_some_and(|p| self.console.holds(p.pgid))
+    }
+
+    /// The process `pid`'s group gives the console to the group `to` (its
+    /// own takes it back); `EPERM` if it may not change the console.
+    pub fn give_console(&mut self, pid: u32, to: u32) -> Result<(), Errno> {
+        let by = self.get(pid).ok_or(Errno::EPERM)?.pgid;
+        let procs = &self.procs;
+        self.console
+            .give(by, to, |g| procs.iter().any(|p| p.pgid == g))
+    }
+
+    /// Process 1 takes the console back (the error screen's).
+    pub fn take_console(&mut self) {
+        self.console.reset();
     }
 
     /// Whether another process can start: an entry is free, and a pid is
@@ -301,6 +374,21 @@ impl<R> Table<R> {
         }
     }
 
+    /// Wakes the processes of group `pgid` that wait for a child or a
+    /// Ctrl-C (`WAIT_CTRL_C`): one was typed. The others it is no news to,
+    /// and would wake for nothing as long as it waits to be read.
+    pub fn wake_waiting(&mut self, pgid: u32) {
+        let pids: Vec<u32> = self
+            .procs
+            .iter()
+            .filter(|p| p.pgid == pgid && p.state == State::Blocked(Blocked::WaitCtrlC))
+            .map(|p| p.pid)
+            .collect();
+        for pid in pids {
+            self.wake(pid);
+        }
+    }
+
     /// Wakes the sleepers whose time has come at tick `now`.
     pub fn wake_sleepers(&mut self, now: u64) {
         let mut due = [0u32; MAX];
@@ -361,7 +449,10 @@ impl<R> Table<R> {
             .into_iter()
             .flatten()
         {
-            if self.get(waiter).map(|p| p.state) == Some(State::Blocked(Blocked::Wait)) {
+            if matches!(
+                self.get(waiter).map(|p| p.state),
+                Some(State::Blocked(Blocked::Wait | Blocked::WaitCtrlC))
+            ) {
                 self.wake(waiter);
             }
         }
@@ -816,6 +907,138 @@ mod tests {
         assert_eq!(t.get(init).unwrap().killed, None, "not process 1");
         assert_eq!(t.get(zombie).unwrap().killed, None, "it has ended already");
         assert_eq!(state(&t, zombie), State::Zombie(WaitStatus::exited(0)));
+    }
+
+    #[test]
+    fn the_list_has_every_process_by_pid_with_its_state() {
+        let mut t = table();
+        let init = add(&mut t, 0, true);
+        let a = t
+            .insert(init, Group::New, String::from("/bin/a"), ())
+            .unwrap();
+        let b = add(&mut t, a, false);
+        let c = add(&mut t, a, true);
+        let d = add(&mut t, a, true);
+        let e = add(&mut t, init, true);
+        assert_eq!(t.schedule(), init);
+        t.block(Blocked::Wait);
+        assert_eq!(t.schedule(), a);
+        t.tick();
+        t.tick();
+        t.block(Blocked::Console);
+        assert_eq!(t.schedule(), b);
+        t.block(Blocked::Sleep(99));
+        assert_eq!(t.schedule(), c);
+        t.block(Blocked::Pipe(7));
+        assert_eq!(t.schedule(), d);
+        t.end(d, WaitStatus::exited(0));
+        assert_eq!(t.schedule(), e);
+        let list = t.list(|p| u64::from(p.pid) * 10);
+        let got: Vec<(u32, u32, u32, u32, u64, u64)> = list
+            .iter()
+            .map(|p| (p.pid, p.ppid, p.pgid, p.state, p.frames, p.ticks))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (init, 0, init, STATE_WAIT, 10, 0),
+                (a, init, a, STATE_READ, 20, 2),
+                (b, a, a, STATE_SLEEP, 30, 0),
+                (c, a, c, STATE_PIPE, 40, 0),
+                (d, a, d, STATE_ZOMBIE, 50, 0),
+                (e, init, e, STATE_RUN, 60, 0),
+            ]
+        );
+        assert_eq!(list[1].name(), b"/bin/a");
+        t.block(Blocked::Wait);
+        t.wake(e);
+        assert_eq!(t.list(|_| 0)[5].state, STATE_READY);
+    }
+
+    #[test]
+    fn the_console_is_changed_by_the_groups_it_was_handed_to() {
+        let mut t = table();
+        let init = add(&mut t, 0, true);
+        let sh = add(&mut t, init, true);
+        assert!(t.may_change_console(init) && !t.may_change_console(sh));
+        t.give_console(init, sh).unwrap();
+        let cmd = add(&mut t, sh, true);
+        let bg = add(&mut t, sh, true);
+        let script_cmd = add(&mut t, cmd, false);
+        t.give_console(sh, cmd).unwrap();
+        assert_eq!(t.console_group(), cmd);
+        assert!(t.may_change_console(script_cmd), "the group's every member");
+        assert!(t.may_change_console(sh) && t.may_change_console(init));
+        assert!(!t.may_change_console(bg), "a background job's");
+        assert_eq!(t.give_console(bg, bg), Err(Errno::EPERM));
+        assert_eq!(t.give_console(99, sh), Err(Errno::EPERM), "no such process");
+        // The command ends and is collected: the shell takes it back.
+        t.end(script_cmd, WaitStatus::exited(0));
+        t.end(cmd, WaitStatus::exited(0));
+        assert!(t.reap(sh, Want::Pid(cmd)).unwrap().is_some());
+        assert!(t.reap(init, Want::Pid(script_cmd)).unwrap().is_some());
+        t.give_console(sh, sh).unwrap();
+        assert_eq!(t.console_group(), sh);
+        t.take_console();
+        assert_eq!(t.console_group(), init);
+        assert!(!t.may_change_console(sh));
+    }
+
+    #[test]
+    fn a_ctrl_c_wakes_its_group_s_waiters_that_asked_for_it_and_no_one_else() {
+        let mut t = table();
+        let a = add(&mut t, 0, true);
+        let b = add(&mut t, a, false);
+        let c = add(&mut t, a, true);
+        let d = add(&mut t, a, false);
+        let e = add(&mut t, a, false);
+        for (p, why) in [
+            (a, Blocked::WaitCtrlC),
+            (b, Blocked::Console),
+            (c, Blocked::WaitCtrlC),
+            (d, Blocked::WaitCtrlC),
+            (e, Blocked::Wait),
+        ] {
+            assert_eq!(t.schedule(), p);
+            t.block(why);
+        }
+        t.wake_waiting(a);
+        assert_eq!(state(&t, a), State::Ready);
+        assert_eq!(state(&t, d), State::Ready);
+        assert_eq!(
+            state(&t, b),
+            State::Blocked(Blocked::Console),
+            "not waiting"
+        );
+        assert_eq!(
+            state(&t, c),
+            State::Blocked(Blocked::WaitCtrlC),
+            "another group"
+        );
+        // A wait that did not ask for a Ctrl-C would wake again and again
+        // while one waits unread (the review's idle spin).
+        assert_eq!(
+            state(&t, e),
+            State::Blocked(Blocked::Wait),
+            "it did not ask"
+        );
+        assert_eq!(
+            t.list(|_| 0)[4].state,
+            STATE_WAIT,
+            "ps says wait either way"
+        );
+    }
+
+    #[test]
+    fn a_child_s_end_wakes_a_parent_that_waits_for_a_ctrl_c_too() {
+        let mut t = table();
+        let parent = add(&mut t, 0, true);
+        let child = add(&mut t, parent, true);
+        assert_eq!(t.schedule(), parent);
+        t.block(Blocked::WaitCtrlC);
+        assert_eq!(t.schedule(), child);
+        t.end(child, WaitStatus::exited(0));
+        assert_eq!(state(&t, parent), State::Ready);
     }
 
     #[test]

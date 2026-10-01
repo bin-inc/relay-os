@@ -3,8 +3,7 @@
 //! and it answers with the result register's value or with the program's
 //! exit. It checks and copies what the program passes (`UserSlice`,
 //! `UserStr`) and leaves the rest to the `Caller`, the kernel's side of
-//! the process. The file calls are in `files`, the pipe's in `pipes`;
-//! `proc_list` is `ENOSYS` until milestone 3's jobs.
+//! the process. The file calls are in `files`, the pipe's in `pipes`.
 
 use crate::exec::ARGS_MAX;
 use crate::fd::{FdTable, File};
@@ -14,8 +13,8 @@ use crate::proc::table::Group;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use relay_abi::info::INFO_MEMORY;
-use relay_abi::spawn::{FOREGROUND, NEW_GROUP, SPAWN_FDS, WAIT_ANY, WAIT_NOHANG};
-use relay_abi::{Call, FdMap, MemInfo, SpawnArgs, Time, WaitStatus, encode};
+use relay_abi::spawn::{FOREGROUND, NEW_GROUP, SPAWN_FDS, WAIT_ANY, WAIT_CTRL_C, WAIT_NOHANG};
+use relay_abi::{Call, FdMap, MemInfo, ProcInfo, SpawnArgs, Time, WaitStatus, encode};
 use vfs::{Errno, Vfs};
 
 mod files;
@@ -88,11 +87,13 @@ pub trait Caller {
     fn pipe_wait(&mut self, id: u64) -> Result<(), Errno>;
     /// Wakes whoever waits on the pipe `id`.
     fn pipe_wake(&mut self, id: u64);
-    /// Line mode (`true`) or raw mode; the previous one.
-    fn console_mode(&mut self, line: bool) -> bool;
+    /// Line mode (`true`) or raw mode; the previous one. `EPERM` unless
+    /// the program's group holds the console (spec §16 item 9).
+    fn console_mode(&mut self, line: bool) -> Result<bool, Errno>;
     /// The console's columns and rows.
     fn console_size(&self) -> (u32, u32);
-    /// Makes `pgid` the foreground group; `ESRCH` if no process is in it.
+    /// Makes `pgid` the foreground group: `ESRCH` if no process is in
+    /// `pgid`, `EPERM` unless the program's group holds the console.
     fn console_foreground(&mut self, pgid: u32) -> Result<(), Errno>;
     /// Pushes `file` as a console tee of the program (spec §6.5).
     fn tee_push(&mut self, file: Arc<File>) -> Result<(), Errno>;
@@ -109,11 +110,20 @@ pub trait Caller {
     /// Starts a child; its pid.
     fn spawn(&mut self, s: &Spawn) -> Result<u32, Errno>;
     /// A child that has ended, with how; `None` if `nohang` and none has.
-    /// `ECHILD` if there is no such child.
-    fn wait(&mut self, child: Child, nohang: bool) -> Result<Option<(u32, WaitStatus)>, Errno>;
+    /// `ECHILD` if there is no such child; with `ctrl_c`, `EINTR` once a
+    /// Ctrl-C is typed while the program's group has the console in raw
+    /// mode (`WAIT_CTRL_C`).
+    fn wait(
+        &mut self,
+        child: Child,
+        nohang: bool,
+        ctrl_c: bool,
+    ) -> Result<Option<(u32, WaitStatus)>, Errno>;
     /// Kills a process, or a group for a negative `target`.
     fn kill(&mut self, target: i64) -> Result<(), Errno>;
     fn pid(&self) -> u32;
+    /// Every process, by pid, as `ps` shows it (spec §9.3).
+    fn processes(&mut self) -> Vec<ProcInfo>;
     /// The memory figures of `free`.
     fn memory(&self) -> MemInfo;
     /// The wall clock and the uptime.
@@ -139,6 +149,7 @@ pub fn dispatch(caller: &mut impl Caller, number: u64, args: [u64; 6]) -> Outcom
         Some(Call::Wait) => wait(caller, args[0] as i64, args[1], args[2]),
         Some(Call::Kill) => caller.kill(args[0] as i64).map(|()| 0),
         Some(Call::Getpid) => Ok(u64::from(caller.pid())),
+        Some(Call::ProcList) => proc_list(caller, args[0], args[1]),
         Some(Call::MemMap) => mem_map(caller, args[0]),
         Some(Call::MemUnmap) => mem_unmap(caller, args[0], args[1]),
         Some(Call::Open) => files::open(caller, args[0], args[1], args[2]),
@@ -243,7 +254,7 @@ fn spawn(caller: &mut impl Caller, addr: u64) -> Result<u64, Errno> {
 /// memory is checked before a child is collected, so a bad pointer never
 /// loses a child's status.
 fn wait(caller: &mut impl Caller, pid: i64, flags: u64, addr: u64) -> Result<u64, Errno> {
-    if flags & !u64::from(WAIT_NOHANG) != 0 {
+    if flags & !u64::from(WAIT_NOHANG | WAIT_CTRL_C) != 0 {
         return Err(Errno::EINVAL);
     }
     let child = match pid {
@@ -259,7 +270,9 @@ fn wait(caller: &mut impl Caller, pid: i64, flags: u64, addr: u64) -> Result<u64
     if let Some(slice) = &status {
         caller.writable(slice)?;
     }
-    let Some((pid, w)) = caller.wait(child, flags & u64::from(WAIT_NOHANG) != 0)? else {
+    let nohang = flags & u64::from(WAIT_NOHANG) != 0;
+    let ctrl_c = flags & u64::from(WAIT_CTRL_C) != 0;
+    let Some((pid, w)) = caller.wait(child, nohang, ctrl_c)? else {
         return Ok(0);
     };
     if let Some(slice) = &status {
@@ -272,6 +285,25 @@ fn wait(caller: &mut impl Caller, pid: i64, flags: u64, addr: u64) -> Result<u64
         caller.write(slice, 0, &bytes)?;
     }
     Ok(u64::from(pid))
+}
+
+/// `proc_list(buffer, length)` (spec §7.3, §9.3): a `ProcInfo` for each
+/// process, by pid, as many as the buffer holds; how many processes there
+/// are, so a caller whose buffer was too short knows. Nothing is written
+/// unless all that fits can be (`EFAULT`).
+fn proc_list(caller: &mut impl Caller, addr: u64, len: u64) -> Result<u64, Errno> {
+    let procs = caller.processes();
+    let size = ProcInfo::SIZE as u64;
+    let fit = (len / size).min(procs.len() as u64);
+    if fit > 0 {
+        let slice = UserSlice::new(addr, fit * size)?;
+        let bytes: Vec<u8> = procs[..fit as usize]
+            .iter()
+            .flat_map(|p| p.to_bytes())
+            .collect();
+        caller.write(&slice, 0, &bytes)?;
+    }
+    Ok(procs.len() as u64)
 }
 
 /// The file open as `fd`.
@@ -329,7 +361,7 @@ fn console_mode(caller: &mut impl Caller, mode: u64) -> Result<u64, Errno> {
         Ok(MODE_LINE) => true,
         _ => return Err(Errno::EINVAL),
     };
-    let was = caller.console_mode(line);
+    let was = caller.console_mode(line)?;
     Ok(u64::from(if was { MODE_LINE } else { MODE_RAW }))
 }
 
@@ -723,6 +755,101 @@ mod tests {
     }
 
     #[test]
+    fn wait_may_end_at_a_ctrl_c() {
+        let mut f = fake();
+        f.running = true;
+        let flags = u64::from(WAIT_CTRL_C);
+        f.ctrl_c_typed = true;
+        assert_eq!(
+            call(&mut f, Call::Wait, [7, flags, W]),
+            Err(errno::EINTR),
+            "a Ctrl-C was typed"
+        );
+        assert_eq!(f.ctrl_c_waits, [true]);
+        f.ended = vec![(7, WaitStatus::exited(0))];
+        assert_eq!(
+            call(&mut f, Call::Wait, [7, flags | 1, W]),
+            Ok(7),
+            "with NOHANG too"
+        );
+        assert_eq!(f.ctrl_c_waits, [true, true]);
+        f.ended = vec![(7, WaitStatus::exited(0))];
+        assert_eq!(
+            call(&mut f, Call::Wait, [7, 0, W]),
+            Ok(7),
+            "without it, a child"
+        );
+        assert_eq!(f.ctrl_c_waits, [true, true, false]);
+        for bad in [4, 8, 1 << 32] {
+            assert_eq!(
+                call(&mut f, Call::Wait, [7, bad, W]),
+                Err(errno::EINVAL),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn proc_list_gives_what_fits_and_how_many_there_are() {
+        use relay_abi::proc::{STATE_RUN, STATE_SLEEP, STATE_WAIT};
+        let mut f = fake();
+        f.procs = alloc::vec![
+            ProcInfo::new(1, 0, 1, STATE_WAIT, 0, 5, b"init"),
+            ProcInfo::new(2, 1, 2, STATE_WAIT, 300, 70, b"/bin/sh"),
+            ProcInfo::new(9, 2, 9, STATE_RUN, 41, 2, b"/bin/ps"),
+            ProcInfo::new(12, 2, 12, STATE_SLEEP, 40, 0, b"/bin/sleep"),
+        ];
+        let size = ProcInfo::SIZE as u64;
+        let all: Vec<u8> = f.procs.iter().flat_map(|p| p.to_bytes()).collect();
+        assert_eq!(call(&mut f, Call::ProcList, [W, 4 * size, 0]), Ok(4));
+        assert_eq!(get(&mut f, W, all.len()), all);
+        // A buffer too short gets what fits, whole entries only, and the
+        // count of all.
+        put(&mut f, W, &[0xAA; 4 * 96]);
+        assert_eq!(call(&mut f, Call::ProcList, [W, 3 * size - 1, 0]), Ok(4));
+        assert_eq!(get(&mut f, W, 2 * 96), all[..2 * 96]);
+        assert_eq!(
+            get(&mut f, W + 2 * size, 96),
+            [0xAA; 96],
+            "nothing of the third"
+        );
+        assert_eq!(
+            call(&mut f, Call::ProcList, [0, 0, 0]),
+            Ok(4),
+            "just the count"
+        );
+        assert_eq!(call(&mut f, Call::ProcList, [0, size - 1, 0]), Ok(4));
+        // More room than processes takes only what they need.
+        assert_eq!(call(&mut f, Call::ProcList, [W, 40 * size, 0]), Ok(4));
+    }
+
+    #[test]
+    fn proc_list_writes_nothing_into_memory_that_is_not_all_the_program_s() {
+        let mut f = fake();
+        f.procs = (1..=3)
+            .map(|pid| ProcInfo::new(pid, 0, pid, 1, 0, 0, b"p"))
+            .collect();
+        let size = ProcInfo::SIZE as u64;
+        assert_eq!(
+            call(&mut f, Call::ProcList, [U, size, 0]),
+            Err(errno::EFAULT),
+            "read-only"
+        );
+        let end = W + PAGE - size - 10;
+        put(&mut f, end, &[0xAA; 96]);
+        assert_eq!(
+            call(&mut f, Call::ProcList, [end, 2 * size, 0]),
+            Err(errno::EFAULT),
+            "the second runs past the page"
+        );
+        assert_eq!(get(&mut f, end, 96), [0xAA; 96], "not even the first");
+        assert_eq!(
+            call(&mut f, Call::ProcList, [0xFFFF_8000_0000_0000, size, 0]),
+            Err(errno::EFAULT)
+        );
+    }
+
+    #[test]
     fn a_bad_status_pointer_loses_no_child() {
         let mut f = fake();
         f.ended = vec![(7, WaitStatus::exited(3))];
@@ -751,7 +878,7 @@ mod tests {
             Err(errno::EINVAL)
         );
         assert_eq!(
-            call(&mut f, Call::Wait, [7, 2, 0]),
+            call(&mut f, Call::Wait, [7, 4, 0]),
             Err(errno::EINVAL),
             "flags"
         );
@@ -902,6 +1029,32 @@ mod tests {
     }
 
     #[test]
+    fn the_console_is_changed_only_by_a_group_that_holds_it() {
+        use relay_abi::console::MODE_LINE;
+        let mut f = fake();
+        f.holds_console = false;
+        let line = u64::from(MODE_LINE);
+        assert_eq!(
+            call(&mut f, Call::ConsoleMode, [line, 0, 0]),
+            Err(errno::EPERM)
+        );
+        assert!(!f.line_mode, "the mode stays");
+        assert_eq!(
+            call(&mut f, Call::ConsoleMode, [7, 0, 0]),
+            Err(errno::EINVAL),
+            "a mode that is none, first"
+        );
+        assert_eq!(
+            call(&mut f, Call::ConsoleForeground, [42, 0, 0]),
+            Err(errno::EPERM)
+        );
+        assert_eq!(f.foreground, 1, "the group stays");
+        // The tees are not the console's state: anyone may push one.
+        assert_eq!(call(&mut f, Call::ConsoleTeePush, [1, 0, 0]), Ok(0));
+        assert_eq!(call(&mut f, Call::ConsoleTeePop, [0, 0, 0]), Ok(0));
+    }
+
+    #[test]
     fn tees_are_pushed_by_fd_and_popped() {
         let mut f = fake();
         assert_eq!(call(&mut f, Call::ConsoleTeePush, [1, 0, 0]), Ok(0));
@@ -1002,6 +1155,7 @@ mod tests {
             Call::Wait,
             Call::Kill,
             Call::Getpid,
+            Call::ProcList,
             Call::MemMap,
             Call::MemUnmap,
             Call::Open,

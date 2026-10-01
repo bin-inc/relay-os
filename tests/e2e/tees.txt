@@ -1,7 +1,8 @@
 # Console tees (user-space gate §6.5; milestone 2, plan 3b): a tee gets what
 # programs and the shell write to the console, written every 4 KiB and at
-# every sync, until it is popped; at most 4; a process's tees end with it;
-# a tee whose file is removed is gone.
+# every sync, until it is popped; at most 4 a process (64 in all,
+# milestone 3); a process's tees end with it; a tee whose file is removed is
+# gone.
 timeout 60
 expect root@relay:~# $
 send t-tee basic
@@ -34,3 +35,6 @@ send bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 send end
 expect \nwritten as it was typed: true\nroot@relay:~# $
 send rm t-tee.log t-tee.end
+# Five processes with a tee each at once, as background scripts have.
+send t-tee owners
+expect \n(a tee of its own: ok\n){5}root@relay:~# $

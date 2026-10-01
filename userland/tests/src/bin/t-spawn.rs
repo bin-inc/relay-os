@@ -23,6 +23,13 @@
 //!   its group and one in a group of its own, and waits for that one: a
 //!   group blocked in the kernel, for Ctrl-C, whose `wait` nothing but the
 //!   kill can end;
+//! - `t-spawn ctrl-c` sets the console to raw mode, starts `t-spin` in a
+//!   group of its own and waits for it with `WAIT_CTRL_C`: a Ctrl-C ends
+//!   the wait, and is taken from what was typed, which the program then
+//!   reads (milestone 3); `t-spawn ctrl-c-apart` does the same but waits
+//!   in a child in a group of its own, twice, for `sleep 2` and then
+//!   `sleep 1`, while it sleeps 3.5 s itself: a Ctrl-C typed meanwhile is
+//!   the parent's, which has the console, never the child's;
 //! - `t-spawn child` exits at once (the children of `t-spawn N`), `t-spawn
 //!   nap` after 300 ms, `t-spawn doze` after a minute.
 #![no_std]
@@ -61,6 +68,9 @@ fn main(args: Args) -> u8 {
         }
         Some(b"sleepers") => sleepers(),
         Some(b"join") => join(),
+        Some(b"ctrl-c") => ctrl_c(),
+        Some(b"ctrl-c-apart") => ctrl_c_apart(),
+        Some(b"ctrl-c-child") => ctrl_c_child(),
         Some(b"kill") => kill(),
         Some(b"kill-new") => kill_new(),
         Some(b"orphan") => {
@@ -239,4 +249,69 @@ fn parse(s: &[u8]) -> Option<u64> {
         let d = c.checked_sub(b'0').filter(|d| *d <= 9)?;
         n.checked_mul(10)?.checked_add(u64::from(d))
     })
+}
+
+fn ctrl_c() -> Result<(), u16> {
+    use relay_abi::console::MODE_RAW;
+    use relay_abi::spawn::{NEW_GROUP, WAIT_CTRL_C};
+    let was = sys::console_mode(MODE_RAW)?;
+    let pid = sys::spawn(b"/bin/t-spin", b"t-spin\0", b"", &STD, NEW_GROUP, 0)?;
+    let _ = writeln!(Fd(1), "waiting for t-spin");
+    let r = sys::wait_with(i64::from(pid), WAIT_CTRL_C);
+    let _ = writeln!(
+        Fd(1),
+        "wait: {}",
+        r.map_or_else(|e| relay_abi::errno::name(e).unwrap_or("?"), |_| "a child")
+    );
+    let mut typed = [0u8; 16];
+    let n = sys::read(0, &mut typed)?;
+    let _ = writeln!(
+        Fd(1),
+        "then read: {:?}",
+        core::str::from_utf8(&typed[..n]).unwrap_or("?")
+    );
+    sys::kill(i64::from(pid))?;
+    sys::wait(i64::from(pid), false)?;
+    sys::console_mode(was)?;
+    Ok(())
+}
+
+/// `ctrl-c-apart`: the console raw and this program's, its child apart.
+fn ctrl_c_apart() -> Result<(), u16> {
+    use relay_abi::console::MODE_RAW;
+    use relay_abi::spawn::NEW_GROUP;
+    let was = sys::console_mode(MODE_RAW)?;
+    let args = b"t-spawn\0ctrl-c-child\0";
+    let child = sys::spawn(b"/bin/t-spawn", args, b"", &STD, NEW_GROUP, 0)?;
+    let _ = writeln!(Fd(1), "the child waits apart");
+    sys::sleep(3500);
+    let mut typed = [0u8; 16];
+    let n = sys::read(0, &mut typed)?;
+    let _ = writeln!(
+        Fd(1),
+        "then read: {:?}",
+        core::str::from_utf8(&typed[..n]).unwrap_or("?")
+    );
+    sys::wait(i64::from(child), false)?;
+    sys::console_mode(was)?;
+    Ok(())
+}
+
+/// `ctrl-c-child`: two waits with `WAIT_CTRL_C`, in a group without the
+/// console.
+fn ctrl_c_child() -> Result<(), u16> {
+    use relay_abi::spawn::WAIT_CTRL_C;
+    for args in [&b"sleep\x002\0"[..], b"sleep\x001\0"] {
+        let pid = sys::spawn(b"/bin/sleep", args, b"", &STD, 0, 0)?;
+        let r = sys::wait_with(i64::from(pid), WAIT_CTRL_C);
+        let _ = writeln!(
+            Fd(1),
+            "the child's wait: {}",
+            r.map_or_else(|e| relay_abi::errno::name(e).unwrap_or("?"), |_| "a child")
+        );
+        if r.is_err() {
+            sys::wait(i64::from(pid), false)?;
+        }
+    }
+    Ok(())
 }
