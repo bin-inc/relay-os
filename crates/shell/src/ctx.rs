@@ -51,6 +51,9 @@ pub struct Ctx<'a> {
 pub(crate) struct JobControl<'a> {
     pub jobs: &'a mut Jobs,
     pub programs: Option<&'a mut dyn Programs>,
+    /// The shell reads commands at its prompt, so `wait %n` says how the
+    /// job ended, as bash's interactive shell does.
+    pub report: bool,
 }
 
 impl JobControl<'_> {

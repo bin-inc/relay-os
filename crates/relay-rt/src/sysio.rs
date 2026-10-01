@@ -295,6 +295,14 @@ impl Programs for SysPrograms {
         }
     }
 
+    fn wait_or_ctrl_c(&mut self, pid: u32) -> Result<WaitStatus, Errno> {
+        match sys::wait_with(i64::from(pid), relay_abi::spawn::WAIT_CTRL_C) {
+            Ok(Some((_, status))) => Ok(status),
+            Ok(None) => Err(Errno::ECHILD),
+            Err(e) => Err(Errno::from_number(e)),
+        }
+    }
+
     fn collect(&mut self) -> Option<(u32, WaitStatus)> {
         sys::wait(relay_abi::spawn::WAIT_ANY, true).ok().flatten()
     }

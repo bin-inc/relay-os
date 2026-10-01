@@ -213,6 +213,7 @@ impl<'a> Shell<'a> {
                     let control = JobControl {
                         jobs: &mut self.jobs,
                         programs: self.runner.programs(),
+                        report: self.prompting && !self.in_script,
                     };
                     match runner::redirect_to(&mut *parts.vfs, cmd.redirect.as_ref()) {
                         Ok(file) => runner::run_function(parts, builtin, args, file, Some(control)),

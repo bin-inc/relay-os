@@ -107,6 +107,15 @@ impl Jobs {
             .map(|j| j.number)
     }
 
+    /// How `pid`, a job's process, ended, once it has.
+    pub fn status_of_pid(&self, pid: u32) -> Option<i32> {
+        self.jobs
+            .iter()
+            .flat_map(|j| &j.procs)
+            .find(|&&(p, _)| p == pid)
+            .and_then(|(_, w)| w.as_ref().map(status_of))
+    }
+
     /// Job `number`'s process group.
     pub fn pgid(&self, number: u32) -> Option<u32> {
         self.find(number).map(|j| j.pgid)

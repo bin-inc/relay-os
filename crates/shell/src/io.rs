@@ -140,6 +140,9 @@ pub trait Programs {
     /// A child that has ended, collected, if one has: a background job's
     /// process (`wait(-1, NOHANG)`).
     fn collect(&mut self) -> Option<(u32, WaitStatus)>;
+    /// Waits for the child `pid` to end, as `wait` does, unless a Ctrl-C
+    /// is typed at the shell's prompt meanwhile (`EINTR`, `WAIT_CTRL_C`).
+    fn wait_or_ctrl_c(&mut self, pid: u32) -> Result<WaitStatus, Errno>;
     /// Copies the console into the file at `path` from now on (a script's
     /// transcript, spec §6.5), written at its end.
     fn tee_push(&mut self, path: &[u8]) -> Result<(), Errno>;

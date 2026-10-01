@@ -179,6 +179,10 @@ pub struct FakePrograms {
     round: u32,
     /// How many children were not yet collected at each `spawn`.
     pub alive_at_spawn: Vec<usize>,
+    /// A Ctrl-C ends the `wait_or_ctrl_c` after this many more.
+    pub ctrl_c_after: Option<usize>,
+    /// Every pid `wait_or_ctrl_c` waited for.
+    pub waited: Vec<u32>,
     /// The tees pushed and not popped, by path.
     pub tees: Vec<String>,
     /// Every tee pushed.
@@ -206,6 +210,8 @@ impl FakePrograms {
             children: Vec::new(),
             round: 0,
             alive_at_spawn: Vec::new(),
+            ctrl_c_after: None,
+            waited: Vec::new(),
             tees: Vec::new(),
             pushed: Vec::new(),
             push_error: None,
@@ -307,6 +313,17 @@ impl Programs for FakePrograms {
             .position(|c| c.pid == pid)
             .ok_or(Errno::ECHILD)?;
         Ok(self.children.remove(i).status)
+    }
+    fn wait_or_ctrl_c(&mut self, pid: u32) -> Result<WaitStatus, Errno> {
+        if let Some(n) = &mut self.ctrl_c_after {
+            if *n == 0 {
+                self.ctrl_c_after = None;
+                return Err(Errno::EINTR);
+            }
+            *n -= 1;
+        }
+        self.waited.push(pid);
+        self.wait(pid)
     }
     fn collect(&mut self) -> Option<(u32, WaitStatus)> {
         match self.children.iter().position(|c| c.ends_at <= self.round) {
