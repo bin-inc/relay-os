@@ -70,10 +70,11 @@ fn wait_for(control: &mut JobControl<'_>, pids: &[u32]) -> Waited {
 /// `wait [%n | PID]...`: waits for every job, or for the jobs and
 /// processes named, as bash's does (spec §9.2). With operands the status
 /// is the last one's: a job's last process's, or 127 for one that is no
-/// job (`%3: no such job`, `pid 9 is not a child of this shell`); without,
-/// 0, and the jobs that ended leave the table without a word. At the
-/// prompt a job named that ends says how at once. Ctrl-C ends the wait
-/// (`^C`, 130); the jobs run on.
+/// job (`%3: no such job`, `pid 9 is not a child of this shell`; a job's
+/// process already reported answers once more); without, 0, and the jobs
+/// that ended leave the table, those a signal ended saying so. At the
+/// prompt a job named that ends says how at once, on the screen. Ctrl-C
+/// ends the wait (`^C`, 130); the jobs run on.
 pub fn wait(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     if let Some(option) = args.iter().find(|a| a.starts_with('-') && a.len() > 1) {
         ctx.fail(NAME, format_args!("wait: {option}: invalid option"));
@@ -86,7 +87,12 @@ pub fn wait(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     if args.is_empty() {
         let pids = control.jobs.all_running();
         let waited = wait_for(control, &pids);
-        control.jobs.forget_finished();
+        let report = control.report;
+        let killed = control.jobs.report_killed();
+        // Notices, as bash's: on the screen, never into a redirection.
+        for line in killed.iter().filter(|_| report) {
+            ctx.err(line.as_bytes());
+        }
         if let Waited::Interrupted = waited {
             ctx.cancelled = true;
         }
@@ -110,6 +116,11 @@ pub fn wait(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
                 Some(n) => {
                     let running = control.jobs.running(n).into_iter().filter(|&p| p == pid);
                     Some((n, running.collect()))
+                }
+                // A job's process the table let go of: once more.
+                None if let Some(gone) = control.jobs.take_gone(pid) => {
+                    status = gone;
+                    continue;
                 }
                 None => {
                     ctx.fail(
@@ -144,7 +155,7 @@ pub fn wait(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
         if let Some(line) = control.jobs.take(n)
             && report
         {
-            ctx.out(line.as_bytes());
+            ctx.err(line.as_bytes());
         }
     }
     status
@@ -398,5 +409,56 @@ mod tests {
             "no jobs without programs"
         );
         assert_eq!(h.run("wait %1").0, 127);
+    }
+
+    #[test]
+    fn a_bare_wait_tells_of_a_killed_job_on_the_screen() {
+        // bash 5.2: `kill -9 %1; wait` says the job was killed; a job that
+        // exited it does not mention.
+        let mut h = with_jobs();
+        h.programs.known.push((
+            "/bin/t-fault",
+            WaitStatus::killed(relay_abi::wait::KILLED_KILL),
+        ));
+        h.programs.lives.push(("/bin/t-fault", 99));
+        let out = typed(&mut h, &["t-fault x &", "t-spin &", "wait > /tmp/w"]);
+        assert!(
+            out.ends_with(
+                "# wait > /tmp/w\n[1]-  Killed                  t-fault x\nroot@relay:/# "
+            ),
+            "{out}"
+        );
+        assert_eq!(h.get("/tmp/w"), b"", "never into the redirection");
+    }
+
+    #[test]
+    fn wait_for_a_job_says_how_it_ended_on_the_screen() {
+        let mut h = with_jobs();
+        let out = typed(&mut h, &["t-spin &", "wait %1 > /tmp/w"]);
+        assert!(
+            out.ends_with(
+                "# wait %1 > /tmp/w\n[1]+  Done                    t-spin\nroot@relay:/# "
+            ),
+            "{out}"
+        );
+        assert_eq!(h.get("/tmp/w"), b"");
+    }
+
+    #[test]
+    fn wait_for_a_reported_job_s_pid_gives_its_status_once() {
+        // bash 5.2: `false &`, Enter (`Exit 1`), then `wait $!` is 1.
+        let mut h = with_jobs();
+        h.programs.known.push(("/bin/false", WaitStatus::exited(1)));
+        let (status, out) = typed_status(&mut h, &["false &", "", "wait 101"]);
+        assert!(out.ends_with("# wait 101\nroot@relay:/# "), "{out}");
+        assert_eq!(status, 1);
+        let mut h = with_jobs();
+        h.programs.known.push(("/bin/false", WaitStatus::exited(1)));
+        let (status, out) = typed_status(&mut h, &["false &", "", "wait 101", "wait 101"]);
+        assert!(
+            out.ends_with("relay-sh: wait: pid 101 is not a child of this shell\nroot@relay:/# "),
+            "{out}"
+        );
+        assert_eq!(status, 127, "once");
     }
 }

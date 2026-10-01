@@ -44,7 +44,14 @@ impl Job {
 #[derive(Default)]
 pub struct Jobs {
     jobs: Vec<Job>,
+    /// How the processes of the jobs that left the table ended, the newest
+    /// last, at most `GONE` of them: `wait PID` answers for each once, as
+    /// bash's does.
+    gone: Vec<(u32, WaitStatus)>,
 }
+
+/// The processes of jobs gone from the table whose statuses are kept.
+const GONE: usize = relay_abi::proc::PROC_MAX;
 
 impl Jobs {
     pub fn new() -> Jobs {
@@ -161,7 +168,7 @@ impl Jobs {
         };
         let lines = order.iter().map(|&i| self.line(i)).collect();
         let listed = |j: &Job| named.is_none_or(|n| n.contains(&j.number));
-        self.jobs.retain(|j| !(listed(j) && j.finished()));
+        self.drop_jobs(|j| listed(j) && j.finished());
         lines
     }
 
@@ -172,7 +179,7 @@ impl Jobs {
             .filter(|&i| self.jobs[i].finished())
             .map(|i| self.line(i))
             .collect();
-        self.jobs.retain(|j| !j.finished());
+        self.drop_jobs(Job::finished);
         lines
     }
 
@@ -184,14 +191,43 @@ impl Jobs {
             .iter()
             .position(|j| j.number == number && j.finished())?;
         let line = self.line(i);
-        self.jobs.remove(i);
+        self.drop_jobs(|j| j.number == number);
         Some(line)
     }
 
-    /// The jobs that have ended leave the table without a word (`wait`
-    /// without operands, as bash's).
-    pub fn forget_finished(&mut self) {
-        self.jobs.retain(|j| !j.finished());
+    /// The jobs that have ended leave the table, and the lines of those a
+    /// signal ended are given: `wait` without operands says nothing of a
+    /// job that exited, as bash's does, but tells of one that was killed.
+    pub fn report_killed(&mut self) -> Vec<String> {
+        let killed = |j: &Job| j.finished() && j.last().is_some_and(|w| w.how != EXITED);
+        let lines = (0..self.jobs.len())
+            .filter(|&i| killed(&self.jobs[i]))
+            .map(|i| self.line(i))
+            .collect();
+        self.drop_jobs(Job::finished);
+        lines
+    }
+
+    /// The status `pid`, a process of a job gone from the table, ended
+    /// with; asked once (bash's `wait $!` after the job was reported).
+    pub fn take_gone(&mut self, pid: u32) -> Option<i32> {
+        let i = self.gone.iter().position(|&(p, _)| p == pid)?;
+        Some(status_of(&self.gone.remove(i).1))
+    }
+
+    /// The jobs `which` names leave the table; their processes' statuses
+    /// are kept, the oldest forgotten beyond `GONE`.
+    fn drop_jobs(&mut self, which: impl Fn(&Job) -> bool) {
+        for job in self.jobs.iter().filter(|j| which(j)) {
+            for &(pid, w) in &job.procs {
+                if let Some(w) = w {
+                    self.gone.push((pid, w));
+                }
+            }
+        }
+        let over = self.gone.len().saturating_sub(GONE);
+        self.gone.drain(..over);
+        self.jobs.retain(|j| !which(j));
     }
 
     fn find(&self, number: u32) -> Option<&Job> {
@@ -366,8 +402,37 @@ mod tests {
         assert_eq!(j.all_running(), [40, 42]);
         assert_eq!(j.take(a), None, "40 still runs");
         j.ended(40, WaitStatus::exited(0));
-        j.forget_finished();
+        assert!(j.report_killed().is_empty(), "it exited");
         assert!(!j.has(a) && j.has(b));
+    }
+
+    #[test]
+    fn a_job_s_processes_answer_once_after_it_left_the_table() {
+        let mut j = Jobs::new();
+        let a = j.add(60, &[60, 61], "false | true");
+        j.ended(60, WaitStatus::exited(1));
+        j.ended(61, WaitStatus::exited(0));
+        assert_eq!(j.report().len(), 1);
+        assert!(!j.has(a));
+        assert_eq!((j.take_gone(60), j.take_gone(61)), (Some(1), Some(0)));
+        assert_eq!(j.take_gone(60), None, "once");
+        // At most the table's 64 are kept, the oldest forgotten.
+        for pid in 100..170 {
+            let n = j.add(pid, &[pid], "true");
+            j.ended(pid, WaitStatus::exited(0));
+            assert!(j.take(n).is_some());
+        }
+        assert_eq!((j.take_gone(105), j.take_gone(106)), (None, Some(0)));
+        // A killed job is told of by `wait`, an exited one not.
+        j.add(200, &[200], "t-spin");
+        j.add(201, &[201], "sleep 5");
+        j.ended(200, WaitStatus::killed(relay_abi::wait::KILLED_KILL));
+        j.ended(201, WaitStatus::exited(0));
+        assert_eq!(
+            j.report_killed(),
+            ["[1]-  Killed                  t-spin\n"]
+        );
+        assert!(j.is_empty());
     }
 
     #[test]
