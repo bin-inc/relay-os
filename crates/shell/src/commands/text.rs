@@ -1,4 +1,6 @@
-//! `cat`, `head`, `tail` and `wc` (spec §7.3).
+//! `cat`, `head`, `tail` and `wc` (spec §7.3). Without a file they read
+//! standard input (user-space gate §9.1), which GNU calls `-` in its
+//! messages.
 
 use crate::ctx::{Ctx, getopt, outln, quote, quote_if_needed};
 use alloc::string::String;
@@ -35,14 +37,14 @@ fn stream(
     Ok(())
 }
 
-/// `cat file…`
+/// `cat [file…]`
 pub fn cat(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     let opts = match getopt(args, "", "") {
         Ok(o) => o,
         Err(e) => return ctx.fail("cat", format_args!("{e}")),
     };
     if opts.operands.is_empty() {
-        return ctx.fail("cat", format_args!("missing operand"));
+        return cat_input(ctx);
     }
     let mut status = 0;
     for op in &opts.operands {
@@ -73,13 +75,27 @@ pub fn cat(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     status
 }
 
-/// The line count and the one file of `head`/`tail`: `[-n N] file`, also
-/// `-N`.
+/// `cat` of standard input, to its end, Ctrl-C or a write error (which the
+/// shell reports).
+fn cat_input(ctx: &mut Ctx<'_>) -> i32 {
+    let mut buf = vec![0; CHUNK];
+    while !ctx.interrupted() && !ctx.out_failed() {
+        match ctx.read_input(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => ctx.out(&buf[..n]),
+            Err(e) => return ctx.fail("cat", format_args!("-: {e}")),
+        }
+    }
+    0
+}
+
+/// The line count and the one file of `head`/`tail`: `[-n N] [file]`, also
+/// `-N`; no file is standard input.
 fn lines_and_file(
     ctx: &mut Ctx<'_>,
     name: &str,
     args: &[String],
-) -> Result<(u64, Node, String), i32> {
+) -> Result<(u64, Option<(Node, String)>), i32> {
     // A first argument `-5` means `-n 5`, as in GNU head and tail.
     let mut args = args.to_vec();
     if let Some(first) = args.first_mut()
@@ -107,7 +123,7 @@ fn lines_and_file(
         },
     };
     let file = match &opts.operands[..] {
-        [] => return Err(ctx.fail(name, format_args!("missing operand"))),
+        [] => return Ok((count, None)),
         [file] => file,
         [_, extra, ..] => {
             return Err(ctx.fail(name, format_args!("extra operand {}", quote(extra))));
@@ -119,27 +135,37 @@ fn lines_and_file(
             format_args!("cannot open {} for reading: {e}", quote(file)),
         )
     })?;
-    Ok((count, node, file.clone()))
+    Ok((count, Some((node, file.clone()))))
 }
 
-/// `head [-n N] file`: the first N lines (10 by default).
+/// How much of `bytes`, the next piece of an input, is within the `left`
+/// lines still wanted; counts off the lines it ends.
+fn within(bytes: &[u8], left: &mut u64) -> usize {
+    let mut end = 0;
+    while *left > 0 && end < bytes.len() {
+        match bytes[end..].iter().position(|&b| b == b'\n') {
+            Some(i) => {
+                end += i + 1;
+                *left -= 1;
+            }
+            None => end = bytes.len(),
+        }
+    }
+    end
+}
+
+/// `head [-n N] [file]`: the first N lines (10 by default).
 pub fn head(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
-    let (count, node, file) = match lines_and_file(ctx, "head", args) {
+    let (count, file) = match lines_and_file(ctx, "head", args) {
         Ok(x) => x,
         Err(status) => return status,
     };
     let mut left = count;
+    let Some((node, file)) = file else {
+        return head_input(ctx, left);
+    };
     let result = stream(ctx, node, 0, |ctx, bytes| {
-        let mut end = 0;
-        while left > 0 && end < bytes.len() {
-            match bytes[end..].iter().position(|&b| b == b'\n') {
-                Some(i) => {
-                    end += i + 1;
-                    left -= 1;
-                }
-                None => end = bytes.len(),
-            }
-        }
+        let end = within(bytes, &mut left);
         ctx.out(&bytes[..end]);
         left > 0
     });
@@ -149,12 +175,33 @@ pub fn head(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     }
 }
 
-/// `tail [-n N] file`: the last N lines (10 by default). It reads backwards
-/// from the end, so a big file costs only what is shown.
+/// `head` of standard input: no more of it is read once the lines are out,
+/// so a pipe's writer gets `EPIPE` once `head` has ended.
+fn head_input(ctx: &mut Ctx<'_>, mut left: u64) -> i32 {
+    let mut buf = vec![0; CHUNK];
+    while left > 0 && !ctx.interrupted() && !ctx.out_failed() {
+        match ctx.read_input(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                let end = within(&buf[..n], &mut left);
+                ctx.out(&buf[..end]);
+            }
+            Err(e) => return ctx.fail("head", format_args!("error reading 'standard input': {e}")),
+        }
+    }
+    0
+}
+
+/// `tail [-n N] [file]`: the last N lines (10 by default). It reads a file
+/// backwards from the end, so a big file costs only what is shown;
+/// standard input is read to its end, keeping the last N lines.
 pub fn tail(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
-    let (count, node, file) = match lines_and_file(ctx, "tail", args) {
+    let (count, file) = match lines_and_file(ctx, "tail", args) {
         Ok(x) => x,
         Err(status) => return status,
+    };
+    let Some((node, file)) = file else {
+        return tail_input(ctx, count);
     };
     match tail_start(ctx, node, count).and_then(|start| {
         stream(ctx, node, start, |ctx, bytes| {
@@ -165,6 +212,36 @@ pub fn tail(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
         Ok(()) => 0,
         Err(e) => ctx.fail("tail", format_args!("error reading {}: {e}", quote(&file))),
     }
+}
+
+/// `tail` of standard input: the last `count` lines, the newest perhaps
+/// without its newline, kept as they come.
+fn tail_input(ctx: &mut Ctx<'_>, count: u64) -> i32 {
+    let mut lines: alloc::collections::VecDeque<Vec<u8>> = alloc::collections::VecDeque::new();
+    let mut buf = vec![0; CHUNK];
+    loop {
+        if ctx.interrupted() {
+            return 0;
+        }
+        let n = match ctx.read_input(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => return ctx.fail("tail", format_args!("error reading 'standard input': {e}")),
+        };
+        for piece in buf[..n].split_inclusive(|&b| b == b'\n') {
+            match lines.back_mut() {
+                Some(last) if last.last() != Some(&b'\n') => last.extend_from_slice(piece),
+                _ => lines.push_back(piece.to_vec()),
+            }
+            if lines.len() as u64 > count {
+                lines.pop_front();
+            }
+        }
+    }
+    for line in lines {
+        ctx.out(&line);
+    }
+    0
 }
 
 /// Where the last `count` lines of `node` start.
@@ -212,17 +289,86 @@ struct Counts {
     bytes: u64,
 }
 
-/// `wc file…`: lines, words and bytes, and a total for several files.
+impl Counts {
+    /// Counts `bytes`, the next piece of an input; `in_word` says whether
+    /// the piece before ended inside a word.
+    fn add(&mut self, bytes: &[u8], in_word: &mut bool) {
+        self.bytes += bytes.len() as u64;
+        for &b in bytes {
+            if b == b'\n' {
+                self.lines += 1;
+            }
+            let space = matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0B | 0x0C);
+            if !space && !*in_word {
+                self.words += 1;
+            }
+            *in_word = !space;
+        }
+    }
+
+    fn plus(self, o: Counts) -> Counts {
+        Counts {
+            lines: self.lines.saturating_add(o.lines),
+            words: self.words.saturating_add(o.words),
+            bytes: self.bytes.saturating_add(o.bytes),
+        }
+    }
+}
+
+/// Which counts `wc` prints: those its options name (`-l`, `-w`, `-c`), or
+/// all three, always in that order.
+#[derive(Clone, Copy)]
+struct Shown {
+    lines: bool,
+    words: bool,
+    bytes: bool,
+}
+
+impl Shown {
+    fn how_many(self) -> usize {
+        [self.lines, self.words, self.bytes]
+            .iter()
+            .filter(|&&s| s)
+            .count()
+    }
+
+    /// The shown counts, each right-aligned to `width`, then the name.
+    fn line(self, c: Counts, width: usize, name: Option<&str>) -> String {
+        let mut parts: Vec<String> = [
+            (self.lines, c.lines),
+            (self.words, c.words),
+            (self.bytes, c.bytes),
+        ]
+        .iter()
+        .filter(|(shown, _)| *shown)
+        .map(|(_, n)| alloc::format!("{n:>width$}"))
+        .collect();
+        parts.extend(name.map(String::from));
+        parts.join(" ")
+    }
+}
+
+/// `wc [-clw] [file…]`: lines, words and bytes, and a total for several
+/// files; standard input without a file.
 pub fn wc(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
-    let opts = match getopt(args, "", "") {
+    let opts = match getopt(args, "clw", "") {
         Ok(o) => o,
         Err(e) => return ctx.fail("wc", format_args!("{e}")),
     };
+    let (lines, words, bytes) = (opts.has('l'), opts.has('w'), opts.has('c'));
+    let any = lines || words || bytes;
+    let shown = Shown {
+        lines: lines || !any,
+        words: words || !any,
+        bytes: bytes || !any,
+    };
     if opts.operands.is_empty() {
-        return ctx.fail("wc", format_args!("missing operand"));
+        return wc_input(ctx, shown);
     }
-    // GNU wc sizes the columns from the files' total size, with at least
-    // 7 digits when something is not a regular file.
+    // GNU's widths: one count of one file is not padded; otherwise the
+    // columns fit the regular files' total size, with at least 7 digits
+    // when one of the files is something else. A file that cannot be found
+    // takes no part (milestone 1 counted it as something else).
     let mut total_size = 0;
     let mut odd = false;
     let mut found = Vec::new();
@@ -238,14 +384,16 @@ pub fn wc(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
                 }
                 found.push(Ok(n));
             }
-            Err(e) => {
-                odd = true;
-                found.push(Err(e));
-            }
+            Err(e) => found.push(Err(e)),
         }
     }
     let digits = total_size.max(1).ilog10() as usize + 1;
-    let width = if odd { digits.max(7) } else { digits };
+    let unpadded = found.len() == 1 && shown.how_many() == 1;
+    let width = match (unpadded, odd) {
+        (true, _) => 1,
+        (false, true) => digits.max(7),
+        (false, false) => digits,
+    };
     let mut status = 0;
     let mut total = Counts::default();
     for (op, node) in opts.operands.iter().zip(found) {
@@ -261,28 +409,36 @@ pub fn wc(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
                 continue;
             }
         };
-        total.lines = total.lines.saturating_add(counts.lines);
-        total.words = total.words.saturating_add(counts.words);
-        total.bytes = total.bytes.saturating_add(counts.bytes);
-        let c = counts;
-        outln!(
-            ctx,
-            "{:>width$} {:>width$} {:>width$} {name}",
-            c.lines,
-            c.words,
-            c.bytes
-        );
+        total = total.plus(counts);
+        outln!(ctx, "{}", shown.line(counts, width, Some(&name)));
     }
     if opts.operands.len() > 1 {
-        let c = total;
-        outln!(
-            ctx,
-            "{:>width$} {:>width$} {:>width$} total",
-            c.lines,
-            c.words,
-            c.bytes
-        );
+        outln!(ctx, "{}", shown.line(total, width, Some("total")));
     }
+    status
+}
+
+/// `wc` of standard input, which is never a regular file here (the
+/// console or a pipe): 7 digits, unless only one count is shown.
+fn wc_input(ctx: &mut Ctx<'_>, shown: Shown) -> i32 {
+    let mut buf = vec![0; CHUNK];
+    let (mut c, mut in_word) = (Counts::default(), false);
+    let mut status = 0;
+    loop {
+        if ctx.interrupted() {
+            return 0;
+        }
+        match ctx.read_input(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => c.add(&buf[..n], &mut in_word),
+            Err(e) => {
+                status = ctx.fail("wc", format_args!("-: {e}"));
+                break;
+            }
+        }
+    }
+    let width = if shown.how_many() == 1 { 1 } else { 7 };
+    outln!(ctx, "{}", shown.line(c, width, None));
     status
 }
 
@@ -290,17 +446,7 @@ fn count(ctx: &mut Ctx<'_>, node: Node) -> Result<Counts, Errno> {
     let mut c = Counts::default();
     let mut in_word = false;
     stream(ctx, node, 0, |_, bytes| {
-        c.bytes += bytes.len() as u64;
-        for &b in bytes {
-            if b == b'\n' {
-                c.lines += 1;
-            }
-            let space = matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0B | 0x0C);
-            if !space && !in_word {
-                c.words += 1;
-            }
-            in_word = !space;
-        }
+        c.add(bytes, &mut in_word);
         true
     })?;
     Ok(c)
@@ -342,7 +488,84 @@ mod tests {
             h.run("cat 'a b'"),
             (1, "cat: 'a b': No such file or directory\n".into())
         );
-        assert_eq!(h.run("cat"), (1, "cat: missing operand\n".into()));
+    }
+
+    #[test]
+    fn cat_without_a_file_copies_its_standard_input() {
+        let mut h = Harness::new();
+        h.stdin = b"typed\nlines".to_vec();
+        assert_eq!(h.run("cat"), (0, "typed\nlines".into()));
+        assert_eq!(h.run("cat"), (0, "".into()), "an input that has ended");
+        // With a file, standard input is not read.
+        h.stdin = b"unread".to_vec();
+        assert_eq!(h.run("cat /etc/hostname"), (0, "relay\n".into()));
+        // More than its buffer, into a file.
+        let big = numbered(20_000);
+        assert!(big.len() > 2 * super::CHUNK);
+        h.stdin = big.clone().into_bytes();
+        assert_eq!(h.run("cat > /tmp/copy"), (0, "".into()));
+        assert_eq!(h.get("/tmp/copy"), big.as_bytes());
+    }
+
+    #[test]
+    fn cat_of_standard_input_stops_at_ctrl_c_and_at_write_and_read_errors() {
+        let mut h = Harness::new();
+        h.stdin = numbered(20_000).into_bytes();
+        h.console.interrupt_after = Some(1);
+        assert_eq!(h.run("cat > /tmp/out"), (130, "^C\n".into()));
+        assert!(h.get("/tmp/out").len() <= super::CHUNK, "one piece at most");
+        let mut h = Harness::with_capacity(5 * 4096);
+        h.stdin = numbered(20_000).into_bytes();
+        assert_eq!(
+            h.run("cat > /tmp/out"),
+            (1, "cat: write error: No space left on device\n".into())
+        );
+        // Nor is the rest of the input read for nothing once the output
+        // cannot be written. (A hundred pieces, then the end: a cat that
+        // reads on fails the test instead of hanging it.)
+        struct Endless(usize);
+        impl crate::Stdin for Endless {
+            fn read(&mut self, buf: &mut [u8]) -> Result<usize, vfs::Errno> {
+                self.0 += 1;
+                if self.0 > 100 {
+                    return Ok(0);
+                }
+                buf.fill(b'x');
+                Ok(buf.len())
+            }
+        }
+        let (mut input, mut out) = (Endless(0), crate::testing::FakeStdout::file(None));
+        out.fail_after = Some((10_000, vfs::Errno::ENOSPC));
+        let io = crate::CommandIo {
+            vfs: &mut h.vfs,
+            console: &mut h.console,
+            system: &mut h.system,
+            stdin: &mut input,
+            stdout: &mut out,
+        };
+        assert_eq!(crate::run_command("cat", super::cat, &[], io), 1);
+        assert_eq!(input.0, 1, "one piece, then the write error");
+        h.console.take();
+        // A read that fails, as a program's fd 0 can.
+        struct Broken;
+        impl crate::Stdin for Broken {
+            fn read(&mut self, _: &mut [u8]) -> Result<usize, vfs::Errno> {
+                Err(vfs::Errno::EIO)
+            }
+        }
+        let mut out = crate::testing::FakeStdout::console();
+        let io = crate::CommandIo {
+            vfs: &mut h.vfs,
+            console: &mut h.console,
+            system: &mut h.system,
+            stdin: &mut Broken,
+            stdout: &mut out,
+        };
+        let status = crate::run_command("cat", super::cat, &[], io);
+        assert_eq!(
+            (status, h.console.take()),
+            (1, "cat: -: Input/output error\n".into())
+        );
     }
 
     #[test]
@@ -454,6 +677,100 @@ mod tests {
     }
 
     #[test]
+    fn head_and_tail_of_standard_input_print_what_gnu_s_print() {
+        let numbered_bytes = numbered(30);
+        let ten: &[u8] = numbered_bytes.as_bytes();
+        let unended: &[u8] = b"one\ntwo\nthree";
+        let big_text = numbered(20_000);
+        let big: &[u8] = big_text.as_bytes();
+        let cases: &[(&[&str], &[u8])] = &[
+            (&["head"], ten),
+            (&["head", "-n", "3"], ten),
+            (&["head", "-3"], ten),
+            (&["head", "-n", "0"], ten),
+            (&["head", "-n", "5"], unended),
+            (&["head", "-n", "2"], unended),
+            (&["head"], b""),
+            (&["head", "-n", "2"], big),
+            (&["tail"], ten),
+            (&["tail", "-n", "3"], ten),
+            (&["tail", "-2"], unended),
+            (&["tail", "-n", "1"], unended),
+            (&["tail", "-n", "0"], ten),
+            (&["tail", "-n", "100"], ten),
+            (&["tail"], b""),
+            (&["tail", "-n", "5"], big),
+            (&["tail", "-n", "3"], b"\n\n\n\n"),
+        ];
+        for (args, stdin) in cases {
+            let mut h = Harness::new();
+            assert_eq!(
+                h.like_host(args, &[], stdin),
+                crate::testing::host_tool(args, &[], stdin),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn head_of_standard_input_reads_no_more_than_its_lines() {
+        // A line a read, as a pipe may give them; a hundred, then the end
+        // (a head that reads on fails the test instead of hanging it).
+        struct Lines(usize);
+        impl crate::Stdin for Lines {
+            fn read(&mut self, buf: &mut [u8]) -> Result<usize, vfs::Errno> {
+                self.0 += 1;
+                if self.0 > 100 {
+                    return Ok(0);
+                }
+                buf[..2].copy_from_slice(b"x\n");
+                Ok(2)
+            }
+        }
+        let mut h = Harness::new();
+        let (mut input, mut out) = (Lines(0), crate::testing::FakeStdout::file(None));
+        let io = crate::CommandIo {
+            vfs: &mut h.vfs,
+            console: &mut h.console,
+            system: &mut h.system,
+            stdin: &mut input,
+            stdout: &mut out,
+        };
+        let args = [String::from("-n"), String::from("3")];
+        assert_eq!(crate::run_command("head", super::head, &args, io), 0);
+        assert_eq!((out.text().as_str(), input.0), ("x\nx\nx\n", 3));
+        h.stdin = numbered(20_000).into_bytes();
+        h.console.interrupt_after = Some(1);
+        assert_eq!(h.run("tail -n 1"), (130, "^C\n".into()));
+    }
+
+    #[test]
+    fn tail_of_standard_input_joins_lines_a_pipe_cuts() {
+        // Three bytes a read, as a pipe may give them.
+        struct Cut(&'static [u8]);
+        impl crate::Stdin for Cut {
+            fn read(&mut self, buf: &mut [u8]) -> Result<usize, vfs::Errno> {
+                let n = self.0.len().min(3).min(buf.len());
+                buf[..n].copy_from_slice(&self.0[..n]);
+                self.0 = &self.0[n..];
+                Ok(n)
+            }
+        }
+        let mut h = Harness::new();
+        let mut out = crate::testing::FakeStdout::file(None);
+        let io = crate::CommandIo {
+            vfs: &mut h.vfs,
+            console: &mut h.console,
+            system: &mut h.system,
+            stdin: &mut Cut(b"one\ntwo\nthree\nfour"),
+            stdout: &mut out,
+        };
+        let args = [String::from("-n"), String::from("2")];
+        assert_eq!(crate::run_command("tail", super::tail, &args, io), 0);
+        assert_eq!(out.text(), "three\nfour");
+    }
+
+    #[test]
     fn head_and_tail_errors() {
         let mut h = Harness::new();
         assert_eq!(
@@ -475,7 +792,6 @@ mod tests {
             h.run("tail -n +2 /etc/motd"),
             (1, "tail: invalid number of lines: '+2'\n".into())
         );
-        assert_eq!(h.run("head"), (1, "head: missing operand\n".into()));
         assert_eq!(h.run("tail a b"), (1, "tail: extra operand 'b'\n".into()));
         assert_eq!(
             h.run("head /tmp"),
@@ -500,6 +816,51 @@ mod tests {
                 " 2  5 29 /tmp/a\n 0  2  7 /tmp/b\n 2  7 36 total\n".into()
             )
         );
+    }
+
+    #[test]
+    fn wc_prints_what_gnu_wc_prints() {
+        let a: &[u8] = b"hello world\nsecond line here\n";
+        let b: &[u8] = b"  x\ty  ";
+        let files = [("a", a), ("b", b), ("d/", &b""[..])];
+        let cases: &[(&[&str], &[u8])] = &[
+            (&["wc"], a),
+            (&["wc", "-c"], a),
+            (&["wc", "-l"], a),
+            (&["wc", "-w"], b),
+            (&["wc", "-lw"], a),
+            (&["wc", "-cl"], b),
+            (&["wc", "-l", "-c", "-w"], a),
+            (&["wc"], b""),
+            (&["wc", "-c"], b""),
+            (&["wc", "a"], b""),
+            (&["wc", "-c", "a"], b""),
+            (&["wc", "a", "b"], b""),
+            (&["wc", "-l", "a", "b"], b""),
+            (&["wc", "-wc", "b", "a"], b""),
+            (&["wc", "a", "nope"], b""),
+            (&["wc", "nope", "a"], b""),
+            (&["wc", "-c", "nope", "a"], b""),
+            (&["wc", "-l", "nope"], b""),
+            (&["wc", "-l", "d", "a"], b""),
+            (&["wc", "a", "d", "nope"], b"not read"),
+        ];
+        for (args, stdin) in cases {
+            let mut h = Harness::new();
+            assert_eq!(
+                h.like_host(args, &files, stdin),
+                crate::testing::host_tool(args, &files, stdin),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wc_of_standard_input_stops_at_ctrl_c() {
+        let mut h = Harness::new();
+        h.stdin = numbered(20_000).into_bytes();
+        h.console.interrupt_after = Some(1);
+        assert_eq!(h.run("wc -l"), (130, "^C\n".into()));
     }
 
     #[test]

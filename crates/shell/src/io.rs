@@ -1,7 +1,8 @@
 //! What the shell needs from its surroundings besides files (spec §7.3).
 //! `relay-rt` implements `Console` and `System` over system calls; `xtask
 //! host-shell` over the host terminal; the tests over buffers. `Programs`
-//! is `/bin/sh`'s way to its commands.
+//! is `/bin/sh`'s way to its commands. `Stdin` is a command's standard
+//! input: a program's fd 0, or bytes in memory (`Bytes`).
 
 use alloc::vec::Vec;
 use relay_abi::WaitStatus;
@@ -52,6 +53,35 @@ pub trait System {
     fn poweroff(&mut self, force: bool) -> Result<(), Errno>;
 }
 
+/// A command's standard input (user-space gate §9.1): a program's fd 0 (the
+/// console, in line mode, or a pipe), or bytes in memory.
+pub trait Stdin {
+    /// Reads some bytes into `buf`: how many, 0 at the end of the input.
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno>;
+}
+
+/// Standard input that is bytes in memory: what a test gives a command, or
+/// what the stage before wrote, in the in-process runner's pipelines.
+pub struct Bytes {
+    data: Vec<u8>,
+    at: usize,
+}
+
+impl Bytes {
+    pub fn new(data: Vec<u8>) -> Bytes {
+        Bytes { data, at: 0 }
+    }
+}
+
+impl Stdin for Bytes {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+        let n = buf.len().min(self.data.len() - self.at);
+        buf[..n].copy_from_slice(&self.data[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
+    }
+}
+
 /// A program's standard output, fd 1 (user-space gate §8.1): the console
 /// or a file the shell opened for it.
 pub trait Stdout {
@@ -65,6 +95,20 @@ pub trait Stdout {
     fn node(&self) -> Option<Node>;
 }
 
+/// The process group a program starts in (user-space gate §6.4, §9.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Group {
+    /// The shell's own: a script's commands, so that Ctrl-C ends the
+    /// script with them.
+    Shell,
+    /// A new one, which gets the console: a command at the prompt, or a
+    /// pipeline's first.
+    New,
+    /// The group of the pipeline's first command (its pid), which has
+    /// the console already.
+    Join(u32),
+}
+
 /// Programs, for a shell that runs its commands as programs (`/bin/sh`,
 /// user-space gate §8.2): `relay-rt`'s system calls there, a fake in the
 /// tests.
@@ -73,17 +117,18 @@ pub trait Programs {
     /// or, with `append`, written at its end. Its fd.
     fn open_output(&mut self, path: &[u8], append: bool) -> Result<u32, Errno>;
     fn close(&mut self, fd: u32);
-    /// Starts the program at `path` with `args` (argument 0 first); its
-    /// pid. It gets the shell's fds 0 and 2, and `stdout` (or the shell's
-    /// fd 1) as its fd 1. With `foreground` it runs in a process group of
-    /// its own, which gets the console (an interactive shell's command,
-    /// spec §6.4); otherwise in the shell's group (a script's).
+    /// Makes a pipe: its read end and its write end.
+    fn pipe(&mut self) -> Result<(u32, u32), Errno>;
+    /// Starts the program at `path` with `args` (argument 0 first) in
+    /// `group`; its pid. It gets `stdin` (or the shell's fd 0) as its fd 0,
+    /// `stdout` (or the shell's fd 1) as its fd 1, and the shell's fd 2.
     fn spawn(
         &mut self,
         path: &[u8],
         args: &[&[u8]],
+        stdin: Option<u32>,
         stdout: Option<u32>,
-        foreground: bool,
+        group: Group,
     ) -> Result<u32, Errno>;
     /// Waits for the child `pid` to end.
     fn wait(&mut self, pid: u32) -> Result<WaitStatus, Errno>;

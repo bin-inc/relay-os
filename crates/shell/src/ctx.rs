@@ -1,9 +1,10 @@
 //! What a command gets to work with: the filesystem, the system, standard
-//! output (the screen, a redirection file, or a program's fd 1) and the
-//! screen for errors; plus the helpers every command shares for options
-//! and GNU-style messages.
+//! input (none, a program's fd 0, or bytes in memory), standard output
+//! (the screen, a redirection file, or a program's fd 1) and the screen
+//! for errors; plus the helpers every command shares for options and
+//! GNU-style messages.
 
-use crate::io::{Console, Stdout, System};
+use crate::io::{Console, Stdin, Stdout, System};
 use crate::transcript::Transcript;
 use alloc::format;
 use alloc::string::String;
@@ -19,6 +20,8 @@ pub struct Ctx<'a> {
     pub system: &'a mut dyn System,
     console: &'a mut dyn Console,
     out: Output<'a>,
+    /// Standard input; without one, the input ends at once.
+    input: Option<&'a mut dyn Stdin>,
     /// Set by `exit`, and by `reboot` and `poweroff` when the machine did
     /// not go away: the shell stops.
     pub(crate) exit: bool,
@@ -106,6 +109,7 @@ impl<'a> Ctx<'a> {
             system,
             console,
             out,
+            input: None,
             exit: false,
             cancelled: false,
             script: None,
@@ -113,6 +117,23 @@ impl<'a> Ctx<'a> {
             transcript: None,
             status: 0,
             exited: false,
+        }
+    }
+
+    /// Gives the command standard input.
+    pub(crate) fn set_input(&mut self, input: &'a mut dyn Stdin) {
+        self.input = Some(input);
+    }
+
+    /// Reads standard input into `buf`: how many bytes, 0 at its end. What
+    /// waits for standard output is written first, so that what came of
+    /// the last read reaches a pipe before the next one waits (a line typed
+    /// into `cat | cat` reaches the second `cat` at Enter).
+    pub fn read_input(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+        self.streams().flush();
+        match &mut self.input {
+            Some(input) => input.read(buf),
+            None => Ok(0),
         }
     }
 

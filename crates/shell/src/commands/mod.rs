@@ -16,7 +16,7 @@ pub use basic::{clear, echo, pwd, uname};
 pub use change::{cp, mkdir, mv, rm, rmdir, touch};
 pub use ls::ls;
 pub(crate) use script::Script;
-pub use script::transcript_name;
+pub use script::{SCRIPT_MAX, transcript_name};
 pub use stat::stat;
 pub use system::{date, df, dmesg, free, poweroff, reboot, sync};
 pub use text::{cat, head, tail, wc};

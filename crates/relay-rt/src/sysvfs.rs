@@ -466,18 +466,17 @@ mod tests {
     /// Runs `line` as its program does over `vfs`: the status, the errors
     /// and the output.
     fn run(vfs: &mut dyn Vfs, line: &str) -> (i32, String, String) {
-        let words = shell::parser::parse(line).unwrap().words;
+        let words = shell::parser::parse(line).unwrap().remove(0).words;
         let (mut errors, mut out) = (Screen::default(), Screen::default());
         let run = shell::commands::find(&words[0]).unwrap().run;
-        let status = shell::run_command(
-            &words[0],
-            run,
-            &words[1..],
+        let io = shell::CommandIo {
             vfs,
-            &mut errors,
-            &mut Clock,
-            &mut out,
-        );
+            console: &mut errors,
+            system: &mut Clock,
+            stdin: &mut shell::Bytes::new(Vec::new()),
+            stdout: &mut out,
+        };
+        let status = shell::run_command(&words[0], run, &words[1..], io);
         let text = |s: Screen| String::from_utf8(s.0).unwrap();
         (status, text(errors), text(out))
     }

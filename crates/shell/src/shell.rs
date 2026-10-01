@@ -2,10 +2,10 @@
 //! built-in command or a program and syncing the filesystems after it
 //! (spec §7.3, §8.3; user-space gate §8.2).
 
-use crate::commands::{self, Script};
+use crate::commands::{self, SCRIPT_MAX, Script};
 use crate::ctx::{Ctx, quote_if_needed};
 use crate::editor::{Feed, LineEditor};
-use crate::io::{Console, Programs, Stdout, System};
+use crate::io::{Console, Programs, Stdin, Stdout, System};
 use crate::parser::{self, HOME};
 use crate::runner::{self, Parts, Ran, Runners};
 use crate::transcript::{self, Transcript};
@@ -41,6 +41,10 @@ pub struct Shell<'a> {
     in_script: bool,
     /// Where a running script's screen output is copied.
     transcript: Option<Transcript>,
+    /// The in-process runner's standard input for its commands (a test's
+    /// bytes); without it the input ends at once (`host-shell`). A
+    /// spawning shell's commands read its fd 0 instead.
+    input: Option<&'a mut dyn Stdin>,
 }
 
 impl<'a> Shell<'a> {
@@ -84,7 +88,14 @@ impl<'a> Shell<'a> {
             exited: false,
             in_script: false,
             transcript: None,
+            input: None,
         }
+    }
+
+    /// The same shell, its in-process commands reading `input`.
+    pub fn with_input(mut self, input: &'a mut dyn Stdin) -> Shell<'a> {
+        self.input = Some(input);
+        self
     }
 
     /// The exit status of the last command.
@@ -151,10 +162,14 @@ impl<'a> Shell<'a> {
     /// status. Every command is followed by a sync, so its changes are on
     /// the disk when the prompt comes back.
     pub fn execute(&mut self, line: &str) -> i32 {
-        let cmd = match parser::parse(line) {
-            Ok(cmd) => cmd,
+        let mut pipeline = match parser::parse(line) {
+            Ok(pipeline) => pipeline,
             Err(e) => return self.finish(SYNTAX, format!("{NAME}: {e}\n")),
         };
+        if pipeline.len() > 1 {
+            return self.pipeline(&pipeline);
+        }
+        let cmd = pipeline.remove(0);
         if cmd.words.is_empty() && cmd.redirect.is_none() {
             return self.status;
         }
@@ -165,6 +180,10 @@ impl<'a> Shell<'a> {
             transcript: &mut self.transcript,
             in_script: self.in_script,
             status: self.status,
+            input: match &mut self.input {
+                Some(input) => Some(&mut **input),
+                None => None,
+            },
         };
         let ran = match cmd.words.split_first() {
             Some((name, args)) => match commands::builtin(name) {
@@ -192,6 +211,32 @@ impl<'a> Shell<'a> {
             status = self.run_script(script);
         }
         self.finish(status, ran.message)
+    }
+
+    /// Runs a pipeline (user-space gate §9.1): its status is the last
+    /// command's. The shell's own commands cannot be in one.
+    fn pipeline(&mut self, stages: &[parser::Command]) -> i32 {
+        let builtin = stages
+            .iter()
+            .find(|c| commands::builtin(&c.words[0]).is_some());
+        if let Some(c) = builtin {
+            let ran = runner::in_a_pipeline(&c.words[0]);
+            return self.finish(ran.status, ran.message);
+        }
+        let parts = Parts {
+            vfs: &mut *self.vfs,
+            console: &mut *self.console,
+            system: &mut *self.system,
+            transcript: &mut self.transcript,
+            in_script: self.in_script,
+            status: self.status,
+            input: match &mut self.input {
+                Some(input) => Some(&mut **input),
+                None => None,
+            },
+        };
+        let ran = self.runner.get().pipeline(parts, stages);
+        self.finish(ran.status, ran.message)
     }
 
     /// Writes to the screen and, while a script runs, its transcript.
@@ -273,6 +318,68 @@ impl<'a> Shell<'a> {
         status
     }
 
+    /// `X | sh`: a shell whose standard input is no console runs the
+    /// commands it reads there (user-space gate §9.1, §16 item 8), a line
+    /// at a time as they come, without a prompt, a trace or the line
+    /// editor, so it never takes the console; it ends at the input's end or
+    /// `exit`. A line over 64 KiB, or not UTF-8, is skipped with a message,
+    /// as `sh` refuses such a script. Returns the last status.
+    pub fn run_input(&mut self, input: &mut dyn Stdin) -> i32 {
+        let mut buf = alloc::vec![0; 4096];
+        let mut line: Vec<u8> = Vec::new();
+        let mut too_long = false;
+        self.stopped = false;
+        loop {
+            let n = match input.read(&mut buf) {
+                Ok(n) => n,
+                Err(e) => {
+                    let message = format!("sh: standard input: {e}\n");
+                    return self.finish(1, message);
+                }
+            };
+            if n == 0 {
+                if !line.is_empty() || too_long {
+                    self.input_line(&line, too_long);
+                }
+                return self.status;
+            }
+            for piece in buf[..n].split_inclusive(|&b| b == b'\n') {
+                let ended = piece.last() == Some(&b'\n');
+                let piece = &piece[..piece.len() - usize::from(ended)];
+                if !too_long {
+                    line.extend_from_slice(piece);
+                    if line.len() as u64 > SCRIPT_MAX {
+                        too_long = true;
+                        line.clear();
+                    }
+                }
+                if ended {
+                    self.input_line(&line, too_long);
+                    line.clear();
+                    too_long = false;
+                    if self.stopped {
+                        return self.status;
+                    }
+                }
+            }
+        }
+    }
+
+    /// One line `run_input` read: run, or said why not.
+    fn input_line(&mut self, line: &[u8], too_long: bool) {
+        match core::str::from_utf8(line) {
+            _ if too_long => {
+                self.finish(1, String::from("sh: standard input: a line over 64 KiB\n"));
+            }
+            Ok(text) => {
+                self.execute(text);
+            }
+            Err(_) => {
+                self.finish(1, String::from("sh: standard input: not a text line\n"));
+            }
+        }
+    }
+
     /// Runs a script's lines (spec §15 item 12): each command is shown as
     /// `+ <line>`, then runs and is synced as if typed. Blank and comment
     /// lines are skipped. Ctrl-C, `exit`, or `reboot`/`poweroff`
@@ -282,7 +389,8 @@ impl<'a> Shell<'a> {
         self.in_script = true;
         let mut status = 0;
         for line in text.lines() {
-            if matches!(parser::parse(line), Ok(c) if c.words.is_empty() && c.redirect.is_none()) {
+            if matches!(parser::parse(line), Ok(p) if p.len() == 1 && p[0].words.is_empty() && p[0].redirect.is_none())
+            {
                 continue;
             }
             if self.console.interrupted() {
@@ -347,6 +455,132 @@ mod tests {
     }
 
     #[test]
+    fn a_pipeline_hands_each_command_s_output_to_the_next() {
+        let mut h = Harness::new();
+        h.put("/tmp/f", b"one\ntwo\nthree\n");
+        // What bash prints for each (`bash -c '…'`).
+        assert_eq!(h.run("echo hello world | wc -c"), (0, "12\n".into()));
+        assert_eq!(
+            h.run("cat /tmp/f | head -n 2 | tail -n 1"),
+            (0, "two\n".into())
+        );
+        // Not the screen: one name a line.
+        assert_eq!(h.run("ls /etc | cat"), (0, "hostname\nmotd\n".into()));
+        // The last command's redirection; and its status is the line's.
+        assert_eq!(h.run("cat /tmp/f | wc -l > /tmp/n"), (0, "".into()));
+        assert_eq!(h.get("/tmp/n"), b"3\n");
+        assert_eq!(
+            h.run("cat /nope | wc -l"),
+            (0, "cat: /nope: No such file or directory\n0\n".into())
+        );
+        assert_eq!(
+            h.run("echo x | cat /nope"),
+            (1, "cat: /nope: No such file or directory\n".into())
+        );
+        // A command that is not found gives the next nothing, as in bash.
+        assert_eq!(
+            h.run("nosuch | wc -l"),
+            (0, "relay-sh: nosuch: command not found\n0\n".into())
+        );
+        assert_eq!(
+            h.run("echo x | nosuch"),
+            (127, "relay-sh: nosuch: command not found\n".into())
+        );
+        // The first command reads the shell's standard input.
+        h.stdin = b"a\nb\n".to_vec();
+        assert_eq!(h.run("cat | wc -l"), (0, "2\n".into()));
+    }
+
+    #[test]
+    fn the_shell_s_own_commands_cannot_be_in_a_pipeline() {
+        let mut h = Harness::new();
+        for (line, name) in [
+            ("cd /tmp | cat", "cd"),
+            ("echo a | exit 3", "exit"),
+            ("help | wc", "help"),
+            ("ls | sh x | wc", "sh"),
+        ] {
+            assert_eq!(
+                h.run(line),
+                (
+                    1,
+                    alloc::format!("relay-sh: {name}: cannot be used in a pipeline\n")
+                ),
+                "{line}"
+            );
+        }
+        // Nothing ran: not even the commands before it.
+        assert_eq!(h.run("pwd"), (0, "/\n".into()));
+        h.put("/tmp/x", b"");
+        assert_eq!(
+            h.run("echo a > /tmp/x | cd /"),
+            (2, "relay-sh: unsupported syntax: > before |\n".into())
+        );
+    }
+
+    #[test]
+    fn a_pipeline_command_without_a_name_is_refused_by_both_runners() {
+        let mut h = Harness::new();
+        for line in ["echo hi | > /tmp/f", "> /tmp/f | cat"] {
+            let said = if line.starts_with('>') {
+                "> before |"
+            } else {
+                "| >"
+            };
+            let want = (2, alloc::format!("relay-sh: unsupported syntax: {said}\n"));
+            assert_eq!(h.run(line), want, "{line}");
+            assert_eq!(h.spawning(line), want, "{line}");
+        }
+        assert!(!h.exists("/tmp/f"), "nothing of the line ran");
+        assert!(h.programs.spawned.is_empty());
+    }
+
+    #[test]
+    fn a_shell_whose_input_is_no_console_runs_the_lines_it_reads() {
+        let mut h = Harness::new();
+        h.programs
+            .known
+            .push(("/bin/t-args", WaitStatus::exited(0)));
+        let text = b"t-args a\n\nt-args 'b c'\n\xff\nexit 3\nt-args never\n".to_vec();
+        let mut input = crate::Bytes::new(text);
+        let status = Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+            .run_input(&mut input);
+        assert_eq!(status, 3, "exit's");
+        let args: Vec<Vec<String>> = h.programs.spawned.iter().map(|s| s.args.clone()).collect();
+        assert_eq!(args, [vec!["t-args", "a"], vec!["t-args", "b c"]]);
+        // No prompt, no trace: only what is wrong.
+        assert_eq!(h.console.take(), "sh: standard input: not a text line\n");
+        assert!(
+            h.console.input.is_empty()
+                && h.programs
+                    .spawned
+                    .iter()
+                    .all(|s| s.group == crate::Group::New)
+        );
+        // The last line needs no newline; a line over 64 KiB is skipped.
+        let mut long = alloc::vec![b'x'; 70_000];
+        long.extend_from_slice(b"\nt-args c");
+        let mut input = crate::Bytes::new(long);
+        let status = Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+            .run_input(&mut input);
+        assert_eq!(
+            (status, h.console.take()),
+            (0, "sh: standard input: a line over 64 KiB\n".into())
+        );
+        assert_eq!(h.programs.spawned.last().unwrap().args, ["t-args", "c"]);
+    }
+
+    #[test]
+    fn ctrl_c_stops_a_pipeline() {
+        let mut h = Harness::new();
+        h.put("/tmp/big", &alloc::vec![b'x'; 300_000]);
+        h.console.interrupt = true;
+        assert_eq!(h.run("cat /tmp/big | wc -c"), (130, "^C\n".into()));
+        // The rest does not run, even what would not have asked.
+        assert_eq!(h.run("cat /tmp/big | echo after"), (130, "^C\n".into()));
+    }
+
+    #[test]
     fn unknown_commands_and_syntax_errors() {
         let mut h = Harness::new();
         assert_eq!(
@@ -354,8 +588,12 @@ mod tests {
             (127, "relay-sh: frobnicate: command not found\n".into())
         );
         assert_eq!(
-            h.run("ls | wc"),
-            (2, "relay-sh: unsupported syntax: |\n".into())
+            h.run("ls | ;"),
+            (2, "relay-sh: unsupported syntax: ;\n".into())
+        );
+        assert_eq!(
+            h.run("ls |"),
+            (2, "relay-sh: syntax error: unexpected end of file\n".into())
         );
         assert_eq!(
             h.run("echo 'open"),
@@ -407,7 +645,10 @@ mod tests {
             )
         );
         assert!(
-            h.programs.spawned.iter().all(|s| !s.foreground),
+            h.programs
+                .spawned
+                .iter()
+                .all(|s| s.group == crate::Group::Shell),
             "a script's commands run in its group, so Ctrl-C ends it with them"
         );
         assert_eq!(h.programs.pushed, ["/tmp/s.log"]);

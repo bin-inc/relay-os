@@ -14,7 +14,7 @@ use relay_abi::info::LOG_MAX;
 use relay_abi::power::{POWER_FORCE, POWER_POWEROFF, POWER_REBOOT};
 use relay_abi::spawn::{FOREGROUND, NEW_GROUP};
 use relay_abi::{FdMap, WaitStatus};
-use shell::{Console, MemInfo, Programs, Stdout, System};
+use shell::{Console, Group, MemInfo, Programs, Stdin, Stdout, System};
 use vfs::{Errno, Node};
 
 /// The console: what is typed on fd 0, and the screen on fd 2 (a
@@ -130,6 +130,23 @@ impl System for SysSystem {
     }
 }
 
+/// Standard input: fd 0, the console (in line mode, as the shell gives it
+/// to its command) or a pipe.
+pub struct SysStdin;
+
+impl SysStdin {
+    /// Whether fd 0 is the console (`fstat` says a character device).
+    pub fn is_console() -> bool {
+        sys::fstat(0).is_ok_and(|st| st.kind == u32::from(KIND_CHAR_DEVICE))
+    }
+}
+
+impl Stdin for SysStdin {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+        sys::read(0, buf).map_err(Errno::from_number)
+    }
+}
+
 /// Standard output: fd 1, the console or the file the shell opened.
 pub struct SysStdout {
     tty: bool,
@@ -199,9 +216,11 @@ pub fn arg_bytes(args: &[&[u8]]) -> Vec<u8> {
     bytes
 }
 
-/// A command's fds: the shell's 0 and 2, and `stdout` or the shell's 1.
-pub fn command_fds(stdout: Option<u32>) -> [FdMap; 3] {
-    [(0, 0), (1, stdout.unwrap_or(1)), (2, 2)].map(|(child, parent)| FdMap { child, parent })
+/// A command's fds: `stdin` or the shell's 0, `stdout` or the shell's 1,
+/// and the shell's 2.
+pub fn command_fds(stdin: Option<u32>, stdout: Option<u32>) -> [FdMap; 3] {
+    [(0, stdin.unwrap_or(0)), (1, stdout.unwrap_or(1)), (2, 2)]
+        .map(|(child, parent)| FdMap { child, parent })
 }
 
 impl Programs for SysPrograms {
@@ -213,25 +232,32 @@ impl Programs for SysPrograms {
         let _ = sys::close(fd);
     }
 
+    fn pipe(&mut self) -> Result<(u32, u32), Errno> {
+        sys::pipe().map_err(Errno::from_number)
+    }
+
     fn spawn(
         &mut self,
         path: &[u8],
         args: &[&[u8]],
+        stdin: Option<u32>,
         stdout: Option<u32>,
-        foreground: bool,
+        group: Group,
     ) -> Result<u32, Errno> {
-        let flags = if foreground && self.own_group {
-            NEW_GROUP | FOREGROUND
-        } else {
-            // A command in the shell's own group reads the console in line
-            // mode too, which is also where Ctrl-C ends it (and the group):
-            // an interactive shell that leads no group left it raw at its
-            // prompt.
-            let _ = sys::console_mode(MODE_LINE);
-            0
+        let (flags, pgid) = match group {
+            Group::New if self.own_group => (NEW_GROUP | FOREGROUND, 0),
+            Group::Join(pgid) if self.own_group => (0, pgid),
+            _ => {
+                // A command in the shell's own group reads the console in
+                // line mode too, which is also where Ctrl-C ends it (and
+                // the group): an interactive shell that leads no group left
+                // it raw at its prompt.
+                let _ = sys::console_mode(MODE_LINE);
+                (0, 0)
+            }
         };
-        sys::spawn(path, &arg_bytes(args), b"", &command_fds(stdout), flags, 0)
-            .map_err(Errno::from_number)
+        let fds = command_fds(stdin, stdout);
+        sys::spawn(path, &arg_bytes(args), b"", &fds, flags, pgid).map_err(Errno::from_number)
     }
 
     fn wait(&mut self, pid: u32) -> Result<WaitStatus, Errno> {
@@ -269,15 +295,14 @@ pub fn words(args: &Args) -> Vec<String> {
 /// command `name`, whose function is `run`, with the program's arguments,
 /// printing exactly what it prints in the shell; its exit status.
 pub fn run_command(name: &str, run: shell::commands::Run, args: &Args) -> u8 {
-    let status = shell::run_command(
-        name,
-        run,
-        &words(args),
-        &mut SysVfs::new(),
-        &mut SysConsole::new(),
-        &mut SysSystem,
-        &mut SysStdout::new(),
-    );
+    let io = shell::CommandIo {
+        vfs: &mut SysVfs::new(),
+        console: &mut SysConsole::new(),
+        system: &mut SysSystem,
+        stdin: &mut SysStdin,
+        stdout: &mut SysStdout::new(),
+    };
+    let status = shell::run_command(name, run, &words(args), io);
     status as u8
 }
 
@@ -320,10 +345,14 @@ mod tests {
     }
 
     #[test]
-    fn a_command_gets_the_shell_s_fds_but_its_redirection() {
+    fn a_command_gets_the_shell_s_fds_but_its_pipes_and_redirection() {
         let pairs = |fds: [FdMap; 3]| fds.map(|f| (f.child, f.parent));
-        assert_eq!(pairs(command_fds(None)), [(0, 0), (1, 1), (2, 2)]);
-        assert_eq!(pairs(command_fds(Some(5))), [(0, 0), (1, 5), (2, 2)]);
+        assert_eq!(pairs(command_fds(None, None)), [(0, 0), (1, 1), (2, 2)]);
+        assert_eq!(pairs(command_fds(None, Some(5))), [(0, 0), (1, 5), (2, 2)]);
+        assert_eq!(
+            pairs(command_fds(Some(4), Some(7))),
+            [(0, 4), (1, 7), (2, 2)]
+        );
         assert_eq!(arg_bytes(&[b"ls", b"", b"a b"]), b"ls\0\0a b\0");
     }
 

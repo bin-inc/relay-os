@@ -3,7 +3,7 @@
 #![cfg(test)]
 
 use crate::Shell;
-use crate::io::{Console, MemInfo, Programs, Stdout, System};
+use crate::io::{Bytes, Console, Group, MemInfo, Programs, Stdout, System};
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
@@ -139,9 +139,11 @@ impl System for TestSystem {
 pub struct Spawned {
     pub path: String,
     pub args: Vec<String>,
-    /// The redirection's fd, as fd 1.
+    /// What it got as fd 0 (a pipe's read end) and fd 1 (a pipe's write
+    /// end or a redirection), instead of the shell's.
+    pub stdin: Option<u32>,
     pub stdout: Option<u32>,
-    pub foreground: bool,
+    pub group: Group,
 }
 
 /// `/bin/sh`'s system calls, for the spawning runner: redirection files
@@ -156,6 +158,10 @@ pub struct FakePrograms {
     pub opened: Vec<(String, bool, u32)>,
     /// What `open_output` fails with, if anything.
     pub open_error: Option<Errno>,
+    /// Every pipe made, (read end, write end); what `pipe` fails with
+    /// after this many, if anything.
+    pub pipes: Vec<(u32, u32)>,
+    pub pipe_error: Option<(usize, Errno)>,
     pub closed: Vec<u32>,
     pub spawned: Vec<Spawned>,
     /// The children started and not yet waited for, by pid.
@@ -179,6 +185,8 @@ impl FakePrograms {
             refusals: Vec::new(),
             opened: Vec::new(),
             open_error: None,
+            pipes: Vec::new(),
+            pipe_error: None,
             closed: Vec::new(),
             spawned: Vec::new(),
             children: Vec::new(),
@@ -205,12 +213,24 @@ impl Programs for FakePrograms {
     fn close(&mut self, fd: u32) {
         self.closed.push(fd);
     }
+    fn pipe(&mut self) -> Result<(u32, u32), Errno> {
+        if let Some((after, e)) = self.pipe_error
+            && self.pipes.len() >= after
+        {
+            return Err(e);
+        }
+        let ends = (self.next_fd + 1, self.next_fd + 2);
+        self.next_fd += 2;
+        self.pipes.push(ends);
+        Ok(ends)
+    }
     fn spawn(
         &mut self,
         path: &[u8],
         args: &[&[u8]],
+        stdin: Option<u32>,
         stdout: Option<u32>,
-        foreground: bool,
+        group: Group,
     ) -> Result<u32, Errno> {
         let path = String::from_utf8_lossy(path).into_owned();
         let Some(&(_, status)) = self.known.iter().find(|(p, _)| *p == path) else {
@@ -223,8 +243,9 @@ impl Programs for FakePrograms {
                 .iter()
                 .map(|a| String::from_utf8_lossy(a).into_owned())
                 .collect(),
+            stdin,
             stdout,
-            foreground,
+            group,
         });
         self.next_pid += 1;
         self.children.push((self.next_pid, status));
@@ -444,6 +465,8 @@ pub struct Harness {
     pub system: TestSystem,
     pub programs: FakePrograms,
     pub spy: Rc<SpyState>,
+    /// The next command's standard input (in-process and as a program).
+    pub stdin: Vec<u8>,
 }
 
 impl Harness {
@@ -470,6 +493,7 @@ impl Harness {
             system: TestSystem::new(),
             programs: FakePrograms::new(),
             spy: state,
+            stdin: Vec::new(),
         }
     }
 
@@ -482,12 +506,16 @@ impl Harness {
             system: TestSystem::new(),
             programs: FakePrograms::new(),
             spy,
+            stdin: Vec::new(),
         }
     }
 
     /// Runs one command line; its exit status and everything it printed.
     pub fn run(&mut self, line: &str) -> (i32, String) {
-        let status = Shell::new(&mut self.vfs, &mut self.console, &mut self.system).execute(line);
+        let mut input = Bytes::new(core::mem::take(&mut self.stdin));
+        let status = Shell::new(&mut self.vfs, &mut self.console, &mut self.system)
+            .with_input(&mut input)
+            .execute(line);
         (status, self.console.take())
     }
 
@@ -508,15 +536,18 @@ impl Harness {
     /// output going to `stdout`; its status and what it said on the
     /// console.
     pub fn program(&mut self, line: &str, stdout: &mut FakeStdout) -> (i32, String) {
-        let words = crate::parser::parse(line).unwrap().words;
+        let words = crate::parser::parse(line).unwrap().remove(0).words;
         let status = crate::run_command(
             &words[0],
             crate::commands::find(&words[0]).unwrap().run,
             &words[1..],
-            &mut self.vfs,
-            &mut self.console,
-            &mut self.system,
-            stdout,
+            crate::CommandIo {
+                vfs: &mut self.vfs,
+                console: &mut self.console,
+                system: &mut self.system,
+                stdin: &mut Bytes::new(core::mem::take(&mut self.stdin)),
+                stdout,
+            },
         );
         (status, self.console.take())
     }
@@ -533,6 +564,38 @@ impl Harness {
         )
         .run_file(&args, stdout);
         (status, self.console.take())
+    }
+
+    /// Runs `args` (the command's name first) as its program does, in a
+    /// fresh directory holding `files` (a name ending in `/` is a
+    /// directory), with `stdin` as its input: its exit
+    /// status, standard output and standard error, to compare with
+    /// [`host_tool`]'s.
+    pub fn like_host(
+        &mut self,
+        args: &[&str],
+        files: &[(&str, &[u8])],
+        stdin: &[u8],
+    ) -> (i32, String, String) {
+        let dir = std::format!("/tmp/host{}", next_dir());
+        self.dir(&dir);
+        for (name, data) in files {
+            match name.strip_suffix('/') {
+                Some(d) => self.dir(&std::format!("{dir}/{d}")),
+                None => self.put(&std::format!("{dir}/{name}"), data),
+            }
+        }
+        self.vfs.chdir(dir.as_bytes()).unwrap();
+        self.stdin = stdin.to_vec();
+        let mut out = FakeStdout::file(None);
+        let line = args
+            .iter()
+            .map(|a| crate::ctx::quote_if_needed(a))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let (status, errors) = self.program(&line, &mut out);
+        self.vfs.chdir(b"/").unwrap();
+        (status, out.text(), errors)
     }
 
     /// Creates (or replaces) a file.
@@ -563,4 +626,51 @@ impl Harness {
     pub fn exists(&mut self, path: &str) -> bool {
         self.vfs.lookup(path.as_bytes()).is_ok()
     }
+}
+
+/// A number for each fresh directory a test asks for.
+fn next_dir() -> usize {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// What the host's own tool prints for `args` (its name first), run in a
+/// fresh directory under the workspace's `target/` holding `files` (a name
+/// ending in `/` is a directory), with
+/// `stdin` as its input and `LC_ALL=C`: its exit status, standard output
+/// and standard error, to compare with [`Harness::like_host`]'s. A tool
+/// that is missing fails the test.
+pub fn host_tool(args: &[&str], files: &[(&str, &[u8])], stdin: &[u8]) -> (i32, String, String) {
+    use std::io::Write;
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/like-host")
+        .join(std::format!("{}-{}", std::process::id(), next_dir()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, data) in files {
+        match name.strip_suffix('/') {
+            Some(d) => std::fs::create_dir(dir.join(d)).unwrap(),
+            None => std::fs::write(dir.join(name), data).unwrap(),
+        }
+    }
+    let mut child = std::process::Command::new(args[0])
+        .args(&args[1..])
+        .current_dir(&dir)
+        .env("LC_ALL", "C")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("the host's {} is needed: {e}", args[0]));
+    // A tool that stops reading early (head) closes the pipe: not an error.
+    let _ = child.stdin.take().unwrap().write_all(stdin);
+    let out = child.wait_with_output().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    let text = |b: Vec<u8>| String::from_utf8_lossy(&b).into_owned();
+    (
+        out.status.code().unwrap_or(-1),
+        text(out.stdout),
+        text(out.stderr),
+    )
 }
