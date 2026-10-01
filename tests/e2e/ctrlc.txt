@@ -62,3 +62,12 @@ alive 1
 type {ctrl-c}x
 expect \Await: EINTR\nthen read: "x"\n
 expect root@relay:~# $
+# A program waiting with WAIT_CTRL_C in a group that does not have the
+# console never takes a Ctrl-C: it is for the console's group, here the
+# parent, which reads it after the child's two waits ended by themselves.
+send t-spawn ctrl-c-apart
+expect \nthe child waits apart\n
+alive 1
+type {ctrl-c}x
+expect \Athe child's wait: a child\nthe child's wait: a child\nthen read: "\\u\{3\}x"\n
+expect root@relay:~# $

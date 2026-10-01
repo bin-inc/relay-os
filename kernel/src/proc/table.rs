@@ -54,6 +54,9 @@ pub const SLICE: u32 = 10;
 pub enum Blocked {
     /// A child to end.
     Wait,
+    /// A child to end, or a Ctrl-C typed in raw mode while its group has
+    /// the console (`WAIT_CTRL_C`).
+    WaitCtrlC,
     /// Console input.
     Console,
     /// The tick count to reach this value.
@@ -77,7 +80,7 @@ impl State {
         match self {
             State::Running => STATE_RUN,
             State::Ready => STATE_READY,
-            State::Blocked(Blocked::Wait) => STATE_WAIT,
+            State::Blocked(Blocked::Wait | Blocked::WaitCtrlC) => STATE_WAIT,
             State::Blocked(Blocked::Console) => STATE_READ,
             State::Blocked(Blocked::Sleep(_)) => STATE_SLEEP,
             State::Blocked(Blocked::Pipe(_)) => STATE_PIPE,
@@ -371,13 +374,14 @@ impl<R> Table<R> {
         }
     }
 
-    /// Wakes the processes of group `pgid` that wait for a child: a Ctrl-C
-    /// may be for them (`WAIT_CTRL_C`).
+    /// Wakes the processes of group `pgid` that wait for a child or a
+    /// Ctrl-C (`WAIT_CTRL_C`): one was typed. The others it is no news to,
+    /// and would wake for nothing as long as it waits to be read.
     pub fn wake_waiting(&mut self, pgid: u32) {
         let pids: Vec<u32> = self
             .procs
             .iter()
-            .filter(|p| p.pgid == pgid && p.state == State::Blocked(Blocked::Wait))
+            .filter(|p| p.pgid == pgid && p.state == State::Blocked(Blocked::WaitCtrlC))
             .map(|p| p.pid)
             .collect();
         for pid in pids {
@@ -445,7 +449,10 @@ impl<R> Table<R> {
             .into_iter()
             .flatten()
         {
-            if self.get(waiter).map(|p| p.state) == Some(State::Blocked(Blocked::Wait)) {
+            if matches!(
+                self.get(waiter).map(|p| p.state),
+                Some(State::Blocked(Blocked::Wait | Blocked::WaitCtrlC))
+            ) {
                 self.wake(waiter);
             }
         }
@@ -978,17 +985,19 @@ mod tests {
     }
 
     #[test]
-    fn a_group_s_waiters_are_woken_and_no_one_else() {
+    fn a_ctrl_c_wakes_its_group_s_waiters_that_asked_for_it_and_no_one_else() {
         let mut t = table();
         let a = add(&mut t, 0, true);
         let b = add(&mut t, a, false);
         let c = add(&mut t, a, true);
         let d = add(&mut t, a, false);
+        let e = add(&mut t, a, false);
         for (p, why) in [
-            (a, Blocked::Wait),
+            (a, Blocked::WaitCtrlC),
             (b, Blocked::Console),
-            (c, Blocked::Wait),
-            (d, Blocked::Wait),
+            (c, Blocked::WaitCtrlC),
+            (d, Blocked::WaitCtrlC),
+            (e, Blocked::Wait),
         ] {
             assert_eq!(t.schedule(), p);
             t.block(why);
@@ -1001,7 +1010,35 @@ mod tests {
             State::Blocked(Blocked::Console),
             "not waiting"
         );
-        assert_eq!(state(&t, c), State::Blocked(Blocked::Wait), "another group");
+        assert_eq!(
+            state(&t, c),
+            State::Blocked(Blocked::WaitCtrlC),
+            "another group"
+        );
+        // A wait that did not ask for a Ctrl-C would wake again and again
+        // while one waits unread (the review's idle spin).
+        assert_eq!(
+            state(&t, e),
+            State::Blocked(Blocked::Wait),
+            "it did not ask"
+        );
+        assert_eq!(
+            t.list(|_| 0)[4].state,
+            STATE_WAIT,
+            "ps says wait either way"
+        );
+    }
+
+    #[test]
+    fn a_child_s_end_wakes_a_parent_that_waits_for_a_ctrl_c_too() {
+        let mut t = table();
+        let parent = add(&mut t, 0, true);
+        let child = add(&mut t, parent, true);
+        assert_eq!(t.schedule(), parent);
+        t.block(Blocked::WaitCtrlC);
+        assert_eq!(t.schedule(), child);
+        t.end(child, WaitStatus::exited(0));
+        assert_eq!(state(&t, parent), State::Ready);
     }
 
     #[test]

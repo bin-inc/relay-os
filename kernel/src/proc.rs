@@ -566,6 +566,7 @@ fn collect(child: Child, nohang: bool, ctrl_c: bool) -> Result<Option<(u32, Wait
             }
             None if nohang => return Ok(None),
             None if ctrl_c && holds_ctrl_c() => return Err(Errno::EINTR),
+            None if ctrl_c => block(Blocked::WaitCtrlC),
             None => block(Blocked::Wait),
         }
     }
