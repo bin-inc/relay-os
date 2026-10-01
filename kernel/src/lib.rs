@@ -22,6 +22,7 @@ pub mod mm;
 pub mod mounts;
 pub mod panic_screen;
 pub mod pci;
+pub mod pipe;
 pub mod power;
 pub mod proc;
 pub mod rtc;
