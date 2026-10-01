@@ -127,6 +127,23 @@ mod tests {
             out.contains("# jobs 2\n[2]+  Running                 t-spin 2 &\nroot"),
             "{out}"
         );
+        // In the order named, a job named twice listed twice (bash 5.2).
+        let ordered = typed(
+            &mut h,
+            &["t-spin &", "t-spin 2 &", "jobs 2 %1", "jobs %1 %1"],
+        );
+        assert!(
+            ordered.contains(
+                "# jobs 2 %1\n[2]+  Running                 t-spin 2 &\n[1]-  Running                 t-spin &\n"
+            ),
+            "{ordered}"
+        );
+        assert!(
+            ordered.contains(
+                "# jobs %1 %1\n[1]-  Running                 t-spin &\n[1]-  Running                 t-spin &\n"
+            ),
+            "{ordered}"
+        );
         assert!(
             out.contains(
                 "# jobs %3 x %0\nrelay-sh: jobs: %3: no such job\nrelay-sh: jobs: x: no such job\nrelay-sh: jobs: %0: no such job\n"

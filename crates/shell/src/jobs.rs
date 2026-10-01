@@ -138,15 +138,20 @@ impl Jobs {
         job.last().map(|w| status_of(&w))
     }
 
-    /// The lines `jobs` prints, by number, of every job or of those named;
+    /// The lines `jobs` prints: of every job by number, or of those named
+    /// in the order named, a job named twice listed twice, as bash's;
     /// the jobs listed that have ended are reported there, and leave the
     /// table.
     pub fn list(&mut self, named: Option<&[u32]>) -> Vec<String> {
+        let order: Vec<usize> = match named {
+            None => (0..self.jobs.len()).collect(),
+            Some(n) => n
+                .iter()
+                .filter_map(|&k| self.jobs.iter().position(|j| j.number == k))
+                .collect(),
+        };
+        let lines = order.iter().map(|&i| self.line(i)).collect();
         let listed = |j: &Job| named.is_none_or(|n| n.contains(&j.number));
-        let lines = (0..self.jobs.len())
-            .filter(|&i| listed(&self.jobs[i]))
-            .map(|i| self.line(i))
-            .collect();
         self.jobs.retain(|j| !(listed(j) && j.finished()));
         lines
     }
