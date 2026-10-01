@@ -6,6 +6,7 @@ use alloc::string::String;
 
 mod basic;
 mod change;
+mod grep;
 mod ls;
 mod script;
 mod stat;
@@ -14,6 +15,7 @@ mod text;
 
 pub use basic::{clear, echo, pwd, uname};
 pub use change::{cp, mkdir, mv, rm, rmdir, touch};
+pub use grep::grep;
 pub use ls::ls;
 pub(crate) use script::Script;
 pub use script::{SCRIPT_MAX, transcript_name};
@@ -84,6 +86,11 @@ pub const COMMANDS: &[Builtin] = &[
         name: "free",
         help: "show memory use",
         run: system::free,
+    },
+    Builtin {
+        name: "grep",
+        help: "print the lines that match a pattern",
+        run: grep::grep,
     },
     Builtin {
         name: "head",
