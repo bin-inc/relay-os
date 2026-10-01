@@ -171,7 +171,13 @@ pub fn parse_line(line: &str) -> Result<Line, ParseError> {
                 if parts.pending.is_some() {
                     return Err(ParseError::MissingTarget(">"));
                 }
-                parts.pending = Some(chars.next_if_eq(&'>').is_some());
+                let append = chars.next_if_eq(&'>').is_some();
+                // `>&2` and `>& f` send output elsewhere in bash; `>>&` and
+                // `> &` are its syntax errors.
+                if !append && chars.peek() == Some(&'&') {
+                    return Err(ParseError::Unsupported(">&".into()));
+                }
+                parts.pending = Some(append);
             }
             '|' => {
                 if chars.next_if_eq(&'|').is_some() {
@@ -543,7 +549,15 @@ mod tests {
     #[test]
     fn an_ampersand_anywhere_else_is_bash_s_error_or_unsupported() {
         // bash's messages (`bash -c '&'`, `bash -c 'a | &'`, …).
-        for line in ["&", " & ", "a | &", "echo > &", "a & &", "a &&&"] {
+        for line in [
+            "&",
+            " & ",
+            "a | &",
+            "echo > &",
+            "echo >>&2",
+            "a & &",
+            "a &&&",
+        ] {
             let e = parse_line(line).unwrap_err();
             if line.contains("&&") {
                 assert_eq!(e, ParseError::Unsupported("&&".into()), "{line}");
@@ -563,6 +577,10 @@ mod tests {
             ("a && b", "&&"),
             ("a &&", "&&"),
             ("> f &", "> &"),
+            // bash runs these (the review found them called its syntax
+            // error).
+            ("echo hi >&2", ">&"),
+            ("echo hi >& f", ">&"),
         ] {
             assert_eq!(
                 parse_line(line),
