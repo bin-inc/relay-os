@@ -1,6 +1,6 @@
-//! `cat`, `head`, `tail` and `wc` (spec §7.3). Without a file they read
-//! standard input (user-space gate §9.1), which GNU calls `-` in its
-//! messages.
+//! `cat`, `head`, `tail` and `wc` (spec §7.3). Without a file, and for a
+//! file named `-`, they read standard input (user-space gate §9.1), as
+//! GNU's do.
 
 use crate::ctx::{Ctx, getopt, outln, quote, quote_if_needed};
 use alloc::string::String;
@@ -49,8 +49,12 @@ pub fn cat(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     let mut status = 0;
     for op in &opts.operands {
         // The shell reports the write error when the command ends.
-        if ctx.out_failed() {
+        if ctx.out_failed() || ctx.interrupted() {
             break;
+        }
+        if op == "-" {
+            status = status.max(cat_input(ctx));
+            continue;
         }
         let name = quote_if_needed(op);
         let node = match ctx.vfs.lookup(op.as_bytes()) {
@@ -90,7 +94,7 @@ fn cat_input(ctx: &mut Ctx<'_>) -> i32 {
 }
 
 /// The line count and the one file of `head`/`tail`: `[-n N] [file]`, also
-/// `-N`; no file is standard input.
+/// `-N`; no file, or `-`, is standard input.
 fn lines_and_file(
     ctx: &mut Ctx<'_>,
     name: &str,
@@ -124,6 +128,7 @@ fn lines_and_file(
     };
     let file = match &opts.operands[..] {
         [] => return Ok((count, None)),
+        [file] if file == "-" => return Ok((count, None)),
         [file] => file,
         [_, extra, ..] => {
             return Err(ctx.fail(name, format_args!("extra operand {}", quote(extra))));
@@ -349,7 +354,7 @@ impl Shown {
 }
 
 /// `wc [-clw] [file…]`: lines, words and bytes, and a total for several
-/// files; standard input without a file.
+/// files; standard input without a file, and for `-`.
 pub fn wc(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     let opts = match getopt(args, "clw", "") {
         Ok(o) => o,
@@ -373,6 +378,12 @@ pub fn wc(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     let mut odd = false;
     let mut found = Vec::new();
     for op in &opts.operands {
+        // `-` is standard input, never a regular file here.
+        if op == "-" {
+            odd = true;
+            found.push(Ok(None));
+            continue;
+        }
         let node = ctx.vfs.lookup(op.as_bytes());
         match node.and_then(|n| Ok((n, ctx.vfs.stat(n)?))) {
             Ok((n, st)) => {
@@ -382,7 +393,7 @@ pub fn wc(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
                 } else {
                     odd = true;
                 }
-                found.push(Ok(n));
+                found.push(Ok(Some(n)));
             }
             Err(e) => found.push(Err(e)),
         }
@@ -398,7 +409,19 @@ pub fn wc(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     let mut total = Counts::default();
     for (op, node) in opts.operands.iter().zip(found) {
         let name = quote_if_needed(op);
-        let counts = match node.and_then(|n| count(ctx, n)) {
+        let counted = match node {
+            Ok(Some(n)) => count(ctx, n),
+            Ok(None) => match count_input(ctx) {
+                None => return 0,
+                Some((c, None)) => Ok(c),
+                Some((c, Some(e))) => {
+                    status = ctx.fail("wc", format_args!("-: {e}"));
+                    Ok(c)
+                }
+            },
+            Err(e) => Err(e),
+        };
+        let counts = match counted {
             Ok(c) => c,
             Err(Errno::EISDIR) => {
                 status = ctx.fail("wc", format_args!("{name}: Is a directory"));
@@ -421,25 +444,30 @@ pub fn wc(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
 /// `wc` of standard input, which is never a regular file here (the
 /// console or a pipe): 7 digits, unless only one count is shown.
 fn wc_input(ctx: &mut Ctx<'_>, shown: Shown) -> i32 {
-    let mut buf = vec![0; CHUNK];
-    let (mut c, mut in_word) = (Counts::default(), false);
-    let mut status = 0;
-    loop {
-        if ctx.interrupted() {
-            return 0;
-        }
-        match ctx.read_input(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => c.add(&buf[..n], &mut in_word),
-            Err(e) => {
-                status = ctx.fail("wc", format_args!("-: {e}"));
-                break;
-            }
-        }
-    }
+    let Some((c, error)) = count_input(ctx) else {
+        return 0;
+    };
+    let status = error.map_or(0, |e| ctx.fail("wc", format_args!("-: {e}")));
     let width = if shown.how_many() == 1 { 1 } else { 7 };
     outln!(ctx, "{}", shown.line(c, width, None));
     status
+}
+
+/// Standard input's counts, to its end or a read error (with the counts
+/// so far); `None` once Ctrl-C has stopped the command.
+fn count_input(ctx: &mut Ctx<'_>) -> Option<(Counts, Option<Errno>)> {
+    let mut buf = vec![0; CHUNK];
+    let (mut c, mut in_word) = (Counts::default(), false);
+    loop {
+        if ctx.interrupted() {
+            return None;
+        }
+        match ctx.read_input(&mut buf) {
+            Ok(0) => return Some((c, None)),
+            Ok(n) => c.add(&buf[..n], &mut in_word),
+            Err(e) => return Some((c, Some(e))),
+        }
+    }
 }
 
 fn count(ctx: &mut Ctx<'_>, node: Node) -> Result<Counts, Errno> {
@@ -566,6 +594,30 @@ mod tests {
             (status, h.console.take()),
             (1, "cat: -: Input/output error\n".into())
         );
+    }
+
+    #[test]
+    fn cat_prints_what_gnu_cat_prints() {
+        let files: &[(&str, &[u8])] = &[("t", b"text\n"), ("d/", b"")];
+        let big = alloc::vec![b'x'; 1 << 20];
+        let cases: &[(&[&str], &[u8])] = &[
+            (&["cat", "t"], b""),
+            (&["cat"], b"in\n"),
+            (&["cat", "-"], b"in\n"),
+            (&["cat", "nope", "-"], b"in\n"),
+            (&["cat", "t", "-", "t"], b"in\n"),
+            (&["cat", "-", "-"], b"once\n"),
+            (&["cat", "d", "t"], b""),
+            (&["cat"], &big),
+        ];
+        for (args, stdin) in cases {
+            let mut h = Harness::new();
+            assert_eq!(
+                h.like_host(args, files, stdin),
+                crate::testing::host_tool(args, files, stdin),
+                "{args:?}"
+            );
+        }
     }
 
     #[test]
@@ -701,6 +753,8 @@ mod tests {
             (&["tail"], b""),
             (&["tail", "-n", "5"], big),
             (&["tail", "-n", "3"], b"\n\n\n\n"),
+            (&["head", "-n", "2", "-"], ten),
+            (&["tail", "-1", "-"], ten),
         ];
         for (args, stdin) in cases {
             let mut h = Harness::new();
@@ -844,6 +898,10 @@ mod tests {
             (&["wc", "-l", "nope"], b""),
             (&["wc", "-l", "d", "a"], b""),
             (&["wc", "a", "d", "nope"], b"not read"),
+            (&["wc", "-"], a),
+            (&["wc", "-c", "-"], b),
+            (&["wc", "-", "a"], b),
+            (&["wc", "-l", "a", "-"], a),
         ];
         for (args, stdin) in cases {
             let mut h = Harness::new();

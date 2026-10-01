@@ -1,6 +1,7 @@
 //! `grep [-i] [-v] [-n] [-c] PATTERN [FILE...]` (user-space gate §9.1):
 //! the lines of each file, or of standard input, that hold a match of
-//! `PATTERN` (`crate::pattern`), as GNU grep prints them with `LC_ALL=C`.
+//! `PATTERN` (`crate::pattern`), as GNU grep prints them with `LC_ALL=C`
+//! (a file `-` is standard input too).
 //! Several files put each one's name before its lines; `-i` ignores case,
 //! `-v` selects the lines that do not match, `-n` numbers them, `-c` counts
 //! them instead. An input that holds a NUL byte is binary: once one of its
@@ -95,6 +96,8 @@ fn search(
     options: &Options,
     file: Option<&String>,
 ) -> Outcome {
+    // `-` is standard input, as no file is.
+    let file = file.filter(|f| *f != "-");
     let name = file.map_or("(standard input)", String::as_str);
     let mut source = match file {
         Some(path) => match open(ctx, path) {
@@ -283,6 +286,9 @@ mod tests {
             (&["grep", "a"], b"x\na\0\n"),
             (&["grep", "-v", "a"], b"a\nb\n"),
             (&["grep", "-", "t"], b""),
+            (&["grep", "a", "t", "-"], b"a\nz\n"),
+            (&["grep", "-c", "b", "-", "t"], b"b\n"),
+            (&["grep", "-n", "x", "-"], b"x\n"),
         ];
         for (args, stdin) in cases {
             let mut h = Harness::new();
