@@ -158,7 +158,7 @@ The NUC has no serial port, so a keyboard that does not work cannot run
 | `[FAIL] keyboard: no USB keyboard found` and no `port 3` line | The K120 connected after the boot's wait, or not at all | Type anyway: a late keyboard is set up when it appears. If nothing works, `debug=usb`: a `port 3: connected` line means it appeared late, none means the port never saw it; the `ports settled` line shows the wait |
 | Keys show up twice or not at all | Firmware still emulating a keyboard (handoff) | `debug=usb`: the `legacy support` line |
 
-## Check 3 — files on the stick (plans 5 and 6; milestone 2), and check 4
+## Check 3 — files on the stick (plans 5 and 6; milestone 2), and checks 4 and 5
 
 The full checklist of spec §9.4. The K120 and the stick sit on the ports
 of check 2 (the stick on bus 4 port 3 in Mint's `lsusb -t`). Since plan 6
@@ -166,7 +166,8 @@ the commands come from two scripts on the stick,
 `/root/checks/check3-a.sh` and `check3-b.sh` (in the repository under
 `rootfs/root/checks/`), and since milestone 2's plan 4b a third,
 `check4.sh` (NUC check 4 of the user-space gate, spec §12.4), after which
-the error screen is visited by hand (plan 5). Every command is a program
+the error screen is visited by hand (plan 5), and since milestone 3's
+plan 4 a fourth, `check5.sh` (NUC check 5). Every command is a program
 now, and `/bin/sh` runs them, which the kernel's init starts as process 2:
 `sh` runs each line as if it were typed, shows it as `+ <command>` before
 its output, and writes everything it shows into a transcript next to the
@@ -249,11 +250,22 @@ every pull request.
    `t-abi` (`relay-sh: t-abi: Exec format error`: a program built for
    another ABI), `ls /bin` into a file (one name a line) and `cat` of a
    file into itself (refused), a script that runs another, and `free` again
-   (the same memory in use). Then one step by hand: `exit` at the prompt.
-   `init: /bin/sh (pid <n>) exited with 0; starting it again` and a new
-   prompt `root@relay:~# ` come at once, without the motd: the shell is a
-   program, and process 1 starts another. Photograph the screen.
-8. The error screen (milestone 2, plan 5): `reboot`, and choose the stick
+   (the same memory in use).
+8. Check 5 (milestone 3, plan 4): type `sh checks/check5.sh`. It runs for
+   a few seconds: pipes (`seq 1000000 | wc -c`, 6888896 bytes through a
+   16 KiB pipe; `seq 1000000 | head -n 1`, which ends at once;
+   `seq 1000 | grep 7 | wc -l`; a pipeline's status; `X | sh`), a
+   background job (`t-spin &`, `jobs`, `ps | grep -c t-spin`, `kill %1`,
+   `wait %1` and its status 137), and a script given three arguments, one
+   empty and one with two blanks, that passes them on to another
+   (`"$@"`, `$#`, `cd "$9"`, a variable whose value has blanks, `$?`). A
+   script prints no `[1] <pid>` and no Done line. The prompt comes back
+   after `+ false`, `+ echo $?` and `1`. Then one step by hand: `exit` at
+   the prompt. `init: /bin/sh (pid <n>) exited with 0; starting it again`
+   and a new prompt `root@relay:~# ` come at once, without the motd: the
+   shell is a program, and process 1 starts another. Photograph the
+   screen.
+9. The error screen (milestone 2, plan 5): `reboot`, and choose the stick
    again with F10, so that the kernel log's last lines are the boot's. At
    the prompt type `exit` three times within 10 s. After the first two,
    init's line and a new prompt; after the third,
@@ -266,17 +278,18 @@ every pull request.
    Photograph it, wait a few seconds (it waits for the key, however long),
    then press a key on the K120: the NUC restarts. Choose the stick again
    with F10: the motd and the prompt.
-9. `poweroff`: the NUC switches itself off (`relay: powering off`). If the
+10. `poweroff`: the NUC switches itself off (`relay: powering off`). If the
    screen says `System halted. It is now safe to power off.` instead, note
    the `relay:` line above it and hold the power button.
-10. Boot Mint and run `cargo xtask verify-usb`: `e2fsck: clean`, the tree
+11. Boot Mint and run `cargo xtask verify-usb`: `e2fsck: clean`, the tree
    lists `/root/notes/a`, `/root/notes/big` (8388608 bytes) and
-   `/root/notes/t`, and the last lines are
+   `/root/notes/t`, and the last lines are `system.img: built <time>`,
    `/root/checks/check3-a.sh: ok, 84 of 84 commands as expected (run <time>)`,
-   `/root/checks/check3-b.sh: ok, 5 of 5 commands as expected (run <time>)`
-   and `/root/checks/check4.sh: ok, 33 of 33 commands as expected (run
-   <time>)`, with the UTC times of the three runs, after the line
-   `system.img: built <time>`. A transcript older than the stick's
+   `/root/checks/check3-b.sh: ok, 5 of 5 commands as expected (run <time>)`,
+   `/root/checks/check4.sh: ok, 33 of 33 commands as expected (run
+   <time>)` and `/root/checks/check5.sh: ok, 29 of 29 commands as
+   expected (run <time>)`, with the UTC times of the four runs. A
+   transcript older than the stick's
    `system.img` (a run before the last `flash --kernel`, which keeps the
    transcripts; `flash --full` erases them) fails. A `FAILED` line is
    followed by the script line, the expectation that failed and what the
@@ -294,6 +307,8 @@ every pull request.
 | `[FAIL] system: ABI N, kernel wants M` or `[FAIL] system: system.img: …`, then the error screen | The archive on the ESP is from another build, or damaged | `cargo xtask flash --kernel` from the same worktree as the kernel |
 | `exit` at the prompt gives no new prompt, or the error screen | Init does not see the shell end, or its clock runs fast (three ends within 10 s) | Photograph the screen: the log's lines on it end with init's `init: /bin/sh (pid N) …` lines |
 | `check4.sh`: `t-spawn fill` fills the table with fewer than 60 children, or the second `free` differs | A process of an earlier command was left over (a zombie init did not collect, or a program still running) | `verify-usb` names the line; `dmesg` shows the `pid N (…)` lines of the programs killed |
+| `check5.sh` stops at a pipeline, and Ctrl-C ends it | A pipe's reader or writer was not woken on this machine | Photograph the screen; `ps` shows each process's state (`pipe` while it waits on one) |
+| `check5.sh`: `ps \| grep -c t-spin` prints another count than 1, then 0 | A `t-spin` of an earlier command still runs, or `kill %1` did not end the job | `ps` lists the processes; `dmesg` shows `pid <n> (/bin/t-spin): killed: kill` |
 | The error screen with `/bin/sh cannot start: …` or `/bin/sh ended 3 times within 10 s` | The shell cannot be loaded, or ends as soon as it starts (its `init: /bin/sh (pid N) …` lines, in the log's lines on the screen, say how) | Photograph the screen; a key restarts the machine |
 | A key on the K120 at the error screen does nothing | The keyboard is not polled while init waits (the idle task polls it) | Photograph the screen and hold the power button |
 | The error screen's heading has scrolled away, or a program's line shows under `Press any key` | A log line takes more rows than counted, or a process still ran | Photograph the screen |

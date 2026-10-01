@@ -1,5 +1,11 @@
 Relay OS
 
-Files live on the USB stick and survive reboots. Every command is a
-program in /bin (ls /bin), and the shell is /bin/sh. Useful commands:
-  ls, cd, pwd, cat, echo text > file, mkdir, rm, cp, mv, sh FILE, help
+Files live on the USB stick and survive reboots. Every command but the
+shell's built-ins (cd, exit, help, jobs, wait, kill) is a program in /bin
+(ls /bin), and the shell is /bin/sh. Useful commands:
+  ls, cd, pwd, cat, echo text > file, mkdir, rm, cp, mv, grep, help
+Pipes and jobs:
+  seq 1000 | grep 7 | wc -l    t-spin &    jobs    ps    kill %1    wait
+Scripts and variables:
+  sh FILE a b    the script reads $0, $1 to $9, ${10}, $#, "$@" and $?
+  NAME=value     then $NAME or ${NAME}; a value is never split into words
