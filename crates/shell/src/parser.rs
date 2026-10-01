@@ -541,6 +541,10 @@ pub fn parse_line(line: &str) -> Result<Line<Word>, ParseError> {
                 if cur.next_if_eq('|') {
                     return Err(ParseError::Unsupported("||".into()));
                 }
+                // bash's `|&` pipes the errors too.
+                if cur.next_if_eq('&') {
+                    return Err(ParseError::Unsupported("|&".into()));
+                }
                 parts.end_word(&mut word, line)?;
                 pipeline.push(parts.take_before_pipe()?);
             }
@@ -1108,6 +1112,13 @@ mod tests {
             );
         }
         assert_eq!(parse("a || b"), Err(ParseError::Unsupported("||".into())));
+        // bash's `|&` sends the errors into the pipe too; `| &` is its
+        // syntax error.
+        assert_eq!(
+            parse("a |& b").unwrap_err().to_string(),
+            "unsupported syntax: |&"
+        );
+        assert_eq!(parse("a|&b"), Err(ParseError::Unsupported("|&".into())));
         // Only the last command redirects (spec §9.1): bash would send the
         // first one's output into the file and the second nothing.
         assert_eq!(
