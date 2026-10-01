@@ -8,9 +8,9 @@
 //! per command). An unquoted `~` alone or before `/` at the start of a word
 //! means `/root`, as in Linux. An unquoted `#` at the start of a word
 //! begins a comment, which runs to the end of the line. An unquoted `|`
-//! joins commands into a pipeline (user-space gate §9.1); only the last
-//! may redirect its output, and bash's syntax errors name a `|` with no
-//! command before it or none after. Every other shell feature is refused:
+//! joins commands into a pipeline (user-space gate §9.1); each has a name,
+//! only the last may redirect its output, and bash's syntax errors name a
+//! `|` with no command before it or none after. Every other shell feature is refused:
 //! an unquoted `;`, `&`, `$`, `*`, `?`, `<`, `` ` ``, `(` or `)` is an
 //! error naming the character, instead of being passed on as if it were
 //! plain text; so are `||` and `2>` (another stream).
@@ -120,8 +120,10 @@ impl Parts {
     }
 
     /// The command so far, ended by a `|`, which needs one before it.
+    /// Every command of a pipeline has a name: a redirection alone, which
+    /// bash runs, is refused like one on a command before the last.
     fn take_before_pipe(&mut self) -> Result<Command, ParseError> {
-        if self.pending.is_some() || self.words.is_empty() {
+        if self.pending.is_some() || (self.words.is_empty() && self.redirect.is_none()) {
             return Err(ParseError::MissingTarget("|"));
         }
         if self.redirect.is_some() {
@@ -211,8 +213,11 @@ pub fn parse(line: &str) -> Result<Pipeline, ParseError> {
     if parts.pending.is_some() {
         return Err(ParseError::MissingTarget("newline"));
     }
-    if !pipeline.is_empty() && parts.words.is_empty() && parts.redirect.is_none() {
-        return Err(ParseError::UnexpectedEnd);
+    if !pipeline.is_empty() && parts.words.is_empty() {
+        return Err(match parts.redirect {
+            None => ParseError::UnexpectedEnd,
+            Some(_) => ParseError::Unsupported("| >".into()),
+        });
     }
     pipeline.push(Command {
         words: parts.words,
@@ -439,6 +444,30 @@ mod tests {
             parse("a > f | b").unwrap_err().to_string(),
             "unsupported syntax: > before |"
         );
+    }
+
+    #[test]
+    fn every_command_of_a_pipeline_has_a_name() {
+        // bash runs a redirection alone as a command; here a pipeline's
+        // commands are programs, so one without a name is refused.
+        for (line, what) in [
+            ("> f | b", "> before |"),
+            (">> f | b | c", "> before |"),
+            ("a | > f", "| >"),
+            ("a | b | >> f", "| >"),
+        ] {
+            assert_eq!(
+                parse(line),
+                Err(ParseError::Unsupported(what.into())),
+                "{line}"
+            );
+        }
+        for line in ["a | b", "a|b>f", "x | y | z >> f", "a # | > f"] {
+            let p = parse(line).unwrap();
+            assert!(p.iter().all(|c| !c.words.is_empty()), "{line}");
+        }
+        // A redirection alone, without a pipeline, still makes the file.
+        assert_eq!(one("> f").unwrap().words, Vec::<String>::new());
     }
 
     #[test]

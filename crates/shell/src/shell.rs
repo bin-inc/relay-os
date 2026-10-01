@@ -457,6 +457,23 @@ mod tests {
     }
 
     #[test]
+    fn a_pipeline_command_without_a_name_is_refused_by_both_runners() {
+        let mut h = Harness::new();
+        for line in ["echo hi | > /tmp/f", "> /tmp/f | cat"] {
+            let said = if line.starts_with('>') {
+                "> before |"
+            } else {
+                "| >"
+            };
+            let want = (2, alloc::format!("relay-sh: unsupported syntax: {said}\n"));
+            assert_eq!(h.run(line), want, "{line}");
+            assert_eq!(h.spawning(line), want, "{line}");
+        }
+        assert!(!h.exists("/tmp/f"), "nothing of the line ran");
+        assert!(h.programs.spawned.is_empty());
+    }
+
+    #[test]
     fn ctrl_c_stops_a_pipeline() {
         let mut h = Harness::new();
         h.put("/tmp/big", &alloc::vec![b'x'; 300_000]);
