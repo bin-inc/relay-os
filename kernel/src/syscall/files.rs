@@ -10,7 +10,7 @@ use crate::mm::user::{UserSlice, UserStr};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use relay_abi::StatFs;
-use relay_abi::file::{KIND_CHAR_DEVICE, STAT_NOFOLLOW, Stat};
+use relay_abi::file::{KIND_CHAR_DEVICE, KIND_FIFO, STAT_NOFOLLOW, Stat};
 use vfs::{Errno, Vfs};
 
 /// A path of the program's, copied in: at most 4096 bytes.
@@ -52,6 +52,7 @@ pub(super) fn read(caller: &mut impl Caller, fd: u64, addr: u64, len: u64) -> Re
         File::Vfs(open) if open.is_readable() => open,
         File::Vfs(_) => return Err(Errno::EBADF),
         File::Console => return console_read(caller, addr, len),
+        File::Pipe(end) => return super::pipes::read(caller, end, addr, len),
     };
     let slice = UserSlice::new(addr, len)?;
     let mut buf = [0u8; PAGE as usize];
@@ -89,8 +90,8 @@ fn console_read(caller: &mut impl Caller, addr: u64, len: u64) -> Result<u64, Er
     Ok(n as u64)
 }
 
-/// `seek(fd, offset, whence)`: the new offset. The console has none
-/// (`EINVAL`).
+/// `seek(fd, offset, whence)`: the new offset. The console and pipes have
+/// none (`EINVAL`).
 pub(super) fn seek(
     caller: &mut impl Caller,
     fd: u64,
@@ -105,8 +106,8 @@ pub(super) fn seek(
     caller.with_vfs(|v| open.seek(v, offset, whence))
 }
 
-/// `fstat(fd, &mut Stat)`. The console is a character device, with
-/// nothing else to say.
+/// `fstat(fd, &mut Stat)`. The console is a character device and a pipe a
+/// FIFO, with nothing else to say (`dev` 0).
 pub(super) fn fstat(caller: &mut impl Caller, fd: u64, addr: u64) -> Result<u64, Errno> {
     let file = file(caller, fd)?;
     let slice = UserSlice::new(addr, Stat::SIZE as u64)?;
@@ -114,6 +115,10 @@ pub(super) fn fstat(caller: &mut impl Caller, fd: u64, addr: u64) -> Result<u64,
         File::Vfs(open) => caller.with_vfs(|v| open.stat(v))?,
         File::Console => Stat {
             kind: u32::from(KIND_CHAR_DEVICE),
+            ..Stat::default()
+        },
+        File::Pipe(_) => Stat {
+            kind: u32::from(KIND_FIFO),
             ..Stat::default()
         },
     };

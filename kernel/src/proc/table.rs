@@ -54,6 +54,9 @@ pub enum Blocked {
     Console,
     /// The tick count to reach this value.
     Sleep(u64),
+    /// The pipe with this id (`pipe::Pipe::id`) to change: data or room
+    /// in it, or an end closed.
+    Pipe(u64),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

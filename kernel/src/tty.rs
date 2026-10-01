@@ -100,7 +100,7 @@ fn flush(tees: &mut TeeStack<Arc<File>>, all: bool) {
 fn write_tee(file: &Arc<File>, bytes: &[u8]) -> Result<(), Errno> {
     match &**file {
         File::Vfs(open) => mounts::with_nodes(|t| open.write_all(t, bytes)),
-        File::Console => Err(Errno::EINVAL),
+        File::Console | File::Pipe(_) => Err(Errno::EINVAL),
     }
 }
 
@@ -118,12 +118,13 @@ pub fn push_tee(owner: u32, file: Arc<File>) -> Result<(), Errno> {
 }
 
 /// Whether `file` can be a tee: a file of the VFS open for writing
-/// (`EBADF` otherwise), not the console (`EINVAL`).
+/// (`EBADF` otherwise), not the console or a pipe (`EINVAL`: a tee is
+/// written from any process's context, where a full pipe could not wait).
 fn tee_target(file: &File) -> Result<(), Errno> {
     match file {
         File::Vfs(open) if open.is_writable() => Ok(()),
         File::Vfs(_) => Err(Errno::EBADF),
-        File::Console => Err(Errno::EINVAL),
+        File::Console | File::Pipe(_) => Err(Errno::EINVAL),
     }
 }
 
@@ -231,5 +232,15 @@ mod tests {
         assert_eq!(tee_target(&read_write), Ok(()));
         assert_eq!(tee_target(&read_only), Err(Errno::EBADF));
         assert_eq!(tee_target(&File::Console), Err(Errno::EINVAL));
+        struct Ring(alloc::boxed::Box<[u8; crate::pipe::SIZE]>);
+        impl crate::pipe::Memory for Ring {
+            fn bytes(&mut self) -> &mut [u8; crate::pipe::SIZE] {
+                &mut self.0
+            }
+        }
+        let (r, w) = crate::pipe::new(Box::new(Ring(Box::new([0; crate::pipe::SIZE]))), |_| {});
+        for end in [r, w] {
+            assert_eq!(tee_target(&File::Pipe(end)), Err(Errno::EINVAL));
+        }
     }
 }

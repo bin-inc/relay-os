@@ -189,7 +189,7 @@ every pull request.
      root is 2 GiB since milestone 2's plan 2; a stick written by an older
      `flash --full` still shows `14.3 GiB`, which the check scripts refuse:
      run `flash --full` again)
-   - `[ ok ] system: 34 programs, ABI 3` (milestone 2: the programs of
+   - `[ ok ] system: 35 programs, ABI 3` (milestone 2: the programs of
      `/bin` from `\EFI\RELAY\system.img`; the count grows as later plans
      add programs)
    - the motd (`Welcome to Relay OS.`), which init prints, and the prompt

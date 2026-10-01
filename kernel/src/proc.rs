@@ -21,7 +21,8 @@ use crate::mm::space::AddressSpace;
 use crate::mm::user::{UserSlice, UserStr};
 use crate::mounts::KernelVfs;
 use crate::syscall::{self, Caller, Child, Outcome, Spawn};
-use crate::{arch, console, klogln, mm, mounts, rtc, timer, tty, usb};
+use crate::{arch, console, klogln, mm, mounts, pipe, rtc, timer, tty, usb};
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -235,6 +236,15 @@ pub fn take_console() {
 /// of its program, as after `kill`.
 pub fn kill_others() {
     PROCS.lock().kill_all_but_init(relay_abi::wait::KILLED_KILL);
+}
+
+/// Wakes every process waiting on the pipe `id` (`pipe::Pipe::id`): data
+/// or room came, or an end closed. Never while the table is locked, since
+/// it locks it: a pipe's end is never dropped under `PROCS`, nor is a
+/// pipe written.
+pub fn wake_pipe(id: u64) {
+    debug_assert!(!PROCS.is_locked(), "a pipe woken while PROCS is held");
+    PROCS.lock().wake_all(Blocked::Pipe(id));
 }
 
 /// The running process blocks on `why` until something wakes it.
@@ -689,6 +699,27 @@ impl Caller for Current {
             // it.
             block(Blocked::Console);
         }
+    }
+
+    fn new_pipe(&mut self) -> Result<(pipe::End, pipe::End), Errno> {
+        let frames = mm::alloc_pipe_frames()?;
+        Ok(pipe::new(Box::new(frames), wake_pipe))
+    }
+
+    fn pipe_wait(&mut self, id: u64) -> Result<(), Errno> {
+        {
+            let t = PROCS.lock();
+            if t.get(t.current()).is_some_and(|p| p.killed.is_some()) {
+                return Err(Errno::EINTR);
+            }
+        }
+        // Data, room, a closed end or a kill wakes it.
+        block(Blocked::Pipe(id));
+        Ok(())
+    }
+
+    fn pipe_wake(&mut self, id: u64) {
+        wake_pipe(id);
     }
 
     fn tee_push(&mut self, file: Arc<File>) -> Result<(), Errno> {

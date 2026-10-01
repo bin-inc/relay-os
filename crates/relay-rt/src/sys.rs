@@ -73,6 +73,13 @@ pub fn open(path: &[u8], flags: u32) -> Result<u32, u16> {
     .map(|fd| fd as u32)
 }
 
+/// Makes a pipe (spec §9.1): its read end and its write end, the two
+/// lowest free fds.
+pub fn pipe() -> Result<(u32, u32), u16> {
+    let mut fds = [0u32; 2];
+    call(Call::Pipe, &[&raw mut fds as u64]).map(|_| (fds[0], fds[1]))
+}
+
 /// Closes `fd`.
 pub fn close(fd: u32) -> Result<(), u16> {
     call(Call::Close, &[u64::from(fd)]).map(|_| ())

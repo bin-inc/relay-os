@@ -68,6 +68,21 @@ pub struct Fake {
     pub ended: Vec<(u32, WaitStatus)>,
     pub running: bool,
     pub killed: Vec<i64>,
+    /// The pipes made, whether there is memory for another, the pipes
+    /// waited on (each wait ends as a kill would: `EINTR`) and woken.
+    pub pipes_made: u32,
+    pub no_pipe_memory: bool,
+    pub waits: Vec<u64>,
+    pub woken: Vec<u64>,
+}
+
+/// A pipe's ring on the heap.
+struct Ring(Box<[u8; crate::pipe::SIZE]>);
+
+impl crate::pipe::Memory for Ring {
+    fn bytes(&mut self) -> &mut [u8; crate::pipe::SIZE] {
+        &mut self.0
+    }
 }
 
 impl Caller for Fake {
@@ -133,6 +148,23 @@ impl Caller for Fake {
     }
     fn kernel_log(&self) -> Vec<u8> {
         FAKE_LOG.to_vec()
+    }
+    fn new_pipe(&mut self) -> Result<(crate::pipe::End, crate::pipe::End), Errno> {
+        if self.no_pipe_memory {
+            return Err(Errno::ENOMEM);
+        }
+        self.pipes_made += 1;
+        Ok(crate::pipe::new(
+            Box::new(Ring(Box::new([0; crate::pipe::SIZE]))),
+            |_| {},
+        ))
+    }
+    fn pipe_wait(&mut self, id: u64) -> Result<(), Errno> {
+        self.waits.push(id);
+        Err(Errno::EINTR)
+    }
+    fn pipe_wake(&mut self, id: u64) {
+        self.woken.push(id);
     }
     /// A machine whose filesystems cannot be shut down (an unplugged
     /// stick): the call comes back.
@@ -222,6 +254,10 @@ pub fn fake() -> Fake {
         ended: Vec::new(),
         running: false,
         killed: Vec::new(),
+        pipes_made: 0,
+        no_pipe_memory: false,
+        waits: Vec::new(),
+        woken: Vec::new(),
     }
 }
 

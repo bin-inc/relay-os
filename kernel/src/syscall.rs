@@ -3,8 +3,8 @@
 //! and it answers with the result register's value or with the program's
 //! exit. It checks and copies what the program passes (`UserSlice`,
 //! `UserStr`) and leaves the rest to the `Caller`, the kernel's side of
-//! the process. The file calls are in `files`; `proc_list` and `pipe` are
-//! `ENOSYS` until milestone 3.
+//! the process. The file calls are in `files`, the pipe's in `pipes`;
+//! `proc_list` is `ENOSYS` until milestone 3's jobs.
 
 use crate::exec::ARGS_MAX;
 use crate::fd::{FdTable, File};
@@ -19,6 +19,7 @@ use relay_abi::{Call, FdMap, MemInfo, SpawnArgs, Time, WaitStatus, encode};
 use vfs::{Errno, Vfs};
 
 mod files;
+mod pipes;
 #[cfg(test)]
 mod testing;
 
@@ -79,6 +80,14 @@ pub trait Caller {
     /// 0 at once for a process outside the foreground group, and at end of
     /// input; `EINTR` if the program was killed while it waited.
     fn console_read(&mut self, buf: &mut [u8]) -> Result<usize, Errno>;
+    /// A new pipe: its read end and its write end (spec §9.1); `ENOMEM`
+    /// when its ring's frames would eat into the reserve.
+    fn new_pipe(&mut self) -> Result<(crate::pipe::End, crate::pipe::End), Errno>;
+    /// Waits until the pipe `id` changes (data, room, an end closed);
+    /// `EINTR` if the program was killed meanwhile (or before).
+    fn pipe_wait(&mut self, id: u64) -> Result<(), Errno>;
+    /// Wakes whoever waits on the pipe `id`.
+    fn pipe_wake(&mut self, id: u64);
     /// Line mode (`true`) or raw mode; the previous one.
     fn console_mode(&mut self, line: bool) -> bool;
     /// The console's columns and rows.
@@ -173,6 +182,7 @@ pub fn dispatch(caller: &mut impl Caller, number: u64, args: [u64; 6]) -> Outcom
         }
         Some(Call::SysInfo) => sys_info(caller, args[0], args[1], args[2]),
         Some(Call::Power) => power(caller, args[0], args[1]),
+        Some(Call::Pipe) => pipes::pipe(caller, args[0]),
         _ => Err(Errno::ENOSYS),
     };
     Outcome::Return(encode(result.map_err(Errno::number)))
@@ -275,10 +285,10 @@ fn file(caller: &mut impl Caller, fd: u64) -> Result<Arc<File>, Errno> {
 /// full disk takes what fits, then says `ENOSPC`).
 fn write(caller: &mut impl Caller, fd: u64, addr: u64, len: u64) -> Result<u64, Errno> {
     let file = file(caller, fd)?;
-    if let File::Vfs(open) = &*file
-        && !open.is_writable()
-    {
-        return Err(Errno::EBADF);
+    match &*file {
+        File::Vfs(open) if !open.is_writable() => return Err(Errno::EBADF),
+        File::Pipe(end) => return pipes::write(caller, end, addr, len),
+        _ => {}
     }
     let slice = UserSlice::new(addr, len)?;
     let mut buf = [0u8; PAGE as usize];
@@ -307,6 +317,7 @@ fn write_to(caller: &mut impl Caller, file: &Arc<File>, bytes: &[u8]) -> Result<
             Ok(bytes.len())
         }
         File::Vfs(open) => caller.with_vfs(|v| open.write(v, bytes)),
+        File::Pipe(_) => unreachable!("write takes pipes apart"),
     }
 }
 
@@ -1021,6 +1032,7 @@ mod tests {
             Call::Sleep,
             Call::SysInfo,
             Call::Power,
+            Call::Pipe,
         ];
         for c in Call::ALL {
             if !served.contains(&c) {

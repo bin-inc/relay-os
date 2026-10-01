@@ -58,6 +58,53 @@ pub fn user_may_take(free: u64) -> bool {
     free > USER_RESERVE_FRAMES
 }
 
+/// The frames a pipe's ring takes (spec §16 item 8): user memory's, so
+/// that pipes never use up the kernel's heap.
+pub const PIPE_FRAMES: u64 = crate::pipe::SIZE as u64 / FRAME_SIZE;
+
+/// Whether a pipe's ring may be made while `free` frames are free: it
+/// leaves the reserve user memory leaves.
+pub fn pipe_may_take(free: u64) -> bool {
+    free >= USER_RESERVE_FRAMES + PIPE_FRAMES
+}
+
+/// A pipe's ring: [`PIPE_FRAMES`] contiguous frames, reached through the
+/// linear map, given back when the pipe goes.
+pub struct PipeFrames {
+    phys: u64,
+}
+
+impl crate::pipe::Memory for PipeFrames {
+    fn bytes(&mut self) -> &mut [u8; crate::pipe::SIZE] {
+        // SAFETY: the frames are this ring's alone until it is dropped, and
+        // the linear map covers every frame of RAM.
+        unsafe { &mut *((PHYS_OFFSET + self.phys) as *mut [u8; crate::pipe::SIZE]) }
+    }
+}
+
+impl Drop for PipeFrames {
+    fn drop(&mut self) {
+        if let Some(m) = MEMORY.lock().as_mut() {
+            m.frames.free(self.phys, PIPE_FRAMES as usize);
+        }
+    }
+}
+
+/// Frames for a new pipe's ring; `ENOMEM` when they would eat into the
+/// reserve, or no four contiguous frames are free.
+pub fn alloc_pipe_frames() -> Result<PipeFrames, vfs::Errno> {
+    let mut guard = MEMORY.lock();
+    let m = guard.as_mut().expect("mm::init has not run");
+    if !pipe_may_take(m.frames.free_frames()) {
+        return Err(vfs::Errno::ENOMEM);
+    }
+    let phys = m
+        .frames
+        .alloc(PIPE_FRAMES as usize, 1)
+        .ok_or(vfs::Errno::ENOMEM)?;
+    Ok(PipeFrames { phys })
+}
+
 /// Page tables are reached through the linear map; new ones come from the
 /// frame allocator.
 struct LinearMem<'a>(&'a mut FrameAllocator<'static>);
@@ -360,6 +407,14 @@ mod tests {
         assert!(user_may_take(2049), "the frame taken leaves 2048");
         assert!(!user_may_take(2048));
         assert!(!user_may_take(0));
+    }
+
+    #[test]
+    fn a_pipe_takes_four_frames_of_user_memory() {
+        assert_eq!(PIPE_FRAMES, 4);
+        assert!(pipe_may_take(2052), "the four taken leave 2048");
+        assert!(!pipe_may_take(2051));
+        assert!(!pipe_may_take(0));
     }
 
     #[test]
