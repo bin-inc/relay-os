@@ -14,6 +14,7 @@ use crate::killed;
 use crate::parser::{Command, Redirect};
 use crate::shell::{CANCELLED, CANNOT_RUN, NAME, NOT_FOUND, SYNTAX};
 use crate::transcript::Transcript;
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -44,8 +45,9 @@ pub(crate) struct Ran {
     pub stop: bool,
     /// It was `exit`, which stops only a script the shell runs itself.
     pub exited: bool,
-    /// Set by `sh`: the script the shell runs next.
-    pub script: Option<Script>,
+    /// Set by `sh`: the script the shell runs next (boxed, so that a `Ran`
+    /// stays small as an error).
+    pub script: Option<Box<Script>>,
 }
 
 impl Ran {
@@ -514,7 +516,7 @@ pub(crate) fn run_function<'s>(
         message,
         stop: ctx.exit,
         exited: ctx.exited,
-        script: ctx.script.take(),
+        script: ctx.script.take().map(Box::new),
     }
 }
 

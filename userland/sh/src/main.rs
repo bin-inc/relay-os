@@ -2,12 +2,16 @@
 //! arguments it is the interactive shell, which takes the console at its
 //! prompt and gives it to each command it starts, unless its standard input
 //! is no console (`X | sh`): then it runs the lines it reads there and
-//! leaves the console alone. `sh FILE` runs a script, its commands in the
-//! shell's own process group and its transcript a console tee. Every
-//! command but `cd`, `exit` and `help` is a program.
+//! leaves the console alone. `sh FILE [ARG]...` runs a script, its
+//! commands in the shell's own process group and its transcript a console
+//! tee. Every command but the shell's own is a program. Outside a script
+//! `$0` is the shell's argument 0, as bash's is.
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use alloc::string::String;
 use relay_rt::sysio::words;
 use relay_rt::{Args, SysConsole, SysPrograms, SysStdin, SysStdout, SysSystem, SysVfs, sys};
 use shell::Shell;
@@ -17,11 +21,17 @@ relay_rt::main!(main);
 fn main(args: Args) -> u8 {
     let (mut vfs, mut system) = (SysVfs::new(), SysSystem);
     let words = words(&args);
+    let name = args
+        .iter()
+        .next()
+        .map(|a| String::from_utf8_lossy(a).into_owned())
+        .unwrap_or_default();
     if words.is_empty() && !SysStdin::is_console() {
         // In a pipeline, in its group: commands read from the pipe, and the
         // console stays with the group, in line mode, so Ctrl-C ends them.
         let (mut console, mut programs) = (SysConsole::new(), SysPrograms::new(false));
-        let mut shell = Shell::spawning(&mut vfs, &mut console, &mut system, &mut programs);
+        let mut shell =
+            Shell::spawning(&mut vfs, &mut console, &mut system, &mut programs).named(&name);
         shell.run_input(&mut SysStdin) as u8
     } else if words.is_empty() {
         // An interactive shell leads a process group of its own when it
@@ -36,7 +46,8 @@ fn main(args: Args) -> u8 {
         };
         let mut console = SysConsole::interactive(leader.then(sys::getpid));
         let mut programs = SysPrograms::new(leader);
-        let mut shell = Shell::spawning(&mut vfs, &mut console, &mut system, &mut programs);
+        let mut shell =
+            Shell::spawning(&mut vfs, &mut console, &mut system, &mut programs).named(&name);
         shell.run();
         shell.status() as u8
     } else {

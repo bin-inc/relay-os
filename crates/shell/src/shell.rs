@@ -105,6 +105,13 @@ impl<'a> Shell<'a> {
         }
     }
 
+    /// The same shell, its `$0` `name`: its argument 0, as bash's is
+    /// (`relay-sh` otherwise).
+    pub fn named(mut self, name: &str) -> Shell<'a> {
+        self.vars = Vars::new(name);
+        self
+    }
+
     /// The same shell, its in-process commands reading `input`.
     pub fn with_input(mut self, input: &'a mut dyn Stdin) -> Shell<'a> {
         self.input = Some(input);
@@ -261,7 +268,7 @@ impl<'a> Shell<'a> {
         self.exited = ran.exited;
         let mut status = ran.status;
         if let Some(script) = ran.script {
-            status = self.run_script(script);
+            status = self.run_script(*script);
         }
         self.finish(status, ran.message)
     }
@@ -378,10 +385,14 @@ impl<'a> Shell<'a> {
     /// Runs a script `sh` read, in this shell (the in-process runner): its
     /// transcript is written by the shell. A script cannot run another.
     /// Its `exit` ends only the script, as it does under `/bin/sh`, where a
-    /// script is a shell of its own.
+    /// script is a shell of its own; and it has variables and arguments of
+    /// its own, and starts with `$?` 0, as there.
     fn run_script(&mut self, script: Script) -> i32 {
         self.transcript = Some(Transcript::new(script.transcript, script.transcript_name));
+        let outer = core::mem::replace(&mut self.vars, Vars::script(&script.name, &script.args));
+        self.status = 0;
         let status = self.run_lines(&script.text);
+        self.vars = outer;
         if self.exited {
             self.stopped = false;
         }
@@ -414,6 +425,7 @@ impl<'a> Shell<'a> {
         let Some(programs) = self.runner.programs() else {
             unreachable!("run_file needs a spawning shell")
         };
+        self.vars = Vars::script(&script.name, &script.args);
         let log = script.transcript_name;
         if let Err(e) = programs.tee_push(log.as_bytes()) {
             let shown = quote_if_needed(&path::display(log.as_bytes()));
@@ -432,44 +444,42 @@ impl<'a> Shell<'a> {
     /// commands it reads there (user-space gate §9.1, §16 item 8), a line
     /// at a time as they come, without a prompt, a trace or the line
     /// editor, so it never takes the console; it ends at the input's end or
-    /// `exit`. A line over 64 KiB, or not UTF-8, is skipped with a message,
-    /// as `sh` refuses such a script. Returns the last status.
+    /// `exit`. It reads a byte at a time, as bash reads a pipe, so that a
+    /// command it runs reads what follows its line (`printf 'cat\nx\n' |
+    /// sh` gives `cat` the `x`). A line over 64 KiB, or not UTF-8, is
+    /// skipped with a message, as `sh` refuses such a script. Returns the
+    /// last status.
     pub fn run_input(&mut self, input: &mut dyn Stdin) -> i32 {
-        let mut buf = alloc::vec![0; 4096];
         let mut line: Vec<u8> = Vec::new();
         let mut too_long = false;
         self.stopped = false;
         loop {
-            let n = match input.read(&mut buf) {
-                Ok(n) => n,
+            let mut byte = [0];
+            match input.read(&mut byte) {
+                Ok(0) => {
+                    if !line.is_empty() || too_long {
+                        self.input_line(&line, too_long);
+                    }
+                    return self.status;
+                }
+                Ok(_) => {}
                 Err(e) => {
                     let message = format!("sh: standard input: {e}\n");
                     return self.finish(1, message);
                 }
-            };
-            if n == 0 {
-                if !line.is_empty() || too_long {
-                    self.input_line(&line, too_long);
-                }
-                return self.status;
             }
-            for piece in buf[..n].split_inclusive(|&b| b == b'\n') {
-                let ended = piece.last() == Some(&b'\n');
-                let piece = &piece[..piece.len() - usize::from(ended)];
-                if !too_long {
-                    line.extend_from_slice(piece);
-                    if line.len() as u64 > SCRIPT_MAX {
-                        too_long = true;
-                        line.clear();
-                    }
+            if byte[0] == b'\n' {
+                self.input_line(&line, too_long);
+                line.clear();
+                too_long = false;
+                if self.stopped {
+                    return self.status;
                 }
-                if ended {
-                    self.input_line(&line, too_long);
+            } else if !too_long {
+                line.push(byte[0]);
+                if line.len() as u64 > SCRIPT_MAX {
+                    too_long = true;
                     line.clear();
-                    too_long = false;
-                    if self.stopped {
-                        return self.status;
-                    }
                 }
             }
         }
@@ -691,6 +701,35 @@ mod tests {
             (0, "sh: standard input: a line over 64 KiB\n".into())
         );
         assert_eq!(h.programs.spawned.last().unwrap().args, ["t-args", "c"]);
+    }
+
+    /// Input that records how much each read asked for.
+    struct Asked {
+        bytes: crate::Bytes,
+        asked: Vec<usize>,
+    }
+
+    impl crate::Stdin for Asked {
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+            self.asked.push(buf.len());
+            self.bytes.read(buf)
+        }
+    }
+
+    #[test]
+    fn a_shell_reading_a_pipe_takes_no_more_than_each_line() {
+        // bash reads a pipe a byte at a time, so `printf 'cat\nx\n' | bash`
+        // gives `cat` the `x`; here a command reads the same fd 0.
+        let mut h = spawning();
+        let mut input = Asked {
+            bytes: crate::Bytes::new(b"t-args a\nt-args b\n".to_vec()),
+            asked: Vec::new(),
+        };
+        Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+            .run_input(&mut input);
+        assert_eq!(h.programs.spawned.len(), 2);
+        assert!(input.asked.iter().all(|&n| n == 1), "{:?}", input.asked);
+        assert_eq!(input.asked.len(), 19, "18 bytes and the end");
     }
 
     #[test]
@@ -948,6 +987,39 @@ mod tests {
     }
 
     #[test]
+    fn a_script_has_its_own_variables_and_arguments() {
+        let mut h = Harness::new();
+        h.put("/tmp/s.sh", b"echo $? \"[$A]\" $1\nB=in\nexit 4\n");
+        // As bash's, without `export`: nothing passes in or out.
+        assert_eq!(
+            h.lines(&["A=out", "nope", "sh /tmp/s.sh x", "echo $? $A [$B] $1"]),
+            (
+                0,
+                "relay-sh: nope: command not found\n+ echo $? \"[$A]\" $1\n0 [] x\n\
+                 + B=in\n+ exit 4\n4 out []\n"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn bin_sh_gives_a_script_its_arguments() {
+        let mut h = spawning();
+        h.put("/tmp/s.sh", b"t-args $0 $# \"$@\"\n");
+        let mut out = FakeStdout::console();
+        h.sh(&["/tmp/s.sh", "a", "b c", ""], &mut out);
+        assert_eq!(
+            h.programs.spawned[0].args,
+            ["t-args", "/tmp/s.sh", "3", "a", "b c", ""]
+        );
+        // A script it runs gets its arguments as typed, expanded.
+        h.put("/tmp/r.sh", b"A='x y'\nsh /tmp/s.sh \"$A\" $1\n");
+        h.sh(&["/tmp/r.sh", "z"], &mut out);
+        assert_eq!(h.programs.spawned[1].args, ["sh", "/tmp/s.sh", "x y", "z"]);
+        assert_eq!(h.programs.spawned[1].path, "/bin/sh");
+    }
+
+    #[test]
     fn a_transcript_that_failed_is_reported_when_the_script_ends() {
         let mut h = spawning();
         h.put("/tmp/s.sh", b"t-args\nt-args\n");
@@ -1046,6 +1118,22 @@ mod tests {
             h.programs.spawned[0].args,
             ["t-args", "0", "", "x", "~/", "/root/"]
         );
+    }
+
+    #[test]
+    fn a_shell_s_name_is_its_argument_0() {
+        let mut h = spawning();
+        Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+            .named("/bin/sh")
+            .execute("t-args $0 $#");
+        assert_eq!(h.programs.spawned[0].args, ["t-args", "/bin/sh", "0"]);
+        // A script's is its file, whatever the shell's.
+        h.put("/tmp/s.sh", b"t-args $0\n");
+        let mut out = FakeStdout::console();
+        Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+            .named("sh")
+            .run_file(&["/tmp/s.sh".into()], &mut out);
+        assert_eq!(h.programs.spawned[1].args, ["t-args", "/tmp/s.sh"]);
     }
 
     #[test]
