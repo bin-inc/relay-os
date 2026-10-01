@@ -2,7 +2,7 @@
 
 - **Date:** 2026-09-29
 - **Status:** Approved 2026-09-29; revised while planning milestone 2's plans 1, 2, 3a, 3b, 4a, 4b and 5
-  and milestone 3's plan 1 (see §16)
+  and milestone 3's plans 1 and 2 (see §16)
 - **Builds on:** milestone 1 (version 0.2.0,
   `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`,
   cited below as "M1 §n")
@@ -161,7 +161,7 @@ mode, its length, and the archive's build time as the file times.
 - **The kernel** keeps those frames reserved, checks the archive (§4.2) and
   its ABI version, and mounts `SysImgFs` at `/bin`. New startup step 10,
   before the shell (M1 §4.4 step 10 becomes step 11):
-  `[ ok ] system: 40 programs, ABI 3` or `[FAIL] system: <reason>`
+  `[ ok ] system: 42 programs, ABI 3` or `[FAIL] system: <reason>`
   (§11.2).
 
 ### 4.4 Mounting `/bin`
@@ -328,7 +328,9 @@ runs. §14 covers its cost.
   script together with its command, as in M1 §15 item 12.
 - The console has one **foreground group**, set with `console_foreground`.
   Only processes in it read the console; others get end of input at once
-  (milestone 3's background jobs, §9.2).
+  (milestone 3's background jobs, §9.2). Only a group the console was
+  handed to, through the groups that held it since process 1, may change
+  its group or mode (§16 item 9).
 - The console is in **raw** or **line** mode (§6.5). In line mode, Ctrl-C
   kills every process of the foreground group (`Killed(CtrlC)`) and drops
   the typed input before it, as M1 §15 item 12 does. In raw mode Ctrl-C is
@@ -348,7 +350,8 @@ runs. §14 covers its cost.
   and Ctrl-C is handled as in §6.4. A read returns at most one line.
 - **Tees** copy console output into files: everything written to the
   console by any process (the shell's messages about killed commands
-  included) also goes to every file on the tee stack (at most 4). `console_tee_push`
+  included) also goes to every file on the tee stack (at most 4 a process,
+  64 in all, §16 item 9). `console_tee_push`
   adds a file the process has open for writing; `console_tee_pop` removes
   the newest tee the process pushed; a process's tees are popped when it
   ends. Tee output is buffered and written every 4 KiB and at every `sync`,
@@ -405,10 +408,10 @@ M3 are reserved in milestone 2 and return `ENOSYS` until milestone 3.
 |---|---|---|
 | `exit` | code `u8` → never returns | |
 | `spawn` | `&SpawnArgs` → pid | `SpawnArgs`: path, argument bytes (NUL-separated), working directory, up to 8 `(child_fd, parent_fd)` pairs (unlisted child fds are closed), flags (`NEW_GROUP`, `FOREGROUND`), and the group of a child of the caller's to join (`pgid`, milestone 3, §16 item 8) |
-| `wait` | pid or −1 for any child, flags (`NOHANG`), `&mut WaitStatus` → pid, or 0 with `NOHANG` and nothing finished | `WaitStatus`: `Exited(code)` or `Killed(reason, fault kind, address, ip)`; `ECHILD` with no such child |
+| `wait` | pid or −1 for any child, flags (`NOHANG`; `CTRL_C`, milestone 3), `&mut WaitStatus` → pid, or 0 with `NOHANG` and nothing finished | `WaitStatus`: `Exited(code)` or `Killed(reason, fault kind, address, ip)`; `ECHILD` with no such child; with `CTRL_C`, `EINTR` at a Ctrl-C typed while the caller's group has the console in raw mode (§16 item 9) |
 | `kill` | pid, or −pgid for a group → 0 | `ESRCH`; `EPERM` for process 1 |
 | `getpid` | → pid | |
-| `proc_list` | buffer → count | M3: `ProcInfo` per process: pid, ppid, pgid, state, frames, CPU ticks, name (up to 64 bytes) |
+| `proc_list` | buffer → count | M3: `ProcInfo` per process, by pid, as many as fit: pid, ppid, pgid, state (what a blocked process waits for), frames, CPU ticks, name (up to 64 bytes); the count is of all processes (§16 item 9) |
 | `mem_map` | length → address | length rounded up to pages; `ENOMEM` (§11.1) |
 | `mem_unmap` | address, length → 0 | whole pages of earlier `mem_map`s only; `EINVAL` otherwise |
 | `open` | path, flags → fd | flags: `READ`, `WRITE`, `CREATE`, `TRUNCATE`, `APPEND`, `EXCLUSIVE`, `DIRECTORY` |
@@ -423,9 +426,9 @@ M3 are reserved in milestone 2 and return `ENOSYS` until milestone 3.
 | `statfs` | path, `&mut StatFs` → 0 | |
 | `sync` | → 0 | syncs every filesystem and every tee |
 | `chdir`, `getcwd` | path / buffer | |
-| `console_mode` | raw or line → previous mode | |
+| `console_mode` | raw or line → previous mode | `EPERM` unless the caller's group holds the console (milestone 3, §16 item 9) |
 | `console_size` | → columns and rows | |
-| `console_foreground` | pgid → 0 | |
+| `console_foreground` | pgid → 0 | `EPERM` unless the caller's group holds the console (milestone 3, §16 item 9) |
 | `console_tee_push`, `console_tee_pop` | fd / none → 0 | §6.5 |
 | `time` | `&mut Time` → 0 | Unix seconds and uptime in nanoseconds |
 | `sleep` | milliseconds → 0 | |
@@ -518,15 +521,16 @@ Shipped in every `system.img`, because the NUC checks use them too:
 |---|---|
 | `t-fault KIND` | faults on purpose: `null-read`, `null-write`, `write-code`, `exec-data`, `ud`, `div0`, `stack`, `kernel-read` (reads a kernel address), `sse`; and `flags-exit`, `flags-ud`, `flags-ac`, `flags-tf` (the flags a program sets never reach the kernel) and `gsbase` (a program cannot set its own `gs` base) |
 | `t-spin [secs]` | spins without system calls, forever or for `secs` seconds (reading the clock only every 2^20 iterations), then prints how many iterations it made |
-| `t-spawn N` | starts N children that exit at once and waits for each; prints the free frames before and after, and how many were lost. Also `kill` (kills a spinning child while it sleeps), `kill-new` (kills one before it has run), `orphan`, `fill` (fills the process table with napping orphans), `sleepers` (a group blocked in `wait` and `sleep`, for Ctrl-C) and, in milestone 3, `join` (children in another child's group, §16 item 8) |
+| `t-spawn N` | starts N children that exit at once and waits for each; prints the free frames before and after, and how many were lost. Also `kill` (kills a spinning child while it sleeps), `kill-new` (kills one before it has run), `orphan`, `fill` (fills the process table with napping orphans), `sleepers` (a group blocked in `wait` and `sleep`, for Ctrl-C) and, in milestone 3, `join` (children in another child's group, §16 item 8) and `ctrl-c` (a wait a raw Ctrl-C ends, §16 item 9) |
 | `t-abi` | a program whose ELF note has the wrong ABI version (built by xtask) |
 | `t-args` | prints its arguments one per line, as `[n] <arg>` |
 | `t-files KIND` | the file calls: `basic` (`open`'s flags, `read`, `write`, `seek`, `fstat`, `close`, an offset shared with a child, 32 fds), `dir` (the calls on paths and `read_dir`), `cwd` (`chdir`, `getcwd`, a child's working directory), `gone` (another process removes its working directory and open file), `full` (write errors on a full disk) |
 | `t-mem KIND` | memory: `map` (`mem_map` and `mem_unmap`), `unmapped` and `unmapped-many` (a page read after it was given back is killed), `grow N` (N MiB of heap), `oom` (a child takes memory until there is none), `churn` (maps and gives back nearly all free memory over and over, in the kernel almost all the time) |
-| `t-read [KIND]` | reads the console and prints each read: in line mode, `raw`, `apart` (outside the foreground group), `size` (and the console calls' refusals), `leave` (leaves the console in line mode behind) |
+| `t-read [KIND]` | reads the console and prints each read: in line mode, `raw`, `apart` (outside the foreground group), `refused` (a group never given the console may not change it, §16 item 9), `size` (and the console calls' refusals), `leave` (a child left behind that may not set line mode) |
 | `t-tee KIND` | console tees: `basic`, `end` (left by a process that ends), `gone` (its file removed), `typed` (a reader's), `full` (on a full disk) |
 | `t-pipe KIND` | milestone 3's `pipe` call (§16 item 8): `basic` (the fds, a write and a read, `fstat`, what an end is not), `room` (16 KiB of a bigger write), `child` (1 MiB to a child, both blocking in turn), `eof` (the end of the data once the last writer ends), `epipe` (a write with no reader; `t-args` writing to one ends with 141), `killed` (a blocked reader and a blocked writer killed), `many` (pipes until `EMFILE`) |
 | `t-sys KIND` | `sys_info`'s names (`uname`) and kernel log (`log`), and the `power` call (`poweroff` and `reboot`, each with or without `-f`) |
+| `t-proc KIND` | milestone 3's `proc_list` call (§16 item 9): `list` (process 1, the shell, itself and children sleeping, ended, on a pipe and reading the console), `short` (a buffer of one entry, and of none), `long` (a name cut at 64 bytes), `end-shell` (a child kills the shell while it reads the console in line mode) |
 
 The kinds a program runs its own children with (`t-files child`, `pwd` and
 `gone-child`, `t-mem hog`, `t-read leave-child`) are left out.
@@ -559,9 +563,10 @@ The kinds a program runs its own children with (`t-files child`, `pwd` and
 - `cmd &` or `a | b &` starts a job (its own process group) without making
   it the foreground; the shell prints `[n] <pid of the last stage>`.
 - Before each prompt the shell collects finished children with
-  `wait(-1, NOHANG)` and reports each finished job as
-  `[n]+ Done  <command>` (or `Exit <code>`, `Killed`).
-- `jobs` lists the jobs: `[n]+ Running  <command> &`.
+  `wait(-1, NOHANG)` and reports each finished job as bash does,
+  `[1]+  Done                    sleep 5` (or `Exit <code>`, `Killed`; the
+  state padded to 24 columns, §16 item 9).
+- `jobs` lists the jobs: `[1]+  Running                 sleep 5 &`.
 - `wait` waits for every job; `wait %n` or `wait PID` for one, and sets `$?`.
 - A background process reading the console gets end of input at once; its
   output goes to the screen.
@@ -570,10 +575,11 @@ The kinds a program runs its own children with (`t-files child`, `pwd` and
 ### 9.3 `ps` and `kill`
 
 - `/bin/ps` prints `PID PPID STATE MEM TIME CMD` (MEM in KiB, TIME as
-  `m:ss` of CPU time) from `proc_list`.
+  `m:ss` of CPU time) from `proc_list`, STATE saying what a blocked process
+  waits for (§16 item 9).
 - `kill PID...` or `kill %n...` (built-in, since `%n` needs the job table)
   kills processes or a whole job. Killing process 1 is refused:
-  `kill: (1) - Operation not permitted`.
+  `relay-sh: kill: (1) - Operation not permitted` (§16 item 9).
 
 ### 9.4 Script arguments and variables
 
@@ -698,6 +704,8 @@ New ones:
 | 2 | `sh` | `/bin/sh` runs its commands as programs, redirections into files, nested scripts with their transcripts (§16 item 5) |
 | 3 | `pipe_calls` | `t-pipe`: the `pipe` call's reads, writes, ends and refusals, blocking both ways, a blocked reader and writer killed, `EPIPE` and the quiet 141, the fds running out; `free` the same before and after (§16 item 8) |
 | 3 | `pipes` | `cat` of the 8 MiB file through `wc -c` gives the exact size; `cat big \| head -n 1` ends at once; `seq 5 \| grep -c .` prints 5 |
+| 3 | `proc_calls` | `t-proc`: `proc_list`'s entries and their states, a short buffer, a long name (§16 item 9) |
+| 3 | `screen_console` | the shell ends a third time while its command holds the console in line mode: the error screen takes it back, and a key restarts the machine (§16 item 9) |
 | 3 | `jobs` | `sleep 5 &` and `t-spin &`; `jobs` and `ps` show both; `kill %2`; `wait`; the Done lines |
 | 3 | `script_vars` | a script run with arguments prints `$0`, `$1`, `$#`, `$@`, `$?` and variables, with and without quotes |
 
@@ -1753,3 +1761,170 @@ does. Facts found before the spec was first merged are already in its body.
    - **Plan 5's deferred minors.** The roadmap's `verify-usb` wording is
      corrected in this plan's first pull request; `t-spawn fill` is
      bounded at the table's 64; the other five go to plan 4.
+9. **Decisions made while planning milestone 3's plan 2** (jobs, `ps` and
+   `kill`):
+   - **Plan 2 is one plan** (§13) in four pull requests: this plan; the
+     kernel's `proc_list`, the console calls' refusal, `wait`'s Ctrl-C and
+     the error screen's test; the shell's background jobs, `jobs`, `wait`
+     and `kill`; `ps`. It has no NUC check: nothing it changes is
+     particular to the NUC (QEMU's USB keyboard types the Ctrl-C a `wait`
+     needs), the stick keeps 0.3.0 until plan 4's `flash --full`, and plan
+     4's `check5.sh` runs a background job and `kill` there.
+   - **`proc_list`** (§7.3, §9.3; `relay_abi::proc`). It fills a buffer
+     with a `ProcInfo` per process, by pid (96 bytes: pid, ppid, pgid and
+     state as `u32`, frames and CPU ticks as `u64`, the name in 64 bytes
+     padded with NULs), as many whole entries as fit, and returns how many
+     processes there are, so a short buffer is no error and says what it
+     missed (`PROC_MAX`, 64, always fits); nothing is written unless all
+     that fits can be (`EFAULT`). A new struct changes no layout, and
+     `VERSION` stays 3. The state says what a blocked process waits for:
+     `STATE_RUN`, `READY`, `WAIT` (a child), `READ` (the console),
+     `SLEEP`, `PIPE`, `ZOMBIE`. The frames are its address space's (its
+     pages, their tables and its PML4, counted by walking the tables as
+     they are given back), 0 for a zombie and for process 1, which has
+     none; the name is the path `spawn` was given, cut at 64 bytes.
+   - **Who may change the console** (§6.4, §7.3; `kernel/src/proc/holders.rs`).
+     The process table keeps the chain of groups that handed the console
+     on, from process 1's at the bottom to the foreground group at the
+     top. `spawn`'s `FOREGROUND` and `console_foreground` put a group on
+     top, cutting the chain back to the giver's group first, and a group
+     taking the console back (its own, or one below it) is cut back to;
+     the error screen gives it to process 1 alone; groups with no process
+     left leave it, so it holds at most one entry per group. `console_mode`,
+     `console_foreground` and a `spawn` with `FOREGROUND` are `EPERM` for a
+     caller whose group is not in it (`console_foreground` says `ESRCH`
+     first for a group with no live process). So a shell takes the
+     console back after its command's group has ended and been
+     collected (it switches the mode while that group is still on top),
+     nested shells and scripts each take it from theirs, and a background
+     job, never given it, can neither take it nor change its mode: `sh
+     script &` and `sh &` leave the console alone. A spike ran every
+     scenario under this rule first: all passed, and the one refusal was
+     `t-read leave`'s orphan, which now shows it. The tee calls stay open
+     to any process: a tee changes nothing a process reads, and refusing
+     them would stop `sh s &` before its first line; so a background
+     script's transcript also gets what the screen shows meanwhile, the
+     prompt's typing included (ruled).
+   - **`wait` and Ctrl-C** (§7.3, §9.2). At its prompt the shell has the
+     console in raw mode, where a Ctrl-C is only a byte, so nothing could
+     stop `wait` while a job ran on. `wait` gains `WAIT_CTRL_C`: a Ctrl-C
+     typed while the caller's group has the console in raw mode ends the
+     wait with `EINTR` and is taken from the input, and that group's
+     waiters are woken when one comes. Without the flag a raw Ctrl-C stays
+     input. A wait with the flag blocks in a state of its own, the only
+     one a Ctrl-C wakes (the review found a plain waiter woken on every
+     pass of the idle task while a raw Ctrl-C waited unread). A flag no
+     program passed before (it was `EINVAL`) adds to the ABI and changes
+     no meaning, so `VERSION` stays 3.
+   - **Tees** (§6.5, corrected in its body; §16 items 4 and 5). A process
+     pushes at most 4 tees, and the stack holds 64, one for each process
+     the table can hold: with 4 for the whole machine, the review found
+     four background scripts, a transcript's tee each, kept any further
+     script from starting (`Device or resource busy`). So nested scripts
+     are no longer stopped at four deep (§16 item 5).
+   - **Background jobs** (§9.2; `crates/shell/src/jobs.rs`). An unquoted
+     `&` at the end of a line (a comment may follow) runs it in the
+     background; elsewhere it gets bash's syntax error (`&` alone, `a |
+     &`, `echo > &`, `a & &`) or is refused as unsupported (`a & b`, `&&`,
+     `> f &`, which bash runs). A job's commands start as a pipeline's do,
+     the first that starts in a new group without the console
+     (`Group::Background`), at the prompt and in a script alike, so a
+     script's Ctrl-C does not reach them (bash's jobs ignore SIGINT
+     there); the others join it, and nothing waits for them. At the
+     prompt the shell says `[n] <pid of the last command>`; it collects
+     what ended with `wait(-1, NOHANG)` before each prompt and before
+     running each line typed (so a job that ended meanwhile leaves its
+     slot in the process table to that line, which the review found
+     refused at a full table), and says how each finished job ended
+     before the next prompt (after a foreground command too); a
+     script and `X | sh` collect before each line and say neither, as
+     bash's non-interactive shells do. A job none of whose commands
+     started is no job (the status the last one's, 127); once one
+     started the status is 0. `cd`, `exit`, `help`, `jobs`, `wait` and
+     `kill` cannot run in the background (`relay-sh: cd: cannot be used in
+     the background`, status 1). The in-process runner, which has no
+     programs, keeps refusing `&` (`unsupported syntax: &`). `>&2` and `>&
+     f`, which bash runs, are `unsupported syntax: >&`, `>>&` and `> &`
+     bash's syntax errors. `exit` leaves running jobs to process 1, as
+     bash's does without `huponexit`. An interactive `/bin/sh` whose group
+     was never given the console (`sh &`) ends at once with 0, before its
+     first prompt (its leader test says `EPERM` exactly then); bash stops
+     such a shell, which needs job control this gate leaves out.
+   - **The job table** (§9.2). A new job is numbered one past the highest
+     in the table, so numbers start again only once it is empty: bash 5.2
+     numbers 4 and 5 after jobs 1 and 2 ended, not the lowest free one.
+     The newest job is `+`, the one before it `-`. A job has ended when
+     every process it started has, and its status is its last one's. Its
+     text is the line as typed, without the `&`. Its lines are bash's,
+     the state padded to 24 columns (`[1]+  Done                    sleep
+     5`, `Exit 1`, `Running` and the text with ` &`), rather than §9.2's
+     shorter form (corrected in its body). A job a signal ended says
+     bash's words for it, which the statuses already follow: `Killed`
+     for `kill`, `Segmentation fault` for a page fault, a protection fault
+     or a stack overflow, `Illegal instruction`, `Floating point
+     exception`, `Interrupt`; the kernel log keeps the fault's detail.
+     bash pads to 24 and no further, so its `Floating point exception`
+     meets the text; a blank stays between here (ruled). Job specs are
+     bash's: `%n`, and `%%`, `%+` or `%` for the current job, `%-` for the
+     previous one (the current one when it is alone).
+   - **`jobs`, `wait` and `kill`** (§8.3, §9.2, §9.3). Built-ins, since
+     they need the job table: a built-in's `Ctx` gets the shell's job
+     control (its jobs and, under `/bin/sh`, its programs), and `help`
+     lists them. `jobs [%n | n]...` lists every job or those named, in the
+     order named (one named twice twice), and a job that has ended says
+     how there once and leaves the table. `wait` waits for every job,
+     which then leave the table, saying nothing of those that exited and
+     telling of those a signal ended, as bash's does; `wait %n` or `wait
+     PID` waits for one, its status that job's last process's or that
+     process's own, and at the prompt a job that ends there says how at
+     once. These notices go to the screen, never into a redirection. The
+     table keeps the statuses of the processes of jobs that left it (the
+     table's 64 at most), so `wait PID` of one answers once, as bash's
+     does. A Ctrl-C at the prompt ends a `wait` (`^C`, 130), the jobs
+     running on. `kill PID...` and `kill
+     %n...` kill processes or a job's whole group (`kill(-pgid)`), the
+     status 1 if any was not killed; killing is the only signal (§15):
+     `-9`, `-KILL`, `-SIGKILL` and `-s KILL` are taken, another signal
+     Linux has (and `-0`, which tests that a process exists, and `-l`,
+     which lists the signals) is `not supported`, and a name it has not
+     is an `invalid signal specification`. Their messages are bash's with `relay-sh:`:
+     `kill: (1) - Operation not permitted`, `kill: (999) - No such
+     process`, `kill: %3: no such job`, `kill: abc: arguments must be
+     process or job IDs`, `wait: pid 9 is not a child of this shell` and
+     `wait: %3: no such job` (127), ``wait: `abc': not a pid or valid job
+     spec`` (1), and an option `invalid option` (2). Until plan 3's `$?`,
+     their status is the shell's last status, which `exit` and a script's
+     end take.
+   - **`ps`** (§9.3; `commands/system.rs`, `/bin/ps`). A command function
+     over the shell's `System`, which gains `processes` (from `proc_list`;
+     none on the host, where `ps` says `processes are not available` as
+     `free` says of memory figures), and a program like the others: `/bin`
+     holds 42. Its columns are procps's, right-aligned numbers:
+     `  PID  PPID STATE      MEM  TIME CMD`; STATE `run`, `ready`, `wait`,
+     `read`, `sleep`, `pipe` or `zombie`; MEM the KiB of the frames its
+     address space holds; TIME its CPU time as `m:ss`; CMD the path it was
+     started from. Process 0, the idle task, is no process.
+   - **The error screen takes the console back** (§11.2; milestone 2's
+     leftover). The scenario `screen_console` ends the shell a third time
+     within 10 s while its command, `t-proc end-shell`, reads the console
+     in line mode and its child kills the shell; the screen ends every
+     other process, gives the console to process 1 in raw mode, and a key
+     restarts the machine, which it would not in line mode, where the key
+     waits in the line discipline.
+   - **Plan 1's deferred minors.** `pipe()` puts copies of its ends in the
+     fd table, both or neither, so the last reference to an end that did
+     not go in is dropped after the table is unlocked, by construction
+     rather than because two free fds were checked first. `X | sh`
+     reading its input 4 KiB at a time goes to plan 3, which reads
+     scripts; `seq`'s zero increment and `[a-a-`'s message go to plan 4.
+   - **Tests** (§8.5, §12). `t-proc` (`list`, `short`, `long`,
+     `end-shell`) and the scenarios `proc_calls`, `screen_console` and
+     `jobs`; `t-tee owners` in `tees`; `t-spawn ctrl-c` and `ctrl-c-apart`
+     (a wait apart from the console never takes its Ctrl-C) in `ctrlc`,
+     which now waits for the prompt
+     before typing into the next command (a spike found the line could
+     reach a command's group that had just ended); `t-read refused` and
+     `leave` show the refusals in `console` (`t-read apart`, which
+     `check3-a.sh` runs on the NUC, prints what it printed). Host tests: the chain of
+     holders, the job table against bash 5.2's own lines, and the shell's
+     jobs over `FakePrograms`, whose children can outlive a prompt.
