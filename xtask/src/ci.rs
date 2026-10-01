@@ -217,6 +217,24 @@ mod tests {
         assert!(workflow.contains("run: cargo xtask unit"));
     }
 
+    /// The unit job has the runner's own tools (binutils' `readelf`,
+    /// e2fsprogs, Linux's headers) and installs the rest: mtools, which
+    /// the tests of the ESP's files run (`image::esp_read`). A missing tool
+    /// fails a test, never skips it, so CI must have every one.
+    #[test]
+    fn the_unit_job_installs_the_tools_its_tests_run() {
+        let workflow = std::fs::read_to_string(root().join(".github/workflows/ci.yml")).unwrap();
+        let unit = workflow
+            .split("\n  unit:\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n  e2e:\n").next())
+            .expect("a unit job before the e2e job");
+        assert!(
+            unit.contains("apt-get install") && unit.contains(" mtools"),
+            "{unit}"
+        );
+    }
+
     /// The user-space gate's definition of done (§1.4 item 3): every
     /// command the user types runs as a program, so the kernel does not
     /// link the shell, not even through another crate (`relay-rt` depends
