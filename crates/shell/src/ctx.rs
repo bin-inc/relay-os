@@ -22,6 +22,9 @@ pub struct Ctx<'a> {
     out: Output<'a>,
     /// Standard input; without one, the input ends at once.
     input: Option<&'a mut dyn Stdin>,
+    /// The exit status when standard output could not be written (1, as
+    /// milestone 1 said; GNU grep's is 2).
+    pub(crate) write_error_status: i32,
     /// Set by `exit`, and by `reboot` and `poweroff` when the machine did
     /// not go away: the shell stops.
     pub(crate) exit: bool,
@@ -110,6 +113,7 @@ impl<'a> Ctx<'a> {
             console,
             out,
             input: None,
+            write_error_status: 1,
             exit: false,
             cancelled: false,
             script: None,
@@ -118,6 +122,12 @@ impl<'a> Ctx<'a> {
             status: 0,
             exited: false,
         }
+    }
+
+    /// The exit status a write error on standard output gives, instead of
+    /// 1.
+    pub fn set_write_error_status(&mut self, status: i32) {
+        self.write_error_status = status;
     }
 
     /// Gives the command standard input.

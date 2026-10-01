@@ -5,8 +5,9 @@
 //! `-v` selects the lines that do not match, `-n` numbers them, `-c` counts
 //! them instead. An input that holds a NUL byte is binary: once one of its
 //! lines is selected, grep says so (`grep: f: binary file matches`)
-//! instead of printing it. The status is 0 if a line was selected, 1 if
-//! none was, and 2 after an error.
+//! instead of printing it; it never reads the file its output goes to.
+//! The status is 0 if a line was selected, 1 if none was, and 2 after an
+//! error, a write error included.
 
 use crate::ctx::{Ctx, getopt};
 use crate::pattern::Pattern;
@@ -36,6 +37,7 @@ enum Outcome {
 }
 
 pub fn grep(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
+    ctx.set_write_error_status(2);
     let opts = match getopt(args, "cinv", "") {
         Ok(o) => o,
         Err(e) => return usage(ctx, Some(format!("{e}"))),
@@ -96,6 +98,14 @@ fn search(
     let name = file.map_or("(standard input)", String::as_str);
     let mut source = match file {
         Some(path) => match open(ctx, path) {
+            // It would read what it wrote, for ever (`grep x f >> f`).
+            Ok(node) if ctx.output_node() == Some(node) => {
+                ctx.fail(
+                    "grep",
+                    format_args!("{path}: input file is also the output"),
+                );
+                return Outcome::Failed;
+            }
             Ok(node) => Source::File { node, offset: 0 },
             Err(e) => {
                 ctx.fail("grep", format_args!("{path}: {e}"));
@@ -282,6 +292,52 @@ mod tests {
                 "{args:?}"
             );
         }
+    }
+
+    #[test]
+    fn grep_never_reads_its_own_output() {
+        // GNU's refusal, whatever the redirection left in the file; a disk
+        // that fills and a Ctrl-C bound a grep that reads on.
+        let mut h = Harness::with_capacity(64 * 4096);
+        h.console.interrupt_after = Some(10_000);
+        let text: String = (0..2000).map(|i| alloc::format!("1 line {i}\n")).collect();
+        h.put("/tmp/f", text.as_bytes());
+        assert_eq!(
+            h.run("grep 1 /tmp/f >> /tmp/f"),
+            (2, "grep: /tmp/f: input file is also the output\n".into())
+        );
+        assert_eq!(h.get("/tmp/f"), text.as_bytes(), "unchanged");
+        assert_eq!(
+            h.run("grep 1 /tmp/nope /tmp/f > /tmp/f"),
+            (
+                2,
+                "grep: /tmp/nope: No such file or directory\ngrep: /tmp/f: input file is also the output\n".into()
+            )
+        );
+        // Another file into it is fine.
+        h.put("/tmp/g", b"1\n");
+        assert_eq!(h.run("grep 1 /tmp/g >> /tmp/f"), (0, "".into()));
+    }
+
+    #[test]
+    fn a_write_error_is_status_2_as_gnu_grep_s() {
+        let mut h = Harness::with_capacity(5 * 4096);
+        let text: String = (0..20_000).map(|i| alloc::format!("line {i}\n")).collect();
+        h.stdin = text.into_bytes();
+        assert_eq!(
+            h.run("grep line > /tmp/out"),
+            (2, "grep: write error: No space left on device\n".into())
+        );
+        // As a program too; and nothing written, nothing failed: 1.
+        let mut out = crate::testing::FakeStdout::file(None);
+        out.fail_after = Some((10, vfs::Errno::ENOSPC));
+        h.stdin = b"a\nb\nccccccccccccccccc\n".to_vec();
+        assert_eq!(
+            h.program("grep c", &mut out),
+            (2, "grep: write error: No space left on device\n".into())
+        );
+        h.stdin = b"a\n".to_vec();
+        assert_eq!(h.program("grep z", &mut out), (1, String::new()));
     }
 
     #[test]
