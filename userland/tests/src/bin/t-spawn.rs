@@ -12,7 +12,8 @@
 //!   so it passes to process 1;
 //! - `t-spawn fill` starts children that nap for 300 ms until the process
 //!   table is full, and ends without waiting for them: their zombies pass
-//!   to process 1;
+//!   to process 1 (64 at most: a kernel that never says the table is full
+//!   gets `and no end`);
 //! - `t-spawn join` starts children in the group of another child, which
 //!   a pipeline's stages do (spec §9.1): one that dozes, then one that
 //!   exited and was not collected yet; `kill` of the group ends both
@@ -192,17 +193,23 @@ fn join() -> Result<(), u16> {
     Ok(())
 }
 
+/// The most processes the table holds (spec §11.1).
+const TABLE: usize = 64;
+
 /// Starts napping children until the table is full, and leaves them.
 fn fill() -> Result<(), u16> {
     let mut n = 0;
-    loop {
+    for _ in 0..TABLE {
         match sys::spawn(b"/bin/t-spawn", b"t-spawn\0nap\0", b"", &[], 0, 0) {
             Ok(_) => n += 1,
-            Err(relay_abi::errno::EAGAIN) => break,
+            Err(relay_abi::errno::EAGAIN) => {
+                let _ = writeln!(Fd(1), "filled the table with {n} children");
+                return Ok(());
+            }
             Err(e) => return Err(e),
         }
     }
-    let _ = writeln!(Fd(1), "filled the table with {n} children");
+    let _ = writeln!(Fd(1), "started {n} children, and no end");
     Ok(())
 }
 
