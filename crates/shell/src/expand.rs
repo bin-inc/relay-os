@@ -151,10 +151,9 @@ impl Expander<'_> {
 }
 
 /// The words of `line` with nothing set: for callers that run no shell
-/// (tests), whose lines expand.
-pub(crate) fn plain(line: &Line<Word>) -> Line {
-    let vars = Vars::new(crate::shell::NAME);
-    expand(line, &vars, 0).unwrap_or_else(|e| panic!("{e}"))
+/// (tests).
+pub(crate) fn plain(line: &Line<Word>) -> Result<Line, Error> {
+    expand(line, &Vars::new(crate::shell::NAME), 0)
 }
 
 #[cfg(test)]

@@ -23,6 +23,7 @@
 
 use alloc::format;
 use alloc::string::String;
+use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::fmt;
 use core::iter::Peekable;
@@ -128,6 +129,8 @@ pub enum ParseError {
     UnexpectedEnd,
     /// A `${` without its `}`.
     UnclosedBrace,
+    /// From `parse` only: the line parses, but does not expand (why).
+    Expansion(String),
 }
 
 impl fmt::Display for ParseError {
@@ -138,6 +141,7 @@ impl fmt::Display for ParseError {
             ParseError::TrailingBackslash => f.write_str("syntax error: nothing after \\"),
             ParseError::MissingTarget(t) => write!(f, "syntax error near unexpected token `{t}'"),
             ParseError::UnexpectedEnd => f.write_str("syntax error: unexpected end of file"),
+            ParseError::Expansion(why) => f.write_str(why),
             ParseError::UnclosedBrace => {
                 f.write_str("syntax error: unexpected EOF while looking for matching `}'")
             }
@@ -398,10 +402,14 @@ impl Parts {
 }
 
 /// The commands of `line`, whether or not it ends with `&`, their words
-/// expanded with no variables set (for callers that run no shell: tests,
-/// whose lines expand).
+/// expanded with no variables set (for callers that run no shell: tests);
+/// a line that does not expand is `ParseError::Expansion`.
 pub fn parse(line: &str) -> Result<Pipeline, ParseError> {
-    parse_line(line).map(|l| crate::expand::plain(&l).pipeline)
+    let typed = parse_line(line)?;
+    match crate::expand::plain(&typed) {
+        Ok(l) => Ok(l.pipeline),
+        Err(e) => Err(ParseError::Expansion(e.to_string())),
+    }
 }
 
 /// `line`'s commands, their words as typed, and whether it runs in the
@@ -563,7 +571,9 @@ mod tests {
 
     /// `line` as `Shell::execute` runs it: parsed, then expanded.
     fn expanded(line: &str) -> Result<Line, ParseError> {
-        parse_line(line).map(|l| crate::expand::plain(&l))
+        parse_line(line).and_then(|l| {
+            crate::expand::plain(&l).map_err(|e| ParseError::Expansion(e.to_string()))
+        })
     }
 
     fn words(line: &str) -> Vec<String> {
@@ -691,6 +701,20 @@ mod tests {
                 [Piece::Param(Param::Status, false)],
             ]
         );
+    }
+
+    #[test]
+    fn parse_says_why_a_line_does_not_expand() {
+        // The review found it panicking, though it is public.
+        assert_eq!(
+            parse("echo ${1A}"),
+            Err(ParseError::Expansion("${1A}: bad substitution".into()))
+        );
+        assert_eq!(
+            parse("echo > $E").unwrap_err().to_string(),
+            "$E: ambiguous redirect"
+        );
+        assert_eq!(parse("echo $E x").unwrap()[0].words, ["echo", "x"]);
     }
 
     #[test]
