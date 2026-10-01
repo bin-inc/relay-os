@@ -11,5 +11,6 @@ name = "sh"
 path = "src/main.rs"
 
 [dependencies]
+relay-abi.workspace = true
 relay-rt.workspace = true
 shell.workspace = true

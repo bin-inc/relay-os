@@ -26,8 +26,14 @@ fn main(args: Args) -> u8 {
     } else if words.is_empty() {
         // An interactive shell leads a process group of its own when it
         // was started at a prompt (the group is numbered after it); one a
-        // script started is in the script's group.
-        let leader = sys::console_foreground(sys::getpid()).is_ok();
+        // script started is in the script's group. One in a group of its
+        // own that was never given the console (`sh &`) has no console to
+        // read: it ends before its first prompt.
+        let leader = match sys::console_foreground(sys::getpid()) {
+            Ok(()) => true,
+            Err(relay_abi::errno::EPERM) => return 0,
+            Err(_) => false,
+        };
         let mut console = SysConsole::interactive(leader.then(sys::getpid));
         let mut programs = SysPrograms::new(leader);
         let mut shell = Shell::spawning(&mut vfs, &mut console, &mut system, &mut programs);

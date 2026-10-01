@@ -104,6 +104,13 @@ alive 1
 send t-spawn fill
 expect \nfilled the table with 60 children\n
 alive 1
+# An interactive shell in the background has no console to read: it ends
+# before its first prompt, and its job is done (milestone 3).
+send sh &
+expect \n\[1\] \d+\nroot@relay:\S+# $
+alive 1
+send echo next
+expect \Aecho next\nnext\n\[1\]\+  Done                    sh\n
 send rm -r /root/a /root/list /root/s.sh /root/s.log /root/t.sh /root/t.log /root/spin.sh /root/spin.log /root/i.sh /root/i.log /root/j.sh /root/j.log
 send cd /tmp
 expect root@relay:/tmp# $
