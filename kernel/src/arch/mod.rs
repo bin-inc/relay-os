@@ -9,6 +9,7 @@ pub mod idt;
 pub mod irq;
 pub mod lapic;
 pub mod pic;
+pub mod tlb;
 pub mod user;
 
 /// The machine, as `uname` names it.
