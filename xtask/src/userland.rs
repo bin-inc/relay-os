@@ -316,6 +316,21 @@ pub fn with_abi(image: &[u8], abi: u32) -> Result<Vec<u8>> {
         .map_err(|e| anyhow::anyhow!("system.img: {e}"))
 }
 
+/// `image` without the program `name` (the e2e step `system-drop`); an
+/// error if it holds none of that name.
+pub fn without(image: &[u8], name: &str) -> Result<Vec<u8>> {
+    let archive = sysimg::Archive::parse(image).map_err(|e| anyhow::anyhow!("system.img: {e}"))?;
+    let entries: Vec<sysimg::Entry<'_>> = archive
+        .entries()
+        .filter(|e| e.name != name.as_bytes())
+        .collect();
+    if entries.len() == archive.entries().count() {
+        bail!("system.img has no program {name}");
+    }
+    sysimg::write(archive.abi(), archive.build_time(), &entries)
+        .map_err(|e| anyhow::anyhow!("system.img: {e}"))
+}
+
 /// The ABI `t-abi` is built for: the one before this (spec §8.5), as a
 /// program left on a disk by an older build would be.
 pub const STALE_ABI: u32 = relay_abi::VERSION - 1;
@@ -377,6 +392,29 @@ pub fn build_system_image() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_program_can_be_left_out_of_the_archive() {
+        let entries = [
+            sysimg::Entry {
+                name: b"sh",
+                mode: 0o755,
+                data: b"one",
+            },
+            sysimg::Entry {
+                name: b"ls",
+                mode: 0o755,
+                data: b"two",
+            },
+        ];
+        let image = sysimg::write(relay_abi::VERSION, 7, &entries).unwrap();
+        let less = without(&image, "sh").unwrap();
+        let archive = sysimg::Archive::parse(&less).unwrap();
+        let names: Vec<&[u8]> = archive.entries().map(|e| e.name).collect();
+        assert_eq!(names, [&b"ls"[..]]);
+        assert_eq!(archive.build_time(), 7);
+        assert!(without(&image, "cat").is_err(), "not in the archive");
+    }
 
     fn t_args() -> Program {
         build()

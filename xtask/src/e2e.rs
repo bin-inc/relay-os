@@ -13,6 +13,8 @@
 //! esp-delete /EFI/RELAY/system.img  (before boot: remove an ESP file)
 //! system-abi 99                    (before boot: system.img, rewritten with
 //!                                   another ABI version)
+//! system-drop sh                   (before boot: system.img, rewritten
+//!                                   without that program)
 //! timeout 20                       (seconds, for the following expects)
 //! expect <regex>                   (waits for serial output, ANSI stripped)
 //! expect-same <name> <regex>       (as expect; the regex's first group must
@@ -152,6 +154,8 @@ pub enum EspEdit {
     /// `system-abi`: `system.img` holds the same programs under another
     /// ABI version.
     SystemAbi(u32),
+    /// `system-drop`: `system.img` holds its programs but this one.
+    SystemDrop(String),
 }
 
 #[derive(Debug, PartialEq)]
@@ -205,7 +209,7 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
                 break_root = true;
                 continue;
             }
-            "esp-write" | "esp-delete" | "system-abi" => {
+            "esp-write" | "esp-delete" | "system-abi" | "system-drop" => {
                 if !steps.is_empty() {
                     bail!("{name}:{line_no}: {word} must come before other steps");
                 }
@@ -214,6 +218,12 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
                         "system-abi" => EspEdit::SystemAbi(rest.parse().with_context(|| {
                             format!("{name}:{line_no}: system-abi needs a number")
                         })?),
+                        "system-drop" => {
+                            if rest.is_empty() || rest.contains(' ') {
+                                bail!("{name}:{line_no}: system-drop needs one program's name");
+                            }
+                            EspEdit::SystemDrop(rest.to_string())
+                        }
                         _ => {
                             let (path, contents) = rest.split_once(' ').unwrap_or((rest, ""));
                             if !path.starts_with('/') {
@@ -429,9 +439,13 @@ fn start(image: &Path, layout: &Layout, scenario: &Scenario, run_dir: &Path) -> 
                 esp_write(&q.disk, layout.esp, path, contents.as_bytes(), run_dir)?
             }
             EspEdit::Delete(path) => esp_delete(&q.disk, layout.esp, path)?,
-            EspEdit::SystemAbi(abi) => {
+            EspEdit::SystemAbi(_) | EspEdit::SystemDrop(_) => {
                 let image = fs::read(out_dir().join("system.img"))?;
-                let other = userland::with_abi(&image, *abi)?;
+                let other = match edit {
+                    EspEdit::SystemAbi(abi) => userland::with_abi(&image, *abi)?,
+                    EspEdit::SystemDrop(program) => userland::without(&image, program)?,
+                    _ => unreachable!(),
+                };
                 esp_write(
                     &q.disk,
                     layout.esp,
@@ -910,19 +924,23 @@ mod tests {
     }
 
     #[test]
-    fn parses_esp_deletes_and_other_abis() {
+    fn parses_esp_deletes_other_abis_and_programs_left_out() {
         let s = parse_scenario(
             "x",
-            "esp-delete /EFI/RELAY/system.img\nsystem-abi 99\nexpect x",
+            "esp-delete /EFI/RELAY/system.img\nsystem-abi 99\nsystem-drop sh\nexpect x",
         )
         .unwrap();
         assert_eq!(
             s.esp_edits,
             vec![
                 EspEdit::Delete("/EFI/RELAY/system.img".into()),
-                EspEdit::SystemAbi(99)
+                EspEdit::SystemAbi(99),
+                EspEdit::SystemDrop("sh".into())
             ]
         );
+        assert!(parse_scenario("x", "system-drop").is_err(), "which one");
+        assert!(parse_scenario("x", "system-drop a b").is_err());
+        assert!(parse_scenario("x", "expect a\nsystem-drop sh").is_err());
         assert!(parse_scenario("x", "esp-delete relative").is_err());
         assert!(parse_scenario("x", "system-abi many").is_err());
         assert!(parse_scenario("x", "expect a\nsystem-abi 2").is_err());
