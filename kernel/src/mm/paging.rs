@@ -84,6 +84,7 @@ impl Cache {
         }
     }
 
+    #[cfg(test)]
     fn of_entry(e: u64) -> Cache {
         match e & (PWT | PCD) {
             0 => Cache::WriteBack,
@@ -390,7 +391,9 @@ impl PageTables {
         }
     }
 
-    /// The physical address, cache type and page size `virt` maps to.
+    /// The physical address, cache type and page size `virt` maps to (for
+    /// the tests of what maps and unmaps).
+    #[cfg(test)]
     pub fn translate(&self, mem: &mut impl PhysMem, virt: u64) -> Option<(u64, Cache, u64)> {
         let mut table = self.pml4;
         for level in (0..4).rev() {

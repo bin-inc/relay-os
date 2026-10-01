@@ -6,7 +6,6 @@
 
 use crate::mm::paging::{MapError, PAGE, Perm, PhysMem};
 use crate::mm::space::AddressSpace;
-use alloc::vec::Vec;
 use elf::{Access, Program};
 use vfs::Errno;
 
@@ -40,25 +39,6 @@ pub struct Entry {
     pub argc: u64,
 }
 
-/// The argument bytes for `args` (argument 0 first): each argument, then a
-/// NUL. An argument holding a NUL is `EINVAL`; more than `ARGS_MAX` bytes
-/// is `E2BIG`.
-pub fn arg_bytes(args: &[&[u8]]) -> Result<Vec<u8>, Errno> {
-    let len: usize = args.iter().map(|a| a.len() + 1).sum();
-    if len > ARGS_MAX {
-        return Err(Errno::E2BIG);
-    }
-    let mut bytes = Vec::with_capacity(len);
-    for a in args {
-        if a.contains(&0) {
-            return Err(Errno::EINVAL);
-        }
-        bytes.extend_from_slice(a);
-        bytes.push(0);
-    }
-    Ok(bytes)
-}
-
 fn perm(access: Access) -> Perm {
     match access {
         Access::ReadExec => Perm::ReadExec,
@@ -77,7 +57,7 @@ fn errno(e: MapError) -> Errno {
 }
 
 /// Maps `program` (read from `file`, checked by `elf::check`) and its stack
-/// into `space` with `args` (from `arg_bytes`, `argc` of them) at the top
+/// into `space` with `args` (`argc` of them, each ending in its NUL) at the top
 /// of the stack. On an error the caller destroys `space`, which gives
 /// back whatever was mapped.
 pub fn load(
@@ -123,7 +103,15 @@ mod tests {
     use super::*;
     use crate::mm::paging::PageTables;
     use crate::mm::testing::FakeMem;
+    use alloc::vec::Vec;
     use elf::Segment;
+
+    /// The argument bytes for `args`: each argument, then a NUL.
+    fn arg_bytes(args: &[&[u8]]) -> Vec<u8> {
+        args.iter()
+            .flat_map(|a| a.iter().copied().chain([0]))
+            .collect()
+    }
 
     fn space(m: &mut FakeMem) -> AddressSpace {
         let mut k = PageTables::new(m).unwrap();
@@ -167,7 +155,7 @@ mod tests {
         let mut m = FakeMem::new();
         let mut s = space(&mut m);
         let (file, p) = program();
-        let args = arg_bytes(&[b"/bin/t"]).unwrap();
+        let args = arg_bytes(&[b"/bin/t"]);
         load(&mut s, &mut m, &file, &p, &args, 1).unwrap();
         // Code from 0x401010, zeroes before it on its page.
         assert_eq!(read(&mut m, &s, 0x40_1000, 0x10), vec![0; 0x10]);
@@ -193,7 +181,7 @@ mod tests {
         let mut m = FakeMem::new();
         let mut s = space(&mut m);
         let (file, p) = program();
-        load(&mut s, &mut m, &file, &p, &arg_bytes(&[b"x"]).unwrap(), 1).unwrap();
+        load(&mut s, &mut m, &file, &p, &arg_bytes(&[b"x"]), 1).unwrap();
         assert_eq!(STACK_BOTTOM, 0x7FFF_FFF0_0000);
         assert_eq!(
             s.user_page(&mut m, STACK_BOTTOM).unwrap().1,
@@ -222,7 +210,7 @@ mod tests {
         let mut m = FakeMem::new();
         let mut s = space(&mut m);
         let (file, p) = program();
-        let args = arg_bytes(&[b"/bin/t-args", b"a", b"b c", b""]).unwrap();
+        let args = arg_bytes(&[b"/bin/t-args", b"a", b"b c", b""]);
         assert_eq!(args, b"/bin/t-args\0a\0b c\0\0");
         let e = load(&mut s, &mut m, &file, &p, &args, 4).unwrap();
         assert_eq!(e.ip, 0x40_1010);
@@ -237,10 +225,8 @@ mod tests {
     #[test]
     fn arguments_up_to_64_kib() {
         let long = vec![b'x'; ARGS_MAX - 3];
-        let args = arg_bytes(&[b"p", &long]).unwrap();
+        let args = arg_bytes(&[b"p", &long]);
         assert_eq!(args.len(), ARGS_MAX);
-        assert_eq!(arg_bytes(&[b"pp", &long]), Err(Errno::E2BIG));
-        assert_eq!(arg_bytes(&[b"p", b"a\0b"]), Err(Errno::EINVAL));
         // The most still fits, and lands at the top.
         let mut m = FakeMem::new();
         let mut s = space(&mut m);
@@ -263,7 +249,7 @@ mod tests {
         let mut m = FakeMem::new();
         let mut s = space(&mut m);
         let (file, p) = program();
-        let args = arg_bytes(&[b"p"]).unwrap();
+        let args = arg_bytes(&[b"p"]);
         assert_eq!(
             load(&mut s, &mut m, &file[..0x3000], &p, &args, 1),
             Err(Errno::ENOEXEC)
@@ -275,7 +261,7 @@ mod tests {
     fn running_out_of_memory_is_enomem_and_leaks_nothing() {
         let mut m = FakeMem::new();
         let (file, p) = program();
-        let args = arg_bytes(&[b"p"]).unwrap();
+        let args = arg_bytes(&[b"p"]);
         let mut k = PageTables::new(&mut m).unwrap();
         k.fill_upper_half(&mut m).unwrap();
         let before = m.frames();

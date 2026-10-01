@@ -92,10 +92,6 @@ impl InputQueue {
         was
     }
 
-    pub fn is_line_mode(&self) -> bool {
-        self.line_mode
-    }
-
     /// Whether a Ctrl-C was typed in line mode since the last call.
     pub fn take_line_interrupt(&mut self) -> bool {
         core::mem::take(&mut self.interrupted)
@@ -167,8 +163,9 @@ impl InputQueue {
     }
 
     /// Adds input; what does not fit is dropped. A Ctrl-C always fits:
-    /// it drops what was typed before it, as `take_interrupt` would, and a
-    /// half-arrived serial sequence, wherever the Ctrl-C came from.
+    /// it drops what was typed before it, as a terminal flushes its input
+    /// on an interrupt, and a half-arrived serial sequence, wherever the
+    /// Ctrl-C came from.
     pub fn push(&mut self, bytes: &[u8]) {
         if self.line_mode {
             if bytes.contains(&INTERRUPT) {
@@ -203,20 +200,6 @@ impl InputQueue {
     /// Whether nothing waits to be read: no raw input, and no line.
     pub fn is_empty(&self) -> bool {
         self.bytes.is_empty() && !self.line.has_line()
-    }
-
-    /// Whether a Ctrl-C is waiting. If one is, it and everything typed
-    /// before it are dropped, as a terminal flushes its input on an
-    /// interrupt; what was typed after it stays.
-    pub fn take_interrupt(&mut self) -> bool {
-        match self.bytes.iter().rposition(|&b| b == INTERRUPT) {
-            Some(i) => {
-                self.bytes.drain(..=i);
-                self.echoed = self.echoed.saturating_sub(i + 1);
-                true
-            }
-            None => false,
-        }
     }
 }
 
@@ -403,12 +386,10 @@ mod tests {
         let mut q = InputQueue::new();
         q.push(&[b'a'; QUEUE_MAX]);
         q.push_key(&press(Key::Char(b'c'), true));
-        assert!(q.take_interrupt());
-        assert!(q.is_empty());
+        assert_eq!(drain(&mut q), [INTERRUPT], "only the Ctrl-C is left");
         q.push(&[b'a'; QUEUE_MAX]);
         q.push(b"x\x03y");
-        assert!(q.take_interrupt());
-        assert_eq!(drain(&mut q), b"y");
+        assert_eq!(drain(&mut q), b"\x03y");
     }
 
     #[test]
@@ -447,8 +428,7 @@ mod tests {
     fn a_ctrl_c_over_serial_ends_a_sequence() {
         let mut q = InputQueue::new();
         serial(&mut q, b"ls\x1b[\x03pwd");
-        assert!(q.take_interrupt());
-        assert_eq!(drain(&mut q), b"pwd");
+        assert_eq!(drain(&mut q), b"\x03pwd");
         // A sequence that never ends is not kept for ever: its start is
         // dropped and what follows is plain input again.
         serial(&mut q, b"\x1b[11111111111111111111");
@@ -493,8 +473,7 @@ mod tests {
         serial(&mut q, b"\x1b[");
         q.push_key(&press(Key::Char(b'c'), true));
         serial(&mut q, b"A");
-        assert!(q.take_interrupt());
-        assert_eq!(drain(&mut q), b"A");
+        assert_eq!(drain(&mut q), b"\x03A");
     }
 
     /// A queue in line mode.
@@ -512,7 +491,6 @@ mod tests {
     #[test]
     fn in_line_mode_keys_are_echoed_and_read_a_line_at_a_time() {
         let mut q = line_mode();
-        assert!(q.is_line_mode());
         q.push_key(&press(Key::Char(b'h'), false));
         serial(&mut q, b"i\x7f\x7fok");
         assert_eq!(read(&mut q, 10), None, "no line yet");
@@ -552,7 +530,7 @@ mod tests {
         assert!(q.is_empty(), "what was typed is dropped");
         serial(&mut q, b"A\r");
         assert_eq!(read(&mut q, 10).unwrap(), b"A\n", "and the half sequence");
-        assert!(!q.take_interrupt(), "not a raw Ctrl-C");
+        assert_eq!(drain(&mut q), b"", "not a raw Ctrl-C");
     }
 
     #[test]
@@ -611,7 +589,7 @@ mod tests {
         q.push(b"ab\x03cd");
         q.take_echo();
         q.set_line_mode(false);
-        assert!(q.take_interrupt());
+        assert_eq!(q.pop(), Some(INTERRUPT));
         q.push(b"e");
         q.set_line_mode(true);
         assert_eq!(q.take_echo(), b"e");
@@ -690,8 +668,7 @@ mod tests {
         let mut q = line_mode();
         q.push(b"abc\x03de");
         q.set_line_mode(false);
-        assert!(q.take_interrupt());
-        assert_eq!(drain(&mut q), b"de");
+        assert_eq!(drain(&mut q), b"\x03de");
     }
 
     #[test]
@@ -719,10 +696,8 @@ mod tests {
     fn an_interrupt_drops_what_was_typed_before_it() {
         let mut q = InputQueue::new();
         q.push(b"rm x\x03 ls\x03pwd\r");
-        assert!(q.take_interrupt());
-        assert_eq!(drain(&mut q), b"pwd\r");
+        assert_eq!(drain(&mut q), b"\x03pwd\r");
         q.push(b"echo");
-        assert!(!q.take_interrupt());
         assert_eq!(drain(&mut q), b"echo");
     }
 }

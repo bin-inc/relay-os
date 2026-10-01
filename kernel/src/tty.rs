@@ -33,10 +33,6 @@ pub fn set_line_mode(line: bool) -> bool {
     was
 }
 
-pub fn is_line_mode() -> bool {
-    INPUT.lock().is_line_mode()
-}
-
 /// Makes `pgid` the console's foreground group.
 pub fn set_foreground(pgid: u32) {
     FOREGROUND.store(pgid, Ordering::Relaxed);

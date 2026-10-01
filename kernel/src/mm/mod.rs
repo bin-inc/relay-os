@@ -19,6 +19,7 @@ pub mod space;
 pub mod testing;
 pub mod user;
 
+use crate::arch;
 use boot_info::{BootInfo, HEAP_BASE, HEAP_SIZE, PHYS_MAP_MAX, PHYS_OFFSET};
 use core::fmt;
 use frame::{FRAME_SIZE, FrameAllocator};
@@ -113,7 +114,7 @@ pub fn free_kernel_stack(stack: KernelStack) {
     m.stacks
         .free(stack, &mut m.tables, &mut LinearMem(&mut m.frames));
     for virt in pages {
-        x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(virt));
+        arch::tlb::flush(virt);
     }
 }
 
@@ -121,11 +122,11 @@ pub fn free_kernel_stack(stack: KernelStack) {
 /// which it no longer has: one by one for a few, all at once for many.
 pub fn flush_pages(virt: u64, pages: u64) {
     if pages > 64 {
-        x86_64::instructions::tlb::flush_all();
+        arch::tlb::flush_all();
         return;
     }
     for k in 0..pages {
-        x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(virt + k * paging::PAGE));
+        arch::tlb::flush(virt + k * paging::PAGE);
     }
 }
 
@@ -345,7 +346,7 @@ pub fn map_mmio(phys: u64, len: u64, cache: Cache) -> Result<*mut u8, MapError> 
     let mut mem = LinearMem(&mut m.frames);
     m.tables
         .map(&mut mem, PHYS_OFFSET + start, start, end - start, cache)?;
-    x86_64::instructions::tlb::flush_all();
+    arch::tlb::flush_all();
     Ok((PHYS_OFFSET + phys) as *mut u8)
 }
 

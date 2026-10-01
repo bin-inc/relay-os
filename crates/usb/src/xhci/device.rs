@@ -142,7 +142,8 @@ impl<H: Hal> Xhci<H> {
     /// connection stable for 100 ms is `Ok`, none for 100 ms is
     /// `Disconnected`. After 2 s of bouncing it gives up: `Disconnected` if
     /// the last look showed no connection (the next connect is a change
-    /// again), `Timeout` if it did (the host tries again).
+    /// again), `Unstable` if it did (which the host does not try again: it
+    /// would bounce as long again).
     fn debounce(&self, port: u8) -> Result<(), UsbError> {
         let start = self.hal.now();
         let (mut since, mut connected) = (start, None);
@@ -177,7 +178,7 @@ impl<H: Hal> Xhci<H> {
                     &self.name,
                     "port {port}: connection not stable after {waited} ms"
                 );
-                Err(UsbError::Timeout)
+                Err(UsbError::Unstable)
             }
             _ => {
                 xlog!(
@@ -709,7 +710,7 @@ mod tests {
     #[test]
     fn a_connection_that_keeps_bouncing_is_given_up_after_2_s_without_a_reset() {
         // Every 40 ms out for 20 ms, for 3 s; at 2 s it is in, or out.
-        for (phase, outcome) in [(10, UsbError::Timeout), (30, UsbError::Disconnected)] {
+        for (phase, outcome) in [(10, UsbError::Unstable), (30, UsbError::Disconnected)] {
             let k120 = FakeUsbDevice::k120();
             let (hal, mut xhci) = plugged(FakeConfig::basic(), 1, &k120);
             let start = hal.clock();
@@ -727,7 +728,7 @@ mod tests {
             assert!(!hal.fake().slot_enabled(1));
             let log = hal.log_text();
             match outcome {
-                UsbError::Timeout => {
+                UsbError::Unstable => {
                     assert!(log.contains("port 1: connection not stable after 2000 ms"))
                 }
                 _ => assert!(log.contains("port 1: not connected after debounce")),

@@ -24,6 +24,9 @@ pub enum UsbError {
     BadDescriptor(&'static str),
     /// The device is no longer connected.
     Disconnected,
+    /// The connection kept bouncing for as long as the debounce waits:
+    /// trying again would only wait as long again.
+    Unstable,
     /// The controller stopped working (a command timed out or it reported a
     /// host system error); nothing more is sent to it.
     ControllerDead,
@@ -46,6 +49,7 @@ impl fmt::Display for UsbError {
             UsbError::Unsupported(what) => write!(f, "unsupported: {what}"),
             UsbError::BadDescriptor(what) => write!(f, "bad descriptor: {what}"),
             UsbError::Disconnected => write!(f, "device disconnected"),
+            UsbError::Unstable => write!(f, "connection not stable"),
             UsbError::ControllerDead => write!(f, "controller stopped working"),
             UsbError::Protocol(what) => write!(f, "protocol error: {what}"),
             UsbError::Sense(sense) => write!(f, "{sense}"),
@@ -61,6 +65,7 @@ mod tests {
     #[test]
     fn messages_read_well_in_a_status_line() {
         assert_eq!(UsbError::Timeout.to_string(), "timed out");
+        assert_eq!(UsbError::Unstable.to_string(), "connection not stable");
         assert_eq!(
             UsbError::Command(5).to_string(),
             "command failed (completion code 5)"

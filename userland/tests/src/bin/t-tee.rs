@@ -70,7 +70,8 @@ fn show_file(path: &[u8]) -> Result<(), u16> {
     let mut buf = [0u8; 256];
     let mut line = [0u8; 256];
     let (mut len, mut total) = (0, 0);
-    loop {
+    // The logs are a few KiB: a file that never ends is cut at 64 KiB.
+    for _ in 0..256 {
         let n = sys::read(fd, &mut buf)?;
         if n == 0 {
             break;
@@ -131,14 +132,19 @@ fn basic() -> Result<(), u16> {
     let r = sys::open(b"t-tee.log", OPEN_READ)?;
     show_ok("push a file open for reading", sys::console_tee_push(r));
     show_ok("push an fd not open", sys::console_tee_push(30));
+    // 4 tees at most; a kernel without the limit is stopped at 16.
     let mut pushed = 0;
-    let full = loop {
+    let mut full = None;
+    while pushed < 16 && full.is_none() {
         match sys::console_tee_push(log) {
             Ok(()) => pushed += 1,
-            Err(e) => break e,
+            Err(e) => full = Some(e),
         }
+    }
+    let _ = match full {
+        Some(e) => writeln!(Fd(1), "pushed {pushed}, then {}", name(e)),
+        None => writeln!(Fd(1), "pushed {pushed}, and no end"),
     };
-    let _ = writeln!(Fd(1), "pushed {pushed}, then {}", name(full));
     for _ in 0..pushed {
         sys::console_tee_pop()?;
     }

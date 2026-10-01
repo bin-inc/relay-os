@@ -230,6 +230,13 @@ pub fn take_console() {
     PROCS.lock().wake_all(Blocked::Console);
 }
 
+/// Kills every process but process 1 (the error screen's, so that none
+/// of them writes over it): each ends before it runs another instruction
+/// of its program, as after `kill`.
+pub fn kill_others() {
+    PROCS.lock().kill_all_but_init(relay_abi::wait::KILLED_KILL);
+}
+
 /// The running process blocks on `why` until something wakes it.
 fn block(why: Blocked) {
     PROCS.lock().block(why);

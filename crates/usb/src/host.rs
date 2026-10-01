@@ -120,15 +120,19 @@ impl<H: Hal> Host<H> {
     }
 
     /// Sets up the device on `port`, [`ATTACH_TRIES`] times at most (each
-    /// try resets the port afresh), unless it is gone or the controller
-    /// died. Only the final outcome is reported.
+    /// try resets the port afresh), unless it is gone, its connection kept
+    /// bouncing, or the controller died. Only the final outcome is
+    /// reported.
     fn attach(&mut self, port: u8) -> Attached {
         let mut tries = 1;
         let outcome = loop {
             match self.xhci.attach(port).and_then(|d| self.claim(d)) {
                 Err(e)
                     if tries < ATTACH_TRIES
-                        && !matches!(e, UsbError::Disconnected | UsbError::ControllerDead) =>
+                        && !matches!(
+                            e,
+                            UsbError::Disconnected | UsbError::Unstable | UsbError::ControllerDead
+                        ) =>
                 {
                     self.log(format_args!("port {port}: setup failed: {e}, trying again"));
                     tries += 1;
@@ -626,6 +630,38 @@ mod tests {
         assert_eq!(attached.len(), 1);
         assert_eq!(attached[0].outcome, Err(UsbError::Disconnected));
         assert!(!hal.log_text().contains("trying again"));
+    }
+
+    #[test]
+    fn a_connection_that_keeps_bouncing_is_given_up_once() {
+        // In for 20 ms, out for 20 ms, for 8 s: the debounce gives up after
+        // 2 s, and trying again would only bounce as long again (milestone
+        // 1's deferred finding: 3 × 2 s per attach).
+        let (hal, mut host) = host(FakeConfig::intel());
+        let k120 = FakeUsbDevice::k120();
+        let start = hal.clock();
+        hal.fake().plug(3, k120.clone());
+        for n in 0..200 {
+            let again = k120.clone();
+            let out = Duration::from_millis(10 + 40 * n);
+            hal.fake().after(out, |x, _| x.unplug(3));
+            hal.fake()
+                .after(out + Duration::from_millis(20), move |x, _| {
+                    x.plug(3, again)
+                });
+        }
+        let attached = host.service();
+        assert_eq!(attached.len(), 1);
+        assert!(attached[0].outcome.is_err());
+        let took = hal.clock() - start;
+        assert!(took < Duration::from_millis(2100), "{took:?}");
+        let log = hal.log_text();
+        assert!(!log.contains("trying again"), "{log}");
+        assert_eq!(
+            log.matches("connection not stable after").count(),
+            1,
+            "{log}"
+        );
     }
 
     #[test]

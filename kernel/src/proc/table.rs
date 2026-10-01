@@ -377,6 +377,20 @@ impl<R> Table<R> {
         if self.procs.iter().any(|p| hit(p) && p.pid == INIT) {
             return Err(Errno::EPERM);
         }
+        self.mark(hit, reason);
+        Ok(())
+    }
+
+    /// Kills every process but process 1 for `reason`, as `kill` does
+    /// (the error screen's, so that nothing else writes over it).
+    pub fn kill_all_but_init(&mut self, reason: u32) {
+        self.mark(|p| p.pid != INIT, reason);
+    }
+
+    /// Marks the processes `hit` names, but the ones that have ended, as
+    /// killed for `reason` (the first reason stays), and wakes the
+    /// blocked ones so that they end.
+    fn mark(&mut self, hit: impl Fn(&Process<R>) -> bool, reason: u32) {
         let mut woken = [0u32; MAX];
         let mut n = 0;
         for p in self.procs.iter_mut().filter(|p| hit(p)) {
@@ -392,7 +406,6 @@ impl<R> Table<R> {
         for &pid in &woken[..n] {
             self.wake(pid);
         }
-        Ok(())
     }
 }
 
@@ -718,6 +731,27 @@ mod tests {
             "and keeps how it ended"
         );
         assert_eq!(t.get(zombie).unwrap().killed, None);
+    }
+
+    #[test]
+    fn every_process_but_1_can_be_killed_at_once() {
+        let mut t = table();
+        let init = add(&mut t, 0, false);
+        let shell = add(&mut t, init, true);
+        let orphan = add(&mut t, init, true);
+        let blocked = add(&mut t, shell, false);
+        let zombie = add(&mut t, shell, false);
+        t.end(zombie, WaitStatus::exited(0));
+        assert_eq!(turns(&mut t, 4), [init, shell, orphan, blocked]);
+        t.block(Blocked::Console);
+        t.kill_all_but_init(KILLED_KILL);
+        for pid in [shell, orphan, blocked] {
+            assert_eq!(t.get(pid).unwrap().killed, Some(KILLED_KILL), "{pid}");
+        }
+        assert_eq!(state(&t, blocked), State::Ready, "woken to end");
+        assert_eq!(t.get(init).unwrap().killed, None, "not process 1");
+        assert_eq!(t.get(zombie).unwrap().killed, None, "it has ended already");
+        assert_eq!(state(&t, zombie), State::Zombie(WaitStatus::exited(0)));
     }
 
     #[test]

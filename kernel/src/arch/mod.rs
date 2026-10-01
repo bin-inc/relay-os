@@ -9,6 +9,7 @@ pub mod idt;
 pub mod irq;
 pub mod lapic;
 pub mod pic;
+pub mod tlb;
 pub mod user;
 
 /// The machine, as `uname` names it.
@@ -30,13 +31,6 @@ pub fn wait_for_interrupt() {
         x86_64::instructions::hlt();
     } else {
         core::hint::spin_loop();
-    }
-}
-
-/// Waits for interrupts forever: the CPU sleeps between timer ticks.
-pub fn idle_forever() -> ! {
-    loop {
-        x86_64::instructions::interrupts::enable_and_hlt();
     }
 }
 

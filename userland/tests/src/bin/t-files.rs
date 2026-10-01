@@ -153,15 +153,22 @@ fn basic() -> Result<(), u16> {
     show_text("read after the child", &buf[..n]);
     sys::close(r)?;
 
-    // 32 fds at most.
+    // 32 fds at most; a kernel without the limit is stopped at 64.
     let mut last = 0;
-    let full = loop {
+    let mut full = None;
+    for _ in 0..64 {
         match sys::open(TMP, rw) {
             Ok(fd) => last = fd,
-            Err(e) => break e,
+            Err(e) => {
+                full = Some(e);
+                break;
+            }
         }
+    }
+    let _ = match full {
+        Some(e) => writeln!(Fd(1), "fds up to {last}, then {}", name(e)),
+        None => writeln!(Fd(1), "fds up to {last}, and no end"),
     };
-    let _ = writeln!(Fd(1), "fds up to {last}, then {}", name(full));
     for fd in 3..=last {
         sys::close(fd)?;
     }
@@ -194,7 +201,8 @@ fn dir() -> Result<(), u16> {
     let mut buf = [0u8; 40];
     let mut calls = 0;
     let _ = write!(Fd(1), "entries:");
-    loop {
+    // Five entries: a read_dir that never ends is stopped at 64 calls.
+    while calls < 64 {
         let n = sys::read_dir(d, &mut buf)?;
         if n == 0 {
             break;

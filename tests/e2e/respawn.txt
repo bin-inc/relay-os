@@ -3,7 +3,7 @@
 # shell ends it says how and starts another, in /root again, with no motd.
 # The third end within 10 s reaches the error screen, which waits for a
 # key typed after it came (not the LF of a terminal's CR LF before it),
-# and a key restarts the machine.
+# and a key restarts the machine. Every other process ends first.
 timeout 30
 expect \nWelcome to Relay OS\.\n
 expect root@relay:~# $
@@ -14,10 +14,14 @@ send echo alive
 expect \nalive\n
 send exit 3
 expect \ninit: /bin/sh \(pid \d+\) exited with 3; starting it again\nroot@relay:~# $
+# An orphan still running when the screen comes (t-spin 1) is killed
+# before it can print over it.
+send t-spawn orphan
 send-crlf exit
 expect \ninit: /bin/sh \(pid \d+\) exited with 0\n
 expect \*\*\* Relay OS cannot run its shell \*\*\*\n\n/bin/sh ended 3 times within 10 s\n\n--- last kernel log lines ---\n
 expect \nPress any key to reboot\.\n
+expect pid \d+ \(\S*t-spin\): killed: kill\n
 alive 2
 reset
 expect Relay OS \d+\.\d+\.\d+

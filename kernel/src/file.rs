@@ -155,10 +155,6 @@ impl OpenFile {
         self.write
     }
 
-    pub fn is_dir(&self) -> bool {
-        self.dir
-    }
-
     /// A removal freed the file's inode.
     pub fn mark_gone(&self) {
         self.state.lock().gone = true;
@@ -401,11 +397,18 @@ mod tests {
         );
         // What may be opened.
         let d = open(&mut t, b"/root", OPEN_READ | OPEN_DIRECTORY).unwrap();
-        assert!(d.is_dir() && d.is_readable() && !d.is_writable());
-        assert!(open(&mut t, b"/root", OPEN_READ).unwrap().is_dir());
+        assert!(d.is_readable() && !d.is_writable());
+        let mut buf = [0u8; 8];
+        assert_eq!(d.read(&mut t, &mut buf), Err(Errno::EISDIR), "a directory");
+        let d = open(&mut t, b"/root", OPEN_READ).unwrap();
+        assert_eq!(
+            d.read(&mut t, &mut buf),
+            Err(Errno::EISDIR),
+            "without DIRECTORY too"
+        );
         assert!(open(&mut t, b"/bin/prog", OPEN_READ).is_ok());
         let f = open(&mut t, b"/root/f", OPEN_WRITE | OPEN_CREATE).unwrap();
-        assert!(!f.is_readable() && f.is_writable() && !f.is_dir());
+        assert!(!f.is_readable() && f.is_writable());
         let r = open(&mut t, b"/root/f", OPEN_READ).unwrap();
         assert_eq!(read_all(&mut t, &r), b"hello");
     }
