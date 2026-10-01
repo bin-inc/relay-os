@@ -1,4 +1,6 @@
-//! `cat`, `head`, `tail` and `wc` (spec §7.3).
+//! `cat`, `head`, `tail` and `wc` (spec §7.3). Without a file they read
+//! standard input (user-space gate §9.1), which GNU calls `-` in its
+//! messages.
 
 use crate::ctx::{Ctx, getopt, outln, quote, quote_if_needed};
 use alloc::string::String;
@@ -35,14 +37,14 @@ fn stream(
     Ok(())
 }
 
-/// `cat file…`
+/// `cat [file…]`
 pub fn cat(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     let opts = match getopt(args, "", "") {
         Ok(o) => o,
         Err(e) => return ctx.fail("cat", format_args!("{e}")),
     };
     if opts.operands.is_empty() {
-        return ctx.fail("cat", format_args!("missing operand"));
+        return cat_input(ctx);
     }
     let mut status = 0;
     for op in &opts.operands {
@@ -71,6 +73,20 @@ pub fn cat(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
         }
     }
     status
+}
+
+/// `cat` of standard input, to its end, Ctrl-C or a write error (which the
+/// shell reports).
+fn cat_input(ctx: &mut Ctx<'_>) -> i32 {
+    let mut buf = vec![0; CHUNK];
+    while !ctx.interrupted() && !ctx.out_failed() {
+        match ctx.read_input(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => ctx.out(&buf[..n]),
+            Err(e) => return ctx.fail("cat", format_args!("-: {e}")),
+        }
+    }
+    0
 }
 
 /// The line count and the one file of `head`/`tail`: `[-n N] file`, also
@@ -342,7 +358,84 @@ mod tests {
             h.run("cat 'a b'"),
             (1, "cat: 'a b': No such file or directory\n".into())
         );
-        assert_eq!(h.run("cat"), (1, "cat: missing operand\n".into()));
+    }
+
+    #[test]
+    fn cat_without_a_file_copies_its_standard_input() {
+        let mut h = Harness::new();
+        h.stdin = b"typed\nlines".to_vec();
+        assert_eq!(h.run("cat"), (0, "typed\nlines".into()));
+        assert_eq!(h.run("cat"), (0, "".into()), "an input that has ended");
+        // With a file, standard input is not read.
+        h.stdin = b"unread".to_vec();
+        assert_eq!(h.run("cat /etc/hostname"), (0, "relay\n".into()));
+        // More than its buffer, into a file.
+        let big = numbered(20_000);
+        assert!(big.len() > 2 * super::CHUNK);
+        h.stdin = big.clone().into_bytes();
+        assert_eq!(h.run("cat > /tmp/copy"), (0, "".into()));
+        assert_eq!(h.get("/tmp/copy"), big.as_bytes());
+    }
+
+    #[test]
+    fn cat_of_standard_input_stops_at_ctrl_c_and_at_write_and_read_errors() {
+        let mut h = Harness::new();
+        h.stdin = numbered(20_000).into_bytes();
+        h.console.interrupt_after = Some(1);
+        assert_eq!(h.run("cat > /tmp/out"), (130, "^C\n".into()));
+        assert!(h.get("/tmp/out").len() <= super::CHUNK, "one piece at most");
+        let mut h = Harness::with_capacity(5 * 4096);
+        h.stdin = numbered(20_000).into_bytes();
+        assert_eq!(
+            h.run("cat > /tmp/out"),
+            (1, "cat: write error: No space left on device\n".into())
+        );
+        // Nor is the rest of the input read for nothing once the output
+        // cannot be written. (A hundred pieces, then the end: a cat that
+        // reads on fails the test instead of hanging it.)
+        struct Endless(usize);
+        impl crate::Stdin for Endless {
+            fn read(&mut self, buf: &mut [u8]) -> Result<usize, vfs::Errno> {
+                self.0 += 1;
+                if self.0 > 100 {
+                    return Ok(0);
+                }
+                buf.fill(b'x');
+                Ok(buf.len())
+            }
+        }
+        let (mut input, mut out) = (Endless(0), crate::testing::FakeStdout::file(None));
+        out.fail_after = Some((10_000, vfs::Errno::ENOSPC));
+        let io = crate::CommandIo {
+            vfs: &mut h.vfs,
+            console: &mut h.console,
+            system: &mut h.system,
+            stdin: &mut input,
+            stdout: &mut out,
+        };
+        assert_eq!(crate::run_command("cat", super::cat, &[], io), 1);
+        assert_eq!(input.0, 1, "one piece, then the write error");
+        h.console.take();
+        // A read that fails, as a program's fd 0 can.
+        struct Broken;
+        impl crate::Stdin for Broken {
+            fn read(&mut self, _: &mut [u8]) -> Result<usize, vfs::Errno> {
+                Err(vfs::Errno::EIO)
+            }
+        }
+        let mut out = crate::testing::FakeStdout::console();
+        let io = crate::CommandIo {
+            vfs: &mut h.vfs,
+            console: &mut h.console,
+            system: &mut h.system,
+            stdin: &mut Broken,
+            stdout: &mut out,
+        };
+        let status = crate::run_command("cat", super::cat, &[], io);
+        assert_eq!(
+            (status, h.console.take()),
+            (1, "cat: -: Input/output error\n".into())
+        );
     }
 
     #[test]

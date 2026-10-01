@@ -1,7 +1,8 @@
 //! What the shell needs from its surroundings besides files (spec §7.3).
 //! `relay-rt` implements `Console` and `System` over system calls; `xtask
 //! host-shell` over the host terminal; the tests over buffers. `Programs`
-//! is `/bin/sh`'s way to its commands.
+//! is `/bin/sh`'s way to its commands. `Stdin` is a command's standard
+//! input: a program's fd 0, or bytes in memory (`Bytes`).
 
 use alloc::vec::Vec;
 use relay_abi::WaitStatus;
@@ -50,6 +51,35 @@ pub trait System {
     fn reboot(&mut self, force: bool) -> Result<(), Errno>;
     /// Turns the machine off, as `reboot` restarts it.
     fn poweroff(&mut self, force: bool) -> Result<(), Errno>;
+}
+
+/// A command's standard input (user-space gate §9.1): a program's fd 0 (the
+/// console, in line mode, or a pipe), or bytes in memory.
+pub trait Stdin {
+    /// Reads some bytes into `buf`: how many, 0 at the end of the input.
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno>;
+}
+
+/// Standard input that is bytes in memory: what a test gives a command, or
+/// what the stage before wrote, in the in-process runner's pipelines.
+pub struct Bytes {
+    data: Vec<u8>,
+    at: usize,
+}
+
+impl Bytes {
+    pub fn new(data: Vec<u8>) -> Bytes {
+        Bytes { data, at: 0 }
+    }
+}
+
+impl Stdin for Bytes {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+        let n = buf.len().min(self.data.len() - self.at);
+        buf[..n].copy_from_slice(&self.data[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
+    }
 }
 
 /// A program's standard output, fd 1 (user-space gate §8.1): the console

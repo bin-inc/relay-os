@@ -3,7 +3,7 @@
 #![cfg(test)]
 
 use crate::Shell;
-use crate::io::{Console, MemInfo, Programs, Stdout, System};
+use crate::io::{Bytes, Console, MemInfo, Programs, Stdout, System};
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
@@ -444,6 +444,8 @@ pub struct Harness {
     pub system: TestSystem,
     pub programs: FakePrograms,
     pub spy: Rc<SpyState>,
+    /// The next command's standard input (in-process and as a program).
+    pub stdin: Vec<u8>,
 }
 
 impl Harness {
@@ -470,6 +472,7 @@ impl Harness {
             system: TestSystem::new(),
             programs: FakePrograms::new(),
             spy: state,
+            stdin: Vec::new(),
         }
     }
 
@@ -482,12 +485,16 @@ impl Harness {
             system: TestSystem::new(),
             programs: FakePrograms::new(),
             spy,
+            stdin: Vec::new(),
         }
     }
 
     /// Runs one command line; its exit status and everything it printed.
     pub fn run(&mut self, line: &str) -> (i32, String) {
-        let status = Shell::new(&mut self.vfs, &mut self.console, &mut self.system).execute(line);
+        let mut input = Bytes::new(core::mem::take(&mut self.stdin));
+        let status = Shell::new(&mut self.vfs, &mut self.console, &mut self.system)
+            .with_input(&mut input)
+            .execute(line);
         (status, self.console.take())
     }
 
@@ -513,10 +520,13 @@ impl Harness {
             &words[0],
             crate::commands::find(&words[0]).unwrap().run,
             &words[1..],
-            &mut self.vfs,
-            &mut self.console,
-            &mut self.system,
-            stdout,
+            crate::CommandIo {
+                vfs: &mut self.vfs,
+                console: &mut self.console,
+                system: &mut self.system,
+                stdin: &mut Bytes::new(core::mem::take(&mut self.stdin)),
+                stdout,
+            },
         );
         (status, self.console.take())
     }

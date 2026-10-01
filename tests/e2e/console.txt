@@ -19,6 +19,17 @@ type abc{ctrl-d}
 expect abc\[3\] abc\n
 type {ctrl-d}
 expect end of input\nroot@relay:~# $
+# cat without a file reads its standard input, the console: a line at a
+# time, each echoed as typed and printed when Enter ends it, until Ctrl-D
+# (milestone 3).
+send cat
+alive 1
+key first line
+expect \nfirst line\nfirst line\n
+key second
+expect second\nsecond\n
+type {ctrl-d}
+expect root@relay:~# $
 # Typed while a program does not read: echoed at once, and the shell's
 # afterwards, as in bash.
 send t-spin 2

@@ -14,7 +14,7 @@ use relay_abi::info::LOG_MAX;
 use relay_abi::power::{POWER_FORCE, POWER_POWEROFF, POWER_REBOOT};
 use relay_abi::spawn::{FOREGROUND, NEW_GROUP};
 use relay_abi::{FdMap, WaitStatus};
-use shell::{Console, MemInfo, Programs, Stdout, System};
+use shell::{Console, MemInfo, Programs, Stdin, Stdout, System};
 use vfs::{Errno, Node};
 
 /// The console: what is typed on fd 0, and the screen on fd 2 (a
@@ -127,6 +127,16 @@ impl System for SysSystem {
             POWER_POWEROFF,
             power_flags(force),
         )))
+    }
+}
+
+/// Standard input: fd 0, the console (in line mode, as the shell gives it
+/// to its command) or a pipe.
+pub struct SysStdin;
+
+impl Stdin for SysStdin {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+        sys::read(0, buf).map_err(Errno::from_number)
     }
 }
 
@@ -269,15 +279,14 @@ pub fn words(args: &Args) -> Vec<String> {
 /// command `name`, whose function is `run`, with the program's arguments,
 /// printing exactly what it prints in the shell; its exit status.
 pub fn run_command(name: &str, run: shell::commands::Run, args: &Args) -> u8 {
-    let status = shell::run_command(
-        name,
-        run,
-        &words(args),
-        &mut SysVfs::new(),
-        &mut SysConsole::new(),
-        &mut SysSystem,
-        &mut SysStdout::new(),
-    );
+    let io = shell::CommandIo {
+        vfs: &mut SysVfs::new(),
+        console: &mut SysConsole::new(),
+        system: &mut SysSystem,
+        stdin: &mut SysStdin,
+        stdout: &mut SysStdout::new(),
+    };
+    let status = shell::run_command(name, run, &words(args), io);
     status as u8
 }
 

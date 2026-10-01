@@ -7,7 +7,7 @@
 
 use crate::commands::{self, Builtin, Script};
 use crate::ctx::Ctx;
-use crate::io::{Console, Programs, System};
+use crate::io::{Console, Programs, Stdin, System};
 use crate::killed;
 use crate::parser::Redirect;
 use crate::shell::{CANCELLED, CANNOT_RUN, NAME, NOT_FOUND};
@@ -28,6 +28,8 @@ pub(crate) struct Parts<'s> {
     pub in_script: bool,
     /// The last command's exit status, for `exit`.
     pub status: i32,
+    /// Standard input for a command run in the shell's process.
+    pub input: Option<&'s mut dyn Stdin>,
 }
 
 /// How a command went.
@@ -206,6 +208,9 @@ pub(crate) fn run_function(
     file: Option<(Node, u64)>,
 ) -> Ran {
     let mut ctx = Ctx::new(parts.vfs, parts.system, parts.console, file);
+    if let Some(input) = parts.input {
+        ctx.set_input(input);
+    }
     ctx.in_script = parts.in_script;
     ctx.status = parts.status;
     ctx.transcript = parts.transcript.take();

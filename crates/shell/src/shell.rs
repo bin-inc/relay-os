@@ -5,7 +5,7 @@
 use crate::commands::{self, Script};
 use crate::ctx::{Ctx, quote_if_needed};
 use crate::editor::{Feed, LineEditor};
-use crate::io::{Console, Programs, Stdout, System};
+use crate::io::{Console, Programs, Stdin, Stdout, System};
 use crate::parser::{self, HOME};
 use crate::runner::{self, Parts, Ran, Runners};
 use crate::transcript::{self, Transcript};
@@ -41,6 +41,10 @@ pub struct Shell<'a> {
     in_script: bool,
     /// Where a running script's screen output is copied.
     transcript: Option<Transcript>,
+    /// The in-process runner's standard input for its commands (a test's
+    /// bytes); without it the input ends at once (`host-shell`). A
+    /// spawning shell's commands read its fd 0 instead.
+    input: Option<&'a mut dyn Stdin>,
 }
 
 impl<'a> Shell<'a> {
@@ -84,7 +88,14 @@ impl<'a> Shell<'a> {
             exited: false,
             in_script: false,
             transcript: None,
+            input: None,
         }
+    }
+
+    /// The same shell, its in-process commands reading `input`.
+    pub fn with_input(mut self, input: &'a mut dyn Stdin) -> Shell<'a> {
+        self.input = Some(input);
+        self
     }
 
     /// The exit status of the last command.
@@ -169,6 +180,10 @@ impl<'a> Shell<'a> {
             transcript: &mut self.transcript,
             in_script: self.in_script,
             status: self.status,
+            input: match &mut self.input {
+                Some(input) => Some(&mut **input),
+                None => None,
+            },
         };
         let ran = match cmd.words.split_first() {
             Some((name, args)) => match commands::builtin(name) {

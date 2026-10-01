@@ -23,7 +23,7 @@ pub mod time;
 mod transcript;
 
 pub use ctx::Ctx;
-pub use io::{Console, MemInfo, Programs, Stdout, System};
-pub use program::run_command;
+pub use io::{Bytes, Console, MemInfo, Programs, Stdin, Stdout, System};
+pub use program::{CommandIo, run_command};
 pub use shell::Shell;
 pub use vfs::Vfs;
