@@ -21,8 +21,11 @@ pub fn jobs(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     control.collect();
     let (named, unknown): (Vec<_>, Vec<_>) = args
         .iter()
-        .map(|a| (a, number(a.strip_prefix('%').unwrap_or(a))))
-        .partition(|(_, n)| n.is_some_and(|n| control.jobs.has(n)));
+        .map(|a| match a.strip_prefix('%') {
+            Some(spec) => (a, control.jobs.spec(spec)),
+            None => (a, number(a).filter(|&n| control.jobs.has(n))),
+        })
+        .partition(|(_, n)| n.is_some());
     let named: Vec<u32> = named.into_iter().filter_map(|(_, n)| n).collect();
     let lines = if args.is_empty() {
         control.jobs.list(None)
@@ -104,7 +107,7 @@ pub fn wait(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
             break;
         };
         let job = match (a.strip_prefix('%'), number(a)) {
-            (Some(n), _) => match number(n).filter(|&n| control.jobs.has(n)) {
+            (Some(spec), _) => match control.jobs.spec(spec) {
                 Some(n) => Some((n, control.jobs.running(n))),
                 None => {
                     ctx.fail(NAME, format_args!("wait: {a}: no such job"));
@@ -176,7 +179,8 @@ fn signal(spec: &str) -> Result<(), &'static str> {
     let name = upper.strip_prefix("SIG").unwrap_or(&upper);
     match (name, number(name)) {
         ("KILL", _) | (_, Some(9)) => Ok(()),
-        (_, Some(1..=64)) => Err("not supported"),
+        // Signal 0 tests that a process exists, in bash's kill.
+        (_, Some(0..=64)) => Err("not supported"),
         (n, None) if SIGNALS.contains(&n) => Err("not supported"),
         _ => Err("invalid signal specification"),
     }
@@ -204,6 +208,10 @@ pub fn kill(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
                 targets = rest;
                 break;
             }
+            // bash lists the signals; there is one here.
+            [l, ..] if l == "-l" || l == "-L" => {
+                return ctx.fail(NAME, format_args!("kill: {l}: not supported"));
+            }
             [spec, rest @ ..] if spec.len() > 1 && spec.starts_with('-') => {
                 if let Err(why) = signal(&spec[1..]) {
                     return ctx.fail(NAME, format_args!("kill: {}: {why}", &spec[1..]));
@@ -227,7 +235,7 @@ pub fn kill(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
                 let pgid = ctx
                     .control
                     .as_ref()
-                    .and_then(|c| number(n).and_then(|n| c.jobs.pgid(n)));
+                    .and_then(|c| c.jobs.spec(n).and_then(|n| c.jobs.pgid(n)));
                 match pgid {
                     Some(pgid) => -i64::from(pgid),
                     None => {
@@ -682,5 +690,56 @@ mod tests {
             "{out}"
         );
         assert_eq!(status, 1);
+    }
+
+    #[test]
+    fn the_current_and_previous_jobs_are_named_as_bash_names_them() {
+        let mut h = with_jobs();
+        let out = typed(
+            &mut h,
+            &[
+                "t-spin &",
+                "t-spin 2 &",
+                "jobs %%",
+                "jobs %-",
+                "jobs %+ %",
+                "kill %-",
+                "",
+                "wait %%",
+            ],
+        );
+        let line2 = "[2]+  Running                 t-spin 2 &\n";
+        assert!(out.contains(&alloc::format!("# jobs %%\n{line2}")), "{out}");
+        assert!(
+            out.contains("# jobs %-\n[1]-  Running                 t-spin &\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains(&alloc::format!("# jobs %+ %\n{line2}{line2}")),
+            "{out}"
+        );
+        assert!(out.contains("# kill %-\n"), "{out}");
+        assert_eq!(h.programs.kills, [-101], "the previous job's group");
+        assert!(
+            out.contains("# wait %%\n[2]+  Done                    t-spin 2\n"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn kill_s_signal_0_and_list_are_not_supported() {
+        let mut h = with_jobs();
+        for (line, said) in [
+            ("kill -0 5", "kill: 0: not supported"),
+            ("kill -l", "kill: -l: not supported"),
+            ("kill -L", "kill: -L: not supported"),
+        ] {
+            assert_eq!(
+                h.spawning(line),
+                (1, alloc::format!("relay-sh: {said}\n")),
+                "{line}"
+            );
+        }
+        assert!(h.programs.kills.is_empty());
     }
 }

@@ -101,6 +101,18 @@ impl Jobs {
         false
     }
 
+    /// The job a job spec names, its `%` taken off (bash's): a number;
+    /// nothing, `%` or `+` for the current job, the newest; `-` for the
+    /// previous one, the one before it, or the newest when it is alone.
+    pub fn spec(&self, spec: &str) -> Option<u32> {
+        let newest = |k: usize| self.jobs.len().checked_sub(k).map(|i| self.jobs[i].number);
+        match spec {
+            "" | "%" | "+" => newest(1),
+            "-" => newest(2).or_else(|| newest(1)),
+            n => number(n).filter(|&n| self.has(n)),
+        }
+    }
+
     /// Whether job `number` is in the table.
     pub fn has(&self, number: u32) -> bool {
         self.find(number).is_some()
@@ -404,6 +416,22 @@ mod tests {
         j.ended(40, WaitStatus::exited(0));
         assert!(j.report_killed().is_empty(), "it exited");
         assert!(!j.has(a) && j.has(b));
+    }
+
+    #[test]
+    fn a_job_spec_names_a_number_or_the_current_or_previous_job() {
+        let mut j = Jobs::new();
+        assert_eq!(j.spec("%"), None, "no job at all");
+        j.add(70, &[70], "a");
+        assert_eq!((j.spec(""), j.spec("-")), (Some(1), Some(1)), "alone, both");
+        j.add(71, &[71], "b");
+        j.add(72, &[72], "c");
+        for (spec, number) in [("", 3), ("%", 3), ("+", 3), ("-", 2), ("1", 1), ("3", 3)] {
+            assert_eq!(j.spec(spec), Some(number), "{spec:?}");
+        }
+        for spec in ["4", "0", "x", "-1", "++"] {
+            assert_eq!(j.spec(spec), None, "{spec:?}");
+        }
     }
 
     #[test]
