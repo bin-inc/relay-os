@@ -5,6 +5,7 @@
 use crate::commands::{self, SCRIPT_MAX, Script};
 use crate::ctx::{Ctx, JobControl, quote_if_needed};
 use crate::editor::{Feed, LineEditor};
+use crate::expand::{self, Vars};
 use crate::io::{Console, Programs, Stdin, Stdout, System};
 use crate::jobs::Jobs;
 use crate::parser::{self, HOME};
@@ -52,6 +53,8 @@ pub struct Shell<'a> {
     /// when it starts one, and how jobs ended before each prompt. A script
     /// and `X | sh` say neither, as bash's do.
     prompting: bool,
+    /// Its variables and arguments (spec §9.4).
+    vars: Vars,
 }
 
 impl<'a> Shell<'a> {
@@ -98,6 +101,7 @@ impl<'a> Shell<'a> {
             input: None,
             jobs: Jobs::new(),
             prompting: false,
+            vars: Vars::new(NAME),
         }
     }
 
@@ -180,20 +184,42 @@ impl<'a> Shell<'a> {
     /// status. Every command is followed by a sync, so its changes are on
     /// the disk when the prompt comes back.
     pub fn execute(&mut self, line: &str) -> i32 {
-        let mut pipeline = match parser::parse_line(line) {
+        let typed = match parser::parse_line(line) {
+            Ok(typed) => typed,
+            Err(e) => return self.finish(SYNTAX, format!("{NAME}: {e}\n")),
+        };
+        if typed.is_blank() {
+            return self.status;
+        }
+        let assigns = typed
+            .pipeline
+            .iter()
+            .find_map(|c| c.words.first().filter(|w| w.assignment().is_some()));
+        if let Some(first) = assigns {
+            // Alone on its line; bash's changes nothing elsewhere.
+            let place = match (&typed.background, typed.pipeline.len()) {
+                (Some(_), _) => "the background",
+                (None, 1) => return self.assign(&typed.pipeline[0]),
+                (None, _) => "a pipeline",
+            };
+            let message = format!("{NAME}: {}: cannot be used in {place}\n", first.typed);
+            return self.finish(1, message);
+        }
+        let mut pipeline = match expand::expand(&typed, &self.vars, self.status) {
             Ok(parser::Line {
                 pipeline,
                 background: Some(text),
             }) => return self.background(&pipeline, &text),
             Ok(line) => line.pipeline,
-            Err(e) => return self.finish(SYNTAX, format!("{NAME}: {e}\n")),
+            Err(e) => return self.finish(1, format!("{NAME}: {e}\n")),
         };
         if pipeline.len() > 1 {
             return self.pipeline(&pipeline);
         }
         let cmd = pipeline.remove(0);
         if cmd.words.is_empty() && cmd.redirect.is_none() {
-            return self.status;
+            // Its words expanded to nothing: bash's status 0.
+            return self.finish(0, String::new());
         }
         let parts = Parts {
             vfs: &mut *self.vfs,
@@ -240,14 +266,35 @@ impl<'a> Shell<'a> {
         self.finish(status, ran.message)
     }
 
+    /// A line of assignments (spec §9.4): each sets its variable in turn,
+    /// so a later one reads an earlier one, and the status is 0. A
+    /// redirection after them makes its file, as bash's does.
+    fn assign(&mut self, cmd: &parser::Command<parser::Word>) -> i32 {
+        for (name, value) in cmd.words.iter().filter_map(parser::Word::assignment) {
+            let set =
+                expand::value(&value, &self.vars, self.status).and_then(|v| self.vars.set(name, v));
+            if let Err(e) = set {
+                return self.finish(1, format!("{NAME}: {e}\n"));
+            }
+        }
+        let redirect = match cmd.redirect.as_ref() {
+            Some(r) => match expand::redirect(r, &self.vars, self.status) {
+                Ok(r) => Some(r),
+                Err(e) => return self.finish(1, format!("{NAME}: {e}\n")),
+            },
+            None => None,
+        };
+        match runner::redirect_to(&mut *self.vfs, redirect.as_ref()) {
+            Ok(_) => self.finish(0, String::new()),
+            Err(ran) => self.finish(ran.status, ran.message),
+        }
+    }
+
     /// Runs a pipeline (user-space gate §9.1): its status is the last
     /// command's. The shell's own commands cannot be in one.
     fn pipeline(&mut self, stages: &[parser::Command]) -> i32 {
-        let builtin = stages
-            .iter()
-            .find(|c| commands::builtin(&c.words[0]).is_some());
-        if let Some(c) = builtin {
-            let ran = runner::in_a_pipeline(&c.words[0]);
+        if let Some(name) = builtin_in(stages) {
+            let ran = runner::in_a_pipeline(name);
             return self.finish(ran.status, ran.message);
         }
         let parts = Parts {
@@ -271,11 +318,7 @@ impl<'a> Shell<'a> {
     /// last process>`. Its status is 0 once anything of it started. The
     /// shell's own commands cannot be in one.
     fn background(&mut self, stages: &[parser::Command], text: &str) -> i32 {
-        let builtin = stages
-            .iter()
-            .find(|c| commands::builtin(&c.words[0]).is_some());
-        if let Some(c) = builtin {
-            let name = &c.words[0];
+        if let Some(name) = builtin_in(stages) {
             let message = format!("{NAME}: {name}: cannot be used in the background\n");
             return self.finish(1, message);
         }
@@ -457,8 +500,9 @@ impl<'a> Shell<'a> {
         self.in_script = true;
         let mut status = 0;
         for line in text.lines() {
-            if matches!(parser::parse(line), Ok(p) if p.len() == 1 && p[0].words.is_empty() && p[0].redirect.is_none())
-            {
+            // Blank as typed: one whose words expand to nothing is traced
+            // and runs.
+            if parser::parse_line(line).is_ok_and(|l| l.is_blank()) {
                 continue;
             }
             if self.console.interrupted() {
@@ -497,6 +541,16 @@ impl<'a> Shell<'a> {
             self.say(format!("{NAME}: sync failed: {e}\n").as_bytes());
         }
     }
+}
+
+/// The name of the first of `stages` that is one of the shell's own
+/// commands (a command whose words expanded to nothing is none).
+fn builtin_in(stages: &[parser::Command]) -> Option<&str> {
+    stages
+        .iter()
+        .filter_map(|c| c.words.first())
+        .find(|name| commands::builtin(name).is_some())
+        .map(String::as_str)
 }
 
 #[cfg(test)]
@@ -949,6 +1003,233 @@ mod tests {
             (1, "sh: /tmp/nope.sh: No such file or directory\n".into())
         );
         assert!(h.programs.spawned.is_empty() && h.programs.pushed.is_empty());
+    }
+
+    #[test]
+    fn dollar_question_is_the_last_line_s_status() {
+        let mut h = Harness::new();
+        // What bash prints for each.
+        assert_eq!(
+            h.lines(&["nope", "echo $?", "echo \"$?\"", "echo 'open", "echo ${?}"]),
+            (
+                0,
+                "relay-sh: nope: command not found\n127\n0\n\
+                 relay-sh: syntax error: unterminated quote\n2\n"
+                    .into()
+            )
+        );
+        // A pipeline's is its last command's; a blank line keeps it.
+        assert_eq!(
+            h.lines(&["cat /nope | wc -l", "echo $?", "cat /nope", "", "echo $?"]),
+            (
+                0,
+                "cat: /nope: No such file or directory\n0\n0\n\
+                 cat: /nope: No such file or directory\n1\n"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn the_shell_has_no_arguments_and_no_variables_set() {
+        let mut h = Harness::new();
+        // bash's `$0` is its own name; this shell's is `relay-sh` in the
+        // in-process runner. bash sets `HOME` and others: no variable is
+        // set here.
+        assert_eq!(
+            h.run(r#"echo $0 $# [$1] [$@] [$HOME] "[$UNSET]""#),
+            (0, "relay-sh 0 [] [] [] []\n".into())
+        );
+        let mut h = spawning();
+        h.spawning(r#"t-args $? "$E" $E ${E}x "~/$E" ~/$E"#);
+        assert_eq!(
+            h.programs.spawned[0].args,
+            ["t-args", "0", "", "x", "~/", "/root/"]
+        );
+    }
+
+    #[test]
+    fn a_line_that_does_not_expand_runs_nothing() {
+        let mut h = Harness::new();
+        assert_eq!(
+            h.run("echo hi > ${1A}"),
+            (1, "relay-sh: ${1A}: bad substitution\n".into())
+        );
+        // bash's: an unquoted target that is no word.
+        assert_eq!(
+            h.run("echo hi > $NONE"),
+            (1, "relay-sh: $NONE: ambiguous redirect\n".into())
+        );
+        assert_eq!(
+            h.run(r#"echo hi > "$NONE""#),
+            (1, "relay-sh: : No such file or directory\n".into())
+        );
+        let mut h = spawning();
+        assert_eq!(
+            h.spawning("t-args | t-args > $NONE"),
+            (1, "relay-sh: $NONE: ambiguous redirect\n".into())
+        );
+        assert!(h.programs.spawned.is_empty(), "nothing of it started");
+    }
+
+    #[test]
+    fn a_command_that_expands_to_nothing_runs_nothing() {
+        let mut h = Harness::new();
+        // bash's: status 0, and a redirection alone still makes its file.
+        assert_eq!(h.lines(&["nope", "$E"]).0, 0);
+        assert_eq!(h.run("$E ${E} > /tmp/f"), (0, "".into()));
+        assert!(h.exists("/tmp/f"));
+        // In a pipeline it reads nothing and gives the next one nothing.
+        assert_eq!(h.run("$E | wc -c"), (0, "0\n".into()));
+        assert_eq!(h.run("echo hi | $E"), (0, "".into()));
+        assert_eq!(h.run("echo hi | $E | $E > /tmp/g"), (0, "".into()));
+        assert_eq!(h.get("/tmp/g"), b"");
+        // A script traces it and runs it.
+        h.put("/tmp/s.sh", b"nope\n$E\necho $?\n");
+        assert_eq!(
+            h.run("sh /tmp/s.sh"),
+            (
+                0,
+                "+ nope\nrelay-sh: nope: command not found\n+ $E\n+ echo $?\n0\n".into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_program_s_neighbour_that_expands_to_nothing_is_an_end() {
+        let mut h = spawning();
+        assert_eq!(h.spawning("$E | t-args"), (3, "".into()));
+        let s = &h.programs.spawned[0];
+        assert_eq!((s.args.len(), s.group), (1, crate::Group::New));
+        let (r, w) = h.programs.pipes[0];
+        assert_eq!(s.stdin, Some(r), "the pipe it reads");
+        assert!(h.programs.closed.contains(&w), "with no writer");
+        assert_eq!(h.spawning("t-args | $E > /tmp/o"), (0, "".into()));
+        let (path, append, fd) = h.programs.opened.last().unwrap();
+        assert_eq!(
+            (path.as_str(), *append),
+            ("/tmp/o", false),
+            "made, as bash's"
+        );
+        assert!(h.programs.closed.contains(fd));
+        // In the background: no job, or one of what started.
+        let mut h = with_jobs();
+        let out = typed(&mut h, &["$E &", "$E | sleep 1 &", ""]);
+        assert!(
+            out.starts_with("root@relay:/# $E &\nroot@relay:/# $E | sleep 1 &\n[1] 101\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("[1]+  Done                    $E | sleep 1\n"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn an_assignment_sets_a_variable_for_the_lines_after_it() {
+        let mut h = Harness::new();
+        // What bash prints for each.
+        assert_eq!(
+            h.lines(&[
+                "A=1 B=$A C=",
+                "echo $A $B [$C] \"[$C]\"",
+                "nope",
+                "D=$? E=\"a  b\" F=~/x",
+                "echo $? $D \"$E\" $F",
+                "A=${A}2",
+                "echo $A",
+            ]),
+            (
+                0,
+                "1 1 [] []\nrelay-sh: nope: command not found\n0 127 a  b /root/x\n12\n".into()
+            )
+        );
+        // A value with blanks stays one word (bash would split it).
+        let mut h = spawning();
+        let mut shell = Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs);
+        shell.execute("A='a b' P=t-args");
+        assert_eq!(shell.execute("$P $A"), 3);
+        assert_eq!(h.programs.spawned[0].args, ["t-args", "a b"]);
+    }
+
+    #[test]
+    fn a_variable_may_name_a_built_in() {
+        let mut h = Harness::new();
+        assert_eq!(
+            h.lines(&["C=cd D=/etc", "$C $D", "pwd"]),
+            (0, "/etc\n".into())
+        );
+    }
+
+    #[test]
+    fn an_assignment_with_a_redirection_makes_its_file() {
+        let mut h = Harness::new();
+        // bash's: the variable is set even when the file cannot be made.
+        assert_eq!(h.lines(&["A=1 > /tmp/f", "echo $A"]), (0, "1\n".into()));
+        assert!(h.exists("/tmp/f"));
+        assert_eq!(
+            h.lines(&["B=2 > /nope/f", "echo $? $B"]),
+            (
+                0,
+                "relay-sh: /nope/f: No such file or directory\n1 2\n".into()
+            )
+        );
+        assert_eq!(
+            h.lines(&["B=3 > $NONE", "echo $? $B"]),
+            (0, "relay-sh: $NONE: ambiguous redirect\n1 3\n".into())
+        );
+    }
+
+    #[test]
+    fn an_assignment_cannot_be_in_a_pipeline_or_the_background() {
+        // bash runs it in a shell of its own there, so it sets nothing.
+        let mut h = spawning();
+        for (line, said) in [
+            ("A=1 | t-args", "A=1: cannot be used in a pipeline"),
+            ("t-args | A='x y'", "A='x y': cannot be used in a pipeline"),
+            ("A=1 &", "A=1: cannot be used in the background"),
+            (
+                "A=1 B=2 | t-args &",
+                "A=1: cannot be used in the background",
+            ),
+        ] {
+            assert_eq!(
+                h.spawning(line),
+                (1, alloc::format!("relay-sh: {said}\n")),
+                "{line}"
+            );
+        }
+        assert!(h.programs.spawned.is_empty(), "nothing of it ran");
+        // A word that is no assignment is a command, as in bash.
+        assert_eq!(
+            h.run("1A=x"),
+            (127, "relay-sh: 1A=x: command not found\n".into())
+        );
+    }
+
+    #[test]
+    fn a_line_beyond_the_limits_runs_nothing() {
+        let mut h = spawning();
+        let big = "x".repeat(40_000);
+        let mut shell = Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs);
+        assert_eq!(shell.execute(&alloc::format!("A={big}")), 0);
+        assert_eq!(shell.execute(&alloc::format!("B={big} C=1")), 1);
+        assert_eq!(shell.execute("t-args $A $A"), 1);
+        assert_eq!(
+            h.console.take(),
+            "relay-sh: B: the variables would hold more than 64 KiB\n\
+             relay-sh: the line would expand to more than 64 KiB\n"
+        );
+        assert!(h.programs.spawned.is_empty(), "nothing started");
+        let mut shell = Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs);
+        shell.execute(&alloc::format!("A={big}"));
+        shell.execute(&alloc::format!("B={big} C=1"));
+        shell.execute(r#"t-args "[$B$C]""#);
+        assert_eq!(
+            h.programs.spawned[0].args,
+            ["t-args", "[]"],
+            "neither B nor what came after it"
+        );
     }
 
     #[test]

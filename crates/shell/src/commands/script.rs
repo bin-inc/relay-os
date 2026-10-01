@@ -193,6 +193,25 @@ mod tests {
     }
 
     #[test]
+    fn a_substitution_of_any_character_fails_only_its_line() {
+        // The review found it panicking the shell before the line's trace.
+        let mut h = Harness::new();
+        h.put(
+            "/tmp/s.sh",
+            "echo before\necho \"${…}\"\necho after\n".as_bytes(),
+        );
+        assert_eq!(
+            h.run("sh /tmp/s.sh"),
+            (
+                0,
+                "+ echo before\nbefore\n+ echo \"${…}\"\nrelay-sh: ${…}: bad substitution\n\
+                 + echo after\nafter\n"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
     fn every_line_is_synced_as_it_starts_and_ends() {
         // The trace reaches the disk before the command runs, so a machine
         // that hangs in it leaves the command's name in the transcript.

@@ -630,6 +630,19 @@ impl Harness {
         (status, self.console.take())
     }
 
+    /// Runs `lines` one after another in one shell, as if typed (no
+    /// prompt); the last one's status and everything they printed.
+    pub fn lines(&mut self, lines: &[&str]) -> (i32, String) {
+        let mut input = Bytes::new(core::mem::take(&mut self.stdin));
+        let mut shell =
+            Shell::new(&mut self.vfs, &mut self.console, &mut self.system).with_input(&mut input);
+        let mut status = 0;
+        for line in lines {
+            status = shell.execute(line);
+        }
+        (status, self.console.take())
+    }
+
     /// Runs one command line in a spawning shell (`/bin/sh`'s); its exit
     /// status and what the shell printed.
     pub fn spawning(&mut self, line: &str) -> (i32, String) {
