@@ -262,7 +262,7 @@ fn braced(cur: &mut Cursor<'_>) -> Result<Param, ParseError> {
     let head = match inside.chars().next() {
         Some(c) if starts_name(c) => inside.find(|c| !in_name(c)),
         Some('0'..='9') => inside.find(|c: char| !c.is_ascii_digit()),
-        Some(_) => Some(1),
+        Some(c) => Some(c.len_utf8()),
         None => return Ok(Param::Bad(typed)),
     }
     .unwrap_or(inside.len());
@@ -690,6 +690,21 @@ mod tests {
                 [Piece::Param(Param::All, false)],
                 [Piece::Param(Param::Status, false)],
             ]
+        );
+    }
+
+    #[test]
+    fn a_substitution_starting_with_any_character_is_read_whole() {
+        // The review found `${é}` panicking the shell (a multi-byte
+        // character cut in two); bash's `bad substitution`.
+        let bad = |t: &str| vec![Piece::Param(Param::Bad(t.into()), false)];
+        assert_eq!(
+            pieces("${é} ${€x} ${ é}"),
+            [bad("${é}"), bad("${€x}"), bad("${ é}")]
+        );
+        assert_eq!(
+            pieces("\"${…}\""),
+            [vec![Piece::Param(Param::Bad("${…}".into()), true)]]
         );
     }
 

@@ -281,6 +281,7 @@ mod tests {
             ("echo \"${}\"", "${}"),
             ("echo ${ A}", "${ A}"),
             ("echo ${A B}", "${A B}"),
+            ("echo ${é}", "${é}"),
         ] {
             let e = words(line, &v).unwrap_err();
             assert_eq!(e, Error::BadSubstitution(typed.into()), "{line}");
