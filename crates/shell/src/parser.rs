@@ -44,6 +44,14 @@ pub struct Line<W = String> {
     pub background: Option<String>,
 }
 
+impl<W> Line<W> {
+    /// Nothing but blanks or a comment was typed.
+    pub fn is_blank(&self) -> bool {
+        matches!(&self.pipeline[..], [c] if c.words.is_empty() && c.redirect.is_none())
+            && self.background.is_none()
+    }
+}
+
 /// One command: its words and where its output goes. The parser gives
 /// them as typed ([`Word`]), and expansion as the strings a command gets.
 #[derive(Clone, Debug, PartialEq, Eq)]

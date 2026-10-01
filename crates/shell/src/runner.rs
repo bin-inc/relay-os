@@ -139,11 +139,15 @@ impl Runner for InProcess {
     }
 
     /// Each stage runs to its end before the next starts, its output kept
-    /// as the next one's input; a stage that is not found says so and
-    /// gives the next one nothing, as bash's does. Ctrl-C stops the rest.
+    /// as the next one's input; a stage that is not found, or whose words
+    /// expanded to nothing, gives the next one nothing, as bash's does (the
+    /// first says so). Ctrl-C stops the rest.
     fn pipeline(&mut self, parts: Parts<'_>, stages: &[Command]) -> Ran {
         // `sh` reads a script for this shell to run after the command.
-        if stages.iter().any(|c| c.words[0] == "sh") {
+        if stages
+            .iter()
+            .any(|c| c.words.first().is_some_and(|w| w == "sh"))
+        {
             return in_a_pipeline("sh");
         }
         let Parts {
@@ -158,8 +162,11 @@ impl Runner for InProcess {
         let (last, before) = stages.split_last().expect("a pipeline has stages");
         let mut piped: Option<Bytes> = None;
         for stage in before {
-            let (name, args) = (&stage.words[0], &stage.words[1..]);
             let mut out = Collected(Vec::new());
+            let Some((name, args)) = stage.words.split_first() else {
+                piped = Some(Bytes::new(out.0));
+                continue;
+            };
             if let Some(command) = commands::find(name) {
                 let mut ctx = Ctx::program(&mut *vfs, &mut *system, &mut *console, &mut out);
                 match (&mut piped, &mut input) {
@@ -185,6 +192,12 @@ impl Runner for InProcess {
             piped = Some(Bytes::new(out.0));
         }
         let mut piped = piped.expect("a stage before the last");
+        let Some((name, args)) = last.words.split_first() else {
+            return match redirect_to(&mut *vfs, last.redirect.as_ref()) {
+                Ok(_) => Ran::said(0, String::new()),
+                Err(ran) => ran,
+            };
+        };
         let parts = Parts {
             vfs,
             console,
@@ -194,12 +207,7 @@ impl Runner for InProcess {
             status,
             input: Some(&mut piped),
         };
-        self.run(
-            parts,
-            &last.words[0],
-            &last.words[1..],
-            last.redirect.as_ref(),
-        )
+        self.run(parts, name, args, last.redirect.as_ref())
     }
 
     fn background(&mut self, _: Parts<'_>, _: &[Command]) -> Started {
@@ -391,9 +399,17 @@ impl Spawning<'_> {
                     }
                 }
             };
-            let name = &stage.words[0];
+            let Some((name, args)) = stage.words.split_first() else {
+                // Its words expanded to nothing: it runs nothing, and its
+                // neighbours see an end.
+                for fd in [stdin, stdout].into_iter().flatten() {
+                    self.programs.close(fd);
+                }
+                stdin = next;
+                continue;
+            };
             let mut argv: Vec<&[u8]> = alloc::vec![name.as_bytes()];
-            argv.extend(stage.words[1..].iter().map(|w| w.as_bytes()));
+            argv.extend(args.iter().map(|w| w.as_bytes()));
             let group = match (in_script, background, first) {
                 (_, true, None) => Group::Background,
                 (true, false, _) => Group::Shell,

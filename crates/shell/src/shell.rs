@@ -188,6 +188,9 @@ impl<'a> Shell<'a> {
             Ok(typed) => typed,
             Err(e) => return self.finish(SYNTAX, format!("{NAME}: {e}\n")),
         };
+        if typed.is_blank() {
+            return self.status;
+        }
         let mut pipeline = match expand::expand(&typed, &self.vars, self.status) {
             Ok(parser::Line {
                 pipeline,
@@ -201,7 +204,8 @@ impl<'a> Shell<'a> {
         }
         let cmd = pipeline.remove(0);
         if cmd.words.is_empty() && cmd.redirect.is_none() {
-            return self.status;
+            // Its words expanded to nothing: bash's status 0.
+            return self.finish(0, String::new());
         }
         let parts = Parts {
             vfs: &mut *self.vfs,
@@ -251,11 +255,8 @@ impl<'a> Shell<'a> {
     /// Runs a pipeline (user-space gate §9.1): its status is the last
     /// command's. The shell's own commands cannot be in one.
     fn pipeline(&mut self, stages: &[parser::Command]) -> i32 {
-        let builtin = stages
-            .iter()
-            .find(|c| commands::builtin(&c.words[0]).is_some());
-        if let Some(c) = builtin {
-            let ran = runner::in_a_pipeline(&c.words[0]);
+        if let Some(name) = builtin_in(stages) {
+            let ran = runner::in_a_pipeline(name);
             return self.finish(ran.status, ran.message);
         }
         let parts = Parts {
@@ -279,11 +280,7 @@ impl<'a> Shell<'a> {
     /// last process>`. Its status is 0 once anything of it started. The
     /// shell's own commands cannot be in one.
     fn background(&mut self, stages: &[parser::Command], text: &str) -> i32 {
-        let builtin = stages
-            .iter()
-            .find(|c| commands::builtin(&c.words[0]).is_some());
-        if let Some(c) = builtin {
-            let name = &c.words[0];
+        if let Some(name) = builtin_in(stages) {
             let message = format!("{NAME}: {name}: cannot be used in the background\n");
             return self.finish(1, message);
         }
@@ -465,8 +462,9 @@ impl<'a> Shell<'a> {
         self.in_script = true;
         let mut status = 0;
         for line in text.lines() {
-            if matches!(parser::parse_line(line), Ok(l) if l.pipeline.len() == 1 && l.pipeline[0].words.is_empty() && l.pipeline[0].redirect.is_none())
-            {
+            // Blank as typed: one whose words expand to nothing is traced
+            // and runs.
+            if parser::parse_line(line).is_ok_and(|l| l.is_blank()) {
                 continue;
             }
             if self.console.interrupted() {
@@ -505,6 +503,16 @@ impl<'a> Shell<'a> {
             self.say(format!("{NAME}: sync failed: {e}\n").as_bytes());
         }
     }
+}
+
+/// The name of the first of `stages` that is one of the shell's own
+/// commands (a command whose words expanded to nothing is none).
+fn builtin_in(stages: &[parser::Command]) -> Option<&str> {
+    stages
+        .iter()
+        .filter_map(|c| c.words.first())
+        .find(|name| commands::builtin(name).is_some())
+        .map(String::as_str)
 }
 
 #[cfg(test)]
@@ -1024,6 +1032,59 @@ mod tests {
             (1, "relay-sh: $NONE: ambiguous redirect\n".into())
         );
         assert!(h.programs.spawned.is_empty(), "nothing of it started");
+    }
+
+    #[test]
+    fn a_command_that_expands_to_nothing_runs_nothing() {
+        let mut h = Harness::new();
+        // bash's: status 0, and a redirection alone still makes its file.
+        assert_eq!(h.lines(&["nope", "$E"]).0, 0);
+        assert_eq!(h.run("$E ${E} > /tmp/f"), (0, "".into()));
+        assert!(h.exists("/tmp/f"));
+        // In a pipeline it reads nothing and gives the next one nothing.
+        assert_eq!(h.run("$E | wc -c"), (0, "0\n".into()));
+        assert_eq!(h.run("echo hi | $E"), (0, "".into()));
+        assert_eq!(h.run("echo hi | $E | $E > /tmp/g"), (0, "".into()));
+        assert_eq!(h.get("/tmp/g"), b"");
+        // A script traces it and runs it.
+        h.put("/tmp/s.sh", b"nope\n$E\necho $?\n");
+        assert_eq!(
+            h.run("sh /tmp/s.sh"),
+            (
+                0,
+                "+ nope\nrelay-sh: nope: command not found\n+ $E\n+ echo $?\n0\n".into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_program_s_neighbour_that_expands_to_nothing_is_an_end() {
+        let mut h = spawning();
+        assert_eq!(h.spawning("$E | t-args"), (3, "".into()));
+        let s = &h.programs.spawned[0];
+        assert_eq!((s.args.len(), s.group), (1, crate::Group::New));
+        let (r, w) = h.programs.pipes[0];
+        assert_eq!(s.stdin, Some(r), "the pipe it reads");
+        assert!(h.programs.closed.contains(&w), "with no writer");
+        assert_eq!(h.spawning("t-args | $E > /tmp/o"), (0, "".into()));
+        let (path, append, fd) = h.programs.opened.last().unwrap();
+        assert_eq!(
+            (path.as_str(), *append),
+            ("/tmp/o", false),
+            "made, as bash's"
+        );
+        assert!(h.programs.closed.contains(fd));
+        // In the background: no job, or one of what started.
+        let mut h = with_jobs();
+        let out = typed(&mut h, &["$E &", "$E | sleep 1 &", ""]);
+        assert!(
+            out.starts_with("root@relay:/# $E &\nroot@relay:/# $E | sleep 1 &\n[1] 101\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("[1]+  Done                    $E | sleep 1\n"),
+            "{out}"
+        );
     }
 
     #[test]
