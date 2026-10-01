@@ -1,0 +1,92 @@
+# Background jobs (user-space gate §9.2, §9.3; milestone 3, plan 2): a
+# line that ends with & starts a job in a process group of its own,
+# without the console; jobs, wait and kill work on them, and the shell
+# says how each ended, in bash's words.
+timeout 60
+expect root@relay:~# $
+send sleep 4 &
+expect \n\[1\] \d+\n
+send t-spin &
+expect \n\[2\] \d+\n
+send jobs
+expect \n\[1\]-  Running                 sleep 4 &\n\[2\]\+  Running                 t-spin &\n
+# Ctrl-C at the prompt only cancels the line typed: the jobs run on.
+key echo nope{ctrl-c}
+expect \^C\n
+send jobs
+expect \n\[1\]-  Running                 sleep 4 &\n\[2\]\+  Running                 t-spin &\n
+# Process 1 cannot be killed; a job's group can, and wait says so.
+send kill 1
+expect \nrelay-sh: kill: \(1\) - Operation not permitted\n
+send kill %2
+send wait %2
+expect \n\[2\]\+  Killed                  t-spin\n
+send wait %1
+expect \n\[1\]\+  Done                    sleep 4\n
+send jobs
+expect root@relay:~# jobs\nroot@relay:~# $
+# Ctrl-C ends a wait at the prompt; the job runs on until it is killed.
+send t-spin &
+expect \n\[1\] \d+\n
+send wait
+alive 1
+key {ctrl-c}
+expect \n\^C\n
+send jobs
+expect \n\[1\]\+  Running                 t-spin &\n
+send kill %1
+# A bare wait tells of a job a signal ended, as bash's does.
+send wait
+expect root@relay:~# wait\n(pid \d+ \(/bin/t-spin\): killed: kill\n)?\[1\]\+  Killed                  t-spin\nroot@relay:~# $
+send dmesg
+expect \npid \d+ \(/bin/t-spin\): killed: kill\npid \d+ \(/bin/t-spin\): killed: kill\n
+# A job reading the console gets end of input at once; a pipeline's output
+# goes to the screen; a script in the background never takes the console.
+send cat &
+expect \n\[1\] \d+\n
+send wait %1
+expect \n\[1\]\+  Done                    cat\n
+send seq 3 | grep 2 &
+expect \n\[1\] \d+\n
+send wait %1
+# Printed at the prompt or after the wait's echo, whichever came first.
+expect (# |\n)2\n
+expect \[1\]\+  Done                    seq 3 \| grep 2\n
+send echo 'sleep 1' > s.sh
+send echo 'echo the script ran' >> s.sh
+send sh s.sh &
+expect \n\[1\] \d+\n
+send echo the prompt is mine
+expect \nthe prompt is mine\n
+send wait %1
+expect the script ran\n
+expect \[1\]\+  Done                    sh s.sh\n
+# Its transcript, a console tee, also got what the screen showed meanwhile
+# (here what was typed at the prompt).
+send cat s.log
+expect \n\+ sleep 1\n
+expect \+ echo the script ran\nthe script ran\n
+# Four scripts in the background, a transcript's tee each, leave room for
+# a fifth in the foreground: a process pushes 4 tees, 64 in all.
+send echo 'sleep 2' > a.sh
+send sh a.sh &
+expect \n\[1\] \d+\n
+send sh a.sh &
+expect \n\[2\] \d+\n
+send sh a.sh &
+expect \n\[3\] \d+\n
+send sh a.sh &
+expect \n\[4\] \d+\n
+send echo 'echo hello' > b.sh
+send sh b.sh
+expect \+ echo hello\nhello\n
+send wait
+expect root@relay:~# wait\nroot@relay:~# $
+# exit leaves a running job to process 1, which collects it when it ends.
+send t-spin 1 &
+expect \n\[1\] \d+\n
+send exit
+expect \ninit: /bin/sh \(pid 2\) exited with 0; starting it again\nroot@relay:~# $
+expect \d+ iterations\n
+send jobs
+expect jobs\nroot@relay:~# $

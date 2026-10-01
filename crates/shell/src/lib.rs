@@ -13,6 +13,7 @@ pub mod commands;
 mod ctx;
 pub mod editor;
 mod io;
+pub mod jobs;
 pub mod killed;
 pub mod parser;
 mod pattern;

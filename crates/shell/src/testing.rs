@@ -170,8 +170,21 @@ pub struct FakePrograms {
     pub pipe_error: Option<(usize, Errno)>,
     pub closed: Vec<u32>,
     pub spawned: Vec<Spawned>,
-    /// The children started and not yet waited for, by pid.
-    children: Vec<(u32, WaitStatus)>,
+    /// The programs that run on through this many rounds of `collect` (a
+    /// round ends when it finds nothing), by path; the others end at once.
+    pub lives: Vec<(&'static str, u32)>,
+    /// The children started and not yet collected.
+    children: Vec<FakeChild>,
+    /// The rounds of `collect` so far.
+    round: u32,
+    /// How many children were not yet collected at each `spawn`.
+    pub alive_at_spawn: Vec<usize>,
+    /// A Ctrl-C ends the `wait_or_ctrl_c` after this many more.
+    pub ctrl_c_after: Option<usize>,
+    /// Every pid `wait_or_ctrl_c` waited for.
+    pub waited: Vec<u32>,
+    /// Every `kill`'s target.
+    pub kills: Vec<i64>,
     /// The tees pushed and not popped, by path.
     pub tees: Vec<String>,
     /// Every tee pushed.
@@ -195,7 +208,13 @@ impl FakePrograms {
             pipe_error: None,
             closed: Vec::new(),
             spawned: Vec::new(),
+            lives: Vec::new(),
             children: Vec::new(),
+            round: 0,
+            alive_at_spawn: Vec::new(),
+            ctrl_c_after: None,
+            waited: Vec::new(),
+            kills: Vec::new(),
             tees: Vec::new(),
             pushed: Vec::new(),
             push_error: None,
@@ -203,6 +222,22 @@ impl FakePrograms {
             next_fd: 3,
             next_pid: 100,
         }
+    }
+}
+
+/// A child of `FakePrograms`: how it ends, its group, and the round of
+/// `collect` from which it has ended.
+struct FakeChild {
+    pid: u32,
+    status: WaitStatus,
+    group: u32,
+    ends_at: u32,
+}
+
+impl FakePrograms {
+    /// The children not yet collected, by pid, with their groups.
+    pub fn children(&self) -> Vec<(u32, u32)> {
+        self.children.iter().map(|c| (c.pid, c.group)).collect()
     }
 }
 
@@ -239,6 +274,12 @@ impl Programs for FakePrograms {
         group: Group,
     ) -> Result<u32, Errno> {
         let path = String::from_utf8_lossy(path).into_owned();
+        self.alive_at_spawn.push(self.children.len());
+        let life = self
+            .lives
+            .iter()
+            .find(|(p, _)| *p == path)
+            .map_or(0, |l| l.1);
         let Some(&(_, status)) = self.known.iter().find(|(p, _)| *p == path) else {
             let refusal = self.refusals.iter().find(|(p, _)| *p == path);
             return Err(refusal.map_or(Errno::ENOENT, |r| r.1));
@@ -254,16 +295,74 @@ impl Programs for FakePrograms {
             group,
         });
         self.next_pid += 1;
-        self.children.push((self.next_pid, status));
+        let group = match group {
+            Group::Shell => 0,
+            Group::New | Group::Background => self.next_pid,
+            Group::Join(g) => g,
+        };
+        self.children.push(FakeChild {
+            pid: self.next_pid,
+            status,
+            group,
+            ends_at: self.round + life,
+        });
         Ok(self.next_pid)
     }
+    /// Waits as long as the child runs on.
     fn wait(&mut self, pid: u32) -> Result<WaitStatus, Errno> {
         let i = self
             .children
             .iter()
-            .position(|c| c.0 == pid)
+            .position(|c| c.pid == pid)
             .ok_or(Errno::ECHILD)?;
-        Ok(self.children.remove(i).1)
+        Ok(self.children.remove(i).status)
+    }
+    /// Its children end at once, killed, as the kernel's `kill` ends them;
+    /// one that has ended already and is not yet collected counts, but
+    /// keeps how it ended, as a zombie does. Process 1 is refused, and any
+    /// other pid or group is none.
+    fn kill(&mut self, target: i64) -> Result<(), Errno> {
+        self.kills.push(target);
+        if target == 1 || target == -1 {
+            return Err(Errno::EPERM);
+        }
+        let hit = |c: &FakeChild| match target {
+            t if t < 0 => i64::from(c.group) == -t,
+            t => i64::from(c.pid) == t,
+        };
+        let mut found = false;
+        let round = self.round;
+        for c in self.children.iter_mut().filter(|c| hit(c)) {
+            if c.ends_at > round {
+                c.status = WaitStatus::killed(relay_abi::wait::KILLED_KILL);
+                c.ends_at = round;
+            }
+            found = true;
+        }
+        if found { Ok(()) } else { Err(Errno::ESRCH) }
+    }
+    fn wait_or_ctrl_c(&mut self, pid: u32) -> Result<WaitStatus, Errno> {
+        if let Some(n) = &mut self.ctrl_c_after {
+            if *n == 0 {
+                self.ctrl_c_after = None;
+                return Err(Errno::EINTR);
+            }
+            *n -= 1;
+        }
+        self.waited.push(pid);
+        self.wait(pid)
+    }
+    fn collect(&mut self) -> Option<(u32, WaitStatus)> {
+        match self.children.iter().position(|c| c.ends_at <= self.round) {
+            Some(i) => {
+                let c = self.children.remove(i);
+                Some((c.pid, c.status))
+            }
+            None => {
+                self.round += 1;
+                None
+            }
+        }
     }
     fn tee_push(&mut self, path: &[u8]) -> Result<(), Errno> {
         if let Some(e) = self.push_error {

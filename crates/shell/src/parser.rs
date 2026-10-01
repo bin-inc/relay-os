@@ -10,10 +10,12 @@
 //! begins a comment, which runs to the end of the line. An unquoted `|`
 //! joins commands into a pipeline (user-space gate §9.1); each has a name,
 //! only the last may redirect its output, and bash's syntax errors name a
-//! `|` with no command before it or none after. Every other shell feature is refused:
-//! an unquoted `;`, `&`, `$`, `*`, `?`, `<`, `` ` ``, `(` or `)` is an
-//! error naming the character, instead of being passed on as if it were
-//! plain text; so are `||` and `2>` (another stream).
+//! `|` with no command before it or none after. An unquoted `&` at the end
+//! of the line (a comment may follow) runs it in the background (§9.2).
+//! Every other shell feature is refused: an unquoted `;`, `&` before more,
+//! `$`, `*`, `?`, `<`, `` ` ``, `(` or `)` is an error naming the
+//! character, instead of being passed on as if it were plain text; so are
+//! `||`, `&&` and `2>` (another stream).
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -25,6 +27,14 @@ pub const HOME: &str = "/root";
 /// A line's commands: one, or several joined by `|`, each one's output the
 /// next one's input. A blank line is one command without words.
 pub type Pipeline = Vec<Command>;
+
+/// A command line: its pipeline, and, if it ends with `&`, what was typed
+/// before the `&` (a background job's text, spec §9.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Line {
+    pub pipeline: Pipeline,
+    pub background: Option<String>,
+}
 
 /// One command: its words and where its output goes.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,7 +77,7 @@ impl fmt::Display for ParseError {
     }
 }
 
-const UNSUPPORTED: &[char] = &[';', '&', '$', '*', '?', '<', '`', '(', ')'];
+const UNSUPPORTED: &[char] = &[';', '$', '*', '?', '<', '`', '(', ')'];
 
 /// A word being built.
 #[derive(Default)]
@@ -137,7 +147,14 @@ impl Parts {
     }
 }
 
+/// The commands of `line`, whether or not it ends with `&`.
 pub fn parse(line: &str) -> Result<Pipeline, ParseError> {
+    parse_line(line).map(|l| l.pipeline)
+}
+
+/// `line`'s commands, and whether it runs in the background.
+pub fn parse_line(line: &str) -> Result<Line, ParseError> {
+    let mut background = None;
     let mut pipeline = Vec::new();
     let mut parts = Parts::default();
     let mut word = Word::default();
@@ -154,7 +171,13 @@ pub fn parse(line: &str) -> Result<Pipeline, ParseError> {
                 if parts.pending.is_some() {
                     return Err(ParseError::MissingTarget(">"));
                 }
-                parts.pending = Some(chars.next_if_eq(&'>').is_some());
+                let append = chars.next_if_eq(&'>').is_some();
+                // `>&2` and `>& f` send output elsewhere in bash; `>>&` and
+                // `> &` are its syntax errors.
+                if !append && chars.peek() == Some(&'&') {
+                    return Err(ParseError::Unsupported(">&".into()));
+                }
+                parts.pending = Some(append);
             }
             '|' => {
                 if chars.next_if_eq(&'|').is_some() {
@@ -162,6 +185,31 @@ pub fn parse(line: &str) -> Result<Pipeline, ParseError> {
                 }
                 parts.end_word(&mut word)?;
                 pipeline.push(parts.take_before_pipe()?);
+            }
+            '&' => {
+                if chars.next_if_eq(&'&').is_some() {
+                    return Err(ParseError::Unsupported("&&".into()));
+                }
+                parts.end_word(&mut word)?;
+                if parts.pending.is_some() || parts.words.is_empty() && parts.redirect.is_none() {
+                    return Err(ParseError::MissingTarget("&"));
+                }
+                if parts.words.is_empty() {
+                    // `> f &`: a background job is a program.
+                    return Err(ParseError::Unsupported("> &".into()));
+                }
+                let rest: String = chars.clone().collect();
+                let after = rest.trim_start_matches([' ', '\t']);
+                if after.starts_with('&') {
+                    return Err(ParseError::MissingTarget("&"));
+                }
+                if !after.is_empty() && !after.starts_with('#') {
+                    // `a & b` runs both in bash.
+                    return Err(ParseError::Unsupported("&".into()));
+                }
+                let typed = &line[..line.len() - rest.len() - 1];
+                background = Some(String::from(typed.trim_matches([' ', '\t'])));
+                break;
             }
             '\'' => {
                 word.started = true;
@@ -223,7 +271,10 @@ pub fn parse(line: &str) -> Result<Pipeline, ParseError> {
         words: parts.words,
         redirect: parts.redirect,
     });
-    Ok(pipeline)
+    Ok(Line {
+        pipeline,
+        background,
+    })
 }
 
 #[cfg(test)]
@@ -375,7 +426,6 @@ mod tests {
     fn unsupported_syntax_names_the_character() {
         for (line, c) in [
             ("a; b", ';'),
-            ("a && b", '&'),
             ("echo $HOME", '$'),
             ("ls *.txt", '*'),
             ("ls file?", '?'),
@@ -468,6 +518,76 @@ mod tests {
         }
         // A redirection alone, without a pipeline, still makes the file.
         assert_eq!(one("> f").unwrap().words, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_line_ending_with_an_ampersand_runs_in_the_background() {
+        let l = parse_line("sleep 5 &").unwrap();
+        assert_eq!(l.pipeline[0].words, ["sleep", "5"]);
+        assert_eq!(l.background.as_deref(), Some("sleep 5"));
+        // The text is what was typed before the `&`, without the blanks
+        // around it; a comment may follow.
+        for (line, text) in [
+            ("  cat f |  wc -l>out& ", "cat f |  wc -l>out"),
+            ("echo 'a  b' \\& &\t# later", "echo 'a  b' \\&"),
+            ("t-spin&", "t-spin"),
+            ("grep x f | head -n 1 & # one", "grep x f | head -n 1"),
+        ] {
+            let l = parse_line(line).unwrap();
+            assert_eq!(l.background.as_deref(), Some(text), "{line}");
+        }
+        let l = parse_line("cat f | wc -l > out &").unwrap();
+        assert_eq!(l.pipeline.len(), 2);
+        assert_eq!(l.pipeline[1].redirect.as_ref().unwrap().path, "out");
+        // Quoted, escaped or in a comment it is a character.
+        for line in ["echo '&' \"&\" \\&", "echo a # &", "echo a"] {
+            assert_eq!(parse_line(line).unwrap().background, None, "{line}");
+        }
+        assert_eq!(words("echo '&' \\& # &"), ["echo", "&", "&"]);
+    }
+
+    #[test]
+    fn an_ampersand_anywhere_else_is_bash_s_error_or_unsupported() {
+        // bash's messages (`bash -c '&'`, `bash -c 'a | &'`, …).
+        for line in [
+            "&",
+            " & ",
+            "a | &",
+            "echo > &",
+            "echo >>&2",
+            "a & &",
+            "a &&&",
+        ] {
+            let e = parse_line(line).unwrap_err();
+            if line.contains("&&") {
+                assert_eq!(e, ParseError::Unsupported("&&".into()), "{line}");
+            } else {
+                assert_eq!(
+                    e.to_string(),
+                    "syntax error near unexpected token `&'",
+                    "{line}"
+                );
+            }
+        }
+        // bash runs `a & b`, `a && b` and `> f &`; they are not supported.
+        for (line, what) in [
+            ("a & b", "&"),
+            ("a &b", "&"),
+            ("a & | b", "&"),
+            ("a && b", "&&"),
+            ("a &&", "&&"),
+            ("> f &", "> &"),
+            // bash runs these (the review found them called its syntax
+            // error).
+            ("echo hi >&2", ">&"),
+            ("echo hi >& f", ">&"),
+        ] {
+            assert_eq!(
+                parse_line(line),
+                Err(ParseError::Unsupported(what.into())),
+                "{line}"
+            );
+        }
     }
 
     #[test]

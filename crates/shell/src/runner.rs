@@ -8,11 +8,11 @@
 //! (`/bin/sh`).
 
 use crate::commands::{self, Builtin, Script};
-use crate::ctx::Ctx;
+use crate::ctx::{Ctx, JobControl};
 use crate::io::{Bytes, Console, Group, Programs, Stdin, Stdout, System};
 use crate::killed;
 use crate::parser::{Command, Redirect};
-use crate::shell::{CANCELLED, CANNOT_RUN, NAME, NOT_FOUND};
+use crate::shell::{CANCELLED, CANNOT_RUN, NAME, NOT_FOUND, SYNTAX};
 use crate::transcript::Transcript;
 use alloc::format;
 use alloc::string::String;
@@ -75,6 +75,20 @@ pub(crate) trait Runner {
     /// Runs a pipeline of two or more commands, none of them a built-in,
     /// the last one's output going to its redirection if it has one.
     fn pipeline(&mut self, parts: Parts<'_>, stages: &[Command]) -> Ran;
+
+    /// Starts a pipeline of one or more commands, none of them a built-in,
+    /// in the background (spec §9.2), and does not wait for it.
+    fn background(&mut self, parts: Parts<'_>, stages: &[Command]) -> Started;
+}
+
+/// A background job's start.
+pub(crate) struct Started {
+    /// Its process group, if any of its commands started.
+    pub pgid: Option<u32>,
+    /// The processes that started, in order.
+    pub pids: Vec<u32>,
+    /// What could not start, and the status if nothing did.
+    pub ran: Ran,
 }
 
 /// The runners a shell may have. (A shell holds its runner in this rather
@@ -119,7 +133,7 @@ impl Runner for InProcess {
             Err(ran) => return ran,
         };
         match commands::find(name) {
-            Some(command) => run_function(parts, command, args, file),
+            Some(command) => run_function(parts, command, args, file, None),
             None => not_found(name),
         }
     }
@@ -186,6 +200,22 @@ impl Runner for InProcess {
             &last.words[1..],
             last.redirect.as_ref(),
         )
+    }
+
+    fn background(&mut self, _: Parts<'_>, _: &[Command]) -> Started {
+        InProcess::refuse_background()
+    }
+}
+
+impl InProcess {
+    /// A background job needs programs: the in-process runner keeps
+    /// refusing `&`, as milestone 1's shell did.
+    fn refuse_background() -> Started {
+        Started {
+            pgid: None,
+            pids: Vec::new(),
+            ran: Ran::said(SYNTAX, format!("{NAME}: unsupported syntax: &\n")),
+        }
     }
 }
 
@@ -269,16 +299,81 @@ impl Runner for Spawning<'_> {
     /// how any killed one ended (a Ctrl-C once), and takes the last one's
     /// status.
     fn pipeline(&mut self, parts: Parts<'_>, stages: &[Command]) -> Ran {
+        let in_script = parts.in_script;
+        let (started, mut ran) = self.start(parts, stages, in_script, false);
+        let mut cancelled = false;
+        for (name, pid) in &started.pids {
+            let ended = match self.programs.wait(*pid) {
+                Ok(w) => ended(name, &w),
+                Err(e) => Ran::said(CANNOT_RUN, format!("{NAME}: {name}: {e}\n")),
+            };
+            if Some(*pid) == started.last {
+                ran.status = ended.status;
+            }
+            if ended.status == CANCELLED {
+                cancelled = true;
+            } else {
+                ran.message.push_str(&ended.message);
+            }
+        }
+        if cancelled {
+            ran.message.push_str("^C\n");
+        }
+        ran
+    }
+
+    /// The stages start as a foreground pipeline's do, the first that
+    /// starts in a new group without the console (at the prompt and in a
+    /// script alike, so that Ctrl-C of the script does not reach it), the
+    /// others joining it; nothing waits for them.
+    fn background(&mut self, parts: Parts<'_>, stages: &[Command]) -> Started {
+        let (started, mut ran) = self.start(parts, stages, false, true);
+        let pgid = started.pids.first().map(|&(_, pid)| pid);
+        if pgid.is_some() {
+            ran.status = 0;
+        }
+        Started {
+            pgid,
+            pids: started.pids.iter().map(|&(_, pid)| pid).collect(),
+            ran,
+        }
+    }
+}
+
+/// The stages a pipeline started: their names and pids, and the last
+/// stage's pid if it started.
+struct Stages<'c> {
+    pids: Vec<(&'c String, u32)>,
+    last: Option<u32>,
+}
+
+impl Spawning<'_> {
+    /// Starts `stages` left to right with pipes between them: in the
+    /// shell's group (`in_script`), or the first that starts in a new one
+    /// (with the console unless `background`) and the others joining it.
+    /// What started, and what did not with its message (the status that
+    /// of a last stage that could not start, or of a pipe that could not
+    /// be made).
+    fn start<'c>(
+        &mut self,
+        parts: Parts<'_>,
+        stages: &'c [Command],
+        in_script: bool,
+        background: bool,
+    ) -> (Stages<'c>, Ran) {
         let (last, _) = stages.split_last().expect("a pipeline has stages");
+        let mut started = Stages {
+            pids: Vec::new(),
+            last: None,
+        };
         let last_out = match &last.redirect {
             Some(r) => match self.programs.open_output(r.path.as_bytes(), r.append) {
                 Ok(fd) => Some(fd),
-                Err(e) => return Ran::said(1, format!("{NAME}: {}: {e}\n", r.path)),
+                Err(e) => return (started, Ran::said(1, format!("{NAME}: {}: {e}\n", r.path))),
             },
             None => None,
         };
-        let (mut stdin, mut first, mut last_pid) = (None, None, None);
-        let mut started = Vec::new();
+        let (mut stdin, mut first) = (None, None);
         let mut ran = Ran::said(0, String::new());
         for (i, stage) in stages.iter().enumerate() {
             let is_last = i + 1 == stages.len();
@@ -299,10 +394,11 @@ impl Runner for Spawning<'_> {
             let name = &stage.words[0];
             let mut argv: Vec<&[u8]> = alloc::vec![name.as_bytes()];
             argv.extend(stage.words[1..].iter().map(|w| w.as_bytes()));
-            let group = match (parts.in_script, first) {
-                (true, _) => Group::Shell,
-                (false, None) => Group::New,
-                (false, Some(pgid)) => Group::Join(pgid),
+            let group = match (in_script, background, first) {
+                (_, true, None) => Group::Background,
+                (true, false, _) => Group::Shell,
+                (_, _, None) => Group::New,
+                (_, _, Some(pgid)) => Group::Join(pgid),
             };
             let path = program_path(name);
             let pid = self
@@ -315,9 +411,9 @@ impl Runner for Spawning<'_> {
             match pid {
                 Ok(pid) => {
                     first.get_or_insert(pid);
-                    started.push((name, pid));
+                    started.pids.push((name, pid));
                     if is_last {
-                        last_pid = Some(pid);
+                        started.last = Some(pid);
                     }
                 }
                 Err(e) => {
@@ -329,25 +425,7 @@ impl Runner for Spawning<'_> {
                 }
             }
         }
-        let mut cancelled = false;
-        for (name, pid) in started {
-            let ended = match self.programs.wait(pid) {
-                Ok(w) => ended(name, &w),
-                Err(e) => Ran::said(CANNOT_RUN, format!("{NAME}: {name}: {e}\n")),
-            };
-            if Some(pid) == last_pid {
-                ran.status = ended.status;
-            }
-            if ended.status == CANCELLED {
-                cancelled = true;
-            } else {
-                ran.message.push_str(&ended.message);
-            }
-        }
-        if cancelled {
-            ran.message.push_str("^C\n");
-        }
-        ran
+        (started, ran)
     }
 }
 
@@ -389,13 +467,15 @@ fn open_redirect(vfs: &mut dyn Vfs, r: &Redirect) -> Result<(Node, u64), Errno> 
 
 /// Runs a command function with its standard output going to `file`, if
 /// any.
-pub(crate) fn run_function(
-    parts: Parts<'_>,
+pub(crate) fn run_function<'s>(
+    parts: Parts<'s>,
     command: &Builtin,
     args: &[String],
     file: Option<(Node, u64)>,
+    control: Option<JobControl<'s>>,
 ) -> Ran {
     let mut ctx = Ctx::new(parts.vfs, parts.system, parts.console, file);
+    ctx.control = control;
     if let Some(input) = parts.input {
         ctx.set_input(input);
     }
