@@ -5,6 +5,7 @@
 use crate::commands::{self, SCRIPT_MAX, Script};
 use crate::ctx::{Ctx, JobControl, quote_if_needed};
 use crate::editor::{Feed, LineEditor};
+use crate::expand;
 use crate::io::{Console, Programs, Stdin, Stdout, System};
 use crate::jobs::Jobs;
 use crate::parser::{self, HOME};
@@ -180,7 +181,7 @@ impl<'a> Shell<'a> {
     /// status. Every command is followed by a sync, so its changes are on
     /// the disk when the prompt comes back.
     pub fn execute(&mut self, line: &str) -> i32 {
-        let mut pipeline = match parser::parse_line(line) {
+        let mut pipeline = match parser::parse_line(line).map(|l| expand::expand(&l)) {
             Ok(parser::Line {
                 pipeline,
                 background: Some(text),
@@ -457,7 +458,7 @@ impl<'a> Shell<'a> {
         self.in_script = true;
         let mut status = 0;
         for line in text.lines() {
-            if matches!(parser::parse(line), Ok(p) if p.len() == 1 && p[0].words.is_empty() && p[0].redirect.is_none())
+            if matches!(parser::parse_line(line), Ok(l) if l.pipeline.len() == 1 && l.pipeline[0].words.is_empty() && l.pipeline[0].redirect.is_none())
             {
                 continue;
             }

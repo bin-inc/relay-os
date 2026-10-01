@@ -26,29 +26,69 @@ pub const HOME: &str = "/root";
 
 /// A line's commands: one, or several joined by `|`, each one's output the
 /// next one's input. A blank line is one command without words.
-pub type Pipeline = Vec<Command>;
+pub type Pipeline<W = String> = Vec<Command<W>>;
 
 /// A command line: its pipeline, and, if it ends with `&`, what was typed
 /// before the `&` (a background job's text, spec §9.2).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Line {
-    pub pipeline: Pipeline,
+pub struct Line<W = String> {
+    pub pipeline: Pipeline<W>,
     pub background: Option<String>,
 }
 
-/// One command: its words and where its output goes.
+/// One command: its words and where its output goes. The parser gives
+/// them as typed ([`Word`]), and expansion as the strings a command gets.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Command {
+pub struct Command<W = String> {
     /// The command name first, then its arguments. Empty for a blank line.
-    pub words: Vec<String>,
-    pub redirect: Option<Redirect>,
+    pub words: Vec<W>,
+    pub redirect: Option<Redirect<W>>,
 }
 
 /// `> path` (truncate) or `>> path` (append).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Redirect {
-    pub path: String,
+pub struct Redirect<W = String> {
+    pub path: W,
     pub append: bool,
+}
+
+/// A word as typed: its pieces of text, each quoted (or escaped) or not.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Word {
+    pub pieces: Vec<Piece>,
+}
+
+/// A piece of a word.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Piece {
+    /// Text, and whether it was quoted or escaped.
+    Text(String, bool),
+}
+
+impl Word {
+    /// Adds `c`, quoted or not, to the word's last piece, or a new one.
+    fn push(&mut self, c: char, quoted: bool) {
+        match self.pieces.last_mut() {
+            Some(Piece::Text(text, q)) if *q == quoted => text.push(c),
+            _ => self.pieces.push(Piece::Text(String::from(c), quoted)),
+        }
+    }
+
+    /// The word is one unquoted piece of text, all ASCII digits (`2` in
+    /// `2>`).
+    fn is_digits(&self) -> bool {
+        matches!(&self.pieces[..], [Piece::Text(t, false)] if t.bytes().all(|b| b.is_ascii_digit()))
+    }
+
+    /// The word's text, its pieces joined.
+    pub fn text(&self) -> String {
+        self.pieces
+            .iter()
+            .map(|p| match p {
+                Piece::Text(t, _) => t.as_str(),
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -81,35 +121,51 @@ const UNSUPPORTED: &[char] = &[';', '$', '*', '?', '<', '`', '(', ')'];
 
 /// A word being built.
 #[derive(Default)]
-struct Word {
-    text: String,
+struct Building {
+    word: Word,
     /// Something (even `''`) was seen, so the word exists even if empty.
     started: bool,
     /// The word began with an unquoted `~`.
     tilde: bool,
-    /// Part of the word was quoted or escaped.
-    quoted: bool,
 }
 
-impl Word {
-    fn finish(self) -> Option<String> {
+impl Building {
+    /// A quote opens: the word exists, and has a quoted piece even if
+    /// nothing is quoted (`''`).
+    fn open_quote(&mut self) {
+        self.started = true;
+        if !matches!(self.word.pieces.last(), Some(Piece::Text(_, true))) {
+            self.word.pieces.push(Piece::Text(String::new(), true));
+        }
+    }
+
+    /// Adds a quoted or escaped character.
+    fn quoted(&mut self, c: char) {
+        self.started = true;
+        self.word.push(c, true);
+    }
+
+    fn finish(self) -> Option<Word> {
         if !self.started {
             return None;
         }
-        let t = self.text;
-        if self.tilde && (t == "~" || t.starts_with("~/")) {
-            Some(alloc::format!("{HOME}{}", &t[1..]))
-        } else {
-            Some(t)
+        let mut word = self.word;
+        let t = word.text();
+        if self.tilde
+            && (t == "~" || t.starts_with("~/"))
+            && let Some(Piece::Text(first, _)) = word.pieces.first_mut()
+        {
+            first.replace_range(..1, HOME);
         }
+        Some(word)
     }
 }
 
 /// Words and redirection collected so far.
 #[derive(Default)]
 struct Parts {
-    words: Vec<String>,
-    redirect: Option<Redirect>,
+    words: Vec<Word>,
+    redirect: Option<Redirect<Word>>,
     /// A `>` (false) or `>>` (true) seen, waiting for its file name.
     pending: Option<bool>,
 }
@@ -117,7 +173,7 @@ struct Parts {
 impl Parts {
     /// Ends a word: it becomes the pending redirection's target or the next
     /// word.
-    fn end_word(&mut self, word: &mut Word) -> Result<(), ParseError> {
+    fn end_word(&mut self, word: &mut Building) -> Result<(), ParseError> {
         let Some(w) = core::mem::take(word).finish() else {
             return Ok(());
         };
@@ -132,7 +188,7 @@ impl Parts {
     /// The command so far, ended by a `|`, which needs one before it.
     /// Every command of a pipeline has a name: a redirection alone, which
     /// bash runs, is refused like one on a command before the last.
-    fn take_before_pipe(&mut self) -> Result<Command, ParseError> {
+    fn take_before_pipe(&mut self) -> Result<Command<Word>, ParseError> {
         if self.pending.is_some() || (self.words.is_empty() && self.redirect.is_none()) {
             return Err(ParseError::MissingTarget("|"));
         }
@@ -147,25 +203,30 @@ impl Parts {
     }
 }
 
-/// The commands of `line`, whether or not it ends with `&`.
+/// The commands of `line`, whether or not it ends with `&`, their words
+/// expanded (for callers that run no shell: tests).
 pub fn parse(line: &str) -> Result<Pipeline, ParseError> {
-    parse_line(line).map(|l| l.pipeline)
+    parse_line(line).map(|l| crate::expand::expand(&l).pipeline)
 }
 
-/// `line`'s commands, and whether it runs in the background.
-pub fn parse_line(line: &str) -> Result<Line, ParseError> {
+/// `line`'s commands, their words as typed, and whether it runs in the
+/// background.
+pub fn parse_line(line: &str) -> Result<Line<Word>, ParseError> {
     let mut background = None;
     let mut pipeline = Vec::new();
     let mut parts = Parts::default();
-    let mut word = Word::default();
+    let mut word = Building::default();
     let mut chars = line.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
             ' ' | '\t' => parts.end_word(&mut word)?,
             '>' => {
                 // `2>` redirects another stream in a real shell.
-                if word.started && !word.quoted && word.text.bytes().all(|b| b.is_ascii_digit()) {
-                    return Err(ParseError::Unsupported(alloc::format!("{}>", word.text)));
+                if word.started && word.word.is_digits() {
+                    return Err(ParseError::Unsupported(alloc::format!(
+                        "{}>",
+                        word.word.text()
+                    )));
                 }
                 parts.end_word(&mut word)?;
                 if parts.pending.is_some() {
@@ -212,37 +273,31 @@ pub fn parse_line(line: &str) -> Result<Line, ParseError> {
                 break;
             }
             '\'' => {
-                word.started = true;
-                word.quoted = true;
+                word.open_quote();
                 loop {
                     match chars.next() {
                         Some('\'') => break,
-                        Some(c) => word.text.push(c),
+                        Some(c) => word.quoted(c),
                         None => return Err(ParseError::UnterminatedQuote),
                     }
                 }
             }
             '"' => {
-                word.started = true;
-                word.quoted = true;
+                word.open_quote();
                 loop {
                     match chars.next() {
                         Some('"') => break,
                         Some('\\') if matches!(chars.peek(), Some('"' | '\\' | '$' | '`')) => {
-                            word.text.push(chars.next().expect("peeked"));
+                            word.quoted(chars.next().expect("peeked"));
                         }
                         Some(c @ ('$' | '`')) => return Err(ParseError::Unsupported(c.into())),
-                        Some(c) => word.text.push(c),
+                        Some(c) => word.quoted(c),
                         None => return Err(ParseError::UnterminatedQuote),
                     }
                 }
             }
             '\\' => match chars.next() {
-                Some(c) => {
-                    word.started = true;
-                    word.quoted = true;
-                    word.text.push(c);
-                }
+                Some(c) => word.quoted(c),
                 None => return Err(ParseError::TrailingBackslash),
             },
             // A comment runs to the end of the line.
@@ -253,7 +308,7 @@ pub fn parse_line(line: &str) -> Result<Line, ParseError> {
                     word.tilde = true;
                 }
                 word.started = true;
-                word.text.push(c);
+                word.word.push(c, false);
             }
         }
     }
@@ -287,6 +342,11 @@ mod tests {
             assert_eq!(p.len(), 1, "{line}");
             p.remove(0)
         })
+    }
+
+    /// `line` as `Shell::execute` runs it: parsed, then expanded.
+    fn expanded(line: &str) -> Result<Line, ParseError> {
+        parse_line(line).map(|l| crate::expand::expand(&l))
     }
 
     fn words(line: &str) -> Vec<String> {
@@ -329,6 +389,27 @@ mod tests {
         );
         assert_eq!(words("echo ''"), ["echo", ""]);
         assert_eq!(words("echo a'b c'd"), ["echo", "ab cd"]);
+    }
+
+    #[test]
+    fn a_word_keeps_which_of_its_pieces_were_quoted() {
+        let text = |t: &str, quoted| Piece::Text(t.into(), quoted);
+        let l = parse_line(r#"a'b c'\d"e" '' "" ~/x"#).unwrap();
+        let pieces: Vec<&[Piece]> = l.pipeline[0].words.iter().map(|w| &w.pieces[..]).collect();
+        assert_eq!(
+            pieces,
+            [
+                &[text("a", false), text("b cde", true)][..],
+                &[text("", true)],
+                &[text("", true)],
+                &[text("/root/x", false)],
+            ]
+        );
+        let c = &parse_line("echo >'o'ut").unwrap().pipeline[0];
+        assert_eq!(
+            c.redirect.as_ref().unwrap().path.pieces,
+            [text("o", true), text("ut", false)]
+        );
     }
 
     #[test]
@@ -522,7 +603,7 @@ mod tests {
 
     #[test]
     fn a_line_ending_with_an_ampersand_runs_in_the_background() {
-        let l = parse_line("sleep 5 &").unwrap();
+        let l = expanded("sleep 5 &").unwrap();
         assert_eq!(l.pipeline[0].words, ["sleep", "5"]);
         assert_eq!(l.background.as_deref(), Some("sleep 5"));
         // The text is what was typed before the `&`, without the blanks
@@ -536,7 +617,7 @@ mod tests {
             let l = parse_line(line).unwrap();
             assert_eq!(l.background.as_deref(), Some(text), "{line}");
         }
-        let l = parse_line("cat f | wc -l > out &").unwrap();
+        let l = expanded("cat f | wc -l > out &").unwrap();
         assert_eq!(l.pipeline.len(), 2);
         assert_eq!(l.pipeline[1].redirect.as_ref().unwrap().path, "out");
         // Quoted, escaped or in a comment it is a character.
