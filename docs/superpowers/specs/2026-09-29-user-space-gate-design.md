@@ -1,7 +1,8 @@
 # Relay OS — User-Space Gate Design: programs, not built-ins (milestones 2 and 3)
 
 - **Date:** 2026-09-29
-- **Status:** Approved 2026-09-29; revised while planning milestone 2's plans 1, 2, 3a, 3b, 4a, 4b and 5 (see §16)
+- **Status:** Approved 2026-09-29; revised while planning milestone 2's plans 1, 2, 3a, 3b, 4a, 4b and 5
+  and milestone 3's plan 1 (see §16)
 - **Builds on:** milestone 1 (version 0.2.0,
   `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`,
   cited below as "M1 §n")
@@ -160,7 +161,7 @@ mode, its length, and the archive's build time as the file times.
 - **The kernel** keeps those frames reserved, checks the archive (§4.2) and
   its ABI version, and mounts `SysImgFs` at `/bin`. New startup step 10,
   before the shell (M1 §4.4 step 10 becomes step 11):
-  `[ ok ] system: 34 programs, ABI 2` or `[FAIL] system: <reason>`
+  `[ ok ] system: 40 programs, ABI 3` or `[FAIL] system: <reason>`
   (§11.2).
 
 ### 4.4 Mounting `/bin`
@@ -403,7 +404,7 @@ M3 are reserved in milestone 2 and return `ENOSYS` until milestone 3.
 | Call | Arguments → result | Notes |
 |---|---|---|
 | `exit` | code `u8` → never returns | |
-| `spawn` | `&SpawnArgs` → pid | `SpawnArgs`: path, argument bytes (NUL-separated), working directory, up to 8 `(child_fd, parent_fd)` pairs (unlisted child fds are closed), flags (`NEW_GROUP`, `FOREGROUND`) |
+| `spawn` | `&SpawnArgs` → pid | `SpawnArgs`: path, argument bytes (NUL-separated), working directory, up to 8 `(child_fd, parent_fd)` pairs (unlisted child fds are closed), flags (`NEW_GROUP`, `FOREGROUND`), and the group of a child of the caller's to join (`pgid`, milestone 3, §16 item 8) |
 | `wait` | pid or −1 for any child, flags (`NOHANG`), `&mut WaitStatus` → pid, or 0 with `NOHANG` and nothing finished | `WaitStatus`: `Exited(code)` or `Killed(reason, fault kind, address, ip)`; `ECHILD` with no such child |
 | `kill` | pid, or −pgid for a group → 0 | `ESRCH`; `EPERM` for process 1 |
 | `getpid` | → pid | |
@@ -414,7 +415,7 @@ M3 are reserved in milestone 2 and return `ENOSYS` until milestone 3.
 | `close` | fd → 0 | |
 | `read`, `write` | fd, buffer → bytes | |
 | `seek` | fd, offset `i64`, whence (start, current, end) → new offset | on the console or a pipe: `EINVAL` |
-| `fstat` | fd, `&mut Stat` → 0 | `Stat::dev` is the file's filesystem, the mount's number from 1, and 0 for the console (§16 item 5) |
+| `fstat` | fd, `&mut Stat` → 0 | `Stat::dev` is the file's filesystem, the mount's number from 1, and 0 for the console and pipes (§16 items 5 and 8) |
 | `stat` | path, `NOFOLLOW` flag, `&mut Stat` → 0 | |
 | `read_dir` | directory fd, buffer → bytes | packed `DirEntry` records (inode, type, name length, name), continuing where the last call stopped |
 | `mkdir`, `rmdir`, `unlink`, `truncate`, `touch`, `readlink` | as the `Vfs` trait | one call per `Vfs` operation |
@@ -430,7 +431,7 @@ M3 are reserved in milestone 2 and return `ENOSYS` until milestone 3.
 | `sleep` | milliseconds → 0 | |
 | `sys_info` | kind, buffer → bytes | kinds: memory (`MemInfo` of M1's `free`), `uname` fields, kernel log (for `dmesg`) |
 | `power` | reboot or poweroff → error only | the kernel syncs and shuts the filesystems down first (M1 §7.4); when that fails it returns the error and the machine stays up, as M1's `unplug` scenario requires |
-| `pipe` | `&mut [fd; 2]` → 0 | M3 (§9.1) |
+| `pipe` | `&mut [u32; 2]` → 0 | M3 (§9.1): the read end first |
 
 `read` and `write` on the console and on pipes may return fewer bytes than
 asked. The kernel reaches the files through the same `MountTable` the
@@ -439,7 +440,8 @@ with the current directory switched per process (§5.4).
 
 ### 7.4 Versioning
 
-`relay_abi::VERSION` (`u32`, 2 for 0.3.0, §16 item 5) changes whenever a call's meaning
+`relay_abi::VERSION` (`u32`, 2 for 0.3.0, §16 item 5, and 3 from milestone 3's
+plan 1, §16 item 8) changes whenever a call's meaning
 or a struct's layout changes; adding a call does not change it. It is
 written into `system.img`'s header (§4.2) and into every program's ELF note
 (§5.2); the kernel refuses a mismatch in either.
@@ -504,7 +506,7 @@ One `[[bin]]` per command, each a thin `main` over the existing command
 function: `cat`, `clear`, `cp`, `date`, `df`, `dmesg`, `echo`, `free`,
 `head`, `ls`, `mkdir`, `mv`, `poweroff`, `pwd`, `reboot`, `rm`, `rmdir`,
 `stat`, `sync`, `tail`, `touch`, `uname`, `wc`. Milestone 3 adds `grep`,
-`seq`, `sleep`, `true`, `false` and `ps` (§9). Every command prints exactly
+`seq`, `sleep`, `true`, `false` and `ps` (§9, §16 item 8). Every command prints exactly
 what it prints in milestone 1. They are built with the `relay` profile plus
 LTO.
 
@@ -516,13 +518,14 @@ Shipped in every `system.img`, because the NUC checks use them too:
 |---|---|
 | `t-fault KIND` | faults on purpose: `null-read`, `null-write`, `write-code`, `exec-data`, `ud`, `div0`, `stack`, `kernel-read` (reads a kernel address), `sse`; and `flags-exit`, `flags-ud`, `flags-ac`, `flags-tf` (the flags a program sets never reach the kernel) and `gsbase` (a program cannot set its own `gs` base) |
 | `t-spin [secs]` | spins without system calls, forever or for `secs` seconds (reading the clock only every 2^20 iterations), then prints how many iterations it made |
-| `t-spawn N` | starts N children that exit at once and waits for each; prints the free frames before and after, and how many were lost. Also `kill` (kills a spinning child while it sleeps), `kill-new` (kills one before it has run), `orphan`, `fill` (fills the process table with napping orphans) and `sleepers` (a group blocked in `wait` and `sleep`, for Ctrl-C) |
+| `t-spawn N` | starts N children that exit at once and waits for each; prints the free frames before and after, and how many were lost. Also `kill` (kills a spinning child while it sleeps), `kill-new` (kills one before it has run), `orphan`, `fill` (fills the process table with napping orphans), `sleepers` (a group blocked in `wait` and `sleep`, for Ctrl-C) and, in milestone 3, `join` (children in another child's group, §16 item 8) |
 | `t-abi` | a program whose ELF note has the wrong ABI version (built by xtask) |
 | `t-args` | prints its arguments one per line, as `[n] <arg>` |
 | `t-files KIND` | the file calls: `basic` (`open`'s flags, `read`, `write`, `seek`, `fstat`, `close`, an offset shared with a child, 32 fds), `dir` (the calls on paths and `read_dir`), `cwd` (`chdir`, `getcwd`, a child's working directory), `gone` (another process removes its working directory and open file), `full` (write errors on a full disk) |
 | `t-mem KIND` | memory: `map` (`mem_map` and `mem_unmap`), `unmapped` and `unmapped-many` (a page read after it was given back is killed), `grow N` (N MiB of heap), `oom` (a child takes memory until there is none), `churn` (maps and gives back nearly all free memory over and over, in the kernel almost all the time) |
 | `t-read [KIND]` | reads the console and prints each read: in line mode, `raw`, `apart` (outside the foreground group), `size` (and the console calls' refusals), `leave` (leaves the console in line mode behind) |
 | `t-tee KIND` | console tees: `basic`, `end` (left by a process that ends), `gone` (its file removed), `typed` (a reader's), `full` (on a full disk) |
+| `t-pipe KIND` | milestone 3's `pipe` call (§16 item 8): `basic` (the fds, a write and a read, `fstat`, what an end is not), `room` (16 KiB of a bigger write), `child` (1 MiB to a child, both blocking in turn), `eof` (the end of the data once the last writer ends), `epipe` (a write with no reader; `t-args` writing to one ends with 141), `killed` (a blocked reader and a blocked writer killed), `many` (pipes until `EMFILE`) |
 | `t-sys KIND` | `sys_info`'s names (`uname`) and kernel log (`log`), and the `power` call (`poweroff` and `reboot`, each with or without `-f`) |
 
 The kinds a program runs its own children with (`t-files child`, `pwd` and
@@ -537,15 +540,19 @@ The kinds a program runs its own children with (`t-files child`, `pwd` and
   closed. `write` blocks while it is full, and returns `EPIPE` once all
   readers have closed.
 - The parser accepts `a | b | c`. The shell makes the pipes, spawns every
-  stage in one new process group with the pipe ends mapped to fds 0 and 1,
+  stage in one new process group with the pipe ends mapped to fds 0 and 1
+  (the later stages join the first one's group, `SpawnArgs::pgid`),
   closes its own copies, and waits for every stage. `$?` is the last
-  stage's status. `>` and `>>` apply to the last stage. A built-in in a
-  pipeline is refused with `sh: cd: cannot be used in a pipeline`.
+  stage's status. `>` and `>>` apply to the last stage (on another stage
+  they are refused). A built-in in a pipeline is refused with
+  `relay-sh: cd: cannot be used in a pipeline` (§16 item 8).
 - `cat`, `wc`, `head` and `tail` read standard input when given no file;
   `Ctx` gains an input for that. On the console that input is line mode.
+  `wc` gains `-c`, `-l` and `-w` (§16 item 8).
 - New programs: `grep [-i] [-v] [-n] [-c] PATTERN [FILE...]` (a pattern is
   literal characters, `.`, `*`, `^`, `$` and `[...]` with ranges and `^`),
-  `seq [FIRST] LAST`, `sleep SECONDS`, `true`, `false`.
+  `seq [FIRST [INCREMENT]] LAST` (whole numbers), `sleep SECONDS`, `true`,
+  `false` (§16 item 8).
 
 ### 9.2 Background jobs
 
@@ -689,6 +696,7 @@ New ones:
 | 2 | `system_nosh` | a `system.img` without `sh`: the error screen says `/bin/sh cannot start` (§16 item 7) |
 | 2 | `utils` | every program of `/bin` prints what the shell's command of its name prints (§16 item 5) |
 | 2 | `sh` | `/bin/sh` runs its commands as programs, redirections into files, nested scripts with their transcripts (§16 item 5) |
+| 3 | `pipe_calls` | `t-pipe`: the `pipe` call's reads, writes, ends and refusals, blocking both ways, a blocked reader and writer killed, `EPIPE` and the quiet 141, the fds running out; `free` the same before and after (§16 item 8) |
 | 3 | `pipes` | `cat` of the 8 MiB file through `wc -c` gives the exact size; `cat big \| head -n 1` ends at once; `seq 5 \| grep -c .` prints 5 |
 | 3 | `jobs` | `sleep 5 &` and `t-spin &`; `jobs` and `ps` show both; `kill %2`; `wait`; the Done lines |
 | 3 | `script_vars` | a script run with arguments prints `$0`, `$1`, `$#`, `$@`, `$?` and variables, with and without quotes |
@@ -743,7 +751,7 @@ exists then. The expected plans:
 5. **Hardening and 0.3.0.** Fixes from the NUC checks, the spec's §16 up to
    date, version 0.3.0.
 
-**Milestone 3**
+**Milestone 3** (its roadmap names these plans `m3-plan-1` to `m3-plan-4`)
 
 6. **Pipes and standard input.** `pipe`, the parser, the stdin readers,
    `grep`, `seq`, `sleep`, `true`, `false`.
@@ -1580,3 +1588,168 @@ does. Facts found before the spec was first merged are already in its body.
      and a test of the error screen taking the console back, which only
      milestone 3's `kill` can reach; milestone 1's "still out of the gate"
      list stays out (§15).
+8. **Decisions made while planning milestone 3's plan 1** (pipes and
+   standard input):
+   - **Milestone 3's plans** (§13). Its roadmap keeps §13's four plans,
+     named `m3-plan-1` to `m3-plan-4` (steps 6–9). Background jobs stay
+     in milestone 3 (§1.2): nothing calls for the cut. Plan 1 is one plan
+     in four pull requests: this plan; the kernel's pipes and the group a
+     child joins; the shell's pipelines and standard input; the new
+     programs. It has no NUC check: nothing it changes is particular to
+     the NUC (QEMU's USB keyboard types into a pipeline), and plan 4's
+     `check5.sh` runs pipes there.
+   - **Pipes** (§7.3, §9.1; `kernel/src/pipe.rs`). `pipe` makes a 16 KiB
+     ring in four contiguous frames of its own, not the kernel's heap,
+     which would hold only about 1000 of them and which `spawn` needs for
+     the programs it reads. The frames are user memory's: `ENOMEM` once
+     fewer than 8 MiB of frames would be left (§11.1), and `free` counts
+     them. The memory for the two fds is checked first (`EFAULT`), then
+     two free fds (`EMFILE`), before anything is made; the ends take the
+     lowest free fds, the read end first. A read gets what the pipe holds,
+     up to its length (and the ring's), and waits only while it is empty
+     and a writer is open; 0 once every write end has closed. A write
+     takes what fits and waits only while nothing of it has gone in, so a
+     full pipe gives fewer bytes than asked (which `relay-rt`'s
+     `write_all` continues); `EPIPE` once every read end has closed. An
+     end closes when the last fd that has it closes, in its process or any
+     child `spawn` gave it to, or when a process ends, and the processes
+     waiting on the pipe are woken. A process killed while it waits gets
+     `EINTR`, which never reaches its program (it ends first, §16 item 3).
+     `fstat` says a FIFO, with `dev` 0; `seek` is `EINVAL`, `read_dir`
+     `ENOTDIR`; reading a write end or writing a read end is `EBADF`; a
+     pipe is no tee (`EINVAL`, as the console: a tee is written from any
+     process, where a full pipe could not wait). The ring's calls never
+     wait; the dispatcher does, through the process (`Caller::pipe_wait`),
+     on `Blocked::Pipe` of the pipe's id, and a pipe is made with the
+     function that wakes its waiters, so the host tests wake no process
+     table. A pipe's lock is held only inside its own calls, and an end is
+     never dropped while the process table is locked (a debug assertion).
+   - **Joining a group** (§6.4, §7.3, §7.4). `SpawnArgs` gains `pgid` and
+     a reserved word that must be 0 (128 bytes): without `NEW_GROUP`, a
+     `pgid` other than 0 is a group the child joins instead of its
+     parent's. It must be the group of one of the caller's children, an
+     ended one not yet collected included (`EPERM` otherwise, Linux's
+     `setpgid` answer), so a pipeline's later stage can join a first stage
+     that has ended already (`true | cat`); with `NEW_GROUP` it is
+     `EINVAL`. The changed layout makes `relay_abi::VERSION` 3: `system: 40
+     programs, ABI 3`, `ABI 99, kernel wants 3`, and `t-abi` built for ABI
+     2 (`STALE_ABI` is the ABI before). The recorded NUC transcripts get
+     `ABI 3` by hand until plan 4's NUC checks record real ones.
+   - **`relay-rt`** (§8.1). `sys::pipe`, and `sys::spawn` takes the group
+     to join. A write to fd 1 that fails with `EPIPE` ends the program
+     with 141 (`BROKEN_PIPE`) and no message, in `sys::write` itself, so
+     every way to fd 1 does so; a pipe of the program's own still sees
+     `EPIPE`. `SysStdin` reads fd 0.
+   - **Standard input** (§9.1). A command gets standard input
+     (`shell::Stdin`) as it gets standard output: a program's fd 0, which
+     is the console in line mode (a line a read, Ctrl-D its end, Ctrl-C
+     for the whole group) or a pipe; or bytes in memory (`shell::Bytes`)
+     in the in-process runner, whose first input is what a test gives
+     (`Shell::with_input`) and in `host-shell` nothing, so `cat` alone
+     ends at once there. `run_command` takes what a program works with as
+     one `CommandIo`. `cat`, `wc`, `head` and `tail` without a file read
+     it, and so does a file named `-` (`cat header - footer`), as GNU's do;
+     `cat` no longer says `missing operand`. A command writes out what
+     waits for its standard output before each read of its input, so a
+     line typed into `cat | cat` reaches the second at Enter (the
+     prototype's review found it held in 4 KiB pieces until Ctrl-D).
+     `head` stops reading once
+     its lines are out, so a writer before it gets `EPIPE`; `tail` keeps
+     the last lines as they come, a line cut across reads joined. GNU's
+     names for standard input in messages are kept (`cat: -: …`,
+     `error reading 'standard input'`).
+   - **`wc`** (§9.1, §12.3). `wc` gains `-c`, `-l` and `-w` (§12.3's
+     `cat big | wc -c` needs `-c`), and its widths are GNU wc's: one count
+     of one input is not padded; otherwise the columns fit the regular
+     files' total size, with at least 7 digits when an input is something
+     else (standard input is never a regular file here). A test compares
+     it with the host's `wc`, which showed that a file that cannot be
+     found takes no part in the widths: milestone 1's `wc` padded to 7
+     for one, and now does not.
+   - **Pipelines in the shell** (§8.2, §9.1). An unquoted `|` joins
+     commands; bash's syntax errors name a `|` with nothing before it
+     (``syntax error near unexpected token `|'``) or after it (`syntax
+     error: unexpected end of file`); `||` is refused as unsupported
+     syntax, and so is a redirection on a command before the last
+     (`unsupported syntax: > before |`), where bash would send that
+     command's output into the file. `cd`, `exit` and `help` cannot be in
+     a pipeline: `relay-sh: cd: cannot be used in a pipeline`, status 1
+     (§9.1 said `sh:`; the shell's own messages say `relay-sh:`, §16 item
+     5), and nothing of the line runs. Every command of a pipeline has a
+     name: a redirection alone, which bash runs as a command, is refused
+     (`> f | b`: `unsupported syntax: > before |`; `a | > f`:
+     `unsupported syntax: | >`; the review found `/bin/sh` panicking on
+     the second). `/bin/sh` starts the stages left to
+     right in one group: the first that starts gets a new group and the
+     console, the others join it (`Group::Join`), and a script's stay in
+     the script's group. Each pipe is made just before the stage that
+     writes it starts, and the shell closes its copies of the ends as soon
+     as the stages have them, so a reader sees its end once its writer has
+     ended. A stage that cannot start says so at once, its neighbours see
+     an end, and the others run, as in bash; a pipe that cannot be made
+     (`relay-sh: pipe error: …`, status 1) stops the starting. The shell
+     waits for every stage, says how any killed one ended, a Ctrl-C once
+     (`^C`), and takes the last one's status; a stage that ended with 141
+     says nothing. The in-process runner runs the stages one after
+     another, each one's output kept in memory as the next one's input,
+     and refuses `sh` in a pipeline too (it would run its script in that
+     shell); a stage that is not found gives the next nothing, and Ctrl-C
+     stops the rest.
+   - **`X | sh`** (§8.3). `/bin/sh` without arguments whose fd 0 is no
+     console runs the lines it reads there, as they come, as bash does:
+     without a prompt, a trace or the line editor, so it never takes the
+     console (the review found `cat | sh` leaving it in raw mode, where
+     Ctrl-C could no longer end the pipeline). It ends at the input's end
+     or `exit`; a line over 64 KiB or not UTF-8 is skipped with an `sh:`
+     message.
+   - **`grep`** (§9.1; `crates/shell/src/pattern.rs`,
+     `commands/grep.rs`). `grep [-i] [-v] [-n] [-c] PATTERN [FILE...]`
+     matches bytes as GNU grep does with `LC_ALL=C`: literal bytes, `.`,
+     `*` (literal at the start), `^` at the start and `$` at the end
+     (literal elsewhere), `[...]` with ranges, `^` and `]` first, `\`
+     before a byte for that byte; `-i` folds ASCII letters only. The
+     escapes that mean something else in GNU's basic expressions (groups,
+     intervals, `\|`, `\+`, `\?`, word anchors, back-references) and a
+     set's classes are refused (`grep: \( \) is not supported`, status 2)
+     rather than matched differently; a malformed pattern gets GNU's
+     message (`Unmatched [, [^, [:, [., or [=`, `Trailing backslash`,
+     `Invalid range end`, `Invalid regular expression`). Matching runs
+     every item at once over the line (an NFA), in time proportional to
+     the line times the pattern, whatever the pattern. Several files put
+     each one's name first; an input with a NUL byte is binary, and
+     `grep: f: binary file matches` replaces its lines; a file that is
+     also its output is refused (`grep: f: input file is also the
+     output`), as GNU's does, since it would read its own output for ever;
+     the status is 0 if a line was selected, 1 if none, 2 after an error,
+     a write error included, as GNU's (`Ctx::set_write_error_status`; the
+     other commands keep 1). A range cannot start where one ended
+     (`[a-z-9]`: `Invalid range end`). A test
+     runs every pattern of up to three symbols of a small alphabet (1885)
+     and the `-i` ones through the host's GNU grep: the same lines, or the
+     same refusal.
+   - **`seq`, `sleep`, `true`, `false`** (§9.1). `seq [FIRST [INCREMENT]]
+     LAST` prints whole numbers as GNU seq does (it takes GNU's INCREMENT
+     too, rather than calling a third operand extra; negative numbers are
+     operands, not options); GNU's also takes decimals, exponents, `inf`,
+     hexadecimal and numbers beyond 64 bits, of which this one says `seq:
+     not a whole number: '1.5'`, and the options `-f`, `-s` and `-w`,
+     which are unknown here; what GNU's refuses gets GNU's first line
+     (`invalid floating point argument`, `invalid option`). `sleep` waits for the sum of its
+     times, in seconds or with GNU's `s`, `m`, `h` and `d`, a fraction
+     counting to the millisecond, through the shell's `System`, which
+     gains `sleep`. `true` and `false` ignore their arguments. With them
+     and `t-pipe`, `/bin` holds 40 programs.
+   - **Messages.** The new commands print the first line of GNU's message
+     for what they refuse, without GNU's `Try '… --help'` line, as
+     milestone 1's commands do; `grep` without a pattern prints GNU's two
+     usage lines, which are its message.
+   - **Tests** (§8.5, §12). `t-pipe` (`basic`, `room`, `child`, `eof`,
+     `epipe`, `killed`, `many`) and the scenario `pipe_calls`; `t-spawn
+     join` in `spawn`; `cat` reading the console in `console`; the
+     scenario `pipes`. Host tests compare `wc`, `head`, `tail`, `grep` and
+     `seq` with the host's own (`testing::host_tool`, run in a directory
+     under `target/` with `LC_ALL=C`, its input written from a thread; a
+     missing tool fails the test).
+   - **Plan 5's deferred minors.** The roadmap's `verify-usb` wording is
+     corrected in this plan's first pull request; `t-spawn fill` is
+     bounded at the table's 64; the other five go to plan 4.

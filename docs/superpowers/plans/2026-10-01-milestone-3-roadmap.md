@@ -1,0 +1,29 @@
+# Milestone 3 Roadmap
+
+**Spec:** `docs/superpowers/specs/2026-09-29-user-space-gate-design.md` (the user-space gate; milestone 3 is its second half, "Pipes and jobs", version 0.4.0)
+
+Milestone 3 connects the programs of milestone 2: pipes and standard input, background jobs with `ps` and `kill`, and script arguments and variables (spec §9). It is split into the four plans of spec §13, steps 6–9, named `m3-plan-1` to `m3-plan-4` (their files `docs/superpowers/plans/<date>-m3-plan-<n>-<name>.md`, their branches `m3p<n>/…`). Each one ends with software that can be tested by itself. Each plan is written just before it is executed, so it builds on the code that actually exists and on what the previous plan's checks showed.
+
+```
+Plan 1 ──► Plan 2 ──► Plan 3 ──► Plan 4
+```
+
+| Plan | Spec §13 step | Delivers | Ends with |
+|---|---|---|---|
+| 1 · Pipes and standard input | 6 | The `pipe` call (a 16 KiB ring in frames of its own, blocking both ways, `EPIPE`); `spawn` joining a child's process group (`SpawnArgs::pgid`, ABI 3); `relay-rt`'s `pipe` and the quiet exit with 141 on `EPIPE`; the parser's `|`, a pipeline in one process group under both runners; `cat`, `wc` (now with `-c`, `-l`, `-w`), `head` and `tail` reading standard input; `grep`, `seq`, `sleep`, `true`, `false`; plan 5's deferred `t-spawn fill` bound | Scenarios `pipe_calls` (`t-pipe`) and `pipes`; `system: 40 programs, ABI 3`; no NUC check |
+| 2 · Jobs, `ps` and `kill` | 7 | `&`, the job table, `jobs`, `wait`, the Done lines (§9.2); `proc_list` with `ProcInfo` and `/bin/ps`, the built-in `kill` with `%n` (§9.3); the console calls refusing a caller outside the foreground group (milestone 2's leftover); a test of the error screen taking the console back, which `kill` can now reach | Scenario `jobs` |
+| 3 · Script arguments and variables | 8 | `$0`…`$9`, `$#`, `$@`, `$?`, `NAME=value`, `$NAME` and `${NAME}`, expansion without word splitting (§9.4) | Scenario `script_vars` |
+| 4 · Hardening and 0.4.0 | 9 | `check5.sh` (pipes, a background job and `kill`, script arguments and variables); the deferred findings of plans 1–3 and plan 5's minors 3–7; the spec's §16 up to date; version 0.4.0 | `cargo xtask ci` green; NUC checks 3, 4 and 5 on a stick written by `flash --full`; milestone 3 done |
+
+## Notes carried forward
+
+- **CI and pull requests (all plans).** As in milestone 2: every pull request to `main` must pass `lint`, `unit` and `e2e`; every plan is split into PRs that are each green on their own, one branch and worktree per PR; new crates, user packages and scenarios are picked up by `cargo xtask ci`. Commits and PR titles follow `CONTRIBUTING.md` (Conventional Commits, since #80).
+- **How plans are made (all plans).** As in milestone 2: every task prototyped in a clone under `tmp/m3p<n>/proto`, one commit per task, tagged `t1..tN` on a tag `p0` (`origin/main` plus the plan's first PR's docs); the plan generated and replayed from it by `tmp/m3p<n>/gen` (a copy of plan 5's, `tmp/m2p5/gen`); an independent review of the prototype whose real findings become tasks of their own, each with a test that fails first; a spike first when the risk is "does everything still pass".
+- **Background jobs stay in milestone 3** (spec §1.2's cut line). Milestone 2 ended well within the gate's time, so nothing calls for the cut. Plan 2 also settles two things milestone 2 left for them: the console calls refusing a caller outside the foreground group, and a test of the error screen taking the console back.
+- **ABI 3 (plan 1).** `SpawnArgs` gains `pgid` and a reserved word (128 bytes), so that a pipeline's later stages can join the first stage's group: a changed layout, so `relay_abi::VERSION` is 3 from plan 1 on (spec §7.4, §16 item 8). The startup line becomes `system: 40 programs, ABI 3`, and `t-abi` is built for ABI 2. Plan 1 has no NUC check, so the recorded NUC transcripts in `xtask/fixtures/checks/` get `ABI 3` by hand until plan 4's NUC checks record real ones, as plan 4a did with ABI 2.
+- **What milestone 2 leaves for milestone 3** (milestone 2's roadmap, "What plan 5 leaves for milestone 3"): the console calls refusing a caller outside the foreground group, and the error screen taking the console back (raw mode, init's group) when a shell is ended while its command has the console in line mode, which only `kill` can do. Both are plan 2's.
+- **Plan 5's deferred minors** (`tmp/m2p5/plan5-ledger-final.md`):
+  - Plan 1, PR 1: milestone 2's roadmap said `verify-usb` fails "a transcript older than its script"; the code compares it with the `system.img` on the stick (corrected there).
+  - Plan 1: `t-spawn fill` loops until `EAGAIN` without a bound, while spec §16 item 7 says every guest-test loop is bounded.
+  - Plan 4: the stick's `/root/README` says every command is a program, then lists `cd` and `help`, which are built-ins (plan 2 adds `jobs`, `wait` and `kill` to them); `verify-usb` prints the run time in debugfs's date format and the build time in `date`'s, on neighbouring lines; an unreadable `system.img` skips `verify-usb`'s stale check with a note instead of failing; the loader-rules scanner's "no raw strings" assumption is not asserted; the TLB scan catches `invlpg` but not `invpcid`.
+- **Still out of the gate** (spec §15): milestone 1's list (milestone 2's roadmap, "Deferred findings of milestone 1"); `fg`, `bg`, Ctrl-Z, stopped processes and signals other than killing; the aarch64 port and the ABI's notes for other architectures, which come after the gate.
