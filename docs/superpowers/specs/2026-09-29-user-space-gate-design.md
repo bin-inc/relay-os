@@ -1873,9 +1873,11 @@ does. Facts found before the spec was first merged are already in its body.
      lists them. `jobs [%n | n]...` lists every job or those named, in the
      order named (one named twice twice), and a job that has ended says
      how there once and leaves the table. `wait` waits for every job,
-     which then leave the table, saying nothing of those that exited and
-     telling of those a signal ended, as bash's does; `wait %n` or `wait
-     PID` waits for one, its status that job's last process's or that
+     which then leave the table, at the prompt each saying how it ended,
+     as bash's do; with nothing running as it began, only those a signal
+     ended say so (the final review found that bare `wait` silent, from
+     notes that had seen only that case); `wait %n` or `wait PID` waits
+     for one, its status that job's last process's or that
      process's own, and at the prompt a job that ends there says how at
      once. These notices go to the screen, never into a redirection. The
      table keeps the statuses of the processes of jobs that left it (the

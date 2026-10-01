@@ -75,9 +75,10 @@ fn wait_for(control: &mut JobControl<'_>, pids: &[u32]) -> Waited {
 /// is the last one's: a job's last process's, or 127 for one that is no
 /// job (`%3: no such job`, `pid 9 is not a child of this shell`; a job's
 /// process already reported answers once more); without, 0, and the jobs
-/// that ended leave the table, those a signal ended saying so. At the
-/// prompt a job named that ends says how at once, on the screen. Ctrl-C
-/// ends the wait (`^C`, 130); the jobs run on.
+/// that ended leave the table, at the prompt saying how, as bash's do (but
+/// those that exited before it began, which were told of at the prompt).
+/// At the prompt a job named that ends says how at once, on the screen.
+/// Ctrl-C ends the wait (`^C`, 130); the jobs run on.
 pub fn wait(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     if let Some(option) = args.iter().find(|a| a.starts_with('-') && a.len() > 1) {
         ctx.fail(NAME, format_args!("wait: {option}: invalid option"));
@@ -91,9 +92,16 @@ pub fn wait(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
         let pids = control.jobs.all_running();
         let waited = wait_for(control, &pids);
         let report = control.report;
-        let killed = control.jobs.report_killed();
+        // As bash's: the jobs it waited for say how they ended, those that
+        // ended before a Ctrl-C too; with nothing running as it began, only
+        // those a signal ended.
+        let lines = if pids.is_empty() {
+            control.jobs.report_killed()
+        } else {
+            control.jobs.report()
+        };
         // Notices, as bash's: on the screen, never into a redirection.
-        for line in killed.iter().filter(|_| report) {
+        for line in lines.iter().filter(|_| report) {
             ctx.err(line.as_bytes());
         }
         if let Waited::Interrupted = waited {
@@ -402,11 +410,17 @@ mod tests {
     }
 
     #[test]
-    fn wait_waits_for_every_job_and_says_nothing_of_them() {
+    fn wait_waits_for_every_job_and_says_how_they_ended() {
+        // bash 5.2 at a prompt: `sleep 1 &`, then `wait` says
+        // `[1]+  Done                    sleep 1` (the final review found it
+        // said nothing).
         let mut h = with_jobs();
         let (status, out) = typed_status(&mut h, &["t-spin &", "t-spin 2 &", "wait", "jobs"]);
         assert!(
-            out.ends_with("root@relay:/# wait\nroot@relay:/# jobs\nroot@relay:/# "),
+            out.ends_with(
+                "root@relay:/# wait\n[1]-  Done                    t-spin\n\
+                 [2]+  Done                    t-spin 2\nroot@relay:/# jobs\nroot@relay:/# "
+            ),
             "{out}"
         );
         assert_eq!(status, 0);
@@ -475,9 +489,11 @@ mod tests {
         let mut h = with_jobs();
         h.programs.ctrl_c_after = Some(1);
         let (status, out) = typed_status(&mut h, &["t-spin &", "t-spin 2 &", "wait", "jobs"]);
+        // The job that ended before the Ctrl-C says so, as bash's does.
         assert!(
             out.contains(
-                "# wait\n^C\nroot@relay:/# jobs\n[2]+  Running                 t-spin 2 &\n"
+                "# wait\n[1]-  Done                    t-spin\n^C\nroot@relay:/# jobs\n\
+                 [2]+  Running                 t-spin 2 &\n"
             ),
             "{out}"
         );
@@ -519,8 +535,8 @@ mod tests {
 
     #[test]
     fn a_bare_wait_tells_of_a_killed_job_on_the_screen() {
-        // bash 5.2: `kill -9 %1; wait` says the job was killed; a job that
-        // exited it does not mention.
+        // bash 5.2: `kill -9 %1; wait` says the job was killed, and the
+        // jobs it waited for how they ended.
         let mut h = with_jobs();
         h.programs.known.push((
             "/bin/t-fault",
@@ -530,7 +546,8 @@ mod tests {
         let out = typed(&mut h, &["t-fault x &", "t-spin &", "wait > /tmp/w"]);
         assert!(
             out.ends_with(
-                "# wait > /tmp/w\n[1]-  Killed                  t-fault x\nroot@relay:/# "
+                "# wait > /tmp/w\n[1]-  Killed                  t-fault x\n\
+                 [2]+  Done                    t-spin\nroot@relay:/# "
             ),
             "{out}"
         );
@@ -741,5 +758,15 @@ mod tests {
             );
         }
         assert!(h.programs.kills.is_empty());
+    }
+
+    #[test]
+    fn a_bare_wait_with_nothing_running_says_nothing_of_jobs_that_exited() {
+        // bash 5.2: `sleep 0.1 &`, a moment, `wait`: no line, the job
+        // having ended (and been told of at the prompt) before.
+        let mut h = with_jobs();
+        h.programs.known.push(("/bin/true", WaitStatus::exited(0)));
+        let out = typed(&mut h, &["true &", "wait"]);
+        assert!(out.ends_with("# wait\nroot@relay:/# "), "{out}");
     }
 }
