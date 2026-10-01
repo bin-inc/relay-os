@@ -1,5 +1,6 @@
-//! `sh FILE`: runs the commands in a file, one line at a time, as if each
-//! had been typed (spec §15 item 12). There are no variables, loops or
+//! `sh FILE [ARG]...`: runs the commands in a file, one line at a time, as
+//! if each had been typed (spec §15 item 12), its arguments `$1` on and
+//! `$0` the file as given (user-space gate §9.4). There are no loops or
 //! conditions: a script is a list of commands. Each command is shown as
 //! `+ <line>` before its output, as `set -x` does, so a photo of the
 //! screen shows which command printed what. A failing command does not
@@ -12,9 +13,10 @@
 //! as it would under bash: the redirection writes from the file's start,
 //! the transcript goes on where it was.
 
-use crate::ctx::{Ctx, getopt, quote, quote_if_needed};
+use crate::ctx::{Ctx, getopt, quote_if_needed};
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 use vfs::{Errno, FileType, Node, path};
 
 /// The largest script, in bytes: far more than a check needs, and read
@@ -24,6 +26,10 @@ pub const SCRIPT_MAX: u64 = 64 * 1024;
 /// A script `sh` has read, for the shell to run.
 pub(crate) struct Script {
     pub text: String,
+    /// The file as `sh` was given it, the script's `$0`, and its
+    /// arguments.
+    pub name: String,
+    pub args: Vec<String>,
     /// The transcript file, emptied, and its name as `sh` was given it.
     pub transcript: Node,
     pub transcript_name: String,
@@ -38,17 +44,24 @@ pub fn transcript_name(script: &str) -> String {
     }
 }
 
-/// `sh FILE`: checks and reads the file and empties its transcript; the
-/// shell then runs its lines (`Shell::execute`).
+/// `sh FILE [ARG]...`: checks and reads the file and empties its
+/// transcript; the shell then runs its lines (`Shell::execute`) with the
+/// arguments. Options come only before the file, as bash's do: what
+/// follows it is the script's (`sh f -x`).
 pub fn sh(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
-    let opts = match getopt(args, "", "") {
-        Ok(o) => o,
-        Err(e) => return ctx.fail("sh", format_args!("{e}")),
+    let first = args
+        .iter()
+        .position(|a| a == "--" || a == "-" || !a.starts_with('-'))
+        .unwrap_or(args.len());
+    let rest = match args.get(first) {
+        Some(a) if a == "--" => &args[first + 1..],
+        _ => &args[first..],
     };
-    let file = match &opts.operands[..] {
-        [] => return ctx.fail("sh", format_args!("missing operand")),
-        [file] => file,
-        [_, extra, ..] => return ctx.fail("sh", format_args!("extra operand {}", quote(extra))),
+    if let Err(e) = getopt(&args[..first], "", "") {
+        return ctx.fail("sh", format_args!("{e}"));
+    }
+    let Some((file, script_args)) = rest.split_first() else {
+        return ctx.fail("sh", format_args!("missing operand"));
     };
     if ctx.in_script {
         return ctx.fail("sh", format_args!("a script cannot run another script"));
@@ -67,6 +80,8 @@ pub fn sh(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
         Ok(transcript) => {
             ctx.script = Some(Script {
                 text,
+                name: file.clone(),
+                args: script_args.to_vec(),
                 transcript,
                 transcript_name: log,
             });
@@ -285,6 +300,31 @@ mod tests {
     }
 
     #[test]
+    fn a_script_gets_its_arguments() {
+        let mut h = Harness::new();
+        h.put("/tmp/s.sh", b"echo $0 $# \"[$1]\" $2\necho \"$@\"\n");
+        // What bash prints, but that bash would split `b c` in `$2`.
+        assert_eq!(
+            h.run("sh /tmp/s.sh a 'b c' -x ''"),
+            (
+                0,
+                "+ echo $0 $# \"[$1]\" $2\n/tmp/s.sh 4 [a] b c\n+ echo \"$@\"\na b c -x \n".into()
+            )
+        );
+        // `--` ends `sh`'s options; one after the file is the script's.
+        h.put("/tmp/t.sh", b"echo $# \"$@\"\n");
+        assert_eq!(
+            h.run("sh -- /tmp/t.sh -- -n"),
+            (0, "+ echo $# \"$@\"\n2 -- -n\n".into())
+        );
+        // So may a file whose name starts with `-`.
+        h.put("/-n.sh", b"echo n\n");
+        assert_eq!(h.run("sh -- -n.sh").1, "+ echo n\nn\n");
+        h.put("/tmp/u.sh", b"echo [$0] $#\n");
+        assert_eq!(h.run("sh /tmp/u.sh").1, "+ echo [$0] $#\n[/tmp/u.sh] 0\n");
+    }
+
+    #[test]
     fn a_script_cannot_run_a_script() {
         let mut h = Harness::new();
         h.put("/tmp/s.sh", b"sh /tmp/s.sh\necho after\n");
@@ -400,9 +440,10 @@ mod tests {
         let run = |h: &mut Harness, line: &str| -> (i32, String) { h.run(line) };
         assert_eq!(run(&mut h, "sh"), (1, "sh: missing operand\n".into()));
         h.put("/tmp/s.sh", b"echo hi\n");
+        assert_eq!(run(&mut h, "sh --"), (1, "sh: missing operand\n".into()));
         assert_eq!(
-            run(&mut h, "sh /tmp/s.sh x"),
-            (1, "sh: extra operand 'x'\n".into())
+            run(&mut h, "sh -x /tmp/s.sh"),
+            (1, "sh: invalid option -- 'x'\n".into())
         );
         assert_eq!(
             run(&mut h, "sh /tmp/nope"),

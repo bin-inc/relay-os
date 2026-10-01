@@ -261,7 +261,7 @@ impl<'a> Shell<'a> {
         self.exited = ran.exited;
         let mut status = ran.status;
         if let Some(script) = ran.script {
-            status = self.run_script(script);
+            status = self.run_script(*script);
         }
         self.finish(status, ran.message)
     }
@@ -378,10 +378,14 @@ impl<'a> Shell<'a> {
     /// Runs a script `sh` read, in this shell (the in-process runner): its
     /// transcript is written by the shell. A script cannot run another.
     /// Its `exit` ends only the script, as it does under `/bin/sh`, where a
-    /// script is a shell of its own.
+    /// script is a shell of its own; and it has variables and arguments of
+    /// its own, and starts with `$?` 0, as there.
     fn run_script(&mut self, script: Script) -> i32 {
         self.transcript = Some(Transcript::new(script.transcript, script.transcript_name));
+        let outer = core::mem::replace(&mut self.vars, Vars::script(&script.name, &script.args));
+        self.status = 0;
         let status = self.run_lines(&script.text);
+        self.vars = outer;
         if self.exited {
             self.stopped = false;
         }
@@ -414,6 +418,7 @@ impl<'a> Shell<'a> {
         let Some(programs) = self.runner.programs() else {
             unreachable!("run_file needs a spawning shell")
         };
+        self.vars = Vars::script(&script.name, &script.args);
         let log = script.transcript_name;
         if let Err(e) = programs.tee_push(log.as_bytes()) {
             let shown = quote_if_needed(&path::display(log.as_bytes()));
@@ -945,6 +950,39 @@ mod tests {
         );
         assert_eq!(h.programs.spawned[0].path, "/bin/sh");
         assert_eq!(h.programs.spawned[0].args, ["sh", "/tmp/t.sh"]);
+    }
+
+    #[test]
+    fn a_script_has_its_own_variables_and_arguments() {
+        let mut h = Harness::new();
+        h.put("/tmp/s.sh", b"echo $? \"[$A]\" $1\nB=in\nexit 4\n");
+        // As bash's, without `export`: nothing passes in or out.
+        assert_eq!(
+            h.lines(&["A=out", "nope", "sh /tmp/s.sh x", "echo $? $A [$B] $1"]),
+            (
+                0,
+                "relay-sh: nope: command not found\n+ echo $? \"[$A]\" $1\n0 [] x\n\
+                 + B=in\n+ exit 4\n4 out []\n"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn bin_sh_gives_a_script_its_arguments() {
+        let mut h = spawning();
+        h.put("/tmp/s.sh", b"t-args $0 $# \"$@\"\n");
+        let mut out = FakeStdout::console();
+        h.sh(&["/tmp/s.sh", "a", "b c", ""], &mut out);
+        assert_eq!(
+            h.programs.spawned[0].args,
+            ["t-args", "/tmp/s.sh", "3", "a", "b c", ""]
+        );
+        // A script it runs gets its arguments as typed, expanded.
+        h.put("/tmp/r.sh", b"A='x y'\nsh /tmp/s.sh \"$A\" $1\n");
+        h.sh(&["/tmp/r.sh", "z"], &mut out);
+        assert_eq!(h.programs.spawned[1].args, ["sh", "/tmp/s.sh", "x y", "z"]);
+        assert_eq!(h.programs.spawned[1].path, "/bin/sh");
     }
 
     #[test]

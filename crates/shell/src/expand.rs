@@ -40,6 +40,13 @@ impl Vars {
         }
     }
 
+    /// A script's: none set, `$0` its `name` and `args` after it.
+    pub fn script(name: &str, args: &[String]) -> Vars {
+        let mut vars = Vars::new(name);
+        vars.args.extend_from_slice(args);
+        vars
+    }
+
     /// The variable `name`'s value; an unset one is empty.
     pub fn get(&self, name: &str) -> &str {
         self.names.get(name).map_or("", String::as_str)
