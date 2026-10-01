@@ -2,7 +2,7 @@
 //! built-in command or a program and syncing the filesystems after it
 //! (spec §7.3, §8.3; user-space gate §8.2).
 
-use crate::commands::{self, Script};
+use crate::commands::{self, SCRIPT_MAX, Script};
 use crate::ctx::{Ctx, quote_if_needed};
 use crate::editor::{Feed, LineEditor};
 use crate::io::{Console, Programs, Stdin, Stdout, System};
@@ -318,6 +318,68 @@ impl<'a> Shell<'a> {
         status
     }
 
+    /// `X | sh`: a shell whose standard input is no console runs the
+    /// commands it reads there (user-space gate §9.1, §16 item 8), a line
+    /// at a time as they come, without a prompt, a trace or the line
+    /// editor, so it never takes the console; it ends at the input's end or
+    /// `exit`. A line over 64 KiB, or not UTF-8, is skipped with a message,
+    /// as `sh` refuses such a script. Returns the last status.
+    pub fn run_input(&mut self, input: &mut dyn Stdin) -> i32 {
+        let mut buf = alloc::vec![0; 4096];
+        let mut line: Vec<u8> = Vec::new();
+        let mut too_long = false;
+        self.stopped = false;
+        loop {
+            let n = match input.read(&mut buf) {
+                Ok(n) => n,
+                Err(e) => {
+                    let message = format!("sh: standard input: {e}\n");
+                    return self.finish(1, message);
+                }
+            };
+            if n == 0 {
+                if !line.is_empty() || too_long {
+                    self.input_line(&line, too_long);
+                }
+                return self.status;
+            }
+            for piece in buf[..n].split_inclusive(|&b| b == b'\n') {
+                let ended = piece.last() == Some(&b'\n');
+                let piece = &piece[..piece.len() - usize::from(ended)];
+                if !too_long {
+                    line.extend_from_slice(piece);
+                    if line.len() as u64 > SCRIPT_MAX {
+                        too_long = true;
+                        line.clear();
+                    }
+                }
+                if ended {
+                    self.input_line(&line, too_long);
+                    line.clear();
+                    too_long = false;
+                    if self.stopped {
+                        return self.status;
+                    }
+                }
+            }
+        }
+    }
+
+    /// One line `run_input` read: run, or said why not.
+    fn input_line(&mut self, line: &[u8], too_long: bool) {
+        match core::str::from_utf8(line) {
+            _ if too_long => {
+                self.finish(1, String::from("sh: standard input: a line over 64 KiB\n"));
+            }
+            Ok(text) => {
+                self.execute(text);
+            }
+            Err(_) => {
+                self.finish(1, String::from("sh: standard input: not a text line\n"));
+            }
+        }
+    }
+
     /// Runs a script's lines (spec §15 item 12): each command is shown as
     /// `+ <line>`, then runs and is synced as if typed. Blank and comment
     /// lines are skipped. Ctrl-C, `exit`, or `reboot`/`poweroff`
@@ -471,6 +533,41 @@ mod tests {
         }
         assert!(!h.exists("/tmp/f"), "nothing of the line ran");
         assert!(h.programs.spawned.is_empty());
+    }
+
+    #[test]
+    fn a_shell_whose_input_is_no_console_runs_the_lines_it_reads() {
+        let mut h = Harness::new();
+        h.programs
+            .known
+            .push(("/bin/t-args", WaitStatus::exited(0)));
+        let text = b"t-args a\n\nt-args 'b c'\n\xff\nexit 3\nt-args never\n".to_vec();
+        let mut input = crate::Bytes::new(text);
+        let status = Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+            .run_input(&mut input);
+        assert_eq!(status, 3, "exit's");
+        let args: Vec<Vec<String>> = h.programs.spawned.iter().map(|s| s.args.clone()).collect();
+        assert_eq!(args, [vec!["t-args", "a"], vec!["t-args", "b c"]]);
+        // No prompt, no trace: only what is wrong.
+        assert_eq!(h.console.take(), "sh: standard input: not a text line\n");
+        assert!(
+            h.console.input.is_empty()
+                && h.programs
+                    .spawned
+                    .iter()
+                    .all(|s| s.group == crate::Group::New)
+        );
+        // The last line needs no newline; a line over 64 KiB is skipped.
+        let mut long = alloc::vec![b'x'; 70_000];
+        long.extend_from_slice(b"\nt-args c");
+        let mut input = crate::Bytes::new(long);
+        let status = Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+            .run_input(&mut input);
+        assert_eq!(
+            (status, h.console.take()),
+            (0, "sh: standard input: a line over 64 KiB\n".into())
+        );
+        assert_eq!(h.programs.spawned.last().unwrap().args, ["t-args", "c"]);
     }
 
     #[test]

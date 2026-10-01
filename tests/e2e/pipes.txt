@@ -56,13 +56,22 @@ key second
 expect second\nsecond\n
 type {ctrl-d}
 expect root@relay:~# $
+# A shell reading a pipe runs what it reads, without a prompt, and leaves
+# the console alone: Ctrl-C still ends the pipeline.
+send echo ls /etc | sh
+expect \nhostname  motd\nroot@relay:~# $
+send t-spin | sh
+alive 1
+key {ctrl-c}
+expect \^C\nroot@relay:~# 
 # Ctrl-C ends every stage of the pipeline, and the shell says so once.
 send t-spin | cat | cat
 alive 1
 key {ctrl-c}
 expect \^C\nroot@relay:~# 
 send dmesg
-expect \npid \d+ \(/bin/t-spin\): killed: Ctrl-C\npid \d+ \(/bin/cat\): killed: Ctrl-C\npid \d+ \(/bin/cat\): killed: Ctrl-C\n
+# The stages end in the order they run again: in any order here.
+expect \n(pid \d+ \(/bin/(t-spin|cat)\): killed: Ctrl-C\n){3}
 # A script's pipeline, in the script's group; its transcript gets what
 # the screen gets.
 send echo 'echo piped | cat' > p.sh

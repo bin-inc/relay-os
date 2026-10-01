@@ -134,6 +134,13 @@ impl System for SysSystem {
 /// to its command) or a pipe.
 pub struct SysStdin;
 
+impl SysStdin {
+    /// Whether fd 0 is the console (`fstat` says a character device).
+    pub fn is_console() -> bool {
+        sys::fstat(0).is_ok_and(|st| st.kind == u32::from(KIND_CHAR_DEVICE))
+    }
+}
+
 impl Stdin for SysStdin {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
         sys::read(0, buf).map_err(Errno::from_number)
