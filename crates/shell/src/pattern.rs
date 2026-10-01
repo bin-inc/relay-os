@@ -236,6 +236,11 @@ fn parse_set(p: &[u8], mut i: usize) -> Result<(Item, usize), PatternError> {
             }
             ranges.push((b, end));
             i += 3;
+            // A range cannot start where one ended (`[a-z-9]`); a last `-`
+            // is a member.
+            if p.get(i) == Some(&b'-') && p.get(i + 1).is_some_and(|&e| e != b']') {
+                return Err(PatternError::InvalidRangeEnd);
+            }
         } else {
             ranges.push((b, b));
             i += 1;
@@ -426,6 +431,33 @@ mod tests {
             patterns.len(),
             differ.join("\n")
         );
+    }
+
+    /// Dashes around ranges in a set, as GNU grep takes or refuses them.
+    #[test]
+    fn dashes_in_a_set_are_what_gnu_grep_makes_of_them() {
+        let lines = ["", "a", "b", "z", "-", "9", "]", "^", "a-z"];
+        let patterns: Vec<String> = [
+            "[a-z-9]",
+            "[a-b-c]",
+            "[a-b-]",
+            "[a-b-]x",
+            "[-a-b]",
+            "[a-]",
+            "[--a]",
+            "[a--]",
+            "[^a-b-]",
+            "[^-a-b]",
+            "[a-b-z]",
+            "[]-a]",
+            "[a-b]-",
+            "[a-c-e-g]",
+        ]
+        .iter()
+        .map(|p| String::from(*p))
+        .collect();
+        let differ = unlike_gnu(&patterns, &lines, false);
+        assert!(differ.is_empty(), "{}", differ.join("\n"));
     }
 
     /// The same with `-i`, over lines in either case.
