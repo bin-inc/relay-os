@@ -11,8 +11,8 @@
 //! `${N}`, `$#`, `$@` or `$?`, is a piece of its word that expansion
 //! replaces (user-space gate §9.4). bash's other parameters (`$*`, `$$`,
 //! `$!`, `$-`, `$_`), its operators (`${A:-x}`, `${#A}`) and, outside
-//! double quotes, its quotes `$'…'` and `$"…"` are refused, as are `$(`
-//! and `$((`; a `${` without its `}` is bash's syntax error, and a `${…}`
+//! double quotes, its quotes `$'…'` and `$"…"` are refused, as are `$(`,
+//! `$((` and `$[`; a `${` without its `}` is bash's syntax error, and a `${…}`
 //! that names nothing expands to its `bad substitution`. A `$` before
 //! anything else is a `$`.
 //!
@@ -301,6 +301,8 @@ fn parameter(cur: &mut Cursor<'_>, quoted: bool) -> Result<Option<Param>, ParseE
             let what = if cur.peek() == Some('(') { "$((" } else { "$(" };
             return Err(ParseError::Unsupported(what.into()));
         }
+        // bash's old arithmetic, `$[1+1]`.
+        '[' => return Err(ParseError::Unsupported("$[".into())),
         // `$'…'` and `$"…"` are bash's quotes of other kinds.
         '\'' | '"' if !quoted => return Err(ParseError::Unsupported(format!("${c}"))),
         _ => return Ok(None),
@@ -861,6 +863,10 @@ mod tests {
             ("echo $(date)", "$("),
             ("echo \"$((1 + 2))\"", "$(("),
             ("echo $'a'", "$'"),
+            // bash's old arithmetic, `$[1+1]` (2 in bash), quoted or not.
+            ("echo $[1+1]", "$["),
+            ("echo \"$[1+1]\"", "$["),
+            ("echo a$[", "$["),
             ("echo $\"a\"", "$\""),
             ("echo ${A:-x}", "${A:-x}"),
             ("echo ${A-x}", "${A-x}"),
