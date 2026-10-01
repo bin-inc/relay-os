@@ -140,6 +140,9 @@ pub trait Programs {
     /// A child that has ended, collected, if one has: a background job's
     /// process (`wait(-1, NOHANG)`).
     fn collect(&mut self) -> Option<(u32, WaitStatus)>;
+    /// Kills the process `target`, or the process group `-target`
+    /// (`kill`): `ESRCH` if there is none, `EPERM` for process 1.
+    fn kill(&mut self, target: i64) -> Result<(), Errno>;
     /// Waits for the child `pid` to end, as `wait` does, unless a Ctrl-C
     /// is typed at the shell's prompt meanwhile (`EINTR`, `WAIT_CTRL_C`).
     fn wait_or_ctrl_c(&mut self, pid: u32) -> Result<WaitStatus, Errno>;

@@ -183,6 +183,8 @@ pub struct FakePrograms {
     pub ctrl_c_after: Option<usize>,
     /// Every pid `wait_or_ctrl_c` waited for.
     pub waited: Vec<u32>,
+    /// Every `kill`'s target.
+    pub kills: Vec<i64>,
     /// The tees pushed and not popped, by path.
     pub tees: Vec<String>,
     /// Every tee pushed.
@@ -212,6 +214,7 @@ impl FakePrograms {
             alive_at_spawn: Vec::new(),
             ctrl_c_after: None,
             waited: Vec::new(),
+            kills: Vec::new(),
             tees: Vec::new(),
             pushed: Vec::new(),
             push_error: None,
@@ -313,6 +316,25 @@ impl Programs for FakePrograms {
             .position(|c| c.pid == pid)
             .ok_or(Errno::ECHILD)?;
         Ok(self.children.remove(i).status)
+    }
+    /// Its children end at once, killed; process 1 is refused, and any
+    /// other pid or group is none.
+    fn kill(&mut self, target: i64) -> Result<(), Errno> {
+        self.kills.push(target);
+        if target == 1 || target == -1 {
+            return Err(Errno::EPERM);
+        }
+        let hit = |c: &FakeChild| match target {
+            t if t < 0 => i64::from(c.group) == -t,
+            t => i64::from(c.pid) == t,
+        };
+        let mut found = false;
+        for c in self.children.iter_mut().filter(|c| hit(c)) {
+            c.status = WaitStatus::killed(relay_abi::wait::KILLED_KILL);
+            c.ends_at = self.round;
+            found = true;
+        }
+        if found { Ok(()) } else { Err(Errno::ESRCH) }
     }
     fn wait_or_ctrl_c(&mut self, pid: u32) -> Result<WaitStatus, Errno> {
         if let Some(n) = &mut self.ctrl_c_after {

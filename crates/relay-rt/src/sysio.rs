@@ -295,6 +295,10 @@ impl Programs for SysPrograms {
         }
     }
 
+    fn kill(&mut self, target: i64) -> Result<(), Errno> {
+        sys::kill(target).map_err(Errno::from_number)
+    }
+
     fn wait_or_ctrl_c(&mut self, pid: u32) -> Result<WaitStatus, Errno> {
         match sys::wait_with(i64::from(pid), relay_abi::spawn::WAIT_CTRL_C) {
             Ok(Some((_, status))) => Ok(status),

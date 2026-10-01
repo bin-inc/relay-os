@@ -17,7 +17,7 @@ mod text;
 
 pub use basic::{clear, echo, r#false, pwd, r#true, uname};
 pub use change::{cp, mkdir, mv, rm, rmdir, touch};
-pub use control::{jobs, wait};
+pub use control::{jobs, kill, wait};
 pub use grep::grep;
 pub use ls::ls;
 pub(crate) use script::Script;
@@ -115,6 +115,11 @@ pub const COMMANDS: &[Builtin] = &[
         name: "jobs",
         help: "list the background jobs",
         run: control::jobs,
+    },
+    Builtin {
+        name: "kill",
+        help: "end processes, or background jobs",
+        run: control::kill,
     },
     Builtin {
         name: "ls",
@@ -215,7 +220,7 @@ pub const COMMANDS: &[Builtin] = &[
 
 /// The shell's own commands (user-space gate §8.3); every other one is a
 /// program of its own in `/bin`.
-pub const BUILTINS: &[&str] = &["cd", "exit", "help", "jobs", "wait"];
+pub const BUILTINS: &[&str] = &["cd", "exit", "help", "jobs", "kill", "wait"];
 
 pub fn find(name: &str) -> Option<&'static Builtin> {
     COMMANDS.iter().find(|b| b.name == name)
@@ -251,7 +256,7 @@ mod tests {
             .filter(|b| builtin(b.name).is_some())
             .map(|b| b.name)
             .collect();
-        assert_eq!(own, ["cd", "exit", "help", "jobs", "wait"]);
+        assert_eq!(own, ["cd", "exit", "help", "jobs", "kill", "wait"]);
         assert!(builtin("cat").is_none() && builtin("sh").is_none());
     }
 }

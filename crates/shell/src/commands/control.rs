@@ -1,6 +1,6 @@
-//! The shell's job commands (user-space gate §9.2, §9.3): `jobs`, `wait`,
-//! and later `kill`. They work on the shell's jobs, which only the shell
-//! has (`Ctx::control`).
+//! The shell's job commands (user-space gate §9.2, §9.3): `jobs`, `wait`
+//! and `kill`. They work on the shell's jobs, which only the shell has
+//! (`Ctx::control`).
 
 use crate::ctx::{Ctx, JobControl};
 use crate::jobs::number;
@@ -156,6 +156,104 @@ pub fn wait(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
             && report
         {
             ctx.err(line.as_bytes());
+        }
+    }
+    status
+}
+
+/// Linux's signal names, which `kill` knows but for `KILL` refuses: only
+/// killing exists here (spec §15).
+const SIGNALS: &[&str] = &[
+    "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "BUS", "FPE", "KILL", "USR1", "SEGV", "USR2",
+    "PIPE", "ALRM", "TERM", "STKFLT", "CHLD", "CONT", "STOP", "TSTP", "TTIN", "TTOU", "URG",
+    "XCPU", "XFSZ", "VTALRM", "PROF", "WINCH", "IO", "PWR", "SYS",
+];
+
+/// What `kill` makes of a signal it was given: `Ok` for killing, else
+/// the message.
+fn signal(spec: &str) -> Result<(), &'static str> {
+    let upper = spec.to_ascii_uppercase();
+    let name = upper.strip_prefix("SIG").unwrap_or(&upper);
+    match (name, number(name)) {
+        ("KILL", _) | (_, Some(9)) => Ok(()),
+        (_, Some(1..=64)) => Err("not supported"),
+        (n, None) if SIGNALS.contains(&n) => Err("not supported"),
+        _ => Err("invalid signal specification"),
+    }
+}
+
+/// `kill [-9 | -KILL | -s KILL] PID | %n...` (spec §9.3): kills each
+/// process, or each job's whole process group, as bash's does with
+/// SIGKILL, its messages bash's (`(1) - Operation not permitted`, `(9) -
+/// No such process`, `%3: no such job`); the status is 1 if any was not
+/// killed. Killing is the only signal here: another is not supported.
+pub fn kill(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
+    let mut targets = args;
+    loop {
+        match targets {
+            [s, spec, rest @ ..] if s == "-s" => {
+                if let Err(why) = signal(spec) {
+                    return ctx.fail(NAME, format_args!("kill: {spec}: {why}"));
+                }
+                targets = rest;
+            }
+            [s] if s == "-s" => {
+                return ctx.fail(NAME, format_args!("kill: -s: option requires an argument"));
+            }
+            [dashes, rest @ ..] if dashes == "--" => {
+                targets = rest;
+                break;
+            }
+            [spec, rest @ ..] if spec.len() > 1 && spec.starts_with('-') => {
+                if let Err(why) = signal(&spec[1..]) {
+                    return ctx.fail(NAME, format_args!("kill: {}: {why}", &spec[1..]));
+                }
+                targets = rest;
+            }
+            _ => break,
+        }
+    }
+    if targets.is_empty() {
+        ctx.fail(
+            NAME,
+            format_args!("kill: usage: kill [-s KILL | -KILL] pid | %job ..."),
+        );
+        return 2;
+    }
+    let mut status = 0;
+    for t in targets {
+        let target = match t.strip_prefix('%') {
+            Some(n) => {
+                let pgid = ctx
+                    .control
+                    .as_ref()
+                    .and_then(|c| number(n).and_then(|n| c.jobs.pgid(n)));
+                match pgid {
+                    Some(pgid) => -i64::from(pgid),
+                    None => {
+                        status = ctx.fail(NAME, format_args!("kill: {t}: no such job"));
+                        continue;
+                    }
+                }
+            }
+            None => match number(t) {
+                Some(pid) => i64::from(pid),
+                None => {
+                    status = ctx.fail(
+                        NAME,
+                        format_args!("kill: {t}: arguments must be process or job IDs"),
+                    );
+                    continue;
+                }
+            },
+        };
+        let programs = ctx.control.as_mut().and_then(|c| c.programs.as_deref_mut());
+        let killed = programs.map_or(Err(vfs::Errno::ESRCH), |p| p.kill(target));
+        if let Err(e) = killed {
+            status = ctx.fail(
+                NAME,
+                format_args!("kill: ({}) - {e}", target.unsigned_abs()),
+            );
         }
     }
     status
@@ -460,5 +558,112 @@ mod tests {
             "{out}"
         );
         assert_eq!(status, 127, "once");
+    }
+
+    #[test]
+    fn kill_ends_a_job_s_whole_group_or_a_process() {
+        let mut h = with_jobs();
+        let out = typed(
+            &mut h,
+            &[
+                "t-spin | t-spin &",
+                "t-spin 3 &",
+                "kill %1",
+                "",
+                "kill -9 103",
+                "",
+            ],
+        );
+        assert!(
+            out.contains("# kill %1\n[1]-  Killed                  t-spin | t-spin\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("# kill -9 103\n[2]+  Killed                  t-spin 3\n"),
+            "{out}"
+        );
+        assert_eq!(h.programs.kills, [-101, 103], "the group, then the process");
+        assert!(h.programs.children().is_empty());
+    }
+
+    #[test]
+    fn kill_says_what_it_could_not_kill_as_bash_s_does() {
+        let mut h = with_jobs();
+        let (status, out) = typed_status(&mut h, &["t-spin &", "kill 1 999 %2 %x abc 0x 101"]);
+        assert!(
+            out.contains(
+                "relay-sh: kill: (1) - Operation not permitted\n\
+                 relay-sh: kill: (999) - No such process\n\
+                 relay-sh: kill: %2: no such job\n\
+                 relay-sh: kill: %x: no such job\n\
+                 relay-sh: kill: abc: arguments must be process or job IDs\n\
+                 relay-sh: kill: 0x: arguments must be process or job IDs\n"
+            ),
+            "{out}"
+        );
+        assert_eq!(status, 1, "though 101 was killed");
+        assert_eq!(h.programs.kills, [1, 999, 101]);
+        assert_eq!(
+            h.spawning("kill"),
+            (
+                2,
+                "relay-sh: kill: usage: kill [-s KILL | -KILL] pid | %job ...\n".into()
+            )
+        );
+        assert_eq!(h.spawning("kill -9").0, 2);
+        // bash kills its own group with 0; the kernel's 0 names nothing.
+        assert_eq!(
+            h.spawning("kill 0"),
+            (1, "relay-sh: kill: (0) - No such process\n".into())
+        );
+        // A shell without programs kills nothing.
+        assert_eq!(
+            h.run("kill 5"),
+            (1, "relay-sh: kill: (5) - No such process\n".into())
+        );
+    }
+
+    #[test]
+    fn killing_is_the_only_signal() {
+        let mut h = with_jobs();
+        for line in [
+            "kill -9 5",
+            "kill -KILL 5",
+            "kill -kill 5",
+            "kill -SIGKILL 5",
+            "kill -s KILL 5",
+            "kill -s 9 -- 5",
+        ] {
+            h.programs.kills.clear();
+            assert_eq!(
+                h.spawning(line),
+                (1, "relay-sh: kill: (5) - No such process\n".into()),
+                "{line}"
+            );
+            assert_eq!(h.programs.kills, [5], "{line}");
+        }
+        h.programs.kills.clear();
+        for (line, said) in [
+            ("kill -TERM 5", "kill: TERM: not supported"),
+            ("kill -15 5", "kill: 15: not supported"),
+            ("kill -s HUP 5", "kill: HUP: not supported"),
+            ("kill -FOO 5", "kill: FOO: invalid signal specification"),
+            ("kill -99 5", "kill: 99: invalid signal specification"),
+            ("kill -s", "kill: -s: option requires an argument"),
+        ] {
+            assert_eq!(
+                h.spawning(line),
+                (1, alloc::format!("relay-sh: {said}\n")),
+                "{line}"
+            );
+        }
+        assert!(h.programs.kills.is_empty(), "nothing killed");
+        assert_eq!(
+            h.spawning("kill -- -5"),
+            (
+                1,
+                "relay-sh: kill: -5: arguments must be process or job IDs\n".into()
+            )
+        );
     }
 }
