@@ -5,7 +5,7 @@
 use crate::commands::{self, SCRIPT_MAX, Script};
 use crate::ctx::{Ctx, JobControl, quote_if_needed};
 use crate::editor::{Feed, LineEditor};
-use crate::expand;
+use crate::expand::{self, Vars};
 use crate::io::{Console, Programs, Stdin, Stdout, System};
 use crate::jobs::Jobs;
 use crate::parser::{self, HOME};
@@ -53,6 +53,8 @@ pub struct Shell<'a> {
     /// when it starts one, and how jobs ended before each prompt. A script
     /// and `X | sh` say neither, as bash's do.
     prompting: bool,
+    /// Its variables and arguments (spec §9.4).
+    vars: Vars,
 }
 
 impl<'a> Shell<'a> {
@@ -99,6 +101,7 @@ impl<'a> Shell<'a> {
             input: None,
             jobs: Jobs::new(),
             prompting: false,
+            vars: Vars::new(NAME),
         }
     }
 
@@ -181,13 +184,17 @@ impl<'a> Shell<'a> {
     /// status. Every command is followed by a sync, so its changes are on
     /// the disk when the prompt comes back.
     pub fn execute(&mut self, line: &str) -> i32 {
-        let mut pipeline = match parser::parse_line(line).map(|l| expand::expand(&l)) {
+        let typed = match parser::parse_line(line) {
+            Ok(typed) => typed,
+            Err(e) => return self.finish(SYNTAX, format!("{NAME}: {e}\n")),
+        };
+        let mut pipeline = match expand::expand(&typed, &self.vars, self.status) {
             Ok(parser::Line {
                 pipeline,
                 background: Some(text),
             }) => return self.background(&pipeline, &text),
             Ok(line) => line.pipeline,
-            Err(e) => return self.finish(SYNTAX, format!("{NAME}: {e}\n")),
+            Err(e) => return self.finish(1, format!("{NAME}: {e}\n")),
         };
         if pipeline.len() > 1 {
             return self.pipeline(&pipeline);
@@ -950,6 +957,73 @@ mod tests {
             (1, "sh: /tmp/nope.sh: No such file or directory\n".into())
         );
         assert!(h.programs.spawned.is_empty() && h.programs.pushed.is_empty());
+    }
+
+    #[test]
+    fn dollar_question_is_the_last_line_s_status() {
+        let mut h = Harness::new();
+        // What bash prints for each.
+        assert_eq!(
+            h.lines(&["nope", "echo $?", "echo \"$?\"", "echo 'open", "echo ${?}"]),
+            (
+                0,
+                "relay-sh: nope: command not found\n127\n0\n\
+                 relay-sh: syntax error: unterminated quote\n2\n"
+                    .into()
+            )
+        );
+        // A pipeline's is its last command's; a blank line keeps it.
+        assert_eq!(
+            h.lines(&["cat /nope | wc -l", "echo $?", "cat /nope", "", "echo $?"]),
+            (
+                0,
+                "cat: /nope: No such file or directory\n0\n0\n\
+                 cat: /nope: No such file or directory\n1\n"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn the_shell_has_no_arguments_and_no_variables_set() {
+        let mut h = Harness::new();
+        // bash's `$0` is its own name; this shell's is `relay-sh` in the
+        // in-process runner. bash sets `HOME` and others: no variable is
+        // set here.
+        assert_eq!(
+            h.run(r#"echo $0 $# [$1] [$@] [$HOME] "[$UNSET]""#),
+            (0, "relay-sh 0 [] [] [] []\n".into())
+        );
+        let mut h = spawning();
+        h.spawning(r#"t-args $? "$E" $E ${E}x "~/$E" ~/$E"#);
+        assert_eq!(
+            h.programs.spawned[0].args,
+            ["t-args", "0", "", "x", "~/", "/root/"]
+        );
+    }
+
+    #[test]
+    fn a_line_that_does_not_expand_runs_nothing() {
+        let mut h = Harness::new();
+        assert_eq!(
+            h.run("echo hi > ${1A}"),
+            (1, "relay-sh: ${1A}: bad substitution\n".into())
+        );
+        // bash's: an unquoted target that is no word.
+        assert_eq!(
+            h.run("echo hi > $NONE"),
+            (1, "relay-sh: $NONE: ambiguous redirect\n".into())
+        );
+        assert_eq!(
+            h.run(r#"echo hi > "$NONE""#),
+            (1, "relay-sh: : No such file or directory\n".into())
+        );
+        let mut h = spawning();
+        assert_eq!(
+            h.spawning("t-args | t-args > $NONE"),
+            (1, "relay-sh: $NONE: ambiguous redirect\n".into())
+        );
+        assert!(h.programs.spawned.is_empty(), "nothing of it started");
     }
 
     #[test]
