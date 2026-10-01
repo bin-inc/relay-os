@@ -20,6 +20,11 @@ pub const FOREGROUND: u32 = 2;
 pub const WAIT_ANY: i64 = -1;
 /// `wait`'s flags: return 0 at once when no child has ended.
 pub const WAIT_NOHANG: u32 = 1;
+/// `wait`'s flags: a Ctrl-C typed while the caller's group has the console
+/// in raw mode ends the wait with `EINTR`, and is taken from the input
+/// (a shell's `wait` built-in, spec §9.2, §16 item 9). Without it a raw
+/// Ctrl-C is only input, which the shell would read after the wait.
+pub const WAIT_CTRL_C: u32 = 2;
 
 /// One of the child's fds: `child` gets what the caller has open as
 /// `parent`.
@@ -114,7 +119,7 @@ mod tests {
         assert_eq!(offset_of!(SpawnArgs, pgid), 120);
         assert_eq!(offset_of!(SpawnArgs, reserved), 124);
         assert_eq!((NEW_GROUP, WAIT_NOHANG, WAIT_ANY), (1, 1, -1));
-        assert_eq!(FOREGROUND, 2);
+        assert_eq!((FOREGROUND, WAIT_CTRL_C), (2, 2));
     }
 
     #[test]

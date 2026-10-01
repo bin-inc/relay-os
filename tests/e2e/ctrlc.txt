@@ -32,7 +32,9 @@ timeout 30
 send dmesg
 expect \npid \d+ \(/bin/t-mem\): killed: Ctrl-C\n
 # A Ctrl-C typed before the command has even started is the command's too:
-# it ends at once, whichever comes first.
+# it ends at once, whichever comes first. (Once the prompt is back: typed
+# while dmesg's group still had the console, the line would be dmesg's.)
+expect root@relay:~# $
 send t-spin
 key {ctrl-c}
 expect \n\^C\nroot@relay:~# 
@@ -49,3 +51,14 @@ key echo nope{ctrl-c}
 expect \^C\n
 send echo still here
 expect \nstill here\n
+# A program that waits for a child with WAIT_CTRL_C while its group has
+# the console in raw mode, as the shell's `wait` does (milestone 3): a
+# Ctrl-C ends the wait, and is taken from what was typed, the rest of it
+# left for the program to read. Its child, in a group of its own, spins on
+# until the program kills it.
+send t-spawn ctrl-c
+expect \nwaiting for t-spin\n
+alive 1
+type {ctrl-c}x
+expect \Await: EINTR\nthen read: "x"\n
+expect root@relay:~# $

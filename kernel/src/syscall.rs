@@ -13,7 +13,7 @@ use crate::proc::table::Group;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use relay_abi::info::INFO_MEMORY;
-use relay_abi::spawn::{FOREGROUND, NEW_GROUP, SPAWN_FDS, WAIT_ANY, WAIT_NOHANG};
+use relay_abi::spawn::{FOREGROUND, NEW_GROUP, SPAWN_FDS, WAIT_ANY, WAIT_CTRL_C, WAIT_NOHANG};
 use relay_abi::{Call, FdMap, MemInfo, ProcInfo, SpawnArgs, Time, WaitStatus, encode};
 use vfs::{Errno, Vfs};
 
@@ -110,8 +110,15 @@ pub trait Caller {
     /// Starts a child; its pid.
     fn spawn(&mut self, s: &Spawn) -> Result<u32, Errno>;
     /// A child that has ended, with how; `None` if `nohang` and none has.
-    /// `ECHILD` if there is no such child.
-    fn wait(&mut self, child: Child, nohang: bool) -> Result<Option<(u32, WaitStatus)>, Errno>;
+    /// `ECHILD` if there is no such child; with `ctrl_c`, `EINTR` once a
+    /// Ctrl-C is typed while the program's group has the console in raw
+    /// mode (`WAIT_CTRL_C`).
+    fn wait(
+        &mut self,
+        child: Child,
+        nohang: bool,
+        ctrl_c: bool,
+    ) -> Result<Option<(u32, WaitStatus)>, Errno>;
     /// Kills a process, or a group for a negative `target`.
     fn kill(&mut self, target: i64) -> Result<(), Errno>;
     fn pid(&self) -> u32;
@@ -247,7 +254,7 @@ fn spawn(caller: &mut impl Caller, addr: u64) -> Result<u64, Errno> {
 /// memory is checked before a child is collected, so a bad pointer never
 /// loses a child's status.
 fn wait(caller: &mut impl Caller, pid: i64, flags: u64, addr: u64) -> Result<u64, Errno> {
-    if flags & !u64::from(WAIT_NOHANG) != 0 {
+    if flags & !u64::from(WAIT_NOHANG | WAIT_CTRL_C) != 0 {
         return Err(Errno::EINVAL);
     }
     let child = match pid {
@@ -263,7 +270,9 @@ fn wait(caller: &mut impl Caller, pid: i64, flags: u64, addr: u64) -> Result<u64
     if let Some(slice) = &status {
         caller.writable(slice)?;
     }
-    let Some((pid, w)) = caller.wait(child, flags & u64::from(WAIT_NOHANG) != 0)? else {
+    let nohang = flags & u64::from(WAIT_NOHANG) != 0;
+    let ctrl_c = flags & u64::from(WAIT_CTRL_C) != 0;
+    let Some((pid, w)) = caller.wait(child, nohang, ctrl_c)? else {
         return Ok(0);
     };
     if let Some(slice) = &status {
@@ -746,6 +755,41 @@ mod tests {
     }
 
     #[test]
+    fn wait_may_end_at_a_ctrl_c() {
+        let mut f = fake();
+        f.running = true;
+        let flags = u64::from(WAIT_CTRL_C);
+        f.ctrl_c_typed = true;
+        assert_eq!(
+            call(&mut f, Call::Wait, [7, flags, W]),
+            Err(errno::EINTR),
+            "a Ctrl-C was typed"
+        );
+        assert_eq!(f.ctrl_c_waits, [true]);
+        f.ended = vec![(7, WaitStatus::exited(0))];
+        assert_eq!(
+            call(&mut f, Call::Wait, [7, flags | 1, W]),
+            Ok(7),
+            "with NOHANG too"
+        );
+        assert_eq!(f.ctrl_c_waits, [true, true]);
+        f.ended = vec![(7, WaitStatus::exited(0))];
+        assert_eq!(
+            call(&mut f, Call::Wait, [7, 0, W]),
+            Ok(7),
+            "without it, a child"
+        );
+        assert_eq!(f.ctrl_c_waits, [true, true, false]);
+        for bad in [4, 8, 1 << 32] {
+            assert_eq!(
+                call(&mut f, Call::Wait, [7, bad, W]),
+                Err(errno::EINVAL),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
     fn proc_list_gives_what_fits_and_how_many_there_are() {
         use relay_abi::proc::{STATE_RUN, STATE_SLEEP, STATE_WAIT};
         let mut f = fake();
@@ -834,7 +878,7 @@ mod tests {
             Err(errno::EINVAL)
         );
         assert_eq!(
-            call(&mut f, Call::Wait, [7, 2, 0]),
+            call(&mut f, Call::Wait, [7, 4, 0]),
             Err(errno::EINVAL),
             "flags"
         );

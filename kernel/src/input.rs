@@ -92,6 +92,19 @@ impl InputQueue {
         was
     }
 
+    /// Whether a Ctrl-C typed in raw mode waits to be read: it is the
+    /// oldest byte then, since it dropped what came before it. (In line
+    /// mode the line discipline has every key, and no byte waits here.)
+    pub fn has_raw_interrupt(&self) -> bool {
+        self.bytes.front() == Some(&INTERRUPT)
+    }
+
+    /// Takes a Ctrl-C typed in raw mode out of the input, if one waits to
+    /// be read; whether one did.
+    pub fn take_raw_interrupt(&mut self) -> bool {
+        self.has_raw_interrupt() && self.pop().is_some()
+    }
+
     /// Whether a Ctrl-C was typed in line mode since the last call.
     pub fn take_line_interrupt(&mut self) -> bool {
         core::mem::take(&mut self.interrupted)
@@ -690,6 +703,24 @@ mod tests {
             [&b"a"[..], b"\x1b[1;5C", b"b", b"\x1b", b"x", b"c", b"\x1b["]
         );
         assert_eq!(keys(b"\x1b").collect::<Vec<_>>(), [&b"\x1b"[..]]);
+    }
+
+    #[test]
+    fn a_raw_ctrl_c_can_be_taken_out_of_the_input() {
+        let mut q = InputQueue::new();
+        q.push(b"ab");
+        assert!(!q.has_raw_interrupt() && !q.take_raw_interrupt());
+        q.push(&[INTERRUPT]);
+        q.push(b"x");
+        assert!(q.has_raw_interrupt());
+        assert!(q.take_raw_interrupt());
+        assert_eq!(drain(&mut q), b"x", "only the Ctrl-C");
+        // In line mode a Ctrl-C is the line discipline's.
+        let mut q = InputQueue::new();
+        q.set_line_mode(true);
+        q.push(&[INTERRUPT]);
+        assert!(!q.has_raw_interrupt() && !q.take_raw_interrupt());
+        assert!(q.take_line_interrupt());
     }
 
     #[test]

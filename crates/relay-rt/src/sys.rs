@@ -291,8 +291,14 @@ pub fn spawn(
 /// end: its pid and how it ended. With `nohang`, `None` at once if none
 /// has.
 pub fn wait(pid: i64, nohang: bool) -> Result<Option<(u32, WaitStatus)>, u16> {
+    wait_with(pid, if nohang { WAIT_NOHANG } else { 0 })
+}
+
+/// [`wait`] with `relay_abi::spawn`'s `WAIT_*` flags: with `WAIT_CTRL_C`,
+/// a Ctrl-C typed while this program's group has the console in raw mode
+/// ends the wait with `EINTR`.
+pub fn wait_with(pid: i64, flags: u32) -> Result<Option<(u32, WaitStatus)>, u16> {
     let mut w = WaitStatus::default();
-    let flags = if nohang { WAIT_NOHANG } else { 0 };
     let args = [pid as u64, u64::from(flags), &raw mut w as u64, 0, 0, 0];
     match decode(unsafe { syscall(Call::Wait, args) })? {
         0 => Ok(None),

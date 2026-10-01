@@ -162,6 +162,11 @@ fn console_input(t: &mut Table<Res>) {
     if tty::has_input() {
         t.wake_all(Blocked::Console);
     }
+    // A Ctrl-C at a shell's `wait` (`WAIT_CTRL_C`): the shell's group has
+    // the console, in raw mode.
+    if tty::has_raw_ctrl_c() {
+        t.wake_waiting(tty::foreground());
+    }
 }
 
 /// A tick interrupted a program (spec §6.1, §6.3): the kernel holds nothing
@@ -534,8 +539,10 @@ pub fn spawn(s: &Spawn) -> Result<u32, Errno> {
 /// A child of the running process that has ended, taken out of the table
 /// with its kernel stack given back; `None` with `nohang` when none has.
 /// `ECHILD` if there is no such child; `EINTR` if the running process was
-/// killed while it waited (it ends on its way back to ring 3).
-fn collect(child: Child, nohang: bool) -> Result<Option<(u32, WaitStatus)>, Errno> {
+/// killed while it waited (it ends on its way back to ring 3), or, with
+/// `ctrl_c`, once a Ctrl-C is typed while its group has the console in raw
+/// mode (the Ctrl-C is taken).
+fn collect(child: Child, nohang: bool, ctrl_c: bool) -> Result<Option<(u32, WaitStatus)>, Errno> {
     let want = match child {
         Child::Any => Want::Any,
         Child::Pid(pid) => Want::Pid(pid),
@@ -558,9 +565,22 @@ fn collect(child: Child, nohang: bool) -> Result<Option<(u32, WaitStatus)>, Errn
                 return Ok(Some((p.pid, status)));
             }
             None if nohang => return Ok(None),
+            None if ctrl_c && holds_ctrl_c() => return Err(Errno::EINTR),
             None => block(Blocked::Wait),
         }
     }
+}
+
+/// Whether a Ctrl-C typed in raw mode is the running process's, its group
+/// having the console: then it is taken.
+fn holds_ctrl_c() -> bool {
+    let mine = {
+        let t = PROCS.lock();
+        t.get(t.current())
+            .is_some_and(|p| p.pgid == tty::foreground())
+    };
+    tty::poll();
+    mine && tty::take_raw_ctrl_c()
 }
 
 /// Waits for the child `pid`, collecting any other child that ends
@@ -569,11 +589,11 @@ fn collect(child: Child, nohang: bool) -> Result<Option<(u32, WaitStatus)>, Errn
 /// not a child of the running process.
 pub fn wait_collecting(pid: u32) -> Result<WaitStatus, Errno> {
     // `ECHILD` before anything else is collected.
-    if let Some((_, status)) = collect(Child::Pid(pid), true)? {
+    if let Some((_, status)) = collect(Child::Pid(pid), true, false)? {
         return Ok(status);
     }
     loop {
-        match collect(Child::Any, false)? {
+        match collect(Child::Any, false, false)? {
             Some((ended, status)) if ended == pid => return Ok(status),
             Some(_) => {}
             None => unreachable!("wait without nohang collects a child"),
@@ -795,8 +815,13 @@ impl Caller for Current {
         spawn(s)
     }
 
-    fn wait(&mut self, child: Child, nohang: bool) -> Result<Option<(u32, WaitStatus)>, Errno> {
-        collect(child, nohang)
+    fn wait(
+        &mut self,
+        child: Child,
+        nohang: bool,
+        ctrl_c: bool,
+    ) -> Result<Option<(u32, WaitStatus)>, Errno> {
+        collect(child, nohang, ctrl_c)
     }
 
     fn kill(&mut self, target: i64) -> Result<(), Errno> {

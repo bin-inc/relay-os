@@ -78,6 +78,10 @@ pub struct Fake {
     pub woken: Vec<u64>,
     /// What `proc_list` reports.
     pub procs: Vec<ProcInfo>,
+    /// Whether a Ctrl-C was typed for a `WAIT_CTRL_C` wait to end at, and
+    /// whether each wait asked for that.
+    pub ctrl_c_typed: bool,
+    pub ctrl_c_waits: Vec<bool>,
 }
 
 /// A pipe's ring on the heap.
@@ -200,7 +204,13 @@ impl Caller for Fake {
         self.spawned.push(s.clone());
         Ok(100 + self.spawned.len() as u32)
     }
-    fn wait(&mut self, child: Child, nohang: bool) -> Result<Option<(u32, WaitStatus)>, Errno> {
+    fn wait(
+        &mut self,
+        child: Child,
+        nohang: bool,
+        ctrl_c: bool,
+    ) -> Result<Option<(u32, WaitStatus)>, Errno> {
+        self.ctrl_c_waits.push(ctrl_c);
         let at = self
             .ended
             .iter()
@@ -208,6 +218,7 @@ impl Caller for Fake {
         match at {
             Some(i) => Ok(Some(self.ended.remove(i))),
             None if self.running && nohang => Ok(None),
+            None if self.running && ctrl_c && self.ctrl_c_typed => Err(Errno::EINTR),
             None => Err(Errno::ECHILD),
         }
     }
@@ -273,6 +284,8 @@ pub fn fake() -> Fake {
         waits: Vec::new(),
         woken: Vec::new(),
         procs: Vec::new(),
+        ctrl_c_typed: false,
+        ctrl_c_waits: Vec::new(),
     }
 }
 

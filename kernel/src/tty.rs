@@ -52,6 +52,16 @@ pub fn ctrl_c() -> Option<u32> {
         .then(|| FOREGROUND.load(Ordering::Relaxed))
 }
 
+/// Whether a Ctrl-C typed in raw mode waits to be read.
+pub fn has_raw_ctrl_c() -> bool {
+    INPUT.lock().has_raw_interrupt()
+}
+
+/// Takes a Ctrl-C typed in raw mode out of the input; whether one waited.
+pub fn take_raw_ctrl_c() -> bool {
+    INPUT.lock().take_raw_interrupt()
+}
+
 /// What a program reads (spec §6.5): in line mode the next line, in raw
 /// mode what was typed, up to `buf`'s length; `None` if nothing waits.
 pub fn read(buf: &mut [u8]) -> Option<usize> {

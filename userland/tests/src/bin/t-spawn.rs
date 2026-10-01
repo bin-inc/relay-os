@@ -23,6 +23,10 @@
 //!   its group and one in a group of its own, and waits for that one: a
 //!   group blocked in the kernel, for Ctrl-C, whose `wait` nothing but the
 //!   kill can end;
+//! - `t-spawn ctrl-c` sets the console to raw mode, starts `t-spin` in a
+//!   group of its own and waits for it with `WAIT_CTRL_C`: a Ctrl-C ends
+//!   the wait, and is taken from what was typed, which the program then
+//!   reads (milestone 3);
 //! - `t-spawn child` exits at once (the children of `t-spawn N`), `t-spawn
 //!   nap` after 300 ms, `t-spawn doze` after a minute.
 #![no_std]
@@ -61,6 +65,7 @@ fn main(args: Args) -> u8 {
         }
         Some(b"sleepers") => sleepers(),
         Some(b"join") => join(),
+        Some(b"ctrl-c") => ctrl_c(),
         Some(b"kill") => kill(),
         Some(b"kill-new") => kill_new(),
         Some(b"orphan") => {
@@ -239,4 +244,29 @@ fn parse(s: &[u8]) -> Option<u64> {
         let d = c.checked_sub(b'0').filter(|d| *d <= 9)?;
         n.checked_mul(10)?.checked_add(u64::from(d))
     })
+}
+
+fn ctrl_c() -> Result<(), u16> {
+    use relay_abi::console::MODE_RAW;
+    use relay_abi::spawn::{NEW_GROUP, WAIT_CTRL_C};
+    let was = sys::console_mode(MODE_RAW)?;
+    let pid = sys::spawn(b"/bin/t-spin", b"t-spin\0", b"", &STD, NEW_GROUP, 0)?;
+    let _ = writeln!(Fd(1), "waiting for t-spin");
+    let r = sys::wait_with(i64::from(pid), WAIT_CTRL_C);
+    let _ = writeln!(
+        Fd(1),
+        "wait: {}",
+        r.map_or_else(|e| relay_abi::errno::name(e).unwrap_or("?"), |_| "a child")
+    );
+    let mut typed = [0u8; 16];
+    let n = sys::read(0, &mut typed)?;
+    let _ = writeln!(
+        Fd(1),
+        "then read: {:?}",
+        core::str::from_utf8(&typed[..n]).unwrap_or("?")
+    );
+    sys::kill(i64::from(pid))?;
+    sys::wait(i64::from(pid), false)?;
+    sys::console_mode(was)?;
+    Ok(())
 }

@@ -371,6 +371,20 @@ impl<R> Table<R> {
         }
     }
 
+    /// Wakes the processes of group `pgid` that wait for a child: a Ctrl-C
+    /// may be for them (`WAIT_CTRL_C`).
+    pub fn wake_waiting(&mut self, pgid: u32) {
+        let pids: Vec<u32> = self
+            .procs
+            .iter()
+            .filter(|p| p.pgid == pgid && p.state == State::Blocked(Blocked::Wait))
+            .map(|p| p.pid)
+            .collect();
+        for pid in pids {
+            self.wake(pid);
+        }
+    }
+
     /// Wakes the sleepers whose time has come at tick `now`.
     pub fn wake_sleepers(&mut self, now: u64) {
         let mut due = [0u32; MAX];
@@ -961,6 +975,33 @@ mod tests {
         t.take_console();
         assert_eq!(t.console_group(), init);
         assert!(!t.may_change_console(sh));
+    }
+
+    #[test]
+    fn a_group_s_waiters_are_woken_and_no_one_else() {
+        let mut t = table();
+        let a = add(&mut t, 0, true);
+        let b = add(&mut t, a, false);
+        let c = add(&mut t, a, true);
+        let d = add(&mut t, a, false);
+        for (p, why) in [
+            (a, Blocked::Wait),
+            (b, Blocked::Console),
+            (c, Blocked::Wait),
+            (d, Blocked::Wait),
+        ] {
+            assert_eq!(t.schedule(), p);
+            t.block(why);
+        }
+        t.wake_waiting(a);
+        assert_eq!(state(&t, a), State::Ready);
+        assert_eq!(state(&t, d), State::Ready);
+        assert_eq!(
+            state(&t, b),
+            State::Blocked(Blocked::Console),
+            "not waiting"
+        );
+        assert_eq!(state(&t, c), State::Blocked(Blocked::Wait), "another group");
     }
 
     #[test]
