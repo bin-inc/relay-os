@@ -24,7 +24,7 @@ pub(crate) use script::Script;
 pub use script::{SCRIPT_MAX, transcript_name};
 pub use seq::seq;
 pub use stat::stat;
-pub use system::{date, df, dmesg, free, poweroff, reboot, sleep, sync};
+pub use system::{date, df, dmesg, free, poweroff, ps, reboot, sleep, sync};
 pub use text::{cat, head, tail, wc};
 
 /// A command function: runs the command with its arguments (without the
@@ -140,6 +140,11 @@ pub const COMMANDS: &[Builtin] = &[
         name: "poweroff",
         help: "sync and turn the machine off",
         run: system::poweroff,
+    },
+    Builtin {
+        name: "ps",
+        help: "list the processes",
+        run: system::ps,
     },
     Builtin {
         name: "pwd",

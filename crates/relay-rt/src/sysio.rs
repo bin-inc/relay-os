@@ -114,6 +114,12 @@ impl System for SysSystem {
         buf
     }
 
+    fn processes(&self) -> Option<Vec<relay_abi::ProcInfo>> {
+        let mut buf = [relay_abi::ProcInfo::new(0, 0, 0, 0, 0, 0, b""); relay_abi::proc::PROC_MAX];
+        let n = sys::proc_list(&mut buf).ok()?;
+        Some(buf[..n.min(buf.len())].to_vec())
+    }
+
     fn sleep(&mut self, ms: u64) {
         sys::sleep(ms);
     }

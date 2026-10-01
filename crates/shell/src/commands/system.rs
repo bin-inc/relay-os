@@ -1,5 +1,5 @@
-//! `date`, `df`, `free`, `dmesg`, `sync`, `reboot` and `poweroff`
-//! (spec §7.3, §7.4).
+//! `date`, `df`, `free`, `dmesg`, `ps`, `sync`, `reboot` and `poweroff`
+//! (spec §7.3, §7.4, §9.3).
 
 use crate::ctx::{Ctx, getopt, outln, quote};
 use crate::time;
@@ -159,6 +159,58 @@ pub fn free(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
         );
     }
     0
+}
+
+/// `ps`: every process, by pid (spec §9.3, §16 item 9): its parent, what
+/// it does (`run`, `ready`, or what it waits for: `wait` for a child,
+/// `read` the console, `sleep`, `pipe`; `zombie` once it has ended), the
+/// memory its address space holds in KiB, its CPU time as `m:ss`, and the
+/// path it was started from. Process 0, the idle task, is no process.
+pub fn ps(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
+    if let Err(status) = no_operands(ctx, "ps", args, "") {
+        return status;
+    }
+    let Some(list) = ctx.system.processes() else {
+        return ctx.fail("ps", format_args!("processes are not available"));
+    };
+    outln!(
+        ctx,
+        "{:>5} {:>5} {:<6} {:>7} {:>5} CMD",
+        "PID",
+        "PPID",
+        "STATE",
+        "MEM",
+        "TIME"
+    );
+    for p in list {
+        let secs = p.ticks / 1000;
+        let time = format!("{}:{:02}", secs / 60, secs % 60);
+        let kib = p.frames.saturating_mul(4);
+        let cmd = String::from_utf8_lossy(p.name());
+        outln!(
+            ctx,
+            "{:>5} {:>5} {:<6} {kib:>7} {time:>5} {cmd}",
+            p.pid,
+            p.ppid,
+            state(p.state)
+        );
+    }
+    0
+}
+
+/// A process's state as `ps` says it.
+fn state(s: u32) -> &'static str {
+    use relay_abi::proc::*;
+    match s {
+        STATE_RUN => "run",
+        STATE_READY => "ready",
+        STATE_WAIT => "wait",
+        STATE_READ => "read",
+        STATE_SLEEP => "sleep",
+        STATE_PIPE => "pipe",
+        STATE_ZOMBIE => "zombie",
+        _ => "?",
+    }
 }
 
 /// `dmesg`: the kernel log.
@@ -381,5 +433,53 @@ mod tests {
         assert_eq!(h.system.reboots, 0);
         let (status, _) = h.run("poweroff -f");
         assert_eq!((status, h.system.poweroffs), (0, 1));
+    }
+
+    #[test]
+    fn ps_lists_every_process_with_what_it_does() {
+        use relay_abi::ProcInfo;
+        use relay_abi::proc::*;
+        let mut h = Harness::new();
+        h.system.processes = Some(alloc::vec![
+            ProcInfo::new(1, 0, 1, STATE_WAIT, 0, 12, b"init"),
+            ProcInfo::new(2, 1, 2, STATE_WAIT, 309, 1_234, b"/bin/sh"),
+            ProcInfo::new(5, 2, 5, STATE_SLEEP, 41, 3, b"/bin/sleep"),
+            ProcInfo::new(6, 2, 6, STATE_READY, 35, 754_000, b"/bin/t-spin"),
+            ProcInfo::new(8, 2, 8, STATE_PIPE, 38, 0, b"/bin/cat"),
+            ProcInfo::new(9, 2, 9, STATE_READ, 37, 0, b"t-read"),
+            ProcInfo::new(10, 2, 8, STATE_ZOMBIE, 0, 61_000, b"/bin/seq"),
+            ProcInfo::new(11, 2, 11, STATE_RUN, 43, 0, b"/bin/ps"),
+            ProcInfo::new(65_536, 1, 3, 99, 2_500_000, 6_000_000, &[b'x'; 64]),
+        ]);
+        assert_eq!(
+            h.run("ps"),
+            (
+                0,
+                "  PID  PPID STATE      MEM  TIME CMD\n\
+                 \x20   1     0 wait         0  0:00 init\n\
+                 \x20   2     1 wait      1236  0:01 /bin/sh\n\
+                 \x20   5     2 sleep      164  0:00 /bin/sleep\n\
+                 \x20   6     2 ready      140 12:34 /bin/t-spin\n\
+                 \x20   8     2 pipe       152  0:00 /bin/cat\n\
+                 \x20   9     2 read       148  0:00 t-read\n\
+                 \x20  10     2 zombie       0  1:01 /bin/seq\n\
+                 \x20  11     2 run        172  0:00 /bin/ps\n\
+                 65536     1 ?      10000000 100:00 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn ps_takes_no_operand_and_needs_processes() {
+        let mut h = Harness::new();
+        assert_eq!(h.run("ps"), (1, "ps: processes are not available\n".into()));
+        h.system.processes = Some(alloc::vec::Vec::new());
+        assert_eq!(h.run("ps x"), (1, "ps: extra operand 'x'\n".into()));
+        assert_eq!(h.run("ps -e").0, 1);
+        assert_eq!(
+            h.run("ps"),
+            (0, "  PID  PPID STATE      MEM  TIME CMD\n".into())
+        );
     }
 }
