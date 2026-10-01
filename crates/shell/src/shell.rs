@@ -444,44 +444,42 @@ impl<'a> Shell<'a> {
     /// commands it reads there (user-space gate §9.1, §16 item 8), a line
     /// at a time as they come, without a prompt, a trace or the line
     /// editor, so it never takes the console; it ends at the input's end or
-    /// `exit`. A line over 64 KiB, or not UTF-8, is skipped with a message,
-    /// as `sh` refuses such a script. Returns the last status.
+    /// `exit`. It reads a byte at a time, as bash reads a pipe, so that a
+    /// command it runs reads what follows its line (`printf 'cat\nx\n' |
+    /// sh` gives `cat` the `x`). A line over 64 KiB, or not UTF-8, is
+    /// skipped with a message, as `sh` refuses such a script. Returns the
+    /// last status.
     pub fn run_input(&mut self, input: &mut dyn Stdin) -> i32 {
-        let mut buf = alloc::vec![0; 4096];
         let mut line: Vec<u8> = Vec::new();
         let mut too_long = false;
         self.stopped = false;
         loop {
-            let n = match input.read(&mut buf) {
-                Ok(n) => n,
+            let mut byte = [0];
+            match input.read(&mut byte) {
+                Ok(0) => {
+                    if !line.is_empty() || too_long {
+                        self.input_line(&line, too_long);
+                    }
+                    return self.status;
+                }
+                Ok(_) => {}
                 Err(e) => {
                     let message = format!("sh: standard input: {e}\n");
                     return self.finish(1, message);
                 }
-            };
-            if n == 0 {
-                if !line.is_empty() || too_long {
-                    self.input_line(&line, too_long);
-                }
-                return self.status;
             }
-            for piece in buf[..n].split_inclusive(|&b| b == b'\n') {
-                let ended = piece.last() == Some(&b'\n');
-                let piece = &piece[..piece.len() - usize::from(ended)];
-                if !too_long {
-                    line.extend_from_slice(piece);
-                    if line.len() as u64 > SCRIPT_MAX {
-                        too_long = true;
-                        line.clear();
-                    }
+            if byte[0] == b'\n' {
+                self.input_line(&line, too_long);
+                line.clear();
+                too_long = false;
+                if self.stopped {
+                    return self.status;
                 }
-                if ended {
-                    self.input_line(&line, too_long);
+            } else if !too_long {
+                line.push(byte[0]);
+                if line.len() as u64 > SCRIPT_MAX {
+                    too_long = true;
                     line.clear();
-                    too_long = false;
-                    if self.stopped {
-                        return self.status;
-                    }
                 }
             }
         }
@@ -703,6 +701,35 @@ mod tests {
             (0, "sh: standard input: a line over 64 KiB\n".into())
         );
         assert_eq!(h.programs.spawned.last().unwrap().args, ["t-args", "c"]);
+    }
+
+    /// Input that records how much each read asked for.
+    struct Asked {
+        bytes: crate::Bytes,
+        asked: Vec<usize>,
+    }
+
+    impl crate::Stdin for Asked {
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+            self.asked.push(buf.len());
+            self.bytes.read(buf)
+        }
+    }
+
+    #[test]
+    fn a_shell_reading_a_pipe_takes_no_more_than_each_line() {
+        // bash reads a pipe a byte at a time, so `printf 'cat\nx\n' | bash`
+        // gives `cat` the `x`; here a command reads the same fd 0.
+        let mut h = spawning();
+        let mut input = Asked {
+            bytes: crate::Bytes::new(b"t-args a\nt-args b\n".to_vec()),
+            asked: Vec::new(),
+        };
+        Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+            .run_input(&mut input);
+        assert_eq!(h.programs.spawned.len(), 2);
+        assert!(input.asked.iter().all(|&n| n == 1), "{:?}", input.asked);
+        assert_eq!(input.asked.len(), 19, "18 bytes and the end");
     }
 
     #[test]
