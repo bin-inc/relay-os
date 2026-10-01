@@ -548,7 +548,10 @@ mod tests {
             )
         );
         assert!(
-            h.programs.spawned.iter().all(|s| !s.foreground),
+            h.programs
+                .spawned
+                .iter()
+                .all(|s| s.group == crate::Group::Shell),
             "a script's commands run in its group, so Ctrl-C ends it with them"
         );
         assert_eq!(h.programs.pushed, ["/tmp/s.log"]);

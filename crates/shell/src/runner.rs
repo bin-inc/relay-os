@@ -9,7 +9,7 @@
 
 use crate::commands::{self, Builtin, Script};
 use crate::ctx::Ctx;
-use crate::io::{Bytes, Console, Programs, Stdin, Stdout, System};
+use crate::io::{Bytes, Console, Group, Programs, Stdin, Stdout, System};
 use crate::killed;
 use crate::parser::{Command, Redirect};
 use crate::shell::{CANCELLED, CANNOT_RUN, NAME, NOT_FOUND};
@@ -238,9 +238,14 @@ impl Runner for Spawning<'_> {
         let mut argv: Vec<&[u8]> = alloc::vec![name.as_bytes()];
         argv.extend(args.iter().map(|w| w.as_bytes()));
         let path = program_path(name);
+        let group = if parts.in_script {
+            Group::Shell
+        } else {
+            Group::New
+        };
         let started = self
             .programs
-            .spawn(path.as_bytes(), &argv, stdout, !parts.in_script);
+            .spawn(path.as_bytes(), &argv, None, stdout, group);
         if let Some(fd) = stdout {
             self.programs.close(fd);
         }
@@ -253,11 +258,96 @@ impl Runner for Spawning<'_> {
         }
     }
 
-    fn pipeline(&mut self, _parts: Parts<'_>, _stages: &[Command]) -> Ran {
-        Ran::said(
-            crate::shell::SYNTAX,
-            format!("{NAME}: unsupported syntax: |\n"),
-        )
+    /// Every stage is a program, started left to right in one process
+    /// group (the first one's, which gets the console; a script's own),
+    /// the pipe between two stages made just before the first of them
+    /// starts. The shell closes its copies of a pipe's ends as soon as the
+    /// stage that needs them has them, so that a reader sees the end of
+    /// its input once its writer has ended, and a writer `EPIPE` once its
+    /// reader has. A stage that cannot start says so at once and leaves
+    /// its neighbours an end; the shell then waits for every stage, says
+    /// how any killed one ended (a Ctrl-C once), and takes the last one's
+    /// status.
+    fn pipeline(&mut self, parts: Parts<'_>, stages: &[Command]) -> Ran {
+        let (last, _) = stages.split_last().expect("a pipeline has stages");
+        let last_out = match &last.redirect {
+            Some(r) => match self.programs.open_output(r.path.as_bytes(), r.append) {
+                Ok(fd) => Some(fd),
+                Err(e) => return Ran::said(1, format!("{NAME}: {}: {e}\n", r.path)),
+            },
+            None => None,
+        };
+        let (mut stdin, mut first, mut last_pid) = (None, None, None);
+        let mut started = Vec::new();
+        let mut ran = Ran::said(0, String::new());
+        for (i, stage) in stages.iter().enumerate() {
+            let is_last = i + 1 == stages.len();
+            let (next, stdout) = if is_last {
+                (None, last_out)
+            } else {
+                match self.programs.pipe() {
+                    Ok((read, write)) => (Some(read), Some(write)),
+                    Err(e) => {
+                        for fd in [stdin, last_out].into_iter().flatten() {
+                            self.programs.close(fd);
+                        }
+                        ran = Ran::said(1, format!("{NAME}: pipe error: {e}\n"));
+                        break;
+                    }
+                }
+            };
+            let name = &stage.words[0];
+            let mut argv: Vec<&[u8]> = alloc::vec![name.as_bytes()];
+            argv.extend(stage.words[1..].iter().map(|w| w.as_bytes()));
+            let group = match (parts.in_script, first) {
+                (true, _) => Group::Shell,
+                (false, None) => Group::New,
+                (false, Some(pgid)) => Group::Join(pgid),
+            };
+            let path = program_path(name);
+            let pid = self
+                .programs
+                .spawn(path.as_bytes(), &argv, stdin, stdout, group);
+            for fd in [stdin, stdout].into_iter().flatten() {
+                self.programs.close(fd);
+            }
+            stdin = next;
+            match pid {
+                Ok(pid) => {
+                    first.get_or_insert(pid);
+                    started.push((name, pid));
+                    if is_last {
+                        last_pid = Some(pid);
+                    }
+                }
+                Err(e) => {
+                    let refused = cannot_start(name, e);
+                    parts.console.write(refused.message.as_bytes());
+                    if is_last {
+                        ran.status = refused.status;
+                    }
+                }
+            }
+        }
+        let mut cancelled = false;
+        for (name, pid) in started {
+            let ended = match self.programs.wait(pid) {
+                Ok(w) => ended(name, &w),
+                Err(e) => Ran::said(CANNOT_RUN, format!("{NAME}: {name}: {e}\n")),
+            };
+            if Some(pid) == last_pid {
+                ran.status = ended.status;
+            }
+            if ended.status == CANCELLED {
+                cancelled = true;
+            } else {
+                ran.message.push_str(&ended.message);
+            }
+        }
+        if cancelled {
+            ran.message.push_str("^C\n");
+        }
+        ran
     }
 }
 
@@ -382,6 +472,7 @@ pub(crate) fn ended(name: &str, w: &relay_abi::WaitStatus) -> Ran {
 
 #[cfg(test)]
 mod tests {
+    use crate::Group;
     use crate::testing::{Harness, Spawned};
     use alloc::format;
     use alloc::string::String;
@@ -413,8 +504,9 @@ mod tests {
             [Spawned {
                 path: "/bin/t-args".into(),
                 args: words(&["t-args", "a", "b c", ""]),
+                stdin: None,
                 stdout: None,
-                foreground: true,
+                group: Group::New,
             }],
             "argument 0 is the name as typed; at the prompt it gets the console"
         );
@@ -554,6 +646,152 @@ mod tests {
             )
         );
         assert_eq!(h.spawning("t-spin"), (130, "^C\n".into()));
+    }
+
+    /// `/bin/cat` exits with 0, `/bin/wc` with 0, `/bin/false` with 1.
+    fn with_stages() -> Harness {
+        let mut h = Harness::new();
+        for (path, code) in [("/bin/cat", 0), ("/bin/wc", 0), ("/bin/false", 1)] {
+            h.programs.known.push((path, WaitStatus::exited(code)));
+        }
+        h
+    }
+
+    fn stage(path: &str, args: &[&str], fds: (Option<u32>, Option<u32>), group: Group) -> Spawned {
+        Spawned {
+            path: path.into(),
+            args: words(args),
+            stdin: fds.0,
+            stdout: fds.1,
+            group,
+        }
+    }
+
+    #[test]
+    fn a_pipeline_s_stages_share_a_group_and_the_pipes_between_them() {
+        let mut h = with_stages();
+        assert_eq!(
+            h.spawning("cat f | wc -l | false >> /tmp/o"),
+            (1, String::new())
+        );
+        // The pipes, 4 and 5 then 6 and 7; the redirection, opened first.
+        assert_eq!(h.programs.opened, [("/tmp/o".into(), true, 4)]);
+        assert_eq!(h.programs.pipes, [(5, 6), (7, 8)]);
+        let first = 101;
+        assert_eq!(
+            h.programs.spawned,
+            [
+                stage("/bin/cat", &["cat", "f"], (None, Some(6)), Group::New),
+                stage(
+                    "/bin/wc",
+                    &["wc", "-l"],
+                    (Some(5), Some(8)),
+                    Group::Join(first)
+                ),
+                stage(
+                    "/bin/false",
+                    &["false"],
+                    (Some(7), Some(4)),
+                    Group::Join(first)
+                ),
+            ],
+            "the first gets a group and the console, the others join it"
+        );
+        // Each end closed as soon as its stage has it.
+        assert_eq!(h.programs.closed, [6, 5, 8, 7, 4]);
+        // In a script, the script's group.
+        let mut h = with_stages();
+        h.put("/tmp/s.sh", b"cat f | wc\n");
+        let mut out = crate::testing::FakeStdout::console();
+        assert_eq!(h.sh(&["/tmp/s.sh"], &mut out).0, 0);
+        let groups: Vec<Group> = h.programs.spawned.iter().map(|s| s.group).collect();
+        assert_eq!(groups, [Group::Shell, Group::Shell]);
+    }
+
+    #[test]
+    fn a_stage_that_cannot_start_says_so_and_the_others_run() {
+        let mut h = with_stages();
+        // As bash: `seq 5 | nosuch | wc -l` prints the error and 0.
+        assert_eq!(
+            h.spawning("cat f | nosuch | wc -l"),
+            (0, "relay-sh: nosuch: command not found\n".into())
+        );
+        assert_eq!(h.programs.spawned.len(), 2);
+        assert_eq!(h.programs.pipes, [(4, 5), (6, 7)]);
+        assert_eq!(
+            h.programs.spawned[1].stdin,
+            Some(6),
+            "the second pipe's read end"
+        );
+        // Every end is closed all the same, so the others see their ends.
+        let mut closed = h.programs.closed.clone();
+        closed.sort();
+        assert_eq!(closed, [4, 5, 6, 7]);
+        // The first that starts leads the group.
+        let mut h = with_stages();
+        h.spawning("nosuch | cat | wc");
+        assert_eq!(h.programs.spawned[0].group, Group::New);
+        assert_eq!(h.programs.spawned[1].group, Group::Join(101));
+        // The last one's refusal is the status.
+        let mut h = with_stages();
+        assert_eq!(
+            h.spawning("cat | nosuch"),
+            (127, "relay-sh: nosuch: command not found\n".into())
+        );
+        assert_eq!(
+            h.spawning("cat | /no/such"),
+            (
+                127,
+                "relay-sh: /no/such: No such file or directory\n".into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_pipeline_says_how_its_killed_stages_ended_and_ctrl_c_once() {
+        let mut h = Harness::new();
+        let fault = WaitStatus::fault(FAULT_PAGE, ACCESS_READ, 0, 0x40_1a2c);
+        h.programs.known.push(("/bin/t-fault", fault));
+        h.programs.known.push(("/bin/cat", WaitStatus::exited(0)));
+        h.programs
+            .known
+            .push(("/bin/t-spin", WaitStatus::killed(KILLED_CTRL_C)));
+        // A writer that ended because nobody read on: 141, said by nobody.
+        h.programs
+            .known
+            .push(("/bin/t-args", WaitStatus::exited(141)));
+        assert_eq!(
+            h.spawning("t-fault null-read | cat"),
+            (
+                0,
+                "relay-sh: t-fault: killed (page fault at 0x0, read, ip 0x401a2c)\n".into()
+            )
+        );
+        assert_eq!(h.spawning("t-spin | t-spin | t-spin"), (130, "^C\n".into()));
+        assert_eq!(h.spawning("t-args x | cat"), (0, String::new()));
+        assert_eq!(h.spawning("cat | t-args x"), (141, String::new()));
+    }
+
+    #[test]
+    fn a_pipeline_that_cannot_be_made_starts_no_more() {
+        let mut h = with_stages();
+        h.programs.pipe_error = Some((1, Errno::EMFILE));
+        assert_eq!(
+            h.spawning("cat | wc | false > /tmp/o"),
+            (1, "relay-sh: pipe error: Too many open files\n".into())
+        );
+        assert_eq!(h.programs.spawned.len(), 1, "only the first");
+        let mut closed = h.programs.closed.clone();
+        closed.sort();
+        assert_eq!(closed, [4, 5, 6], "the redirection and both ends");
+        // A redirection that cannot be opened starts nothing.
+        let mut h = with_stages();
+        h.programs.open_error = Some(Errno::EISDIR);
+        assert_eq!(
+            h.spawning("cat | wc > /tmp"),
+            (1, "relay-sh: /tmp: Is a directory\n".into())
+        );
+        assert!(h.programs.spawned.is_empty() && h.programs.pipes.is_empty());
     }
 
     #[test]

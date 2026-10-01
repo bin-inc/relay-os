@@ -3,7 +3,7 @@
 #![cfg(test)]
 
 use crate::Shell;
-use crate::io::{Bytes, Console, MemInfo, Programs, Stdout, System};
+use crate::io::{Bytes, Console, Group, MemInfo, Programs, Stdout, System};
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
@@ -139,9 +139,11 @@ impl System for TestSystem {
 pub struct Spawned {
     pub path: String,
     pub args: Vec<String>,
-    /// The redirection's fd, as fd 1.
+    /// What it got as fd 0 (a pipe's read end) and fd 1 (a pipe's write
+    /// end or a redirection), instead of the shell's.
+    pub stdin: Option<u32>,
     pub stdout: Option<u32>,
-    pub foreground: bool,
+    pub group: Group,
 }
 
 /// `/bin/sh`'s system calls, for the spawning runner: redirection files
@@ -156,6 +158,10 @@ pub struct FakePrograms {
     pub opened: Vec<(String, bool, u32)>,
     /// What `open_output` fails with, if anything.
     pub open_error: Option<Errno>,
+    /// Every pipe made, (read end, write end); what `pipe` fails with
+    /// after this many, if anything.
+    pub pipes: Vec<(u32, u32)>,
+    pub pipe_error: Option<(usize, Errno)>,
     pub closed: Vec<u32>,
     pub spawned: Vec<Spawned>,
     /// The children started and not yet waited for, by pid.
@@ -179,6 +185,8 @@ impl FakePrograms {
             refusals: Vec::new(),
             opened: Vec::new(),
             open_error: None,
+            pipes: Vec::new(),
+            pipe_error: None,
             closed: Vec::new(),
             spawned: Vec::new(),
             children: Vec::new(),
@@ -205,12 +213,24 @@ impl Programs for FakePrograms {
     fn close(&mut self, fd: u32) {
         self.closed.push(fd);
     }
+    fn pipe(&mut self) -> Result<(u32, u32), Errno> {
+        if let Some((after, e)) = self.pipe_error
+            && self.pipes.len() >= after
+        {
+            return Err(e);
+        }
+        let ends = (self.next_fd + 1, self.next_fd + 2);
+        self.next_fd += 2;
+        self.pipes.push(ends);
+        Ok(ends)
+    }
     fn spawn(
         &mut self,
         path: &[u8],
         args: &[&[u8]],
+        stdin: Option<u32>,
         stdout: Option<u32>,
-        foreground: bool,
+        group: Group,
     ) -> Result<u32, Errno> {
         let path = String::from_utf8_lossy(path).into_owned();
         let Some(&(_, status)) = self.known.iter().find(|(p, _)| *p == path) else {
@@ -223,8 +243,9 @@ impl Programs for FakePrograms {
                 .iter()
                 .map(|a| String::from_utf8_lossy(a).into_owned())
                 .collect(),
+            stdin,
             stdout,
-            foreground,
+            group,
         });
         self.next_pid += 1;
         self.children.push((self.next_pid, status));

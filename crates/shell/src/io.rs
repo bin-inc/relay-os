@@ -95,6 +95,20 @@ pub trait Stdout {
     fn node(&self) -> Option<Node>;
 }
 
+/// The process group a program starts in (user-space gate §6.4, §9.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Group {
+    /// The shell's own: a script's commands, so that Ctrl-C ends the
+    /// script with them.
+    Shell,
+    /// A new one, which gets the console: a command at the prompt, or a
+    /// pipeline's first.
+    New,
+    /// The group of the pipeline's first command (its pid), which has
+    /// the console already.
+    Join(u32),
+}
+
 /// Programs, for a shell that runs its commands as programs (`/bin/sh`,
 /// user-space gate §8.2): `relay-rt`'s system calls there, a fake in the
 /// tests.
@@ -103,17 +117,18 @@ pub trait Programs {
     /// or, with `append`, written at its end. Its fd.
     fn open_output(&mut self, path: &[u8], append: bool) -> Result<u32, Errno>;
     fn close(&mut self, fd: u32);
-    /// Starts the program at `path` with `args` (argument 0 first); its
-    /// pid. It gets the shell's fds 0 and 2, and `stdout` (or the shell's
-    /// fd 1) as its fd 1. With `foreground` it runs in a process group of
-    /// its own, which gets the console (an interactive shell's command,
-    /// spec §6.4); otherwise in the shell's group (a script's).
+    /// Makes a pipe: its read end and its write end.
+    fn pipe(&mut self) -> Result<(u32, u32), Errno>;
+    /// Starts the program at `path` with `args` (argument 0 first) in
+    /// `group`; its pid. It gets `stdin` (or the shell's fd 0) as its fd 0,
+    /// `stdout` (or the shell's fd 1) as its fd 1, and the shell's fd 2.
     fn spawn(
         &mut self,
         path: &[u8],
         args: &[&[u8]],
+        stdin: Option<u32>,
         stdout: Option<u32>,
-        foreground: bool,
+        group: Group,
     ) -> Result<u32, Errno>;
     /// Waits for the child `pid` to end.
     fn wait(&mut self, pid: u32) -> Result<WaitStatus, Errno>;
