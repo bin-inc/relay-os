@@ -574,6 +574,30 @@ free
     }
 
     #[test]
+    fn the_nuc_s_instructions_run_every_check_script() {
+        // The prototype's review: the README's quick start ran three of
+        // the four scripts, and `verify-usb` fails a script left unrun.
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        let dir = format!("{root}/rootfs/root/checks");
+        let mut scripts: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|f| f.ends_with(".sh"))
+            .collect();
+        scripts.sort();
+        assert!(scripts.len() >= 4, "{scripts:?}");
+        for doc in ["README.md", "docs/hardware-test.md"] {
+            let text = std::fs::read_to_string(format!("{root}/{doc}")).unwrap();
+            for s in &scripts {
+                assert!(
+                    text.contains(&format!("sh checks/{s}")),
+                    "{doc} does not run {s}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn many_wildcards_stay_fast() {
         let script = format!("dmesg\n{}#> never\n", "#> ...\n".repeat(40));
         let log = format!("+ dmesg\n{}", "x\n".repeat(2000));

@@ -48,9 +48,10 @@ has the whole checklist):
 3. Reboot, press F10 and choose the UEFI entry for the Kingston stick. Every
    startup line says `[ ok ]` and the prompt `root@relay:~# ` follows.
 4. Type `sh checks/check3-a.sh`, then `reboot`, boot the stick again, type
-   `sh checks/check3-b.sh` and `sh checks/check4.sh`, then `poweroff`.
+   `sh checks/check3-b.sh`, `sh checks/check4.sh` and `sh checks/check5.sh`,
+   then `poweroff`.
 5. Back in Linux Mint: `cargo xtask verify-usb` checks the filesystem and
-   the output of the three scripts.
+   the output of every script.
 
 After a code change, `cargo xtask flash --kernel` replaces only the loader,
 the kernel and the programs of `/bin` (`system.img`) and keeps the files on
