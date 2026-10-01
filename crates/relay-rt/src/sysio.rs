@@ -196,11 +196,17 @@ pub struct SysPrograms {
     /// prompt may have one too, with the console; a shell in a script's
     /// group keeps its commands there (and the console with them).
     own_group: bool,
+    /// The last child started in a group of its own, which a pipeline's
+    /// later commands join.
+    leader: Option<u32>,
 }
 
 impl SysPrograms {
     pub fn new(own_group: bool) -> SysPrograms {
-        SysPrograms { own_group }
+        SysPrograms {
+            own_group,
+            leader: None,
+        }
     }
 }
 
@@ -208,6 +214,22 @@ impl SysPrograms {
 /// its end.
 pub fn output_flags(append: bool) -> u32 {
     OPEN_WRITE | OPEN_CREATE | if append { OPEN_APPEND } else { OPEN_TRUNCATE }
+}
+
+/// `spawn`'s flags and group for a command in `group`, from a shell that
+/// leads a group of its own (`own_group`) or not, whose last child in a
+/// new group was `leader`: a new group with the console only from a
+/// leading shell; a background job's without it, from any shell; a
+/// pipeline's later stages in the group its first one started, or else
+/// the shell's.
+pub fn spawn_group(group: Group, own_group: bool, leader: Option<u32>) -> (u32, u32) {
+    match group {
+        Group::New if own_group => (NEW_GROUP | FOREGROUND, 0),
+        // Without the console, which stays where it is (spec §9.2).
+        Group::Background => (NEW_GROUP, 0),
+        Group::Join(pgid) if leader == Some(pgid) => (0, pgid),
+        _ => (0, 0),
+    }
 }
 
 /// `spawn`'s arguments: each followed by a NUL.
@@ -248,20 +270,21 @@ impl Programs for SysPrograms {
         stdout: Option<u32>,
         group: Group,
     ) -> Result<u32, Errno> {
-        let (flags, pgid) = match group {
-            Group::New if self.own_group => (NEW_GROUP | FOREGROUND, 0),
-            Group::Join(pgid) if self.own_group => (0, pgid),
-            _ => {
-                // A command in the shell's own group reads the console in
-                // line mode too, which is also where Ctrl-C ends it (and
-                // the group): an interactive shell that leads no group left
-                // it raw at its prompt.
-                let _ = sys::console_mode(MODE_LINE);
-                (0, 0)
-            }
-        };
+        let (flags, pgid) = spawn_group(group, self.own_group, self.leader);
+        if flags & NEW_GROUP == 0 && pgid == 0 {
+            // A command in the shell's own group reads the console in line
+            // mode too, which is also where Ctrl-C ends it (and the group):
+            // an interactive shell that leads no group left it raw at its
+            // prompt.
+            let _ = sys::console_mode(MODE_LINE);
+        }
         let fds = command_fds(stdin, stdout);
-        sys::spawn(path, &arg_bytes(args), b"", &fds, flags, pgid).map_err(Errno::from_number)
+        let pid = sys::spawn(path, &arg_bytes(args), b"", &fds, flags, pgid)
+            .map_err(Errno::from_number)?;
+        if flags & NEW_GROUP != 0 {
+            self.leader = Some(pid);
+        }
+        Ok(pid)
     }
 
     fn wait(&mut self, pid: u32) -> Result<WaitStatus, Errno> {
@@ -270,6 +293,10 @@ impl Programs for SysPrograms {
             Ok(None) => Err(Errno::ECHILD),
             Err(e) => Err(Errno::from_number(e)),
         }
+    }
+
+    fn collect(&mut self) -> Option<(u32, WaitStatus)> {
+        sys::wait(relay_abi::spawn::WAIT_ANY, true).ok().flatten()
     }
 
     /// The tee holds the open file (spec §16 item 4), so the fd goes.
@@ -358,6 +385,31 @@ mod tests {
             [(0, 4), (1, 7), (2, 2)]
         );
         assert_eq!(arg_bytes(&[b"ls", b"", b"a b"]), b"ls\0\0a b\0");
+    }
+
+    #[test]
+    fn a_command_s_group_is_the_shell_s_a_new_one_or_its_first_stage_s() {
+        // At the prompt of a shell leading its group: a command gets the
+        // console; a pipeline's later stages join its first.
+        assert_eq!(
+            spawn_group(Group::New, true, None),
+            (NEW_GROUP | FOREGROUND, 0)
+        );
+        assert_eq!(spawn_group(Group::Join(7), true, Some(7)), (0, 7));
+        // A background job never gets the console, from any shell.
+        for own in [true, false] {
+            assert_eq!(spawn_group(Group::Background, own, None), (NEW_GROUP, 0));
+            assert_eq!(
+                spawn_group(Group::Join(9), own, Some(9)),
+                (0, 9),
+                "its later stages"
+            );
+        }
+        // A shell in a script's group keeps its commands there, a
+        // pipeline's later stages too (their first did not lead a group).
+        assert_eq!(spawn_group(Group::New, false, None), (0, 0));
+        assert_eq!(spawn_group(Group::Join(12), false, Some(9)), (0, 0));
+        assert_eq!(spawn_group(Group::Shell, true, Some(12)), (0, 0));
     }
 
     #[test]

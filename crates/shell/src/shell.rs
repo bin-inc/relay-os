@@ -6,6 +6,7 @@ use crate::commands::{self, SCRIPT_MAX, Script};
 use crate::ctx::{Ctx, quote_if_needed};
 use crate::editor::{Feed, LineEditor};
 use crate::io::{Console, Programs, Stdin, Stdout, System};
+use crate::jobs::Jobs;
 use crate::parser::{self, HOME};
 use crate::runner::{self, Parts, Ran, Runners};
 use crate::transcript::{self, Transcript};
@@ -45,6 +46,12 @@ pub struct Shell<'a> {
     /// bytes); without it the input ends at once (`host-shell`). A
     /// spawning shell's commands read its fd 0 instead.
     input: Option<&'a mut dyn Stdin>,
+    /// The background jobs (spec §9.2).
+    jobs: Jobs,
+    /// It reads commands at its prompt (`run`): it says a job's number
+    /// when it starts one, and how jobs ended before each prompt. A script
+    /// and `X | sh` say neither, as bash's do.
+    prompting: bool,
 }
 
 impl<'a> Shell<'a> {
@@ -89,6 +96,8 @@ impl<'a> Shell<'a> {
             in_script: false,
             transcript: None,
             input: None,
+            jobs: Jobs::new(),
+            prompting: false,
         }
     }
 
@@ -118,7 +127,12 @@ impl<'a> Shell<'a> {
     /// `reboot`/`poweroff` return.
     pub fn run(&mut self) {
         self.stopped = false;
+        self.prompting = true;
         while !self.stopped {
+            self.collect_jobs();
+            for line in self.jobs.report() {
+                self.say(line.as_bytes());
+            }
             let mut out = Vec::new();
             let prompt = self.prompt();
             self.editor.start(&prompt, self.console.columns(), &mut out);
@@ -164,11 +178,9 @@ impl<'a> Shell<'a> {
     pub fn execute(&mut self, line: &str) -> i32 {
         let mut pipeline = match parser::parse_line(line) {
             Ok(parser::Line {
-                background: Some(_),
-                ..
-            }) => {
-                return self.finish(SYNTAX, format!("{NAME}: unsupported syntax: &\n"));
-            }
+                pipeline,
+                background: Some(text),
+            }) => return self.background(&pipeline, &text),
             Ok(line) => line.pipeline,
             Err(e) => return self.finish(SYNTAX, format!("{NAME}: {e}\n")),
         };
@@ -243,6 +255,56 @@ impl<'a> Shell<'a> {
         };
         let ran = self.runner.get().pipeline(parts, stages);
         self.finish(ran.status, ran.message)
+    }
+
+    /// Starts `stages` as a background job (user-space gate §9.2), whose
+    /// text is `text`: at the prompt the shell says `[<number>] <pid of its
+    /// last process>`. Its status is 0 once anything of it started. The
+    /// shell's own commands cannot be in one.
+    fn background(&mut self, stages: &[parser::Command], text: &str) -> i32 {
+        let builtin = stages
+            .iter()
+            .find(|c| commands::builtin(&c.words[0]).is_some());
+        if let Some(c) = builtin {
+            let name = &c.words[0];
+            let message = format!("{NAME}: {name}: cannot be used in the background\n");
+            return self.finish(1, message);
+        }
+        let parts = Parts {
+            vfs: &mut *self.vfs,
+            console: &mut *self.console,
+            system: &mut *self.system,
+            transcript: &mut self.transcript,
+            in_script: self.in_script,
+            status: self.status,
+            input: None,
+        };
+        let started = self.runner.get().background(parts, stages);
+        if let Some(pgid) = started.pgid {
+            let number = self.jobs.add(pgid, &started.pids, text);
+            if self.prompting && !self.in_script {
+                let last = started.pids.last().copied().unwrap_or(pgid);
+                self.say(format!("[{number}] {last}\n").as_bytes());
+            }
+        }
+        self.finish(started.ran.status, started.ran.message)
+    }
+
+    /// Collects the background jobs' processes that have ended, at most
+    /// as many as can exist (`relay_abi::proc::PROC_MAX`).
+    fn collect_jobs(&mut self) {
+        if self.jobs.is_empty() {
+            return;
+        }
+        let Some(programs) = self.runner.programs() else {
+            return;
+        };
+        for _ in 0..relay_abi::proc::PROC_MAX {
+            let Some((pid, status)) = programs.collect() else {
+                break;
+            };
+            self.jobs.ended(pid, status);
+        }
     }
 
     /// Writes to the screen and, while a script runs, its transcript.
@@ -373,6 +435,7 @@ impl<'a> Shell<'a> {
 
     /// One line `run_input` read: run, or said why not.
     fn input_line(&mut self, line: &[u8], too_long: bool) {
+        self.collect_jobs();
         match core::str::from_utf8(line) {
             _ if too_long => {
                 self.finish(1, String::from("sh: standard input: a line over 64 KiB\n"));
@@ -404,6 +467,7 @@ impl<'a> Shell<'a> {
                 status = CANCELLED;
                 break;
             }
+            self.collect_jobs();
             // The line runs as written; only its trace is trimmed.
             self.say(format!("+ {}\n", line.trim()).as_bytes());
             // On the disk before the command runs: a command that hangs
@@ -631,6 +695,144 @@ mod tests {
             .push(("/bin/t-args", WaitStatus::exited(3)));
         h.programs.known.push(("/bin/sh", WaitStatus::exited(0)));
         h
+    }
+
+    /// What an interactive `/bin/sh` prints for the lines typed, each
+    /// ending with Enter, until the input ends.
+    fn typed(h: &mut Harness, lines: &[&str]) -> String {
+        for line in lines {
+            h.console.type_in(line.as_bytes());
+            h.console.type_in(b"\r");
+        }
+        Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs).run();
+        h.console.take()
+    }
+
+    /// `sleep` and `t-spin` run on through `collect`'s first round (the
+    /// prompt after they start).
+    fn with_jobs() -> Harness {
+        let mut h = spawning();
+        for p in ["/bin/sleep", "/bin/t-spin", "/bin/cat"] {
+            h.programs.known.push((p, WaitStatus::exited(0)));
+            h.programs.lives.push((p, 1));
+        }
+        h.programs.known.push(("/bin/false", WaitStatus::exited(1)));
+        h
+    }
+
+    #[test]
+    fn a_background_job_says_its_number_and_how_it_ended_before_a_prompt() {
+        let mut h = with_jobs();
+        let out = typed(&mut h, &["sleep 5 &", "", "false &", ""]);
+        assert_eq!(
+            out,
+            "root@relay:/# sleep 5 &\n[1] 101\n\
+             root@relay:/# \n\
+             [1]+  Done                    sleep 5\n\
+             root@relay:/# false &\n[1] 102\n\
+             [1]+  Exit 1                  false\n\
+             root@relay:/# \nroot@relay:/# "
+        );
+        assert_eq!(
+            h.programs.spawned[0].group,
+            crate::Group::Background,
+            "without the console"
+        );
+        assert!(h.programs.children().is_empty(), "every one collected");
+    }
+
+    #[test]
+    fn a_background_pipeline_is_one_job_in_one_group() {
+        let mut h = with_jobs();
+        let out = typed(&mut h, &["cat f | t-args x > out &", ""]);
+        assert!(
+            out.starts_with("root@relay:/# cat f | t-args x > out &\n[1] 102\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("[1]+  Exit 3                  cat f | t-args x > out\n"),
+            "{out}"
+        );
+        let groups: Vec<crate::Group> = h.programs.spawned.iter().map(|s| s.group).collect();
+        assert_eq!(groups, [crate::Group::Background, crate::Group::Join(101)]);
+        assert_eq!(h.programs.spawned[1].stdout, Some(4), "the redirection");
+        let (r, w) = h.programs.pipes[0];
+        assert!(
+            [r, w, 4].iter().all(|fd| h.programs.closed.contains(fd)),
+            "the shell's copies"
+        );
+    }
+
+    #[test]
+    fn a_background_job_that_cannot_start_is_no_job() {
+        let mut h = with_jobs();
+        assert_eq!(
+            h.spawning("nosuch &"),
+            (127, "relay-sh: nosuch: command not found\n".into())
+        );
+        // One stage of two that starts is a job, the status 0, as bash's.
+        let out = typed(&mut h, &["nosuch | sleep 1 &", ""]);
+        assert!(
+            out.starts_with(
+                "root@relay:/# nosuch | sleep 1 &\nrelay-sh: nosuch: command not found\n[1] 101\n"
+            ),
+            "{out}"
+        );
+        assert_eq!(
+            h.spawning("sleep 1 | nosuch &"),
+            (0, "relay-sh: nosuch: command not found\n".into()),
+            "even the last"
+        );
+        for line in ["cd / &", "exit &", "help | cat &"] {
+            let name = line.split([' ', '&']).next().unwrap();
+            assert_eq!(
+                h.spawning(line),
+                (
+                    1,
+                    alloc::format!("relay-sh: {name}: cannot be used in the background\n")
+                ),
+                "{line}"
+            );
+        }
+        assert_eq!(h.programs.spawned.len(), 2, "nothing else started");
+    }
+
+    #[test]
+    fn a_script_and_x_into_sh_say_nothing_of_their_jobs() {
+        let mut h = with_jobs();
+        h.put("/tmp/s.sh", b"sleep 5 &\nt-args\nt-args\n");
+        let mut out = FakeStdout::console();
+        assert_eq!(
+            h.sh(&["/tmp/s.sh"], &mut out),
+            (3, "+ sleep 5 &\n+ t-args\n+ t-args\n".into())
+        );
+        assert_eq!(
+            h.programs.spawned[0].group,
+            crate::Group::Background,
+            "not the script's group"
+        );
+        assert!(
+            h.programs.children().is_empty(),
+            "collected before the later lines"
+        );
+        let mut h = with_jobs();
+        let mut input = crate::Bytes::new(b"sleep 5 &\nt-args\nt-args\n".to_vec());
+        Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+            .run_input(&mut input);
+        assert_eq!(h.console.take(), "");
+        assert!(
+            h.programs.children().is_empty(),
+            "collected before the later lines"
+        );
+    }
+
+    #[test]
+    fn the_in_process_runner_runs_no_background_job() {
+        let mut h = Harness::new();
+        assert_eq!(
+            h.run("echo hi &"),
+            (2, "relay-sh: unsupported syntax: &\n".into())
+        );
     }
 
     #[test]

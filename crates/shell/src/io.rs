@@ -107,8 +107,11 @@ pub enum Group {
     /// pipeline's first.
     New,
     /// The group of the pipeline's first command (its pid), which has
-    /// the console already.
+    /// the console already, or, in a background job, does not.
     Join(u32),
+    /// A new one, without the console: a background job's first command
+    /// (§9.2), at the prompt and in a script alike.
+    Background,
 }
 
 /// Programs, for a shell that runs its commands as programs (`/bin/sh`,
@@ -134,6 +137,9 @@ pub trait Programs {
     ) -> Result<u32, Errno>;
     /// Waits for the child `pid` to end.
     fn wait(&mut self, pid: u32) -> Result<WaitStatus, Errno>;
+    /// A child that has ended, collected, if one has: a background job's
+    /// process (`wait(-1, NOHANG)`).
+    fn collect(&mut self) -> Option<(u32, WaitStatus)>;
     /// Copies the console into the file at `path` from now on (a script's
     /// transcript, spec §6.5), written at its end.
     fn tee_push(&mut self, path: &[u8]) -> Result<(), Errno>;

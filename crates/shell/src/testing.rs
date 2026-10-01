@@ -170,8 +170,13 @@ pub struct FakePrograms {
     pub pipe_error: Option<(usize, Errno)>,
     pub closed: Vec<u32>,
     pub spawned: Vec<Spawned>,
-    /// The children started and not yet waited for, by pid.
-    children: Vec<(u32, WaitStatus)>,
+    /// The programs that run on through this many rounds of `collect` (a
+    /// round ends when it finds nothing), by path; the others end at once.
+    pub lives: Vec<(&'static str, u32)>,
+    /// The children started and not yet collected.
+    children: Vec<FakeChild>,
+    /// The rounds of `collect` so far.
+    round: u32,
     /// The tees pushed and not popped, by path.
     pub tees: Vec<String>,
     /// Every tee pushed.
@@ -195,7 +200,9 @@ impl FakePrograms {
             pipe_error: None,
             closed: Vec::new(),
             spawned: Vec::new(),
+            lives: Vec::new(),
             children: Vec::new(),
+            round: 0,
             tees: Vec::new(),
             pushed: Vec::new(),
             push_error: None,
@@ -203,6 +210,22 @@ impl FakePrograms {
             next_fd: 3,
             next_pid: 100,
         }
+    }
+}
+
+/// A child of `FakePrograms`: how it ends, its group, and the round of
+/// `collect` from which it has ended.
+struct FakeChild {
+    pid: u32,
+    status: WaitStatus,
+    group: u32,
+    ends_at: u32,
+}
+
+impl FakePrograms {
+    /// The children not yet collected, by pid, with their groups.
+    pub fn children(&self) -> Vec<(u32, u32)> {
+        self.children.iter().map(|c| (c.pid, c.group)).collect()
     }
 }
 
@@ -239,6 +262,11 @@ impl Programs for FakePrograms {
         group: Group,
     ) -> Result<u32, Errno> {
         let path = String::from_utf8_lossy(path).into_owned();
+        let life = self
+            .lives
+            .iter()
+            .find(|(p, _)| *p == path)
+            .map_or(0, |l| l.1);
         let Some(&(_, status)) = self.known.iter().find(|(p, _)| *p == path) else {
             let refusal = self.refusals.iter().find(|(p, _)| *p == path);
             return Err(refusal.map_or(Errno::ENOENT, |r| r.1));
@@ -254,16 +282,39 @@ impl Programs for FakePrograms {
             group,
         });
         self.next_pid += 1;
-        self.children.push((self.next_pid, status));
+        let group = match group {
+            Group::Shell => 0,
+            Group::New | Group::Background => self.next_pid,
+            Group::Join(g) => g,
+        };
+        self.children.push(FakeChild {
+            pid: self.next_pid,
+            status,
+            group,
+            ends_at: self.round + life,
+        });
         Ok(self.next_pid)
     }
+    /// Waits as long as the child runs on.
     fn wait(&mut self, pid: u32) -> Result<WaitStatus, Errno> {
         let i = self
             .children
             .iter()
-            .position(|c| c.0 == pid)
+            .position(|c| c.pid == pid)
             .ok_or(Errno::ECHILD)?;
-        Ok(self.children.remove(i).1)
+        Ok(self.children.remove(i).status)
+    }
+    fn collect(&mut self) -> Option<(u32, WaitStatus)> {
+        match self.children.iter().position(|c| c.ends_at <= self.round) {
+            Some(i) => {
+                let c = self.children.remove(i);
+                Some((c.pid, c.status))
+            }
+            None => {
+                self.round += 1;
+                None
+            }
+        }
     }
     fn tee_push(&mut self, path: &[u8]) -> Result<(), Errno> {
         if let Some(e) = self.push_error {
