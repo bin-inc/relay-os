@@ -53,6 +53,13 @@ impl fmt::Display for Reason {
 /// What follows the log lines.
 const FOOTER: &[u8] = b"\nPress any key to reboot.\n";
 
+/// What clears the console for the screen, whatever a program's output
+/// left the terminal in: CAN first ends an escape a program left
+/// unfinished (a lone ESC would swallow the next one, and the colours it
+/// resets would stay), and prints nothing otherwise; then the colours,
+/// the clear and the cursor's home.
+const CLEAR: &[u8] = b"\x18\x1b[0m\x1b[2J\x1b[H";
+
 /// The screen on a console of `size` (columns, rows): a heading, the
 /// reason, the newest of the kernel log's last lines (`tail`, without its
 /// colours) that fit without scrolling the heading away, and what to do.
@@ -152,7 +159,7 @@ pub fn show(reason: &Reason) -> ! {
     proc::take_console();
     tty::poll();
     while tty::pop().is_some() {}
-    console::write_bytes(b"\x1b[0m\x1b[2J\x1b[H");
+    console::write_bytes(CLEAR);
     let size = console::size().unwrap_or((80, 25));
     console::write_bytes(&text(reason, &tail[..n], size));
     loop {
@@ -283,6 +290,19 @@ storage: root on 00:14.0 port 15, the disk with the boot partition 4A7D166A-7C33
     /// the real terminal: its rows, blanks at the end cut, and the
     /// cursor's row.
     fn on_the_nuc(text: &[u8]) -> (Vec<String>, usize) {
+        nuc_terminal(text, |t| {
+            let rows = (0..t.rows())
+                .map(|r| {
+                    let row: String = (0..t.cols()).map(|c| t.cell(c, r).ch as char).collect();
+                    row.trim_end().to_string()
+                })
+                .collect();
+            (rows, t.cursor().1)
+        })
+    }
+
+    /// `f` of the real terminal at the NUC's size, after `text`.
+    fn nuc_terminal<R>(text: &[u8], f: impl FnOnce(&term::Terminal) -> R) -> R {
         use term::{Cell, PixelFormat, Terminal};
         let (w, h) = (1920, 1080);
         assert_eq!(term::geometry(w, h), (120, 33, 2));
@@ -290,13 +310,35 @@ storage: root on 00:14.0 port 15, the disk with the boot partition 4A7D166A-7C33
         let mut shadow = alloc::vec![0u32; w * h];
         let mut t = Terminal::new(w, h, PixelFormat::Bgr, &mut cells, &mut shadow);
         t.write_bytes(text);
-        let rows = (0..t.rows())
-            .map(|r| {
-                let row: String = (0..t.cols()).map(|c| t.cell(c, r).ch as char).collect();
-                row.trim_end().to_string()
-            })
-            .collect();
-        (rows, t.cursor().1)
+        f(&t)
+    }
+
+    #[test]
+    fn the_screen_has_its_colours_whatever_a_program_left_the_terminal_in() {
+        // A program's last bytes before the screen: black on black, then
+        // a sequence it never finished (a lone ESC, half a CSI, half a
+        // UTF-8 character), which would swallow the screen's own reset.
+        for left in [
+            &b"hello \x1b[30;40mdark\x1b"[..],
+            b"\x1b[30;40m\x1b[1;",
+            b"\x1b[30;40m\xC3",
+            b"\x1b[30;40m",
+        ] {
+            let mut screen = left.to_vec();
+            screen.extend_from_slice(CLEAR);
+            screen.extend_from_slice(&text(&Reason::Ended, b"x\n", NUC));
+            nuc_terminal(&screen, |t| {
+                let (first, rows) = (t.cell(0, 0), t.rows());
+                let row: String = (0..t.cols()).map(|c| t.cell(c, 0).ch as char).collect();
+                assert_eq!(
+                    row.trim_end(),
+                    "*** Relay OS cannot run its shell ***",
+                    "{left:?}"
+                );
+                assert_ne!(first.fg, first.bg, "{left:?}: the heading can be seen");
+                assert!(rows == 33);
+            });
+        }
     }
 
     /// Lines a program's path can put in the kernel log, each one where a
