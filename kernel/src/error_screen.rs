@@ -103,9 +103,12 @@ fn fitting(tail: &[u8], cols: usize, rows: usize) -> &[u8] {
     &tail[start..]
 }
 
-/// Shows the screen for `reason`, waits for a key, and restarts the
-/// machine. Only process 1 calls it.
+/// Ends every other process, shows the screen for `reason`, waits for a
+/// key, and restarts the machine. Only process 1 calls it.
 pub fn show(reason: &Reason) -> ! {
+    // Nothing else writes to the console while the screen is up: an
+    // orphan's output would land under it and could scroll it away.
+    proc::kill_others();
     let mut tail = [0u8; 4096];
     let n = klog::KLOG.lock().tail_lines(TAIL_LINES, &mut tail);
     // The console is init's, in raw mode, and what was typed before the
