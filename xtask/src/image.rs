@@ -179,6 +179,18 @@ pub fn esp_delete(target: &Path, esp: Partition, path: &str) -> Result<()> {
         .arg(format!("::{path}")))
 }
 
+/// The bytes of one file (absolute ESP path, `/` separators) of an
+/// existing ESP.
+pub fn esp_read(target: &Path, esp: Partition, path: &str, scratch: &Path) -> Result<Vec<u8>> {
+    fs::create_dir_all(scratch)?;
+    let file = scratch.join("esp-read.tmp");
+    run(mtools("mcopy")
+        .args(["-o", "-i", &mtools_target(target, esp)])
+        .arg(format!("::{path}"))
+        .arg(&file))?;
+    Ok(fs::read(&file)?)
+}
+
 /// Replaces only the cmdline file on an existing ESP.
 pub fn set_cmdline(target: &Path, esp: Partition, cmdline: &str, scratch: &Path) -> Result<()> {
     esp_write(
@@ -366,6 +378,31 @@ pub fn build_image_as(art: &Artifacts, cmdline: &str, name: &str, bytes: u64) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_of_the_esp_reads_back() {
+        let dir = out_dir().join("esp-read-selftest");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("esp.img");
+        let esp = Partition {
+            start_lba: 0,
+            sectors: 131072,
+        };
+        fs::File::create(&img)
+            .unwrap()
+            .set_len(esp.sectors * 512)
+            .unwrap();
+        let fat = mtools_target(&img, esp);
+        run(mtools("mformat").args(["-i", &fat, "-F", "-T", "131072", "::"])).unwrap();
+        run(mtools("mmd").args(["-i", &fat, "::/EFI", "::/EFI/RELAY"])).unwrap();
+        esp_write(&img, esp, "/EFI/RELAY/system.img", b"archive", &dir).unwrap();
+        assert_eq!(
+            esp_read(&img, esp, "/EFI/RELAY/system.img", &dir).unwrap(),
+            b"archive"
+        );
+        assert!(esp_read(&img, esp, "/EFI/RELAY/none", &dir).is_err());
+    }
 
     #[test]
     fn fixed_script_pins_guids() {
