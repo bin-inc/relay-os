@@ -274,7 +274,10 @@ pub fn parse_fadt(t: &[u8]) -> Fadt {
     let len = t.len();
     let dsdt = match len >= 148 && u64_at(t, 140) != 0 {
         true => u64_at(t, 140),
-        false => t.get(40..44).map_or(0, |_| u32_at(t, 40) as u64),
+        false => t
+            .get(40..44)
+            .and_then(|b| b.try_into().ok())
+            .map_or(0, |b| u64::from(u32::from_le_bytes(b))),
     };
     let cnt_len = if len > 89 { t[89] } else { 2 };
     let pm1 = |x_off: usize, old_off: usize| {
