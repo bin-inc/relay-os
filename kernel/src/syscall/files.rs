@@ -162,7 +162,8 @@ pub(super) fn read_dir(
     let len = len.min(READ_DIR_MAX);
     let slice = UserSlice::new(addr, len)?;
     caller.writable(&slice)?;
-    let room = caller.heap_room();
+    // The buffer comes from the heap the directory's list needs too.
+    let room = caller.heap_room().saturating_sub(len as usize);
     let mut buf = alloc::vec![0u8; len as usize];
     let n = caller.with_vfs(|v| open.read_dir(v, &mut buf, room))?;
     caller.write(&slice, 0, &buf[..n])?;
@@ -586,6 +587,27 @@ mod tests {
         f.heap_room = usize::MAX;
         call(&mut f, Call::Seek, [d, 0, 0]).unwrap();
         assert!(call(&mut f, Call::ReadDir, [d, W, PAGE]).unwrap() > 0);
+    }
+
+    #[test]
+    fn read_dir_s_own_buffer_is_not_room_for_the_directory() {
+        // The directory's list takes up to ten times its size while it is
+        // made (`file::DIR_MEMORY_FACTOR`), after the call has taken its
+        // own buffer from the same heap.
+        let mut f = fake();
+        assert_eq!(on(&mut f, Call::Stat, b"/root", [0, W]), Ok(0));
+        let size = u64_at(&get(&mut f, W, 72), 8) as usize;
+        assert!(size > 0, "a directory with a size, or the check is vacuous");
+        let d = open(&mut f, b"/root", OPEN_READ).unwrap();
+        let len = PAGE as usize;
+        f.heap_room = 10 * size + len - 1;
+        assert_eq!(
+            call(&mut f, Call::ReadDir, [d, W, len as u64]),
+            Err(errno::ENOMEM),
+            "room for the list, but not beside the buffer"
+        );
+        f.heap_room = 10 * size + len;
+        assert!(call(&mut f, Call::ReadDir, [d, W, len as u64]).unwrap() > 0);
     }
 
     #[test]
