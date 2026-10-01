@@ -12,9 +12,10 @@
 //! replaces (user-space gate §9.4). bash's other parameters (`$*`, `$$`,
 //! `$!`, `$-`, `$_`), its operators (`${A:-x}`, `${#A}`) and, outside
 //! double quotes, its quotes `$'…'` and `$"…"` are refused, as are `$(`,
-//! `$((` and `$[`; a `${` without its `}` is bash's syntax error, and a `${…}`
-//! that names nothing expands to its `bad substitution`. A `$` before
-//! anything else is a `$`.
+//! `$((` and `$[`; a `${` without its `}` is bash's syntax error (quotes,
+//! escapes and `${…}` inside it are read whole, as bash reads them), and a
+//! `${…}` that names nothing expands to its `bad substitution`. A `$`
+//! before anything else is a `$`.
 //!
 //! A word whose unquoted start is a name and `=` is an assignment
 //! (`Word::assignment`), its value's `~` at its start or after a `:` made
@@ -249,6 +250,41 @@ impl<'l> Cursor<'l> {
     }
 }
 
+/// The text of a `${…}` up to its `}`, which it takes. As bash does, it
+/// reads quotes, escapes and further `${…}` whole, so a `}` among them
+/// does not end it; a quote left open is unterminated.
+fn brace_text(cur: &mut Cursor<'_>) -> Result<String, ParseError> {
+    let mut text = String::new();
+    // The `${` opened inside and not yet closed.
+    let mut open = 0usize;
+    loop {
+        let c = cur.next().ok_or(ParseError::UnclosedBrace)?;
+        if c == '}' && open == 0 {
+            return Ok(text);
+        }
+        text.push(c);
+        match c {
+            '}' => open -= 1,
+            '$' if cur.next_if_eq('{') => {
+                text.push('{');
+                open += 1;
+            }
+            '\\' => text.push(cur.next().ok_or(ParseError::UnclosedBrace)?),
+            '\'' | '"' => loop {
+                let q = cur.next().ok_or(ParseError::UnterminatedQuote)?;
+                text.push(q);
+                if q == c {
+                    break;
+                }
+                if q == '\\' && c == '"' {
+                    text.push(cur.next().ok_or(ParseError::UnterminatedQuote)?);
+                }
+            },
+            _ => {}
+        }
+    }
+}
+
 /// A name starts with a letter or `_`.
 fn starts_name(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_'
@@ -315,14 +351,7 @@ fn parameter(cur: &mut Cursor<'_>, quoted: bool) -> Result<Option<Param>, ParseE
 /// `#`, `@`, `?`. bash's operators (`${A:-x}`, `${#A}`) are unsupported,
 /// and anything else is a bad substitution.
 fn braced(cur: &mut Cursor<'_>) -> Result<Param, ParseError> {
-    let mut inside = String::new();
-    loop {
-        match cur.next() {
-            Some('}') => break,
-            Some(c) => inside.push(c),
-            None => return Err(ParseError::UnclosedBrace),
-        }
-    }
+    let inside = brace_text(cur)?;
     let typed = format!("${{{inside}}}");
     let head = match inside.chars().next() {
         Some(c) if starts_name(c) => inside.find(|c| !in_name(c)),
@@ -888,7 +917,18 @@ mod tests {
 
     #[test]
     fn a_brace_without_its_end_is_a_syntax_error() {
-        for line in ["echo ${A", "echo \"${A\"", "echo ${"] {
+        // A `}` quoted or escaped inside does not end it, nor does the
+        // first `}` after a `${` inside it, as in bash.
+        for line in [
+            "echo ${A",
+            "echo \"${A",
+            "echo ${",
+            "echo ${A\\",
+            "echo ${A\\}",
+            "echo ${A\"}\"",
+            "echo ${A\"\\\"\"",
+            "echo ${A:-${B}",
+        ] {
             let e = one(line).unwrap_err();
             assert_eq!(e, ParseError::UnclosedBrace, "{line}");
             // bash's words (`bash -c 'echo ${A'`).
@@ -897,6 +937,44 @@ mod tests {
                 "syntax error: unexpected EOF while looking for matching `}'"
             );
         }
+    }
+
+    #[test]
+    fn quotes_and_escapes_inside_a_substitution_are_skipped_as_bash_does() {
+        // Inside `${…}` bash reads quotes, escapes and further `${…}`
+        // whole while it looks for the `}`, so a quote left open there is
+        // unterminated (bash: ``unexpected EOF while looking for matching
+        // `"'``; this shell keeps its own words for an open quote).
+        for line in [
+            "echo \"${A\"",
+            "echo ${A\"",
+            "echo \"${A'",
+            "echo ${A'}",
+            "echo ${A\"x",
+            "echo ${A\"\\",
+        ] {
+            assert_eq!(one(line), Err(ParseError::UnterminatedQuote), "{line}");
+        }
+        // What it reads is the substitution's text, and bash's `bad
+        // substitution` or this shell's refusal names it whole.
+        let bad = |t: &str, q: bool| vec![Piece::Param(Param::Bad(t.into()), q)];
+        assert_eq!(
+            pieces(r#"${A"}"} ${A\}} ${A'\'} "${A"\""}""#),
+            [
+                bad(r#"${A"}"}"#, false),
+                bad(r"${A\}}", false),
+                bad(r"${A'\'}", false),
+                bad(r#"${A"\""}"#, true)
+            ]
+        );
+        assert_eq!(
+            one("echo ${A:-${B}}"),
+            Err(ParseError::Unsupported("${A:-${B}}".into()))
+        );
+        assert_eq!(
+            one("echo ${A:-\"x}\"}"),
+            Err(ParseError::Unsupported("${A:-\"x}\"}".into()))
+        );
     }
 
     /// `word`'s assignment, the value's pieces joined.
