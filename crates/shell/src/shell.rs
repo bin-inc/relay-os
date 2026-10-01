@@ -271,9 +271,10 @@ impl<'a> Shell<'a> {
     /// redirection after them makes its file, as bash's does.
     fn assign(&mut self, cmd: &parser::Command<parser::Word>) -> i32 {
         for (name, value) in cmd.words.iter().filter_map(parser::Word::assignment) {
-            match expand::value(&value, &self.vars, self.status) {
-                Ok(v) => self.vars.set(name, v),
-                Err(e) => return self.finish(1, format!("{NAME}: {e}\n")),
+            let set =
+                expand::value(&value, &self.vars, self.status).and_then(|v| self.vars.set(name, v));
+            if let Err(e) = set {
+                return self.finish(1, format!("{NAME}: {e}\n"));
             }
         }
         let redirect = match cmd.redirect.as_ref() {
@@ -1203,6 +1204,31 @@ mod tests {
         assert_eq!(
             h.run("1A=x"),
             (127, "relay-sh: 1A=x: command not found\n".into())
+        );
+    }
+
+    #[test]
+    fn a_line_beyond_the_limits_runs_nothing() {
+        let mut h = spawning();
+        let big = "x".repeat(40_000);
+        let mut shell = Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs);
+        assert_eq!(shell.execute(&alloc::format!("A={big}")), 0);
+        assert_eq!(shell.execute(&alloc::format!("B={big} C=1")), 1);
+        assert_eq!(shell.execute("t-args $A $A"), 1);
+        assert_eq!(
+            h.console.take(),
+            "relay-sh: B: the variables would hold more than 64 KiB\n\
+             relay-sh: the line would expand to more than 64 KiB\n"
+        );
+        assert!(h.programs.spawned.is_empty(), "nothing started");
+        let mut shell = Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs);
+        shell.execute(&alloc::format!("A={big}"));
+        shell.execute(&alloc::format!("B={big} C=1"));
+        shell.execute(r#"t-args "[$B$C]""#);
+        assert_eq!(
+            h.programs.spawned[0].args,
+            ["t-args", "[]"],
+            "neither B nor what came after it"
         );
     }
 

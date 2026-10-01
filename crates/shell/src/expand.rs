@@ -13,9 +13,19 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
+/// The most a line expands to, its words' bytes and one for each word, as
+/// `spawn` takes at most 64 KiB of arguments (spec §11.1): so nothing a
+/// person types grows the shell's heap without bound.
+pub const EXPANSION_MAX: usize = 64 * 1024;
+
+/// The most a shell's variables hold, their names' and values' bytes.
+pub const VARS_MAX: usize = 64 * 1024;
+
 /// A shell's variables and arguments.
 pub(crate) struct Vars {
     names: BTreeMap<String, String>,
+    /// The bytes of their names and values.
+    size: usize,
     /// `$0`, then `$1` on.
     args: Vec<String>,
 }
@@ -25,6 +35,7 @@ impl Vars {
     pub fn new(name: &str) -> Vars {
         Vars {
             names: BTreeMap::new(),
+            size: 0,
             args: alloc::vec![String::from(name)],
         }
     }
@@ -34,9 +45,17 @@ impl Vars {
         self.names.get(name).map_or("", String::as_str)
     }
 
-    /// Sets the variable `name` to `value`.
-    pub fn set(&mut self, name: &str, value: String) {
+    /// Sets the variable `name` to `value`, unless the variables would
+    /// then hold more than `VARS_MAX`.
+    pub fn set(&mut self, name: &str, value: String) -> Result<(), Error> {
+        let old = self.names.get(name).map_or(0, |v| name.len() + v.len());
+        let size = self.size - old + name.len() + value.len();
+        if size > VARS_MAX {
+            return Err(Error::Full(String::from(name)));
+        }
+        self.size = size;
         self.names.insert(String::from(name), value);
+        Ok(())
     }
 }
 
@@ -47,6 +66,10 @@ pub(crate) enum Error {
     BadSubstitution(String),
     /// A redirection whose target is not one word, as typed.
     AmbiguousRedirect(String),
+    /// The line would expand to more than `EXPANSION_MAX`.
+    TooLong,
+    /// The variable would make the variables hold more than `VARS_MAX`.
+    Full(String),
 }
 
 impl fmt::Display for Error {
@@ -54,13 +77,15 @@ impl fmt::Display for Error {
         match self {
             Error::BadSubstitution(t) => write!(f, "{t}: bad substitution"),
             Error::AmbiguousRedirect(t) => write!(f, "{t}: ambiguous redirect"),
+            Error::TooLong => f.write_str("the line would expand to more than 64 KiB"),
+            Error::Full(n) => write!(f, "{n}: the variables would hold more than 64 KiB"),
         }
     }
 }
 
 /// `line`'s commands with the words they get, `status` being `$?`.
 pub(crate) fn expand(line: &Line<Word>, vars: &Vars, status: i32) -> Result<Line, Error> {
-    let x = Expander { vars, status };
+    let mut x = Expander::new(vars, status);
     let mut pipeline = Vec::new();
     for c in &line.pipeline {
         pipeline.push(x.command(c)?);
@@ -74,8 +99,8 @@ pub(crate) fn expand(line: &Line<Word>, vars: &Vars, status: i32) -> Result<Line
 /// An assignment's value: one string, however it expands (`$@` joined by
 /// blanks, as bash joins it there).
 pub(crate) fn value(word: &Word, vars: &Vars, status: i32) -> Result<String, Error> {
-    let x = Expander { vars, status };
-    Ok(x.fields(word)?
+    Ok(Expander::new(vars, status)
+        .fields(word)?
         .into_iter()
         .map(|f| f.text)
         .collect::<Vec<_>>()
@@ -84,12 +109,14 @@ pub(crate) fn value(word: &Word, vars: &Vars, status: i32) -> Result<String, Err
 
 /// A redirection's target, which must expand to one word.
 pub(crate) fn redirect(r: &Redirect<Word>, vars: &Vars, status: i32) -> Result<Redirect, Error> {
-    Expander { vars, status }.redirect(r)
+    Expander::new(vars, status).redirect(r)
 }
 
 struct Expander<'v> {
     vars: &'v Vars,
     status: i32,
+    /// What may still be made: bytes, and one for each word.
+    room: usize,
 }
 
 /// A word being made, and whether anything quoted went into it.
@@ -98,8 +125,22 @@ struct Field {
     quoted: bool,
 }
 
-impl Expander<'_> {
-    fn command(&self, c: &Command<Word>) -> Result<Command, Error> {
+impl<'v> Expander<'v> {
+    fn new(vars: &'v Vars, status: i32) -> Expander<'v> {
+        Expander {
+            vars,
+            status,
+            room: EXPANSION_MAX,
+        }
+    }
+
+    /// Takes `n` from the room left, before what it is for is made.
+    fn take(&mut self, n: usize) -> Result<(), Error> {
+        self.room = self.room.checked_sub(n).ok_or(Error::TooLong)?;
+        Ok(())
+    }
+
+    fn command(&mut self, c: &Command<Word>) -> Result<Command, Error> {
         let mut words = Vec::new();
         for w in &c.words {
             words.extend(self.word(w)?);
@@ -111,7 +152,7 @@ impl Expander<'_> {
         Ok(Command { words, redirect })
     }
 
-    fn redirect(&self, r: &Redirect<Word>) -> Result<Redirect, Error> {
+    fn redirect(&mut self, r: &Redirect<Word>) -> Result<Redirect, Error> {
         let mut fields = self.word(&r.path)?;
         if fields.len() != 1 {
             return Err(Error::AmbiguousRedirect(r.path.typed.clone()));
@@ -123,7 +164,7 @@ impl Expander<'_> {
     }
 
     /// The words `word` gives: one, none, or one an argument for `$@`.
-    fn word(&self, word: &Word) -> Result<Vec<String>, Error> {
+    fn word(&mut self, word: &Word) -> Result<Vec<String>, Error> {
         Ok(self
             .fields(word)?
             .into_iter()
@@ -133,39 +174,48 @@ impl Expander<'_> {
     }
 
     /// What `word` expands to, before an unquoted empty word is removed.
-    fn fields(&self, word: &Word) -> Result<Vec<Field>, Error> {
+    fn fields(&mut self, word: &Word) -> Result<Vec<Field>, Error> {
+        self.take(1)?;
         let mut fields = alloc::vec![Field {
             text: String::new(),
             quoted: false,
         }];
         for piece in &word.pieces {
-            let last = fields.last_mut().expect("a field");
             match piece {
-                Piece::Text(t, quoted) => {
-                    last.text.push_str(t);
-                    last.quoted |= quoted;
-                }
                 Piece::Param(Param::All, quoted) => {
                     let Some((first, rest)) = self.vars.args[1..].split_first() else {
                         continue;
                     };
-                    last.text.push_str(first);
-                    last.quoted |= quoted;
-                    fields.extend(rest.iter().map(|a| Field {
-                        text: a.clone(),
-                        quoted: *quoted,
-                    }));
+                    self.push(&mut fields, first, *quoted)?;
+                    for a in rest {
+                        self.take(1)?;
+                        fields.push(Field {
+                            text: String::new(),
+                            quoted: false,
+                        });
+                        self.push(&mut fields, a, *quoted)?;
+                    }
                 }
+                Piece::Text(t, quoted) => self.push(&mut fields, t, *quoted)?,
                 Piece::Param(p, quoted) => {
-                    last.text.push_str(&self.value(p)?);
-                    last.quoted |= quoted;
+                    let value = self.value(p)?;
+                    self.push(&mut fields, &value, *quoted)?;
                 }
             }
         }
         Ok(fields)
     }
 
-    /// A parameter's value (not `$@`'s).
+    /// Adds `text` to the last of `fields`.
+    fn push(&mut self, fields: &mut [Field], text: &str, quoted: bool) -> Result<(), Error> {
+        self.take(text.len())?;
+        let last = fields.last_mut().expect("a field");
+        last.text.push_str(text);
+        last.quoted |= quoted;
+        Ok(())
+    }
+
+    /// A parameter's value (`$@`'s joined by blanks).
     fn value(&self, p: &Param) -> Result<String, Error> {
         let args = &self.vars.args;
         Ok(match p {
@@ -189,13 +239,12 @@ pub(crate) fn plain(line: &Line<Word>) -> Result<Line, Error> {
 impl Vars {
     /// `names` set, and `args` (`$0` first).
     pub fn of(names: &[(&str, &str)], args: &[&str]) -> Vars {
-        Vars {
-            names: names
-                .iter()
-                .map(|(n, v)| (String::from(*n), String::from(*v)))
-                .collect(),
-            args: args.iter().map(|a| String::from(*a)).collect(),
+        let mut vars = Vars::new("");
+        for (n, v) in names {
+            vars.set(n, String::from(*v)).unwrap();
         }
+        vars.args = args.iter().map(|a| String::from(*a)).collect();
+        vars
     }
 }
 
@@ -317,6 +366,49 @@ mod tests {
         assert_eq!(
             value("A=${1A}").unwrap_err(),
             Error::BadSubstitution("${1A}".into())
+        );
+    }
+
+    #[test]
+    fn the_variables_hold_at_most_64_kib() {
+        let mut v = Vars::new("sh");
+        let big = "x".repeat(VARS_MAX - 1);
+        v.set("A", big.clone()).unwrap();
+        assert_eq!(v.set("B", String::new()), Err(Error::Full("B".into())));
+        assert_eq!(v.set("A", big.clone() + "y"), Err(Error::Full("A".into())));
+        assert_eq!(v.get("A"), big, "unchanged");
+        // A smaller value makes room again.
+        v.set("A", String::from("1")).unwrap();
+        v.set("B", "x".repeat(VARS_MAX - 3)).unwrap();
+        assert_eq!(
+            Error::Full("B".into()).to_string(),
+            "B: the variables would hold more than 64 KiB"
+        );
+    }
+
+    #[test]
+    fn a_line_expands_to_at_most_64_kib() {
+        let half = "x".repeat(EXPANSION_MAX / 2);
+        let v = Vars::of(&[("A", &half)], &["s.sh"]);
+        assert_eq!(words("echo $A", &v).unwrap()[1].len(), half.len());
+        assert_eq!(words("echo $A $A", &v), Err(Error::TooLong));
+        assert_eq!(words("echo \"$A$A\"", &v), Err(Error::TooLong));
+        // Each word counts too: many empty arguments, many times.
+        let mut args = alloc::vec!["s.sh"];
+        args.extend(core::iter::repeat_n("", 20_000));
+        let v = Vars::of(&[], &args);
+        assert_eq!(words(r#"echo "$@""#, &v).unwrap().len(), 20_001);
+        assert_eq!(
+            words(r#"echo "$@" "$@" "$@" "$@""#, &v),
+            Err(Error::TooLong)
+        );
+        // And so does each word of the line itself.
+        let empties = "'' ".repeat(EXPANSION_MAX);
+        assert_eq!(words(&empties, &v).unwrap().len(), EXPANSION_MAX);
+        assert_eq!(words(&(empties + "''"), &v), Err(Error::TooLong));
+        assert_eq!(
+            Error::TooLong.to_string(),
+            "the line would expand to more than 64 KiB"
         );
     }
 
