@@ -299,13 +299,15 @@ pub fn check_transcripts(
         let report = checks::check(&checks::parse(&script, machine)?, &transcript);
         // A transcript from before the system on the stick (a later
         // `flash --kernel`) shows what an older kernel and programs did.
-        let (run, run_text) = modified(target, root, &log)?;
+        let run = modified(target, root, &log)?;
         let stale = system_built.filter(|&built| run < built);
         let passed = report.ok() && stale.is_none();
         let verdict = if passed { "ok" } else { "FAILED" };
         out.push(format!(
-            "{path}: {verdict}, {} of {} commands as expected (run {run_text})",
-            report.passed, report.commands,
+            "{path}: {verdict}, {} of {} commands as expected (run {})",
+            report.passed,
+            report.commands,
+            shell::time::date(run),
         ));
         if let Some(built) = stale {
             out.push(format!(
@@ -322,12 +324,11 @@ pub fn check_transcripts(
     Ok((out, ok))
 }
 
-/// When the file at `path` was last changed: in seconds since 1970, and
-/// in UTC as debugfs shows it (`Mon Sep 28 14:09:17 2026 UTC`).
-fn modified(target: &Path, root: Partition, path: &str) -> Result<(u64, String)> {
+/// When the file at `path` was last changed, in seconds since 1970 (shown
+/// as `date` shows a time, as `system.img`'s build time is).
+fn modified(target: &Path, root: Partition, path: &str) -> Result<u64> {
     let text = run_stdout(
         Command::new("debugfs")
-            .env("TZ", "UTC")
             .arg("-R")
             .arg(format!("stat \"{path}\""))
             .arg(e2fs_target(target, root)),
@@ -337,9 +338,8 @@ fn modified(target: &Path, root: Partition, path: &str) -> Result<(u64, String)>
     text.lines()
         .find_map(|l| l.trim_start().strip_prefix("mtime: 0x"))
         .and_then(|l| {
-            let (number, when) = l.split_once(" -- ")?;
-            let secs = u64::from_str_radix(number.split(':').next()?, 16).ok()?;
-            Some((secs, format!("{when} UTC")))
+            let number = l.split([' ', ':']).next()?;
+            u64::from_str_radix(number, 16).ok()
         })
         .with_context(|| format!("{path}: debugfs shows no mtime"))
 }
@@ -466,8 +466,8 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "/root/checks/a.sh: ok, 2 of 2 commands as expected (run Mon Sep 28 14:09:17 2026 UTC)",
-                "/root/checks/b.sh: FAILED, 0 of 1 commands as expected (run Mon Sep 28 14:09:17 2026 UTC)",
+                "/root/checks/a.sh: ok, 2 of 2 commands as expected (run Mon Sep 28 14:09:17 UTC 2026)",
+                "/root/checks/b.sh: FAILED, 0 of 1 commands as expected (run Mon Sep 28 14:09:17 UTC 2026)",
                 "  line 1: `cat /root/notes/a`: expected /remember me/, printed `forgotten` (line 1)",
                 "/root/checks/c.sh: FAILED, not run (no /root/checks/c.log)",
             ]
@@ -497,7 +497,7 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "/root/checks/a.sh: ok, 1 of 1 commands as expected (run Mon Sep 28 14:09:17 2026 UTC)",
+                "/root/checks/a.sh: ok, 1 of 1 commands as expected (run Mon Sep 28 14:09:17 UTC 2026)",
                 "/root/checks/b.sh: FAILED, not run (no /root/checks/b.log)",
             ]
         );
@@ -540,9 +540,9 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "/root/checks/a.sh: FAILED, 1 of 1 commands as expected (run Mon Sep 28 14:09:17 2026 UTC)",
+                "/root/checks/a.sh: FAILED, 1 of 1 commands as expected (run Mon Sep 28 14:09:17 UTC 2026)",
                 "  the transcript is older than the system on the stick (system.img built Tue Sep 29 10:00:00 UTC 2026): run the script again",
-                "/root/checks/b.sh: ok, 1 of 1 commands as expected (run Tue Sep 29 10:00:00 2026 UTC)",
+                "/root/checks/b.sh: ok, 1 of 1 commands as expected (run Tue Sep 29 10:00:00 UTC 2026)",
             ]
         );
         let (_, ok) = check_transcripts(&img, root, Machine::Nuc, &dir, None).unwrap();
