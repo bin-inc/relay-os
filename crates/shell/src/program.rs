@@ -114,6 +114,77 @@ mod tests {
         assert_eq!(out.text(), "from fd 0\n");
     }
 
+    /// What a program did, in order: each read of standard input and each
+    /// write of standard output.
+    type Log = alloc::rc::Rc<core::cell::RefCell<alloc::vec::Vec<String>>>;
+
+    /// Standard input a line a read, as the console in line mode and a
+    /// pipe from a writer that writes lines give it.
+    struct Lines(Log, alloc::vec::Vec<&'static str>);
+
+    impl crate::Stdin for Lines {
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+            let line = if self.1.is_empty() {
+                ""
+            } else {
+                self.1.remove(0)
+            };
+            self.0.borrow_mut().push(alloc::format!("read {line:?}"));
+            buf[..line.len()].copy_from_slice(line.as_bytes());
+            Ok(line.len())
+        }
+    }
+
+    /// Standard output that is a pipe.
+    struct Pipe(Log);
+
+    impl crate::Stdout for Pipe {
+        fn write(&mut self, bytes: &[u8]) -> Result<(), Errno> {
+            let text = String::from_utf8_lossy(bytes);
+            self.0.borrow_mut().push(alloc::format!("write {text:?}"));
+            Ok(())
+        }
+        fn is_tty(&self) -> bool {
+            false
+        }
+        fn node(&self) -> Option<vfs::Node> {
+            None
+        }
+    }
+
+    #[test]
+    fn what_a_program_read_reaches_its_pipe_before_it_reads_again() {
+        // `cat | cat`: the second gets each line as it is typed, not 4 KiB
+        // later.
+        for (name, run, args) in [
+            ("cat", crate::commands::cat as crate::commands::Run, &[][..]),
+            ("head", crate::commands::head, &["-n", "5"][..]),
+        ] {
+            let mut h = Harness::new();
+            let log = Log::default();
+            let args: alloc::vec::Vec<String> = args.iter().map(|a| String::from(*a)).collect();
+            let io = crate::CommandIo {
+                vfs: &mut h.vfs,
+                console: &mut h.console,
+                system: &mut h.system,
+                stdin: &mut Lines(log.clone(), alloc::vec!["one\n", "two\n"]),
+                stdout: &mut Pipe(log.clone()),
+            };
+            assert_eq!(crate::run_command(name, run, &args, io), 0);
+            assert_eq!(
+                *log.borrow(),
+                [
+                    "read \"one\\n\"",
+                    "write \"one\\n\"",
+                    "read \"two\\n\"",
+                    "write \"two\\n\"",
+                    "read \"\""
+                ],
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     fn reboot_and_poweroff_say_why_the_machine_stayed_up() {
         let mut h = Harness::new();

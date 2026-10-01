@@ -47,6 +47,15 @@ key one
 key two
 type {ctrl-d}
 expect \ntwo\n2\nroot@relay:~# $
+# And each line reaches the next stage when Enter ends it.
+send cat | cat
+alive 1
+key first line
+expect \nfirst line\nfirst line\n
+key second
+expect second\nsecond\n
+type {ctrl-d}
+expect root@relay:~# $
 # Ctrl-C ends every stage of the pipeline, and the shell says so once.
 send t-spin | cat | cat
 alive 1

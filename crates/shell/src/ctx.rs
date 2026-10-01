@@ -125,8 +125,12 @@ impl<'a> Ctx<'a> {
         self.input = Some(input);
     }
 
-    /// Reads standard input into `buf`: how many bytes, 0 at its end.
+    /// Reads standard input into `buf`: how many bytes, 0 at its end. What
+    /// waits for standard output is written first, so that what came of
+    /// the last read reaches a pipe before the next one waits (a line typed
+    /// into `cat | cat` reaches the second `cat` at Enter).
     pub fn read_input(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+        self.streams().flush();
         match &mut self.input {
             Some(input) => input.read(buf),
             None => Ok(0),
