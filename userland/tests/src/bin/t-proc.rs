@@ -10,6 +10,10 @@
 //!   not have is `EFAULT`: the dispatcher's tests, over the same checks.)
 //! - `t-proc long`: a child started by a path longer than 64 bytes shows
 //!   its first 64.
+//! - `t-proc end-shell`: reads the console, as the shell gave it (in line
+//!   mode), while a child in a group of its own finds the shell in the
+//!   list and kills it half a second later: the shell ends while its
+//!   command holds the console (the error screen must take it back).
 #![no_std]
 #![no_main]
 
@@ -29,8 +33,10 @@ fn main(args: Args) -> u8 {
         Some(b"list") => list(),
         Some(b"short") => short(),
         Some(b"long") => long(),
+        Some(b"end-shell") => end_shell(),
+        Some(b"kill-grandparent") => kill_grandparent(),
         _ => {
-            let _ = sys::write_all(2, b"usage: t-proc list|short|long\n");
+            let _ = sys::write_all(2, b"usage: t-proc list|short|long|end-shell\n");
             return 2;
         }
     };
@@ -198,4 +204,46 @@ fn long() -> Result<(), u16> {
     sys::kill(i64::from(child))?;
     sys::wait(i64::from(child), false)?;
     Ok(())
+}
+
+fn end_shell() -> Result<(), u16> {
+    let fds = [
+        FdMap {
+            child: 1,
+            parent: 1,
+        },
+        FdMap {
+            child: 2,
+            parent: 2,
+        },
+    ];
+    let args = b"t-proc\0kill-grandparent\0";
+    sys::spawn(
+        b"/bin/t-proc",
+        args,
+        b"",
+        &fds,
+        relay_abi::spawn::NEW_GROUP,
+        0,
+    )?;
+    let _ = writeln!(Fd(1), "reading the console");
+    let mut buf = [0u8; 64];
+    // Until the error screen ends it; 100 lines at most.
+    for _ in 0..100 {
+        if sys::read(0, &mut buf)? == 0 {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Kills the parent of this program's parent, half a second from now.
+fn kill_grandparent() -> Result<(), u16> {
+    sys::sleep(500);
+    let mut buf = [ProcInfo::new(0, 0, 0, 0, 0, 0, b""); PROC_MAX];
+    let all = processes(&mut buf)?;
+    let parent = entry(all, sys::getpid()).map_or(0, |p| p.ppid);
+    let shell = entry(all, parent).map_or(0, |p| p.ppid);
+    let _ = writeln!(Fd(1), "killing pid {shell}");
+    sys::kill(i64::from(shell))
 }
