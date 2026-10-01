@@ -37,6 +37,7 @@ fn main(args: Args) -> u8 {
             b"",
             &[],
             NEW_GROUP,
+            0,
         )
         .map(|_| ()),
         Some(b"leave-child") => {
@@ -115,7 +116,7 @@ fn apart() -> Result<(), u16> {
             parent: 2,
         },
     ];
-    let pid = sys::spawn(b"/bin/t-read", b"t-read\0", b"", &fds, NEW_GROUP)?;
+    let pid = sys::spawn(b"/bin/t-read", b"t-read\0", b"", &fds, NEW_GROUP, 0)?;
     sys::wait(i64::from(pid), false).map(|_| ())
 }
 

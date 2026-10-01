@@ -7,6 +7,7 @@
 
 use crate::error_screen::{self, Reason};
 use crate::mounts::KernelVfs;
+use crate::proc::table::Group;
 use crate::syscall::Spawn;
 use crate::system::SystemError;
 use crate::{kprintln, proc, timer, tty};
@@ -100,7 +101,7 @@ fn start_shell() -> Result<u32, Errno> {
         argc: 1,
         cwd: Vec::new(),
         fds: fds.to_vec(),
-        new_group: true,
+        group: Group::New,
         foreground: true,
     })
 }

@@ -12,6 +12,9 @@
 //!   ready.
 //! - A process that ends stays as a zombie until its parent `wait`s for it;
 //!   its children pass to process 1.
+//! - A new process joins its parent's group, starts one of its own, or
+//!   joins the group of another child of its parent (a pipeline's later
+//!   stages join the first one's).
 //! - Round-robin: a process made ready joins the end of the queue, and one
 //!   that used up its slice of [`SLICE`] ticks goes to the end when another
 //!   is ready.
@@ -27,6 +30,18 @@ use vfs::Errno;
 pub const MAX: usize = 64;
 /// Process 1: the parent of orphans, and the one `kill` refuses.
 pub const INIT: u32 = 1;
+/// The process group a new process goes into (spec §6.4, §16 item 8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Group {
+    /// Its parent's.
+    Parent,
+    /// A new one, numbered with its own pid.
+    New,
+    /// This one, which must be the group of another child of its parent
+    /// (a zombie not yet collected counts).
+    Join(u32),
+}
+
 /// Timer ticks in a time slice (spec §6.1).
 pub const SLICE: u32 = 10;
 
@@ -187,24 +202,32 @@ impl<R> Table<R> {
         self.procs.len() < MAX && self.next_pid != 0
     }
 
-    /// Adds a ready process, a child of `ppid`, in its parent's group or,
-    /// with `new_group` (or no parent), in a new group numbered with its
-    /// own pid; its pid. `EAGAIN` when [`MAX`] processes exist, or every
-    /// pid has been used.
-    pub fn insert(
-        &mut self,
-        ppid: u32,
-        new_group: bool,
-        name: String,
-        res: R,
-    ) -> Result<u32, Errno> {
+    /// Whether `pgid` is the group of a child of `parent`'s, ended or not:
+    /// the only groups a new child of `parent` may join.
+    pub fn may_join(&self, parent: u32, pgid: u32) -> bool {
+        self.procs
+            .iter()
+            .any(|p| p.ppid == parent && p.pgid == pgid)
+    }
+
+    /// Adds a ready process, a child of `ppid`, in the group `group` says
+    /// (a new one, numbered with its own pid, when it has no parent); its
+    /// pid. `EAGAIN` when [`MAX`] processes exist, or every pid has been
+    /// used; `EPERM` for a group it may not join.
+    pub fn insert(&mut self, ppid: u32, group: Group, name: String, res: R) -> Result<u32, Errno> {
         if !self.has_room() {
             return Err(Errno::EAGAIN);
         }
+        if let Group::Join(g) = group
+            && !self.may_join(ppid, g)
+        {
+            return Err(Errno::EPERM);
+        }
         let pid = self.next_pid;
         self.next_pid = pid.checked_add(1).unwrap_or(0);
-        let pgid = match self.get(ppid) {
-            Some(parent) if !new_group => parent.pgid,
+        let pgid = match (group, self.get(ppid)) {
+            (Group::Join(g), _) => g,
+            (Group::Parent, Some(parent)) => parent.pgid,
             _ => pid,
         };
         self.procs.push(Process {
@@ -419,7 +442,8 @@ mod tests {
     }
 
     fn add(t: &mut Table<()>, ppid: u32, new_group: bool) -> u32 {
-        t.insert(ppid, new_group, String::from("p"), ()).unwrap()
+        let group = if new_group { Group::New } else { Group::Parent };
+        t.insert(ppid, group, String::from("p"), ()).unwrap()
     }
 
     fn state(t: &Table<()>, pid: u32) -> State {
@@ -452,13 +476,16 @@ mod tests {
         assert_eq!(add(&mut t, 0, true), u32::MAX - 1);
         assert_eq!(add(&mut t, 0, true), u32::MAX);
         assert_eq!(
-            t.insert(0, true, String::from("x"), ()),
+            t.insert(0, Group::New, String::from("x"), ()),
             Err(Errno::EAGAIN),
             "no pid is used twice, and none overflows"
         );
         t.end(u32::MAX, WaitStatus::exited(0));
         assert!(t.reap(0, Want::Pid(u32::MAX)).unwrap().is_some());
-        assert_eq!(t.insert(0, true, String::from("x"), ()), Err(Errno::EAGAIN));
+        assert_eq!(
+            t.insert(0, Group::New, String::from("x"), ()),
+            Err(Errno::EAGAIN)
+        );
     }
 
     #[test]
@@ -487,12 +514,12 @@ mod tests {
             add(&mut t, 0, true);
         }
         assert_eq!(
-            t.insert(1, false, String::from("x"), ()),
+            t.insert(1, Group::Parent, String::from("x"), ()),
             Err(Errno::EAGAIN)
         );
         t.end(64, WaitStatus::exited(0));
         assert_eq!(
-            t.insert(1, false, String::from("x"), ()),
+            t.insert(1, Group::Parent, String::from("x"), ()),
             Err(Errno::EAGAIN),
             "a zombie keeps its entry"
         );
@@ -510,6 +537,40 @@ mod tests {
         let child = add(&mut t, cmd, false);
         assert_eq!(t.get(child).unwrap().pgid, cmd);
         assert_eq!(t.get(child).unwrap().ppid, cmd);
+    }
+
+    #[test]
+    fn a_child_may_join_the_group_of_another_child_of_its_parent() {
+        let mut t = table();
+        let init = add(&mut t, 0, false);
+        let shell = add(&mut t, init, true);
+        let first = add(&mut t, shell, true);
+        let join = |t: &mut Table<()>, ppid, pgid| {
+            t.insert(ppid, Group::Join(pgid), String::from("p"), ())
+        };
+        // An ended child that was not collected still counts, alone in its
+        // group: `true | cat`, whose `true` may end before `cat` starts.
+        t.end(first, WaitStatus::exited(0));
+        let second = join(&mut t, shell, first).unwrap();
+        assert_eq!(t.get(second).unwrap().pgid, first);
+        assert_eq!(t.get(second).unwrap().ppid, shell);
+        let third = join(&mut t, shell, first).unwrap();
+        assert_eq!(t.get(third).unwrap().pgid, first);
+        // Not a group of its parent's children: its own, its parent's,
+        // another process's, one nobody is in, one of a grandchild.
+        let len = t.len();
+        let grandchild = add(&mut t, second, true);
+        for pgid in [shell, init, grandchild, 999] {
+            assert_eq!(join(&mut t, shell, pgid), Err(Errno::EPERM), "{pgid}");
+        }
+        assert_eq!(t.len(), len + 1, "nothing added");
+        // Once collected, the group is gone with it.
+        t.end(second, WaitStatus::exited(0));
+        t.end(third, WaitStatus::exited(0));
+        for pid in [first, second, third] {
+            assert!(t.reap(shell, Want::Pid(pid)).unwrap().is_some());
+        }
+        assert_eq!(join(&mut t, shell, first), Err(Errno::EPERM));
     }
 
     #[test]

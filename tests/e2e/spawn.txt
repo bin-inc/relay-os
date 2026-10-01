@@ -2,7 +2,8 @@
 # plan 3a): a thousand children that exit at once leave the free frames as
 # they were, `kill` ends a program that never makes a system call while
 # its parent sleeps, process 1 cannot be killed, and an orphan passes to
-# process 1, which collects it.
+# process 1, which collects it. A child may join the group of another
+# child, ended or not, as a pipeline's stages do (milestone 3).
 timeout 60
 expect root@relay:~# $
 send t-args warm-up
@@ -18,6 +19,9 @@ send t-spawn kill
 expect \nt-spin: kill\nkill 1: EPERM\nkill 999999: ESRCH\npid above 1: true\n
 send dmesg
 expect \npid \d+ \(/bin/t-spin\): killed: kill\n
+send t-spawn join
+expect \njoined a dozing child's group\ngroup 1: EPERM\na new group and another: EINVAL\n
+expect \nfirst: kill\nsecond: kill\njoined an ended child's group\nonce collected: EPERM\n
 # A program killed before it has run runs none of its code: the kernel log
 # line comes right after the command, with no output of t-args before it.
 send t-spawn kill-new

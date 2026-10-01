@@ -13,6 +13,11 @@
 //! - `t-spawn fill` starts children that nap for 300 ms until the process
 //!   table is full, and ends without waiting for them: their zombies pass
 //!   to process 1;
+//! - `t-spawn join` starts children in the group of another child, which
+//!   a pipeline's stages do (spec §9.1): one that dozes, then one that
+//!   exited and was not collected yet; `kill` of the group ends both
+//!   dozers; joining process 1's group, or a new group and another at
+//!   once, is refused;
 //! - `t-spawn sleepers` starts three children that sleep for a minute in
 //!   its group and one in a group of its own, and waits for that one: a
 //!   group blocked in the kernel, for Ctrl-C, whose `wait` nothing but the
@@ -54,9 +59,12 @@ fn main(args: Args) -> u8 {
             return 0;
         }
         Some(b"sleepers") => sleepers(),
+        Some(b"join") => join(),
         Some(b"kill") => kill(),
         Some(b"kill-new") => kill_new(),
-        Some(b"orphan") => sys::spawn(b"/bin/t-spin", b"t-spin\x001\0", b"", &STD, 0).map(|_| ()),
+        Some(b"orphan") => {
+            sys::spawn(b"/bin/t-spin", b"t-spin\x001\0", b"", &STD, 0, 0).map(|_| ())
+        }
         Some(n) => match parse(n) {
             Some(n) => many(n),
             None => return usage(),
@@ -73,7 +81,10 @@ fn main(args: Args) -> u8 {
 }
 
 fn usage() -> u8 {
-    let _ = sys::write_all(2, b"usage: t-spawn N|kill|kill-new|orphan|fill|sleepers\n");
+    let _ = sys::write_all(
+        2,
+        b"usage: t-spawn N|kill|kill-new|orphan|fill|sleepers|join\n",
+    );
     2
 }
 
@@ -84,7 +95,7 @@ fn free() -> Result<u64, u16> {
 
 /// Starts `t-spawn child` and waits for it; it must exit with 0.
 fn child() -> Result<(), u16> {
-    let pid = sys::spawn(b"/bin/t-spawn", b"t-spawn\0child\0", b"", &[], 0)?;
+    let pid = sys::spawn(b"/bin/t-spawn", b"t-spawn\0child\0", b"", &[], 0, 0)?;
     match sys::wait(i64::from(pid), false)? {
         Some((p, w)) if p == pid && w == relay_abi::WaitStatus::exited(0) => Ok(()),
         _ => Err(relay_abi::errno::ECHILD),
@@ -109,7 +120,7 @@ fn many(n: u64) -> Result<(), u16> {
 }
 
 fn kill() -> Result<(), u16> {
-    let pid = sys::spawn(b"/bin/t-spin", b"t-spin\0", b"", &STD, 0)?;
+    let pid = sys::spawn(b"/bin/t-spin", b"t-spin\0", b"", &STD, 0, 0)?;
     // It spins, and this one sleeps: the tick wakes it all the same.
     sys::sleep(200);
     sys::kill(i64::from(pid))?;
@@ -133,12 +144,51 @@ fn kill() -> Result<(), u16> {
 /// Children asleep, and this one waiting for one outside its group.
 fn sleepers() -> Result<(), u16> {
     for _ in 0..3 {
-        sys::spawn(b"/bin/t-spawn", b"t-spawn\0doze\0", b"", &[], 0)?;
+        sys::spawn(b"/bin/t-spawn", b"t-spawn\0doze\0", b"", &[], 0, 0)?;
     }
     let apart = relay_abi::spawn::NEW_GROUP;
-    let pid = sys::spawn(b"/bin/t-spawn", b"t-spawn\0doze\0", b"", &[], apart)?;
+    let pid = sys::spawn(b"/bin/t-spawn", b"t-spawn\0doze\0", b"", &[], apart, 0)?;
     sys::wait(i64::from(pid), false)?;
     let _ = sys::write_all(1, b"t-spawn: the sleeper woke\n");
+    Ok(())
+}
+
+/// Children in another child's group, and the groups no child may join.
+fn join() -> Result<(), u16> {
+    use relay_abi::spawn::NEW_GROUP;
+    let name = |e: u16| relay_abi::errno::name(e).unwrap_or("?");
+    let doze = |flags, pgid| sys::spawn(b"/bin/t-spawn", b"t-spawn\0doze\0", b"", &[], flags, pgid);
+    let first = doze(NEW_GROUP, 0)?;
+    let second = doze(0, first)?;
+    let _ = writeln!(Fd(1), "joined a dozing child's group");
+    for (what, flags, pgid) in [
+        ("group 1", 0, 1),
+        ("a new group and another", NEW_GROUP, first),
+    ] {
+        let said = doze(flags, pgid).map_or_else(name, |_| "started");
+        let _ = writeln!(Fd(1), "{what}: {said}");
+    }
+    sys::kill(-i64::from(first))?;
+    for pid in [first, second] {
+        if let Some((_, w)) = sys::wait(i64::from(pid), false)? {
+            let _ = writeln!(
+                Fd(1),
+                "{}: {w}",
+                if pid == first { "first" } else { "second" }
+            );
+        }
+    }
+    // A child that has ended, and was not collected, still has its group.
+    let ended = sys::spawn(b"/bin/t-spawn", b"t-spawn\0child\0", b"", &[], NEW_GROUP, 0)?;
+    sys::sleep(200);
+    let late = sys::spawn(b"/bin/t-spawn", b"t-spawn\0child\0", b"", &[], 0, ended)?;
+    let _ = writeln!(Fd(1), "joined an ended child's group");
+    for pid in [ended, late] {
+        sys::wait(i64::from(pid), false)?;
+    }
+    let said = sys::spawn(b"/bin/t-spawn", b"t-spawn\0child\0", b"", &[], 0, ended)
+        .map_or_else(name, |_| "started");
+    let _ = writeln!(Fd(1), "once collected: {said}");
     Ok(())
 }
 
@@ -146,7 +196,7 @@ fn sleepers() -> Result<(), u16> {
 fn fill() -> Result<(), u16> {
     let mut n = 0;
     loop {
-        match sys::spawn(b"/bin/t-spawn", b"t-spawn\0nap\0", b"", &[], 0) {
+        match sys::spawn(b"/bin/t-spawn", b"t-spawn\0nap\0", b"", &[], 0, 0) {
             Ok(_) => n += 1,
             Err(relay_abi::errno::EAGAIN) => break,
             Err(e) => return Err(e),
@@ -158,7 +208,14 @@ fn fill() -> Result<(), u16> {
 
 /// Kills a child before it has run, and says how it ended.
 fn kill_new() -> Result<(), u16> {
-    let pid = sys::spawn(b"/bin/t-args", b"t-args\0SHOULD-NOT-PRINT\0", b"", &STD, 0)?;
+    let pid = sys::spawn(
+        b"/bin/t-args",
+        b"t-args\0SHOULD-NOT-PRINT\0",
+        b"",
+        &STD,
+        0,
+        0,
+    )?;
     sys::kill(i64::from(pid))?;
     if let Some((_, w)) = sys::wait(i64::from(pid), false)? {
         let _ = writeln!(Fd(1), "t-args: {w}");

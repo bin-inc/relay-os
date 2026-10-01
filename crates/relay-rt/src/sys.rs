@@ -233,8 +233,16 @@ fn write_all_by(
 /// argument 0 first) in `cwd` (empty: this program's), giving it the fds
 /// `fds` names (child, parent) and closing its others; with `NEW_GROUP` in
 /// `flags` it starts a process group of its own, which `FOREGROUND` also
-/// gives the console, in line mode. Its pid.
-pub fn spawn(path: &[u8], args: &[u8], cwd: &[u8], fds: &[FdMap], flags: u32) -> Result<u32, u16> {
+/// gives the console, in line mode; without it, a `pgid` other than 0 is
+/// the group of another child of this program's that it joins. Its pid.
+pub fn spawn(
+    path: &[u8],
+    args: &[u8],
+    cwd: &[u8],
+    fds: &[FdMap],
+    flags: u32,
+    pgid: u32,
+) -> Result<u32, u16> {
     if fds.len() > SPAWN_FDS {
         return Err(relay_abi::errno::EINVAL);
     }
@@ -247,6 +255,7 @@ pub fn spawn(path: &[u8], args: &[u8], cwd: &[u8], fds: &[FdMap], flags: u32) ->
         cwd_len: cwd.len() as u64,
         fd_count: fds.len() as u32,
         flags,
+        pgid,
         ..SpawnArgs::default()
     };
     a.fds[..fds.len()].copy_from_slice(fds);

@@ -10,6 +10,7 @@ use crate::exec::ARGS_MAX;
 use crate::fd::{FdTable, File};
 use crate::mm::paging::PAGE;
 use crate::mm::user::{UserSlice, UserStr};
+use crate::proc::table::Group;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use relay_abi::info::INFO_MEMORY;
@@ -35,7 +36,8 @@ pub struct Spawn {
     /// Relative to the caller's current directory; empty for that one.
     pub cwd: Vec<u8>,
     pub fds: Vec<FdMap>,
-    pub new_group: bool,
+    /// Its parent's group, a new one, or another child's (`SpawnArgs::pgid`).
+    pub group: Group,
     /// The new group gets the console (`FOREGROUND`).
     pub foreground: bool,
 }
@@ -184,11 +186,11 @@ fn spawn(caller: &mut impl Caller, addr: u64) -> Result<u64, Errno> {
     caller.read(&UserSlice::new(addr, raw.len() as u64)?, 0, &mut raw)?;
     let a = SpawnArgs::from_bytes(&raw);
     let foreground = a.flags & FOREGROUND != 0;
-    // A group to join comes with milestone 3's pipelines.
+    let new_group = a.flags & NEW_GROUP != 0;
     if a.flags & !(NEW_GROUP | FOREGROUND) != 0
-        || (foreground && a.flags & NEW_GROUP == 0)
+        || (foreground && !new_group)
+        || (new_group && a.pgid != 0)
         || a.fd_count as usize > SPAWN_FDS
-        || a.pgid != 0
         || a.reserved != 0
     {
         return Err(Errno::EINVAL);
@@ -217,7 +219,11 @@ fn spawn(caller: &mut impl Caller, addr: u64) -> Result<u64, Errno> {
         argc,
         cwd,
         fds: a.fds[..a.fd_count as usize].to_vec(),
-        new_group: a.flags & NEW_GROUP != 0,
+        group: match a.pgid {
+            _ if new_group => Group::New,
+            0 => Group::Parent,
+            g => Group::Join(g),
+        },
         foreground,
     };
     caller.spawn(&s).map(u64::from)
@@ -556,7 +562,7 @@ mod tests {
                         parent: 2
                     }
                 ],
-                new_group: true,
+                group: Group::New,
                 foreground: false,
             }]
         );
@@ -567,12 +573,19 @@ mod tests {
         });
         assert_eq!(call(&mut f, Call::Spawn, [a, 0, 0]), Ok(102));
         let s = &f.spawned[1];
-        assert!(!s.new_group && s.cwd.is_empty() && s.fds.is_empty());
+        assert!(s.group == Group::Parent && s.cwd.is_empty() && s.fds.is_empty());
         assert_eq!(s.argc, 1);
         // A group of its own that gets the console.
         let a = spawn_args(&mut f, b"x\0", |a| a.flags = NEW_GROUP | FOREGROUND);
         assert_eq!(call(&mut f, Call::Spawn, [a, 0, 0]), Ok(103));
-        assert!(f.spawned[2].new_group && f.spawned[2].foreground);
+        assert!(f.spawned[2].group == Group::New && f.spawned[2].foreground);
+        // Another child's group (whether it may is the table's to say).
+        let a = spawn_args(&mut f, b"x\0", |a| {
+            a.flags = 0;
+            a.pgid = 102;
+        });
+        assert_eq!(call(&mut f, Call::Spawn, [a, 0, 0]), Ok(104));
+        assert_eq!(f.spawned[3].group, Group::Join(102));
         // The caller's refusal.
         let a = spawn_args(&mut f, b"x\0", |a| a.path_len = 7);
         put(&mut f, W + 200, b"missing");
@@ -598,7 +611,19 @@ mod tests {
             "the console goes to a group of the child's own"
         );
         assert_eq!(refused(&mut f, b"x\0", |a| a.flags = 4), Err(errno::EINVAL));
-        assert_eq!(refused(&mut f, b"x\0", |a| a.pgid = 2), Err(errno::EINVAL));
+        assert_eq!(
+            refused(&mut f, b"x\0", |a| a.pgid = 2),
+            Err(errno::EINVAL),
+            "a new group and another child's"
+        );
+        assert_eq!(
+            refused(&mut f, b"x\0", |a| {
+                a.flags = FOREGROUND;
+                a.pgid = 2;
+            }),
+            Err(errno::EINVAL),
+            "the console goes to a new group only"
+        );
         assert_eq!(
             refused(&mut f, b"x\0", |a| a.reserved = 1),
             Err(errno::EINVAL),
