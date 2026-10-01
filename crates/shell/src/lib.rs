@@ -19,7 +19,7 @@ mod program;
 mod runner;
 mod shell;
 mod testing;
-mod time;
+pub mod time;
 mod transcript;
 
 pub use ctx::Ctx;

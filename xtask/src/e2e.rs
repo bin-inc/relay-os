@@ -13,6 +13,8 @@
 //! esp-delete /EFI/RELAY/system.img  (before boot: remove an ESP file)
 //! system-abi 99                    (before boot: system.img, rewritten with
 //!                                   another ABI version)
+//! system-drop sh                   (before boot: system.img, rewritten
+//!                                   without that program)
 //! timeout 20                       (seconds, for the following expects)
 //! expect <regex>                   (waits for serial output, ANSI stripped)
 //! expect-same <name> <regex>       (as expect; the regex's first group must
@@ -31,6 +33,8 @@
 //!                                   alone: a key at the error screen; QEMU
 //!                                   must exit as after a reset, then starts
 //!                                   again on the same disk)
+//! reset-key                        (as `reset`, with Enter pressed on the USB
+//!                                   keyboard: QMP send-key)
 //! poweroff [<command>]             (types `poweroff`, or <command>; QEMU must
 //!                                   exit through isa-debug-exit, test mode's
 //!                                   power-off; an `expect` after it reads
@@ -122,6 +126,8 @@ pub enum Step {
     /// Type this text (or nothing) and Enter over the serial console, and
     /// the machine restarts as with `Reboot` (a key at the error screen).
     Reset(String),
+    /// As `Reset`, with Enter pressed on the USB keyboard instead.
+    ResetKey,
     /// Switch the machine off with a command (`poweroff` if none is
     /// given); no later step talks to it.
     Poweroff(String),
@@ -152,6 +158,8 @@ pub enum EspEdit {
     /// `system-abi`: `system.img` holds the same programs under another
     /// ABI version.
     SystemAbi(u32),
+    /// `system-drop`: `system.img` holds its programs but this one.
+    SystemDrop(String),
 }
 
 #[derive(Debug, PartialEq)]
@@ -205,7 +213,7 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
                 break_root = true;
                 continue;
             }
-            "esp-write" | "esp-delete" | "system-abi" => {
+            "esp-write" | "esp-delete" | "system-abi" | "system-drop" => {
                 if !steps.is_empty() {
                     bail!("{name}:{line_no}: {word} must come before other steps");
                 }
@@ -214,6 +222,12 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
                         "system-abi" => EspEdit::SystemAbi(rest.parse().with_context(|| {
                             format!("{name}:{line_no}: system-abi needs a number")
                         })?),
+                        "system-drop" => {
+                            if rest.is_empty() || rest.contains(' ') {
+                                bail!("{name}:{line_no}: system-drop needs one program's name");
+                            }
+                            EspEdit::SystemDrop(rest.to_string())
+                        }
                         _ => {
                             let (path, contents) = rest.split_once(' ').unwrap_or((rest, ""));
                             if !path.starts_with('/') {
@@ -254,6 +268,7 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
             "alive" => Step::Alive(rest.parse().with_context(|| format!("{name}:{line_no}"))?),
             "reboot" if rest.is_empty() => Step::Reboot(None),
             "reset" => Step::Reset(rest.to_string()),
+            "reset-key" if rest.is_empty() => Step::ResetKey,
             "reboot" => {
                 Regex::new(rest).with_context(|| format!("{name}:{line_no}: bad regex"))?;
                 Step::Reboot(Some(rest.to_string()))
@@ -429,9 +444,13 @@ fn start(image: &Path, layout: &Layout, scenario: &Scenario, run_dir: &Path) -> 
                 esp_write(&q.disk, layout.esp, path, contents.as_bytes(), run_dir)?
             }
             EspEdit::Delete(path) => esp_delete(&q.disk, layout.esp, path)?,
-            EspEdit::SystemAbi(abi) => {
+            EspEdit::SystemAbi(_) | EspEdit::SystemDrop(_) => {
                 let image = fs::read(out_dir().join("system.img"))?;
-                let other = userland::with_abi(&image, *abi)?;
+                let other = match edit {
+                    EspEdit::SystemAbi(abi) => userland::with_abi(&image, *abi)?,
+                    EspEdit::SystemDrop(program) => userland::without(&image, program)?,
+                    _ => unreachable!(),
+                };
                 esp_write(
                     &q.disk,
                     layout.esp,
@@ -508,13 +527,20 @@ fn read_serial(
     })
 }
 
-/// Types `command` and waits (up to `timeout`) for QEMU to exit with
-/// `status`; the shell shut the filesystem down first, so it must be marked
-/// clean, unless the stick was pulled out. Returns the serial log once everything QEMU printed is in it.
+/// Types `command` over serial and waits for QEMU to exit with `status`
+/// (`wait_exit`).
 fn exit_with(r: &mut Running, command: &str, status: i32, timeout: Duration) -> Result<fs::File> {
     r.stdin.write_all(command.as_bytes())?;
     r.stdin.write_all(b"\r")?;
     r.stdin.flush()?;
+    wait_exit(r, command, status, timeout)
+}
+
+/// Waits (up to `timeout`) for QEMU to exit with `status` after `command`;
+/// the machine shut the filesystem down first, so it must be marked clean,
+/// unless the stick was pulled out. Returns the serial log once everything
+/// QEMU printed is in it.
+fn wait_exit(r: &mut Running, command: &str, status: i32, timeout: Duration) -> Result<fs::File> {
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(s) = r.child.try_wait()? {
@@ -546,7 +572,13 @@ fn exit_with(r: &mut Running, command: &str, status: i32, timeout: Duration) -> 
 /// (`-no-reboot`) exits, after printing `last` if given; then the same disk
 /// boots again, with the serial log continued.
 fn reboot(r: &mut Running, command: &str, last: Option<&str>, timeout: Duration) -> Result<()> {
-    let mut log = exit_with(r, command, EXIT_RESET, timeout)?;
+    let log = exit_with(r, command, EXIT_RESET, timeout)?;
+    boot_again(r, log, last)
+}
+
+/// After a reset: the machine printed `last` if given, and the same disk
+/// boots again, with the serial log `log` continued.
+fn boot_again(r: &mut Running, mut log: fs::File, last: Option<&str>) -> Result<()> {
     if let Some(pattern) = last {
         let text = r.text();
         if !Regex::new(pattern)?.is_match(&text[r.consumed.min(text.len())..]) {
@@ -725,6 +757,15 @@ fn run_step(
         }
         Step::Reboot(last) => reboot(r, "reboot", last.as_deref(), *timeout)?,
         Step::Reset(text) => reboot(r, text, None, *timeout)?,
+        Step::ResetKey => {
+            let enter = serde_json::json!([{ "type": "qcode", "data": "ret" }]);
+            r.qmp.execute(
+                "send-key",
+                serde_json::json!({ "keys": enter, "hold-time": KEY_HOLD_MS }),
+            )?;
+            let log = wait_exit(r, "Enter on the USB keyboard", EXIT_RESET, *timeout)?;
+            boot_again(r, log, None)?;
+        }
         Step::FileLines { path, bytes, line } => {
             if !r.off {
                 bail!("file-lines reads the disk: switch the machine off first (poweroff)");
@@ -910,19 +951,23 @@ mod tests {
     }
 
     #[test]
-    fn parses_esp_deletes_and_other_abis() {
+    fn parses_esp_deletes_other_abis_and_programs_left_out() {
         let s = parse_scenario(
             "x",
-            "esp-delete /EFI/RELAY/system.img\nsystem-abi 99\nexpect x",
+            "esp-delete /EFI/RELAY/system.img\nsystem-abi 99\nsystem-drop sh\nexpect x",
         )
         .unwrap();
         assert_eq!(
             s.esp_edits,
             vec![
                 EspEdit::Delete("/EFI/RELAY/system.img".into()),
-                EspEdit::SystemAbi(99)
+                EspEdit::SystemAbi(99),
+                EspEdit::SystemDrop("sh".into())
             ]
         );
+        assert!(parse_scenario("x", "system-drop").is_err(), "which one");
+        assert!(parse_scenario("x", "system-drop a b").is_err());
+        assert!(parse_scenario("x", "expect a\nsystem-drop sh").is_err());
         assert!(parse_scenario("x", "esp-delete relative").is_err());
         assert!(parse_scenario("x", "system-abi many").is_err());
         assert!(parse_scenario("x", "expect a\nsystem-abi 2").is_err());
@@ -1004,7 +1049,7 @@ mod tests {
     fn parses_reboot_and_poweroff_steps() {
         let s = parse_scenario(
             "x",
-            "reboot\nreboot relay: restarting\npoweroff\npoweroff t-sys poweroff\nreset\nreset reboot -f",
+            "reboot\nreboot relay: restarting\npoweroff\npoweroff t-sys poweroff\nreset\nreset reboot -f\nreset-key",
         )
         .unwrap();
         assert_eq!(
@@ -1015,10 +1060,15 @@ mod tests {
                 (3, Step::Poweroff("poweroff".into())),
                 (4, Step::Poweroff("t-sys poweroff".into())),
                 (5, Step::Reset(String::new())),
-                (6, Step::Reset("reboot -f".into()))
+                (6, Step::Reset("reboot -f".into())),
+                (7, Step::ResetKey)
             ]
         );
         assert!(parse_scenario("x", "reboot (").is_err());
+        assert!(
+            parse_scenario("x", "reset-key x").is_err(),
+            "Enter alone: after the first key the machine is gone"
+        );
     }
 
     #[test]
