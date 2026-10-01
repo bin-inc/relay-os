@@ -1,7 +1,7 @@
 //! A process's file descriptors (user-space gate §5.4): 32 slots, each a
 //! shared reference to an open file, so a child `spawn` hands an fd to
 //! uses the same file as its parent, offset and all. The files are the
-//! console and files of the VFS; milestone 3 adds pipe ends.
+//! console, files of the VFS and pipes' ends.
 
 use crate::file::OpenFile;
 use alloc::sync::Arc;
@@ -19,6 +19,8 @@ pub enum File {
     Console,
     /// A file of the VFS.
     Vfs(OpenFile),
+    /// An end of a pipe (spec §9.1).
+    Pipe(crate::pipe::End),
 }
 
 pub struct FdTable {

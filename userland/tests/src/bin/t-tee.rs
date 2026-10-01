@@ -108,7 +108,7 @@ fn basic() -> Result<(), u16> {
             parent: 2,
         },
     ];
-    let pid = sys::spawn(b"/bin/t-args", b"t-args\0from a child\0", b"", &fds, 0)?;
+    let pid = sys::spawn(b"/bin/t-args", b"t-args\0from a child\0", b"", &fds, 0, 0)?;
     sys::wait(i64::from(pid), false)?;
     let _ = writeln!(Fd(1), "nothing written yet: {}", size(b"t-tee.log") == 0);
     show_ok("sync", sys::sync());

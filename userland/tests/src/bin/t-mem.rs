@@ -186,7 +186,7 @@ fn oom() -> Result<(), u16> {
             parent: 2,
         },
     ];
-    let pid = sys::spawn(b"/bin/t-mem", b"t-mem\0hog\0", b"", &fds, 0)?;
+    let pid = sys::spawn(b"/bin/t-mem", b"t-mem\0hog\0", b"", &fds, 0, 0)?;
     if let Some((_, w)) = sys::wait(i64::from(pid), false)? {
         let _ = writeln!(Fd(1), "the hog: {w}");
     }

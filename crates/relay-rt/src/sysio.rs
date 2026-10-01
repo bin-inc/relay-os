@@ -230,7 +230,7 @@ impl Programs for SysPrograms {
             let _ = sys::console_mode(MODE_LINE);
             0
         };
-        sys::spawn(path, &arg_bytes(args), b"", &command_fds(stdout), flags)
+        sys::spawn(path, &arg_bytes(args), b"", &command_fds(stdout), flags, 0)
             .map_err(Errno::from_number)
     }
 

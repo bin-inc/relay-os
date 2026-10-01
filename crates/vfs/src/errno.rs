@@ -49,11 +49,13 @@ pub enum Errno {
     EMFILE,
     /// A buffer too short for the answer (`getcwd`).
     ERANGE,
+    /// A write to a pipe nobody reads any more.
+    EPIPE,
 }
 
 impl Errno {
     /// Every error number.
-    pub const ALL: [Errno; 26] = [
+    pub const ALL: [Errno; 27] = [
         Errno::ENOENT,
         Errno::EEXIST,
         Errno::ENOTDIR,
@@ -80,6 +82,7 @@ impl Errno {
         Errno::EINTR,
         Errno::EMFILE,
         Errno::ERANGE,
+        Errno::EPIPE,
     ];
 
     /// The error with Linux's number `n` (a system call's error, in a
@@ -120,6 +123,7 @@ impl Errno {
             Errno::EINTR => "Interrupted system call",
             Errno::EMFILE => "Too many open files",
             Errno::ERANGE => "Numerical result out of range",
+            Errno::EPIPE => "Broken pipe",
         }
     }
 
@@ -154,6 +158,7 @@ impl Errno {
             Errno::EINTR => n::EINTR,
             Errno::EMFILE => n::EMFILE,
             Errno::ERANGE => n::ERANGE,
+            Errno::EPIPE => n::EPIPE,
         }
     }
 }
@@ -184,6 +189,7 @@ mod tests {
         assert_eq!(Errno::EROFS.to_string(), "Read-only file system");
         assert_eq!(Errno::EXDEV.to_string(), "Invalid cross-device link");
         assert_eq!(Errno::EFBIG.to_string(), "File too large");
+        assert_eq!(Errno::EPIPE.to_string(), "Broken pipe");
     }
 
     /// The name, number and message the host's C library gives: the real

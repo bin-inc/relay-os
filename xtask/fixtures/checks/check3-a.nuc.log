@@ -99,7 +99,7 @@ usb: 00:14.0 port 15: 0951:1666 SuperSpeed, disk Kingston DataTraveler 3.0, 14.4
 storage: 00:14.0 port 15: GPT with 2 partitions
 storage: root on 00:14.0 port 15, the disk with the boot partition 1A986FFA-A474-4233-B2D4-ECB7E558BA2C
 [[32m ok [0m] mount /: ext2 on 00:14.0 port 15 partition 2, 2.0 GiB
-[[32m ok [0m] system: 34 programs, ABI 2
+[[32m ok [0m] system: 34 programs, ABI 3
 + ls -l /bin
 total 2467
 -rwxr-xr-x 1 root root  90832 Oct  1 02:21 cat

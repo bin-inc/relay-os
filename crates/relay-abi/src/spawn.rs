@@ -1,5 +1,6 @@
 //! What `spawn` and `wait` take (spec §7.3): the new program's path,
-//! arguments, working directory and file descriptors, and `wait`'s flags.
+//! arguments, working directory, file descriptors and process group, and
+//! `wait`'s flags.
 
 /// How many fds `spawn` can hand a child.
 pub const SPAWN_FDS: usize = 8;
@@ -50,6 +51,12 @@ pub struct SpawnArgs {
     pub fd_count: u32,
     /// [`NEW_GROUP`], with or without [`FOREGROUND`], or 0.
     pub flags: u32,
+    /// Without [`NEW_GROUP`], the process group the child joins instead of
+    /// its parent's (a pipeline's later stages join the first one's, spec
+    /// §9.1); 0 for the parent's.
+    pub pgid: u32,
+    /// 0.
+    pub reserved: u32,
 }
 
 impl SpawnArgs {
@@ -78,6 +85,8 @@ impl SpawnArgs {
             fds,
             fd_count: u32_at(112),
             flags: u32_at(116),
+            pgid: u32_at(120),
+            reserved: u32_at(124),
         }
     }
 }
@@ -92,7 +101,7 @@ mod tests {
         assert_eq!(size_of::<FdMap>(), 8);
         assert_eq!(offset_of!(FdMap, child), 0);
         assert_eq!(offset_of!(FdMap, parent), 4);
-        assert_eq!(SpawnArgs::SIZE, 120);
+        assert_eq!(SpawnArgs::SIZE, 128);
         assert_eq!(offset_of!(SpawnArgs, path), 0);
         assert_eq!(offset_of!(SpawnArgs, path_len), 8);
         assert_eq!(offset_of!(SpawnArgs, args), 16);
@@ -102,6 +111,8 @@ mod tests {
         assert_eq!(offset_of!(SpawnArgs, fds), 48);
         assert_eq!(offset_of!(SpawnArgs, fd_count), 112);
         assert_eq!(offset_of!(SpawnArgs, flags), 116);
+        assert_eq!(offset_of!(SpawnArgs, pgid), 120);
+        assert_eq!(offset_of!(SpawnArgs, reserved), 124);
         assert_eq!((NEW_GROUP, WAIT_NOHANG, WAIT_ANY), (1, 1, -1));
         assert_eq!(FOREGROUND, 2);
     }
@@ -125,6 +136,8 @@ mod tests {
             fds,
             fd_count: 3,
             flags: NEW_GROUP,
+            pgid: 44,
+            reserved: 55,
         };
         // SAFETY: `SpawnArgs` is `repr(C)` of integers with no padding.
         let bytes: [u8; SpawnArgs::SIZE] = unsafe { core::mem::transmute(a) };

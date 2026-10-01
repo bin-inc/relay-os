@@ -147,7 +147,7 @@ fn basic() -> Result<(), u16> {
             parent: r,
         },
     ];
-    let pid = sys::spawn(b"/bin/t-files", b"t-files\0child\0", b"", &fds, 0)?;
+    let pid = sys::spawn(b"/bin/t-files", b"t-files\0child\0", b"", &fds, 0, 0)?;
     sys::wait(i64::from(pid), false)?;
     let n = sys::read(r, &mut buf[..5])?;
     show_text("read after the child", &buf[..n]);
@@ -276,7 +276,7 @@ fn child_in(cwd: &[u8]) -> Result<(), u16> {
             parent: 2,
         },
     ];
-    let pid = sys::spawn(b"/bin/t-files", b"t-files\0pwd\0", cwd, &fds, 0)?;
+    let pid = sys::spawn(b"/bin/t-files", b"t-files\0pwd\0", cwd, &fds, 0, 0)?;
     sys::wait(i64::from(pid), false).map(|_| ())
 }
 
@@ -324,6 +324,7 @@ fn gone() -> Result<(), u16> {
         b"t-files\0gone-child\0",
         b"t-files.g",
         &fds,
+        0,
         0,
     )?;
     // While the child naps: remove its directory and file, and make new

@@ -3,13 +3,14 @@
 //! and it answers with the result register's value or with the program's
 //! exit. It checks and copies what the program passes (`UserSlice`,
 //! `UserStr`) and leaves the rest to the `Caller`, the kernel's side of
-//! the process. The file calls are in `files`; `proc_list` and `pipe` are
-//! `ENOSYS` until milestone 3.
+//! the process. The file calls are in `files`, the pipe's in `pipes`;
+//! `proc_list` is `ENOSYS` until milestone 3's jobs.
 
 use crate::exec::ARGS_MAX;
 use crate::fd::{FdTable, File};
 use crate::mm::paging::PAGE;
 use crate::mm::user::{UserSlice, UserStr};
+use crate::proc::table::Group;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use relay_abi::info::INFO_MEMORY;
@@ -18,6 +19,7 @@ use relay_abi::{Call, FdMap, MemInfo, SpawnArgs, Time, WaitStatus, encode};
 use vfs::{Errno, Vfs};
 
 mod files;
+mod pipes;
 #[cfg(test)]
 mod testing;
 
@@ -35,7 +37,8 @@ pub struct Spawn {
     /// Relative to the caller's current directory; empty for that one.
     pub cwd: Vec<u8>,
     pub fds: Vec<FdMap>,
-    pub new_group: bool,
+    /// Its parent's group, a new one, or another child's (`SpawnArgs::pgid`).
+    pub group: Group,
     /// The new group gets the console (`FOREGROUND`).
     pub foreground: bool,
 }
@@ -77,6 +80,14 @@ pub trait Caller {
     /// 0 at once for a process outside the foreground group, and at end of
     /// input; `EINTR` if the program was killed while it waited.
     fn console_read(&mut self, buf: &mut [u8]) -> Result<usize, Errno>;
+    /// A new pipe: its read end and its write end (spec §9.1); `ENOMEM`
+    /// when its ring's frames would eat into the reserve.
+    fn new_pipe(&mut self) -> Result<(crate::pipe::End, crate::pipe::End), Errno>;
+    /// Waits until the pipe `id` changes (data, room, an end closed);
+    /// `EINTR` if the program was killed meanwhile (or before).
+    fn pipe_wait(&mut self, id: u64) -> Result<(), Errno>;
+    /// Wakes whoever waits on the pipe `id`.
+    fn pipe_wake(&mut self, id: u64);
     /// Line mode (`true`) or raw mode; the previous one.
     fn console_mode(&mut self, line: bool) -> bool;
     /// The console's columns and rows.
@@ -171,6 +182,7 @@ pub fn dispatch(caller: &mut impl Caller, number: u64, args: [u64; 6]) -> Outcom
         }
         Some(Call::SysInfo) => sys_info(caller, args[0], args[1], args[2]),
         Some(Call::Power) => power(caller, args[0], args[1]),
+        Some(Call::Pipe) => pipes::pipe(caller, args[0]),
         _ => Err(Errno::ENOSYS),
     };
     Outcome::Return(encode(result.map_err(Errno::number)))
@@ -184,9 +196,12 @@ fn spawn(caller: &mut impl Caller, addr: u64) -> Result<u64, Errno> {
     caller.read(&UserSlice::new(addr, raw.len() as u64)?, 0, &mut raw)?;
     let a = SpawnArgs::from_bytes(&raw);
     let foreground = a.flags & FOREGROUND != 0;
+    let new_group = a.flags & NEW_GROUP != 0;
     if a.flags & !(NEW_GROUP | FOREGROUND) != 0
-        || (foreground && a.flags & NEW_GROUP == 0)
+        || (foreground && !new_group)
+        || (new_group && a.pgid != 0)
         || a.fd_count as usize > SPAWN_FDS
+        || a.reserved != 0
     {
         return Err(Errno::EINVAL);
     }
@@ -214,7 +229,11 @@ fn spawn(caller: &mut impl Caller, addr: u64) -> Result<u64, Errno> {
         argc,
         cwd,
         fds: a.fds[..a.fd_count as usize].to_vec(),
-        new_group: a.flags & NEW_GROUP != 0,
+        group: match a.pgid {
+            _ if new_group => Group::New,
+            0 => Group::Parent,
+            g => Group::Join(g),
+        },
         foreground,
     };
     caller.spawn(&s).map(u64::from)
@@ -266,10 +285,10 @@ fn file(caller: &mut impl Caller, fd: u64) -> Result<Arc<File>, Errno> {
 /// full disk takes what fits, then says `ENOSPC`).
 fn write(caller: &mut impl Caller, fd: u64, addr: u64, len: u64) -> Result<u64, Errno> {
     let file = file(caller, fd)?;
-    if let File::Vfs(open) = &*file
-        && !open.is_writable()
-    {
-        return Err(Errno::EBADF);
+    match &*file {
+        File::Vfs(open) if !open.is_writable() => return Err(Errno::EBADF),
+        File::Pipe(end) => return pipes::write(caller, end, addr, len),
+        _ => {}
     }
     let slice = UserSlice::new(addr, len)?;
     let mut buf = [0u8; PAGE as usize];
@@ -298,6 +317,7 @@ fn write_to(caller: &mut impl Caller, file: &Arc<File>, bytes: &[u8]) -> Result<
             Ok(bytes.len())
         }
         File::Vfs(open) => caller.with_vfs(|v| open.write(v, bytes)),
+        File::Pipe(_) => unreachable!("write takes pipes apart"),
     }
 }
 
@@ -436,6 +456,8 @@ mod tests {
             fds,
             fd_count: 2,
             flags: NEW_GROUP,
+            pgid: 0,
+            reserved: 0,
         };
         edit(&mut a);
         // SAFETY: `SpawnArgs` is `repr(C)` of integers with no padding.
@@ -551,7 +573,7 @@ mod tests {
                         parent: 2
                     }
                 ],
-                new_group: true,
+                group: Group::New,
                 foreground: false,
             }]
         );
@@ -562,12 +584,19 @@ mod tests {
         });
         assert_eq!(call(&mut f, Call::Spawn, [a, 0, 0]), Ok(102));
         let s = &f.spawned[1];
-        assert!(!s.new_group && s.cwd.is_empty() && s.fds.is_empty());
+        assert!(s.group == Group::Parent && s.cwd.is_empty() && s.fds.is_empty());
         assert_eq!(s.argc, 1);
         // A group of its own that gets the console.
         let a = spawn_args(&mut f, b"x\0", |a| a.flags = NEW_GROUP | FOREGROUND);
         assert_eq!(call(&mut f, Call::Spawn, [a, 0, 0]), Ok(103));
-        assert!(f.spawned[2].new_group && f.spawned[2].foreground);
+        assert!(f.spawned[2].group == Group::New && f.spawned[2].foreground);
+        // Another child's group (whether it may is the table's to say).
+        let a = spawn_args(&mut f, b"x\0", |a| {
+            a.flags = 0;
+            a.pgid = 102;
+        });
+        assert_eq!(call(&mut f, Call::Spawn, [a, 0, 0]), Ok(104));
+        assert_eq!(f.spawned[3].group, Group::Join(102));
         // The caller's refusal.
         let a = spawn_args(&mut f, b"x\0", |a| a.path_len = 7);
         put(&mut f, W + 200, b"missing");
@@ -593,6 +622,24 @@ mod tests {
             "the console goes to a group of the child's own"
         );
         assert_eq!(refused(&mut f, b"x\0", |a| a.flags = 4), Err(errno::EINVAL));
+        assert_eq!(
+            refused(&mut f, b"x\0", |a| a.pgid = 2),
+            Err(errno::EINVAL),
+            "a new group and another child's"
+        );
+        assert_eq!(
+            refused(&mut f, b"x\0", |a| {
+                a.flags = FOREGROUND;
+                a.pgid = 2;
+            }),
+            Err(errno::EINVAL),
+            "the console goes to a new group only"
+        );
+        assert_eq!(
+            refused(&mut f, b"x\0", |a| a.reserved = 1),
+            Err(errno::EINVAL),
+            "reserved"
+        );
         assert_eq!(
             refused(&mut f, b"x\0", |a| a.fd_count = 9),
             Err(errno::EINVAL)
@@ -985,6 +1032,7 @@ mod tests {
             Call::Sleep,
             Call::SysInfo,
             Call::Power,
+            Call::Pipe,
         ];
         for c in Call::ALL {
             if !served.contains(&c) {

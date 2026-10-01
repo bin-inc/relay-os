@@ -1,0 +1,35 @@
+# The pipe call from ring 3 (user-space gate §9.1; milestone 3, plan 1):
+# t-pipe's kinds, each answer the kernel gave. A read waits for data and
+# a write for room, an end closes with the last process that has it, a
+# killed reader or writer ends, the fds run out cleanly, and a pipe's
+# frames come back: free shows the same memory in use before and after.
+timeout 60
+expect root@relay:~# $
+# Every kernel-stack slot's page tables made first (they stay), so memory
+# in use compares after them.
+send t-spawn fill
+expect \nfilled the table with 61 children\n
+alive 1
+send free
+expect-same mem \nMem:\s+\d+\s+(\d+)\s
+send t-pipe basic
+expect \npipe: 3 4\nwrite: 5\nread: hello\nfstat: fifo, dev 0\nseek: EINVAL\nread the write end: EBADF\nwrite the read end: EBADF\ntee: EINVAL\nafter the writer closed: 0\n
+send t-pipe room
+expect \nwrite 20000: 16384\nread back: 16384, all as written: true\n
+# 1 MiB through 16 KiB: the writer and the reader block in turn.
+send t-pipe child
+expect-same sum \ndrained 1048576 bytes, checksum (\d+)\n
+expect-same sum sent 1048576 bytes, checksum (\d+)\n
+send t-pipe eof
+expect \nend of data once the child ended: 0\n
+send t-pipe epipe
+expect \nwrite with no reader: EPIPE\nt-args with nobody reading: exited with 141\n
+send t-pipe killed
+expect \na reader blocked on an empty pipe: kill\n
+expect \na writer blocked on a full pipe: kill\n
+send dmesg
+expect \npid \d+ \(/bin/t-pipe\): killed: kill\npid \d+ \(/bin/t-pipe\): killed: kill\n
+send t-pipe many
+expect \npipes: 14, then EMFILE\nthe last fd: 31\n
+send free
+expect-same mem \nMem:\s+\d+\s+(\d+)\s

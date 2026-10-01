@@ -3,8 +3,8 @@
 # error screen says the same (§11.2), and a key restarts the machine.
 system-abi 99
 timeout 30
-expect \[FAIL\] system: ABI 99, kernel wants 2
-expect \*\*\* Relay OS cannot run its shell \*\*\*\n\nsystem: ABI 99, kernel wants 2\n
+expect \[FAIL\] system: ABI 99, kernel wants 3
+expect \*\*\* Relay OS cannot run its shell \*\*\*\n\nsystem: ABI 99, kernel wants 3\n
 expect \nPress any key to reboot\.\n
 reset
 expect Relay OS \d+\.\d+\.\d+

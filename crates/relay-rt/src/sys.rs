@@ -73,6 +73,13 @@ pub fn open(path: &[u8], flags: u32) -> Result<u32, u16> {
     .map(|fd| fd as u32)
 }
 
+/// Makes a pipe (spec §9.1): its read end and its write end, the two
+/// lowest free fds.
+pub fn pipe() -> Result<(u32, u32), u16> {
+    let mut fds = [0u32; 2];
+    call(Call::Pipe, &[&raw mut fds as u64]).map(|_| (fds[0], fds[1]))
+}
+
 /// Closes `fd`.
 pub fn close(fd: u32) -> Result<(), u16> {
     call(Call::Close, &[u64::from(fd)]).map(|_| ())
@@ -196,7 +203,14 @@ pub fn getcwd(buf: &mut [u8]) -> Result<usize, u16> {
     call(Call::Getcwd, &[buf.as_mut_ptr() as u64, buf.len() as u64]).map(|n| n as usize)
 }
 
-/// Writes some of `bytes` to `fd`; returns how many.
+/// The status a program ends with once nobody reads its standard output
+/// (spec §8.1): bash's for a program SIGPIPE ended, 128 + 13.
+pub const BROKEN_PIPE: u8 = 141;
+
+/// Writes some of `bytes` to `fd`; returns how many. A write to fd 1 that
+/// fails with `EPIPE` ends the program at once with [`BROKEN_PIPE`] and no
+/// message, as SIGPIPE ends one on Linux: nobody reads its output any
+/// more (`cat big | head -n 1`).
 pub fn write(fd: u32, bytes: &[u8]) -> Result<usize, u16> {
     let args = [
         u64::from(fd),
@@ -206,7 +220,17 @@ pub fn write(fd: u32, bytes: &[u8]) -> Result<usize, u16> {
         0,
         0,
     ];
-    decode(unsafe { syscall(Call::Write, args) }).map(|n| n as usize)
+    let r = decode(unsafe { syscall(Call::Write, args) }).map(|n| n as usize);
+    if ends_quietly(fd, r) {
+        exit(BROKEN_PIPE);
+    }
+    r
+}
+
+/// Whether a write's result ends the program: a broken pipe on standard
+/// output. Any other fd's `EPIPE` is the program's to see.
+fn ends_quietly(fd: u32, r: Result<usize, u16>) -> bool {
+    fd == 1 && r == Err(relay_abi::errno::EPIPE)
 }
 
 /// Writes all of `bytes` to `fd`, however many calls that takes.
@@ -233,8 +257,16 @@ fn write_all_by(
 /// argument 0 first) in `cwd` (empty: this program's), giving it the fds
 /// `fds` names (child, parent) and closing its others; with `NEW_GROUP` in
 /// `flags` it starts a process group of its own, which `FOREGROUND` also
-/// gives the console, in line mode. Its pid.
-pub fn spawn(path: &[u8], args: &[u8], cwd: &[u8], fds: &[FdMap], flags: u32) -> Result<u32, u16> {
+/// gives the console, in line mode; without it, a `pgid` other than 0 is
+/// the group of another child of this program's that it joins. Its pid.
+pub fn spawn(
+    path: &[u8],
+    args: &[u8],
+    cwd: &[u8],
+    fds: &[FdMap],
+    flags: u32,
+    pgid: u32,
+) -> Result<u32, u16> {
     if fds.len() > SPAWN_FDS {
         return Err(relay_abi::errno::EINVAL);
     }
@@ -247,6 +279,7 @@ pub fn spawn(path: &[u8], args: &[u8], cwd: &[u8], fds: &[FdMap], flags: u32) ->
         cwd_len: cwd.len() as u64,
         fd_count: fds.len() as u32,
         flags,
+        pgid,
         ..SpawnArgs::default()
     };
     a.fds[..fds.len()].copy_from_slice(fds);
@@ -354,6 +387,17 @@ mod tests {
     use super::*;
     use alloc::vec::Vec;
     use relay_abi::errno::{EIO, ENOSPC};
+
+    #[test]
+    fn only_a_broken_pipe_on_standard_output_ends_the_program() {
+        use relay_abi::errno::EPIPE;
+        assert!(ends_quietly(1, Err(EPIPE)));
+        assert!(!ends_quietly(3, Err(EPIPE)), "a pipe of its own");
+        assert!(!ends_quietly(2, Err(EPIPE)));
+        assert!(!ends_quietly(1, Err(EIO)));
+        assert!(!ends_quietly(1, Ok(0)));
+        assert_eq!(BROKEN_PIPE, 128 + 13);
+    }
 
     #[test]
     fn a_write_that_takes_nothing_is_enospc() {

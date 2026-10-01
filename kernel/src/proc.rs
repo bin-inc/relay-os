@@ -21,14 +21,15 @@ use crate::mm::space::AddressSpace;
 use crate::mm::user::{UserSlice, UserStr};
 use crate::mounts::KernelVfs;
 use crate::syscall::{self, Caller, Child, Outcome, Spawn};
-use crate::{arch, console, klogln, mm, mounts, rtc, timer, tty, usb};
+use crate::{arch, console, klogln, mm, mounts, pipe, rtc, timer, tty, usb};
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use relay_abi::{MemInfo, Time, WaitStatus};
 use spin::Mutex;
-use table::{Blocked, Table, Want};
+use table::{Blocked, Group, Table, Want};
 use vfs::{Cwd, Errno, FileType, Vfs};
 use x86_64::instructions::interrupts;
 
@@ -237,6 +238,15 @@ pub fn kill_others() {
     PROCS.lock().kill_all_but_init(relay_abi::wait::KILLED_KILL);
 }
 
+/// Wakes every process waiting on the pipe `id` (`pipe::Pipe::id`): data
+/// or room came, or an end closed. Never while the table is locked, since
+/// it locks it: a pipe's end is never dropped under `PROCS`, nor is a
+/// pipe written.
+pub fn wake_pipe(id: u64) {
+    debug_assert!(!PROCS.is_locked(), "a pipe woken while PROCS is held");
+    PROCS.lock().wake_all(Blocked::Pipe(id));
+}
+
 /// The running process blocks on `why` until something wakes it.
 fn block(why: Blocked) {
     PROCS.lock().block(why);
@@ -291,7 +301,7 @@ pub fn start(init: extern "C" fn(u64) -> !, arg: u64, cwd: Cwd) -> ! {
     };
     let pid = PROCS
         .lock()
-        .insert(0, true, String::from("init"), res)
+        .insert(0, Group::New, String::from("init"), res)
         .unwrap_or_else(|_| unreachable!("the table is empty"));
     assert_eq!(pid, table::INIT);
     idle()
@@ -425,13 +435,18 @@ fn memory_error(e: MapError) -> Errno {
 /// program at its path, read through the mount table from the running
 /// process's current directory, with its arguments, fds, working directory
 /// and group. `EAGAIN` when the table is full or every pid has been
-/// used; the fds and the working directory are checked before the program
-/// is read.
+/// used, `EPERM` for a group it may not join; those, the fds and the
+/// working directory are checked before the program is read.
 pub fn spawn(s: &Spawn) -> Result<u32, Errno> {
     let (fds, mut cwd) = {
         let t = PROCS.lock();
         if !t.has_room() {
             return Err(Errno::EAGAIN);
+        }
+        if let Group::Join(g) = s.group
+            && !t.may_join(t.current(), g)
+        {
+            return Err(Errno::EPERM);
         }
         let parent = t.get(t.current()).expect("a process spawns");
         (parent.res.fds.for_child(&s.fds)?, parent.res.cwd.clone())
@@ -469,13 +484,22 @@ pub fn spawn(s: &Spawn) -> Result<u32, Errno> {
         }
     };
     let mut t = PROCS.lock();
-    if !t.has_room() {
+    let me = t.current();
+    let joinable = match s.group {
+        Group::Join(g) => t.may_join(me, g),
+        _ => true,
+    };
+    if !t.has_room() || !joinable {
         // Checked above, and nothing else ran since; but a refusal here
         // must give back what was taken, not panic.
         drop(t);
         mm::free_kernel_stack(stack);
         mm::with_user_memory(|mem, _| space.destroy(mem));
-        return Err(Errno::EAGAIN);
+        return Err(if joinable {
+            Errno::EAGAIN
+        } else {
+            Errno::EPERM
+        });
     }
     prepare(&stack, first_run, 0);
     let res = Res {
@@ -485,10 +509,9 @@ pub fn spawn(s: &Spawn) -> Result<u32, Errno> {
         fds,
         cwd: Some(cwd),
     };
-    let me = t.current();
     let pid = t
-        .insert(me, s.new_group, name.into_owned(), res)
-        .unwrap_or_else(|e| unreachable!("has_room was checked under this lock: {e}"));
+        .insert(me, s.group, name.into_owned(), res)
+        .unwrap_or_else(|e| unreachable!("room and group were checked under this lock: {e}"));
     drop(t);
     // Before the child can run: the kernel is not preemptible, and it has
     // not been switched to yet.
@@ -676,6 +699,27 @@ impl Caller for Current {
             // it.
             block(Blocked::Console);
         }
+    }
+
+    fn new_pipe(&mut self) -> Result<(pipe::End, pipe::End), Errno> {
+        let frames = mm::alloc_pipe_frames()?;
+        Ok(pipe::new(Box::new(frames), wake_pipe))
+    }
+
+    fn pipe_wait(&mut self, id: u64) -> Result<(), Errno> {
+        {
+            let t = PROCS.lock();
+            if t.get(t.current()).is_some_and(|p| p.killed.is_some()) {
+                return Err(Errno::EINTR);
+            }
+        }
+        // Data, room, a closed end or a kill wakes it.
+        block(Blocked::Pipe(id));
+        Ok(())
+    }
+
+    fn pipe_wake(&mut self, id: u64) {
+        wake_pipe(id);
     }
 
     fn tee_push(&mut self, file: Arc<File>) -> Result<(), Errno> {

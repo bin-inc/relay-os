@@ -66,7 +66,7 @@ expect \n(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \w{3} [ \d]\d \d\d:\d\d:\d\d UTC 20\d\d\n
 send /bin/df
 expect \nFilesystem     1K-blocks +Used Available Use% Mounted on\n/dev/root +\d+ +\d+ +\d+ +\d+% /\n
 send /bin/dmesg
-expect \n\[ ok \] system: \d+ programs, ABI 2\n
+expect \n\[ ok \] system: \d+ programs, ABI 3\n
 send /bin/sync
 send /bin/free
 expect \n +total +used +free\nMem: +\d+ +\d+ +\d+\nHeap: +\d+ +\d+ +\d+\n
