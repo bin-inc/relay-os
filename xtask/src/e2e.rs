@@ -33,6 +33,8 @@
 //!                                   alone: a key at the error screen; QEMU
 //!                                   must exit as after a reset, then starts
 //!                                   again on the same disk)
+//! reset-key                        (as `reset`, with Enter pressed on the USB
+//!                                   keyboard: QMP send-key)
 //! poweroff [<command>]             (types `poweroff`, or <command>; QEMU must
 //!                                   exit through isa-debug-exit, test mode's
 //!                                   power-off; an `expect` after it reads
@@ -124,6 +126,8 @@ pub enum Step {
     /// Type this text (or nothing) and Enter over the serial console, and
     /// the machine restarts as with `Reboot` (a key at the error screen).
     Reset(String),
+    /// As `Reset`, with Enter pressed on the USB keyboard instead.
+    ResetKey,
     /// Switch the machine off with a command (`poweroff` if none is
     /// given); no later step talks to it.
     Poweroff(String),
@@ -264,6 +268,7 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
             "alive" => Step::Alive(rest.parse().with_context(|| format!("{name}:{line_no}"))?),
             "reboot" if rest.is_empty() => Step::Reboot(None),
             "reset" => Step::Reset(rest.to_string()),
+            "reset-key" if rest.is_empty() => Step::ResetKey,
             "reboot" => {
                 Regex::new(rest).with_context(|| format!("{name}:{line_no}: bad regex"))?;
                 Step::Reboot(Some(rest.to_string()))
@@ -522,13 +527,20 @@ fn read_serial(
     })
 }
 
-/// Types `command` and waits (up to `timeout`) for QEMU to exit with
-/// `status`; the shell shut the filesystem down first, so it must be marked
-/// clean, unless the stick was pulled out. Returns the serial log once everything QEMU printed is in it.
+/// Types `command` over serial and waits for QEMU to exit with `status`
+/// (`wait_exit`).
 fn exit_with(r: &mut Running, command: &str, status: i32, timeout: Duration) -> Result<fs::File> {
     r.stdin.write_all(command.as_bytes())?;
     r.stdin.write_all(b"\r")?;
     r.stdin.flush()?;
+    wait_exit(r, command, status, timeout)
+}
+
+/// Waits (up to `timeout`) for QEMU to exit with `status` after `command`;
+/// the machine shut the filesystem down first, so it must be marked clean,
+/// unless the stick was pulled out. Returns the serial log once everything
+/// QEMU printed is in it.
+fn wait_exit(r: &mut Running, command: &str, status: i32, timeout: Duration) -> Result<fs::File> {
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(s) = r.child.try_wait()? {
@@ -560,7 +572,13 @@ fn exit_with(r: &mut Running, command: &str, status: i32, timeout: Duration) -> 
 /// (`-no-reboot`) exits, after printing `last` if given; then the same disk
 /// boots again, with the serial log continued.
 fn reboot(r: &mut Running, command: &str, last: Option<&str>, timeout: Duration) -> Result<()> {
-    let mut log = exit_with(r, command, EXIT_RESET, timeout)?;
+    let log = exit_with(r, command, EXIT_RESET, timeout)?;
+    boot_again(r, log, last)
+}
+
+/// After a reset: the machine printed `last` if given, and the same disk
+/// boots again, with the serial log `log` continued.
+fn boot_again(r: &mut Running, mut log: fs::File, last: Option<&str>) -> Result<()> {
     if let Some(pattern) = last {
         let text = r.text();
         if !Regex::new(pattern)?.is_match(&text[r.consumed.min(text.len())..]) {
@@ -739,6 +757,15 @@ fn run_step(
         }
         Step::Reboot(last) => reboot(r, "reboot", last.as_deref(), *timeout)?,
         Step::Reset(text) => reboot(r, text, None, *timeout)?,
+        Step::ResetKey => {
+            let enter = serde_json::json!([{ "type": "qcode", "data": "ret" }]);
+            r.qmp.execute(
+                "send-key",
+                serde_json::json!({ "keys": enter, "hold-time": KEY_HOLD_MS }),
+            )?;
+            let log = wait_exit(r, "Enter on the USB keyboard", EXIT_RESET, *timeout)?;
+            boot_again(r, log, None)?;
+        }
         Step::FileLines { path, bytes, line } => {
             if !r.off {
                 bail!("file-lines reads the disk: switch the machine off first (poweroff)");
@@ -1022,7 +1049,7 @@ mod tests {
     fn parses_reboot_and_poweroff_steps() {
         let s = parse_scenario(
             "x",
-            "reboot\nreboot relay: restarting\npoweroff\npoweroff t-sys poweroff\nreset\nreset reboot -f",
+            "reboot\nreboot relay: restarting\npoweroff\npoweroff t-sys poweroff\nreset\nreset reboot -f\nreset-key",
         )
         .unwrap();
         assert_eq!(
@@ -1033,10 +1060,15 @@ mod tests {
                 (3, Step::Poweroff("poweroff".into())),
                 (4, Step::Poweroff("t-sys poweroff".into())),
                 (5, Step::Reset(String::new())),
-                (6, Step::Reset("reboot -f".into()))
+                (6, Step::Reset("reboot -f".into())),
+                (7, Step::ResetKey)
             ]
         );
         assert!(parse_scenario("x", "reboot (").is_err());
+        assert!(
+            parse_scenario("x", "reset-key x").is_err(),
+            "Enter alone: after the first key the machine is gone"
+        );
     }
 
     #[test]
