@@ -42,11 +42,12 @@ ps | grep -c t-spin
 # arguments, one empty and one with two blanks, passes them on to
 # another with one more. A value is never split into words (bash would
 # split `$A`), an unquoted empty one is no word, and `cd "$9"` without a
-# ninth argument stays where it is.
+# ninth argument stays where it is (not home, where it started).
 echo 'echo "$0: $# arguments"' > /root/check5-a.sh
 echo 't-args "$@"' >> /root/check5-a.sh
 echo 'sh /root/check5-b.sh "$@" last' >> /root/check5-a.sh
 echo 'echo "b: $#, [$1] [$2] [$3] [$4]"' > /root/check5-b.sh
+echo 'cd /root/checks' >> /root/check5-b.sh
 echo 'cd "$9"' >> /root/check5-b.sh
 echo 'echo "cd: $?"' >> /root/check5-b.sh
 echo 'pwd' >> /root/check5-b.sh
@@ -60,19 +61,21 @@ sh /root/check5-a.sh one '' 'two  words'
 #> \+ sh /root/check5-b\.sh "\$@" last
 #> \+ echo "b: \$#, \[\$1\] \[\$2\] \[\$3\] \[\$4\]"
 #> b: 4, \[one\] \[\] \[two  words\] \[last\]
+#> \+ cd /root/checks
 #> \+ cd "\$9"
 #> \+ echo "cd: \$\?"
 #> cd: 0
 #> \+ pwd
-#> /root
+#> /root/checks
 cat /root/check5-b.log
 #> \+ echo "b: \$#, \[\$1\] \[\$2\] \[\$3\] \[\$4\]"
 #> b: 4, \[one\] \[\] \[two  words\] \[last\]
+#> \+ cd /root/checks
 #> \+ cd "\$9"
 #> \+ echo "cd: \$\?"
 #> cd: 0
 #> \+ pwd
-#> /root
+#> /root/checks
 A='a  b'
 t-args $A "$A" '$A' ${A}c $E "$E"
 #> \[1\] a  b

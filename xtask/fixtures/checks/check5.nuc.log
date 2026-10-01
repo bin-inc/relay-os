@@ -27,6 +27,7 @@ piped 0
 + echo 't-args "$@"' >> /root/check5-a.sh
 + echo 'sh /root/check5-b.sh "$@" last' >> /root/check5-a.sh
 + echo 'echo "b: $#, [$1] [$2] [$3] [$4]"' > /root/check5-b.sh
++ echo 'cd /root/checks' >> /root/check5-b.sh
 + echo 'cd "$9"' >> /root/check5-b.sh
 + echo 'echo "cd: $?"' >> /root/check5-b.sh
 + echo 'pwd' >> /root/check5-b.sh
@@ -40,19 +41,21 @@ piped 0
 + sh /root/check5-b.sh "$@" last
 + echo "b: $#, [$1] [$2] [$3] [$4]"
 b: 4, [one] [] [two  words] [last]
++ cd /root/checks
 + cd "$9"
 + echo "cd: $?"
 cd: 0
 + pwd
-/root
+/root/checks
 + cat /root/check5-b.log
 + echo "b: $#, [$1] [$2] [$3] [$4]"
 b: 4, [one] [] [two  words] [last]
++ cd /root/checks
 + cd "$9"
 + echo "cd: $?"
 cd: 0
 + pwd
-/root
+/root/checks
 + A='a  b'
 + t-args $A "$A" '$A' ${A}c $E "$E"
 [1] a  b
