@@ -140,6 +140,17 @@ impl Word {
         Some((name, Word { pieces, typed }))
     }
 
+    /// The word appends to a variable, `NAME+=value`, as bash's does.
+    fn appends(&self) -> bool {
+        let Some(Piece::Text(first, false)) = self.pieces.first() else {
+            return false;
+        };
+        first
+            .split_once('=')
+            .and_then(|(before, _)| before.strip_suffix('+'))
+            .is_some_and(is_name)
+    }
+
     /// The word if it is one unquoted piece of text, all ASCII digits (`2`
     /// in `2>`).
     fn digits(&self) -> Option<&str> {
@@ -354,11 +365,18 @@ fn value_tildes(text: &str, first: bool, last: bool) -> String {
 
 /// A command of `words` and `redirect`. An assignment before a command,
 /// which gives bash's command an environment, is not supported: programs
-/// get none (user-space gate §9.4).
+/// get none (user-space gate §9.4); nor is bash's `NAME+=value`, which
+/// appends.
 fn command(
     words: Vec<Word>,
     redirect: Option<Redirect<Word>>,
 ) -> Result<Command<Word>, ParseError> {
+    let mut leading = words
+        .iter()
+        .take_while(|w| w.assignment().is_some() || w.appends());
+    if let Some(append) = leading.find(|w| w.appends()) {
+        return Err(ParseError::Unsupported(append.typed.clone()));
+    }
     if let Some(first) = words.first()
         && first.assignment().is_some()
         && words.iter().any(|w| w.assignment().is_none())
@@ -932,6 +950,28 @@ mod tests {
         // An argument that looks like one is one; assignments alone parse.
         assert_eq!(words("echo A=1"), ["echo", "A=1"]);
         assert!(parse_line("A=1 B=2 > f").is_ok());
+    }
+
+    #[test]
+    fn appending_to_a_variable_is_unsupported() {
+        // bash's `A+=x` appends; here it is refused rather than run as a
+        // command (the review found `A+=2: command not found`).
+        for (line, what) in [
+            ("A+=2", "A+=2"),
+            ("PATH+=:/x", "PATH+=:/x"),
+            ("A=1 B+=\"x y\"", "B+=\"x y\""),
+            ("A+=1 echo hi", "A+=1"),
+            ("ls | A+=1", "A+=1"),
+        ] {
+            assert_eq!(
+                parse_line(line),
+                Err(ParseError::Unsupported(what.into())),
+                "{line}"
+            );
+        }
+        // An argument, or a word that is no name's, is not one.
+        assert_eq!(words("echo A+=1"), ["echo", "A+=1"]);
+        assert!(parse_line("1+=x").is_ok() && parse_line("A\\+=x").is_ok());
     }
 
     #[test]
