@@ -4,26 +4,39 @@
 //! except that `\"`, `\\`, `\$` and `` \` `` stand for the second
 //! character, parameters expand in it, and a bare `` ` `` in it is refused
 //! as outside quotes (bash would run it); outside quotes `\` makes the
-//! next character literal. Outside single quotes a parameter, `$NAME`,
-//! `${NAME}`, `$0`…`$9`, `${N}`, `$#`, `$@` or `$?`, is a piece of its word
-//! that expansion replaces (user-space gate §9.4); bash's other
-//! parameters and operators are refused, and a `$` before anything else is
-//! a `$`. `> file` and `>> file` redirect standard output (at most one
-//! per command). An unquoted `~` alone or before `/` at the start of a word
-//! means `/root`, as in Linux. An unquoted `#` at the start of a word
-//! begins a comment, which runs to the end of the line. An unquoted `|`
-//! joins commands into a pipeline (user-space gate §9.1); each has a name,
-//! only the last may redirect its output, and bash's syntax errors name a
-//! `|` with no command before it or none after. An unquoted `&` at the end
-//! of the line (a comment may follow) runs it in the background (§9.2).
-//! Every other shell feature is refused: an unquoted `;`, `&` before more,
-//! `*`, `?`, `<`, `` ` ``, `(` or `)` is an error naming the
-//! character, instead of being passed on as if it were plain text; so are
-//! `||`, `&&` and `2>` (another stream).
+//! next character literal. Each word is given as typed: its pieces, quoted
+//! or not, for expansion (`crate::expand`), and its text for messages.
+//!
+//! Outside single quotes a parameter, `$NAME`, `${NAME}`, `$0`…`$9`,
+//! `${N}`, `$#`, `$@` or `$?`, is a piece of its word that expansion
+//! replaces (user-space gate §9.4). bash's other parameters (`$*`, `$$`,
+//! `$!`, `$-`, `$_`), its operators (`${A:-x}`, `${#A}`) and, outside
+//! double quotes, its quotes `$'…'` and `$"…"` are refused, as are `$(`
+//! and `$((`; a `${` without its `}` is bash's syntax error, and a `${…}`
+//! that names nothing expands to its `bad substitution`. A `$` before
+//! anything else is a `$`.
+//!
+//! A word whose unquoted start is a name and `=` is an assignment
+//! (`Word::assignment`), its value's `~` at its start or after a `:` made
+//! `/root`, as bash's is; an assignment before a command, which would give
+//! bash's command an environment, and bash's `NAME+=value` are refused.
+//!
+//! `> file` and `>> file` redirect standard output (at most one per
+//! command). An unquoted `~` alone, or before `/` in the same unquoted
+//! piece, at the start of a word means `/root`, as in Linux. An unquoted
+//! `#` at the start of a word begins a comment, which runs to the end of
+//! the line. An unquoted `|` joins commands into a pipeline (user-space
+//! gate §9.1); each has a name, only the last may redirect its output, and
+//! bash's syntax errors name a `|` with no command before it or none after.
+//! An unquoted `&` at the end of the line (a comment may follow) runs it in
+//! the background (§9.2). Every other shell feature is refused: an unquoted
+//! `;`, `&` before more, `*`, `?`, `<`, `` ` ``, `(` or `)` is an error
+//! naming the character, instead of being passed on as if it were plain
+//! text; so are `||`, `&&`, `|&` (the errors into the pipe too), `>&` and
+//! `2>` (another stream).
 
 use alloc::format;
-use alloc::string::String;
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 use core::iter::Peekable;
