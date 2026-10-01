@@ -89,13 +89,13 @@ fn cat_input(ctx: &mut Ctx<'_>) -> i32 {
     0
 }
 
-/// The line count and the one file of `head`/`tail`: `[-n N] file`, also
-/// `-N`.
+/// The line count and the one file of `head`/`tail`: `[-n N] [file]`, also
+/// `-N`; no file is standard input.
 fn lines_and_file(
     ctx: &mut Ctx<'_>,
     name: &str,
     args: &[String],
-) -> Result<(u64, Node, String), i32> {
+) -> Result<(u64, Option<(Node, String)>), i32> {
     // A first argument `-5` means `-n 5`, as in GNU head and tail.
     let mut args = args.to_vec();
     if let Some(first) = args.first_mut()
@@ -123,7 +123,7 @@ fn lines_and_file(
         },
     };
     let file = match &opts.operands[..] {
-        [] => return Err(ctx.fail(name, format_args!("missing operand"))),
+        [] => return Ok((count, None)),
         [file] => file,
         [_, extra, ..] => {
             return Err(ctx.fail(name, format_args!("extra operand {}", quote(extra))));
@@ -135,27 +135,37 @@ fn lines_and_file(
             format_args!("cannot open {} for reading: {e}", quote(file)),
         )
     })?;
-    Ok((count, node, file.clone()))
+    Ok((count, Some((node, file.clone()))))
 }
 
-/// `head [-n N] file`: the first N lines (10 by default).
+/// How much of `bytes`, the next piece of an input, is within the `left`
+/// lines still wanted; counts off the lines it ends.
+fn within(bytes: &[u8], left: &mut u64) -> usize {
+    let mut end = 0;
+    while *left > 0 && end < bytes.len() {
+        match bytes[end..].iter().position(|&b| b == b'\n') {
+            Some(i) => {
+                end += i + 1;
+                *left -= 1;
+            }
+            None => end = bytes.len(),
+        }
+    }
+    end
+}
+
+/// `head [-n N] [file]`: the first N lines (10 by default).
 pub fn head(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
-    let (count, node, file) = match lines_and_file(ctx, "head", args) {
+    let (count, file) = match lines_and_file(ctx, "head", args) {
         Ok(x) => x,
         Err(status) => return status,
     };
     let mut left = count;
+    let Some((node, file)) = file else {
+        return head_input(ctx, left);
+    };
     let result = stream(ctx, node, 0, |ctx, bytes| {
-        let mut end = 0;
-        while left > 0 && end < bytes.len() {
-            match bytes[end..].iter().position(|&b| b == b'\n') {
-                Some(i) => {
-                    end += i + 1;
-                    left -= 1;
-                }
-                None => end = bytes.len(),
-            }
-        }
+        let end = within(bytes, &mut left);
         ctx.out(&bytes[..end]);
         left > 0
     });
@@ -165,12 +175,33 @@ pub fn head(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     }
 }
 
-/// `tail [-n N] file`: the last N lines (10 by default). It reads backwards
-/// from the end, so a big file costs only what is shown.
+/// `head` of standard input: no more of it is read once the lines are out,
+/// so a pipe's writer gets `EPIPE` once `head` has ended.
+fn head_input(ctx: &mut Ctx<'_>, mut left: u64) -> i32 {
+    let mut buf = vec![0; CHUNK];
+    while left > 0 && !ctx.interrupted() && !ctx.out_failed() {
+        match ctx.read_input(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                let end = within(&buf[..n], &mut left);
+                ctx.out(&buf[..end]);
+            }
+            Err(e) => return ctx.fail("head", format_args!("error reading 'standard input': {e}")),
+        }
+    }
+    0
+}
+
+/// `tail [-n N] [file]`: the last N lines (10 by default). It reads a file
+/// backwards from the end, so a big file costs only what is shown;
+/// standard input is read to its end, keeping the last N lines.
 pub fn tail(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
-    let (count, node, file) = match lines_and_file(ctx, "tail", args) {
+    let (count, file) = match lines_and_file(ctx, "tail", args) {
         Ok(x) => x,
         Err(status) => return status,
+    };
+    let Some((node, file)) = file else {
+        return tail_input(ctx, count);
     };
     match tail_start(ctx, node, count).and_then(|start| {
         stream(ctx, node, start, |ctx, bytes| {
@@ -181,6 +212,36 @@ pub fn tail(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
         Ok(()) => 0,
         Err(e) => ctx.fail("tail", format_args!("error reading {}: {e}", quote(&file))),
     }
+}
+
+/// `tail` of standard input: the last `count` lines, the newest perhaps
+/// without its newline, kept as they come.
+fn tail_input(ctx: &mut Ctx<'_>, count: u64) -> i32 {
+    let mut lines: alloc::collections::VecDeque<Vec<u8>> = alloc::collections::VecDeque::new();
+    let mut buf = vec![0; CHUNK];
+    loop {
+        if ctx.interrupted() {
+            return 0;
+        }
+        let n = match ctx.read_input(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => return ctx.fail("tail", format_args!("error reading 'standard input': {e}")),
+        };
+        for piece in buf[..n].split_inclusive(|&b| b == b'\n') {
+            match lines.back_mut() {
+                Some(last) if last.last() != Some(&b'\n') => last.extend_from_slice(piece),
+                _ => lines.push_back(piece.to_vec()),
+            }
+            if lines.len() as u64 > count {
+                lines.pop_front();
+            }
+        }
+    }
+    for line in lines {
+        ctx.out(&line);
+    }
+    0
 }
 
 /// Where the last `count` lines of `node` start.
@@ -616,6 +677,100 @@ mod tests {
     }
 
     #[test]
+    fn head_and_tail_of_standard_input_print_what_gnu_s_print() {
+        let numbered_bytes = numbered(30);
+        let ten: &[u8] = numbered_bytes.as_bytes();
+        let unended: &[u8] = b"one\ntwo\nthree";
+        let big_text = numbered(20_000);
+        let big: &[u8] = big_text.as_bytes();
+        let cases: &[(&[&str], &[u8])] = &[
+            (&["head"], ten),
+            (&["head", "-n", "3"], ten),
+            (&["head", "-3"], ten),
+            (&["head", "-n", "0"], ten),
+            (&["head", "-n", "5"], unended),
+            (&["head", "-n", "2"], unended),
+            (&["head"], b""),
+            (&["head", "-n", "2"], big),
+            (&["tail"], ten),
+            (&["tail", "-n", "3"], ten),
+            (&["tail", "-2"], unended),
+            (&["tail", "-n", "1"], unended),
+            (&["tail", "-n", "0"], ten),
+            (&["tail", "-n", "100"], ten),
+            (&["tail"], b""),
+            (&["tail", "-n", "5"], big),
+            (&["tail", "-n", "3"], b"\n\n\n\n"),
+        ];
+        for (args, stdin) in cases {
+            let mut h = Harness::new();
+            assert_eq!(
+                h.like_host(args, &[], stdin),
+                crate::testing::host_tool(args, &[], stdin),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn head_of_standard_input_reads_no_more_than_its_lines() {
+        // A line a read, as a pipe may give them; a hundred, then the end
+        // (a head that reads on fails the test instead of hanging it).
+        struct Lines(usize);
+        impl crate::Stdin for Lines {
+            fn read(&mut self, buf: &mut [u8]) -> Result<usize, vfs::Errno> {
+                self.0 += 1;
+                if self.0 > 100 {
+                    return Ok(0);
+                }
+                buf[..2].copy_from_slice(b"x\n");
+                Ok(2)
+            }
+        }
+        let mut h = Harness::new();
+        let (mut input, mut out) = (Lines(0), crate::testing::FakeStdout::file(None));
+        let io = crate::CommandIo {
+            vfs: &mut h.vfs,
+            console: &mut h.console,
+            system: &mut h.system,
+            stdin: &mut input,
+            stdout: &mut out,
+        };
+        let args = [String::from("-n"), String::from("3")];
+        assert_eq!(crate::run_command("head", super::head, &args, io), 0);
+        assert_eq!((out.text().as_str(), input.0), ("x\nx\nx\n", 3));
+        h.stdin = numbered(20_000).into_bytes();
+        h.console.interrupt_after = Some(1);
+        assert_eq!(h.run("tail -n 1"), (130, "^C\n".into()));
+    }
+
+    #[test]
+    fn tail_of_standard_input_joins_lines_a_pipe_cuts() {
+        // Three bytes a read, as a pipe may give them.
+        struct Cut(&'static [u8]);
+        impl crate::Stdin for Cut {
+            fn read(&mut self, buf: &mut [u8]) -> Result<usize, vfs::Errno> {
+                let n = self.0.len().min(3).min(buf.len());
+                buf[..n].copy_from_slice(&self.0[..n]);
+                self.0 = &self.0[n..];
+                Ok(n)
+            }
+        }
+        let mut h = Harness::new();
+        let mut out = crate::testing::FakeStdout::file(None);
+        let io = crate::CommandIo {
+            vfs: &mut h.vfs,
+            console: &mut h.console,
+            system: &mut h.system,
+            stdin: &mut Cut(b"one\ntwo\nthree\nfour"),
+            stdout: &mut out,
+        };
+        let args = [String::from("-n"), String::from("2")];
+        assert_eq!(crate::run_command("tail", super::tail, &args, io), 0);
+        assert_eq!(out.text(), "three\nfour");
+    }
+
+    #[test]
     fn head_and_tail_errors() {
         let mut h = Harness::new();
         assert_eq!(
@@ -637,7 +792,6 @@ mod tests {
             h.run("tail -n +2 /etc/motd"),
             (1, "tail: invalid number of lines: '+2'\n".into())
         );
-        assert_eq!(h.run("head"), (1, "head: missing operand\n".into()));
         assert_eq!(h.run("tail a b"), (1, "tail: extra operand 'b'\n".into()));
         assert_eq!(
             h.run("head /tmp"),
