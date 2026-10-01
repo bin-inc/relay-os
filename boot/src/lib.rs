@@ -22,12 +22,58 @@ mod tests {
     ];
 
     /// The code of a source file without its `//` comments, which may
-    /// explain a banned feature.
+    /// explain a banned feature. A `//` in a string literal is code, and
+    /// so is a `"` in a character literal (`'"'`); a lifetime (`'a`) is
+    /// neither. The loader has no raw strings.
     fn code(src: &str) -> String {
-        src.lines()
-            .map(|l| l.split("//").next().unwrap_or(""))
-            .collect::<Vec<_>>()
-            .join("\n")
+        let mut out = String::new();
+        let mut chars = src.chars().peekable();
+        let mut in_string = false;
+        while let Some(c) = chars.next() {
+            if in_string {
+                out.push(c);
+                match c {
+                    '\\' => out.extend(chars.next()),
+                    '"' => in_string = false,
+                    _ => {}
+                }
+                continue;
+            }
+            match c {
+                '/' if chars.peek() == Some(&'/') => {
+                    while chars.next_if(|&n| n != '\n').is_some() {}
+                }
+                '"' => {
+                    in_string = true;
+                    out.push(c);
+                }
+                '\'' => {
+                    out.push(c);
+                    let mut ahead = chars.clone();
+                    let literal = match ahead.next() {
+                        Some('\\') => true,
+                        Some(_) => ahead.next() == Some('\''),
+                        None => false,
+                    };
+                    if literal {
+                        // Its character (escaped or not) and closing quote.
+                        let first = chars.next();
+                        out.extend(first);
+                        if first == Some('\\') {
+                            out.extend(chars.next());
+                        }
+                        for n in chars.by_ref() {
+                            out.push(n);
+                            if n == '\'' {
+                                break;
+                            }
+                        }
+                    }
+                }
+                _ => out.push(c),
+            }
+        }
+        out
     }
 
     #[test]
@@ -49,6 +95,28 @@ mod tests {
             code("let x = 1; // Exclusive\n/// Exclusive"),
             "let x = 1; \n"
         );
+    }
+
+    #[test]
+    fn a_string_is_code_even_with_slashes_in_it() {
+        // Milestone 1's deferred finding: `//` in a string was cut as a
+        // comment, and a banned word after it was not seen.
+        let line = r#"let p = "a//b"; open("Exclusive"); // Exclusive"#;
+        assert_eq!(code(line), r#"let p = "a//b"; open("Exclusive"); "#);
+        let escaped = r#"let s = "\"//"; x(); // y"#;
+        assert_eq!(code(escaped), r#"let s = "\"//"; x(); "#);
+        let chars = r#"let q = '"'; let e = '\''; let d = '\"'; f(); // "g""#;
+        assert_eq!(
+            code(chars),
+            r#"let q = '"'; let e = '\''; let d = '\"'; f(); "#
+        );
+        let lifetime = r#"fn f(s: &'static str) -> &str { "it's" } // x"#;
+        assert_eq!(
+            code(lifetime),
+            r#"fn f(s: &'static str) -> &str { "it's" } "#
+        );
+        let two_lines = "let s = \"a\n//b\"; // c\nd";
+        assert_eq!(code(two_lines), "let s = \"a\n//b\"; \nd");
     }
 
     /// On the NUC 12 firmware, exclusive opens stop the firmware's own
