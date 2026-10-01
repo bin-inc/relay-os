@@ -33,6 +33,11 @@ impl Vars {
     pub fn get(&self, name: &str) -> &str {
         self.names.get(name).map_or("", String::as_str)
     }
+
+    /// Sets the variable `name` to `value`.
+    pub fn set(&mut self, name: &str, value: String) {
+        self.names.insert(String::from(name), value);
+    }
 }
 
 /// Why a line could not be expanded; the shell says so, status 1.
@@ -66,6 +71,22 @@ pub(crate) fn expand(line: &Line<Word>, vars: &Vars, status: i32) -> Result<Line
     })
 }
 
+/// An assignment's value: one string, however it expands (`$@` joined by
+/// blanks, as bash joins it there).
+pub(crate) fn value(word: &Word, vars: &Vars, status: i32) -> Result<String, Error> {
+    let x = Expander { vars, status };
+    Ok(x.fields(word)?
+        .into_iter()
+        .map(|f| f.text)
+        .collect::<Vec<_>>()
+        .join(" "))
+}
+
+/// A redirection's target, which must expand to one word.
+pub(crate) fn redirect(r: &Redirect<Word>, vars: &Vars, status: i32) -> Result<Redirect, Error> {
+    Expander { vars, status }.redirect(r)
+}
+
 struct Expander<'v> {
     vars: &'v Vars,
     status: i32,
@@ -84,23 +105,35 @@ impl Expander<'_> {
             words.extend(self.word(w)?);
         }
         let redirect = match &c.redirect {
-            Some(r) => {
-                let mut fields = self.word(&r.path)?;
-                if fields.len() != 1 {
-                    return Err(Error::AmbiguousRedirect(r.path.typed.clone()));
-                }
-                Some(Redirect {
-                    path: fields.remove(0),
-                    append: r.append,
-                })
-            }
+            Some(r) => Some(self.redirect(r)?),
             None => None,
         };
         Ok(Command { words, redirect })
     }
 
+    fn redirect(&self, r: &Redirect<Word>) -> Result<Redirect, Error> {
+        let mut fields = self.word(&r.path)?;
+        if fields.len() != 1 {
+            return Err(Error::AmbiguousRedirect(r.path.typed.clone()));
+        }
+        Ok(Redirect {
+            path: fields.remove(0),
+            append: r.append,
+        })
+    }
+
     /// The words `word` gives: one, none, or one an argument for `$@`.
     fn word(&self, word: &Word) -> Result<Vec<String>, Error> {
+        Ok(self
+            .fields(word)?
+            .into_iter()
+            .filter(|f| f.quoted || !f.text.is_empty())
+            .map(|f| f.text)
+            .collect())
+    }
+
+    /// What `word` expands to, before an unquoted empty word is removed.
+    fn fields(&self, word: &Word) -> Result<Vec<Field>, Error> {
         let mut fields = alloc::vec![Field {
             text: String::new(),
             quoted: false,
@@ -129,11 +162,7 @@ impl Expander<'_> {
                 }
             }
         }
-        Ok(fields
-            .into_iter()
-            .filter(|f| f.quoted || !f.text.is_empty())
-            .map(|f| f.text)
-            .collect())
+        Ok(fields)
     }
 
     /// A parameter's value (not `$@`'s).
@@ -270,6 +299,25 @@ mod tests {
         // An empty argument alone, as bash's.
         let empty = Vars::of(&[], &["s.sh", ""]);
         assert_eq!(words(r#"echo $@ "$@""#, &empty).unwrap(), ["echo", ""]);
+    }
+
+    #[test]
+    fn an_assignment_s_value_is_one_string() {
+        // As bash sets it: `$@` joined by blanks, nothing removed.
+        let v = script();
+        let value = |line: &str| {
+            let l = parse_line(line).unwrap();
+            let (_, value) = l.pipeline[0].words[0].assignment().unwrap();
+            super::value(&value, &v, 0)
+        };
+        assert_eq!(value("A=$@").unwrap(), "one two three  four");
+        assert_eq!(value(r#"A="<$@>""#).unwrap(), "<one two three  four>");
+        assert_eq!(value("A=$E$UNSET").unwrap(), "");
+        assert_eq!(value("A=$A.$#").unwrap(), "a  b.4");
+        assert_eq!(
+            value("A=${1A}").unwrap_err(),
+            Error::BadSubstitution("${1A}".into())
+        );
     }
 
     #[test]

@@ -113,6 +113,33 @@ impl Word {
         }
     }
 
+    /// The word as an assignment, `NAME=value`, if its name and `=` are
+    /// unquoted (`"A"=x` is none, as in bash): the name, and the value as a
+    /// word of its own, a `~` at its start or after a `:` made `/root`, as
+    /// bash's is.
+    pub fn assignment(&self) -> Option<(&str, Word)> {
+        let Some(Piece::Text(first, false)) = self.pieces.first() else {
+            return None;
+        };
+        let (name, rest) = first.split_once('=')?;
+        if !is_name(name) {
+            return None;
+        }
+        let mut pieces = Vec::new();
+        if !rest.is_empty() {
+            pieces.push(Piece::Text(rest.into(), false));
+        }
+        pieces.extend(self.pieces[1..].iter().cloned());
+        let count = pieces.len();
+        for (i, piece) in pieces.iter_mut().enumerate() {
+            if let Piece::Text(text, false) = piece {
+                *text = value_tildes(text, i == 0, i + 1 == count);
+            }
+        }
+        let typed = String::from(self.typed.get(name.len() + 1..).unwrap_or(""));
+        Some((name, Word { pieces, typed }))
+    }
+
     /// The word if it is one unquoted piece of text, all ASCII digits (`2`
     /// in `2>`).
     fn digits(&self) -> Option<&str> {
@@ -303,6 +330,47 @@ fn braced(cur: &mut Cursor<'_>) -> Result<Param, ParseError> {
     })
 }
 
+/// An unquoted piece of an assignment's value with each `~` made `/root`
+/// that is at the value's start (`first`) or after a `:`, and before a `/`,
+/// a `:` or the value's end (`last`).
+fn value_tildes(text: &str, first: bool, last: bool) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    let mut after_colon = first;
+    while let Some(c) = chars.next() {
+        let ends = match chars.peek() {
+            Some(&n) => n == '/' || n == ':',
+            None => last,
+        };
+        if c == '~' && after_colon && ends {
+            out.push_str(HOME);
+        } else {
+            out.push(c);
+        }
+        after_colon = c == ':';
+    }
+    out
+}
+
+/// A command of `words` and `redirect`. An assignment before a command,
+/// which gives bash's command an environment, is not supported: programs
+/// get none (user-space gate §9.4).
+fn command(
+    words: Vec<Word>,
+    redirect: Option<Redirect<Word>>,
+) -> Result<Command<Word>, ParseError> {
+    if let Some(first) = words.first()
+        && first.assignment().is_some()
+        && words.iter().any(|w| w.assignment().is_none())
+    {
+        return Err(ParseError::Unsupported(format!(
+            "{} before a command",
+            first.typed
+        )));
+    }
+    Ok(Command { words, redirect })
+}
+
 /// A word being built.
 #[derive(Default)]
 struct Building {
@@ -402,10 +470,7 @@ impl Parts {
             return Err(ParseError::Unsupported("> before |".into()));
         }
         let p = core::mem::take(self);
-        Ok(Command {
-            words: p.words,
-            redirect: None,
-        })
+        command(p.words, None)
     }
 }
 
@@ -555,10 +620,7 @@ pub fn parse_line(line: &str) -> Result<Line<Word>, ParseError> {
             Some(_) => ParseError::Unsupported("| >".into()),
         });
     }
-    pipeline.push(Command {
-        words: parts.words,
-        redirect: parts.redirect,
-    });
+    pipeline.push(command(parts.words, parts.redirect)?);
     Ok(Line {
         pipeline,
         background,
@@ -794,6 +856,82 @@ mod tests {
                 "syntax error: unexpected EOF while looking for matching `}'"
             );
         }
+    }
+
+    /// `word`'s assignment, the value's pieces joined.
+    fn assignment(word: &str) -> Option<(String, String)> {
+        let l = parse_line(word).unwrap();
+        let (name, value) = l.pipeline[0].words[0].assignment()?;
+        let text = value
+            .pieces
+            .iter()
+            .map(|p| match p {
+                Piece::Text(t, _) => t.clone(),
+                Piece::Param(p, _) => format!("<{p:?}>"),
+            })
+            .collect();
+        Some((name.into(), text))
+    }
+
+    #[test]
+    fn a_word_with_an_unquoted_name_and_equals_sign_is_an_assignment() {
+        for (word, name, value) in [
+            ("A=1", "A", "1"),
+            ("A=", "A", ""),
+            ("_x9=a=b", "_x9", "a=b"),
+            (r#"A="a b""#, "A", "a b"),
+            ("A=$B", "A", "<Name(\"B\")>"),
+            ("A=x$1", "A", "x<Arg(1)>"),
+            ("A=''", "A", ""),
+        ] {
+            assert_eq!(
+                assignment(word),
+                Some((name.into(), value.into())),
+                "{word}"
+            );
+        }
+        // Command names in bash (`1A=x: command not found`).
+        for word in [
+            "1A=x", "A-B=x", r#""A"=x"#, r"A\=x", "=x", r#"A"="x"#, "$A=x", "a",
+        ] {
+            assert_eq!(assignment(word), None, "{word}");
+        }
+    }
+
+    #[test]
+    fn a_tilde_in_a_value_is_home_at_its_start_or_after_a_colon() {
+        // What bash sets for each.
+        for (word, value) in [
+            ("A=~/x:~/y:~:a~", "/root/x:/root/y:/root:a~"),
+            ("A=~", "/root"),
+            ("A=x:~", "x:/root"),
+            ("A=~x", "~x"),
+            ("A='~'/x", "~/x"),
+            (r#"A=~"/x""#, "~/x"),
+            ("A=~$B", "~<Name(\"B\")>"),
+        ] {
+            assert_eq!(assignment(word).unwrap().1, value, "{word}");
+        }
+    }
+
+    #[test]
+    fn an_assignment_before_a_command_is_unsupported() {
+        // bash gives the command an environment, which programs have not.
+        for (line, what) in [
+            ("A=1 echo hi", "A=1 before a command"),
+            ("A='a b' B=2 cat f", "A='a b' before a command"),
+            ("ls | A=1 wc", "A=1 before a command"),
+            ("A=1 echo &", "A=1 before a command"),
+        ] {
+            assert_eq!(
+                parse_line(line),
+                Err(ParseError::Unsupported(what.into())),
+                "{line}"
+            );
+        }
+        // An argument that looks like one is one; assignments alone parse.
+        assert_eq!(words("echo A=1"), ["echo", "A=1"]);
+        assert!(parse_line("A=1 B=2 > f").is_ok());
     }
 
     #[test]

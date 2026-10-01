@@ -191,6 +191,20 @@ impl<'a> Shell<'a> {
         if typed.is_blank() {
             return self.status;
         }
+        let assigns = typed
+            .pipeline
+            .iter()
+            .find_map(|c| c.words.first().filter(|w| w.assignment().is_some()));
+        if let Some(first) = assigns {
+            // Alone on its line; bash's changes nothing elsewhere.
+            let place = match (&typed.background, typed.pipeline.len()) {
+                (Some(_), _) => "the background",
+                (None, 1) => return self.assign(&typed.pipeline[0]),
+                (None, _) => "a pipeline",
+            };
+            let message = format!("{NAME}: {}: cannot be used in {place}\n", first.typed);
+            return self.finish(1, message);
+        }
         let mut pipeline = match expand::expand(&typed, &self.vars, self.status) {
             Ok(parser::Line {
                 pipeline,
@@ -250,6 +264,29 @@ impl<'a> Shell<'a> {
             status = self.run_script(script);
         }
         self.finish(status, ran.message)
+    }
+
+    /// A line of assignments (spec §9.4): each sets its variable in turn,
+    /// so a later one reads an earlier one, and the status is 0. A
+    /// redirection after them makes its file, as bash's does.
+    fn assign(&mut self, cmd: &parser::Command<parser::Word>) -> i32 {
+        for (name, value) in cmd.words.iter().filter_map(parser::Word::assignment) {
+            match expand::value(&value, &self.vars, self.status) {
+                Ok(v) => self.vars.set(name, v),
+                Err(e) => return self.finish(1, format!("{NAME}: {e}\n")),
+            }
+        }
+        let redirect = match cmd.redirect.as_ref() {
+            Some(r) => match expand::redirect(r, &self.vars, self.status) {
+                Ok(r) => Some(r),
+                Err(e) => return self.finish(1, format!("{NAME}: {e}\n")),
+            },
+            None => None,
+        };
+        match runner::redirect_to(&mut *self.vfs, redirect.as_ref()) {
+            Ok(_) => self.finish(0, String::new()),
+            Err(ran) => self.finish(ran.status, ran.message),
+        }
     }
 
     /// Runs a pipeline (user-space gate §9.1): its status is the last
@@ -1084,6 +1121,88 @@ mod tests {
         assert!(
             out.contains("[1]+  Done                    $E | sleep 1\n"),
             "{out}"
+        );
+    }
+
+    #[test]
+    fn an_assignment_sets_a_variable_for_the_lines_after_it() {
+        let mut h = Harness::new();
+        // What bash prints for each.
+        assert_eq!(
+            h.lines(&[
+                "A=1 B=$A C=",
+                "echo $A $B [$C] \"[$C]\"",
+                "nope",
+                "D=$? E=\"a  b\" F=~/x",
+                "echo $? $D \"$E\" $F",
+                "A=${A}2",
+                "echo $A",
+            ]),
+            (
+                0,
+                "1 1 [] []\nrelay-sh: nope: command not found\n0 127 a  b /root/x\n12\n".into()
+            )
+        );
+        // A value with blanks stays one word (bash would split it).
+        let mut h = spawning();
+        let mut shell = Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs);
+        shell.execute("A='a b' P=t-args");
+        assert_eq!(shell.execute("$P $A"), 3);
+        assert_eq!(h.programs.spawned[0].args, ["t-args", "a b"]);
+    }
+
+    #[test]
+    fn a_variable_may_name_a_built_in() {
+        let mut h = Harness::new();
+        assert_eq!(
+            h.lines(&["C=cd D=/etc", "$C $D", "pwd"]),
+            (0, "/etc\n".into())
+        );
+    }
+
+    #[test]
+    fn an_assignment_with_a_redirection_makes_its_file() {
+        let mut h = Harness::new();
+        // bash's: the variable is set even when the file cannot be made.
+        assert_eq!(h.lines(&["A=1 > /tmp/f", "echo $A"]), (0, "1\n".into()));
+        assert!(h.exists("/tmp/f"));
+        assert_eq!(
+            h.lines(&["B=2 > /nope/f", "echo $? $B"]),
+            (
+                0,
+                "relay-sh: /nope/f: No such file or directory\n1 2\n".into()
+            )
+        );
+        assert_eq!(
+            h.lines(&["B=3 > $NONE", "echo $? $B"]),
+            (0, "relay-sh: $NONE: ambiguous redirect\n1 3\n".into())
+        );
+    }
+
+    #[test]
+    fn an_assignment_cannot_be_in_a_pipeline_or_the_background() {
+        // bash runs it in a shell of its own there, so it sets nothing.
+        let mut h = spawning();
+        for (line, said) in [
+            ("A=1 | t-args", "A=1: cannot be used in a pipeline"),
+            ("t-args | A='x y'", "A='x y': cannot be used in a pipeline"),
+            ("A=1 &", "A=1: cannot be used in the background"),
+            (
+                "A=1 B=2 | t-args &",
+                "A=1: cannot be used in the background",
+            ),
+        ] {
+            assert_eq!(
+                h.spawning(line),
+                (1, alloc::format!("relay-sh: {said}\n")),
+                "{line}"
+            );
+        }
+        assert!(h.programs.spawned.is_empty(), "nothing of it ran");
+        // A word that is no assignment is a command, as in bash.
+        assert_eq!(
+            h.run("1A=x"),
+            (127, "relay-sh: 1A=x: command not found\n".into())
         );
     }
 
