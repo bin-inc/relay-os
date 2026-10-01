@@ -5,7 +5,8 @@
 //!   start again from 1 only once the table is empty.
 //! - The newest job is the current one, marked `+`, the one before it `-`.
 //! - A job has ended when every process it started has; its status is its
-//!   last one's: `Done`, `Exit 3` or `Killed`.
+//!   last one's: `Done`, `Exit 3`, or the words bash has for the signal
+//!   Linux would have sent (`Killed`, `Segmentation fault`, …).
 //! - A line is bash's: `[1]+  Done                    sleep 5`, the state
 //!   padded to 24 columns, a running job's text followed by ` &`.
 
@@ -176,9 +177,25 @@ impl Jobs {
             _ if !job.finished() => (String::from("Running"), " &"),
             Some(w) if w.how == EXITED && w.code == 0 => (String::from("Done"), ""),
             Some(w) if w.how == EXITED => (format!("Exit {}", w.code), ""),
-            _ => (String::from("Killed"), ""),
+            Some(w) => (String::from(signal_words(status_of(&w))), ""),
+            None => (String::from("Killed"), ""),
         };
-        format!("[{}]{mark}  {state:<24}{}{amp}\n", job.number, job.text)
+        // bash pads to 24 and no further, so its `Floating point
+        // exception` meets the text; here a blank stays between.
+        format!("[{}]{mark}  {state:<23} {}{amp}\n", job.number, job.text)
+    }
+}
+
+/// bash's words for a job its signal ended, by the status the signal
+/// gives (`killed::killed`'s): SIGSEGV for a page fault or a protection
+/// fault, SIGILL, SIGFPE, SIGINT, and SIGKILL for `kill` or anything else.
+fn signal_words(status: i32) -> &'static str {
+    match status {
+        139 => "Segmentation fault",
+        132 => "Illegal instruction",
+        136 => "Floating point exception",
+        130 => "Interrupt",
+        _ => "Killed",
     }
 }
 
@@ -279,7 +296,7 @@ mod tests {
         assert_eq!(j.status(n), Some(139));
         assert_eq!(
             j.take(n).unwrap(),
-            "[1]+  Killed                  t-fault null-read\n"
+            "[1]+  Segmentation fault      t-fault null-read\n"
         );
         let n = j.add(35, &[35], "t-spin");
         j.ended(35, killed());
@@ -308,5 +325,36 @@ mod tests {
         j.ended(40, WaitStatus::exited(0));
         j.forget_finished();
         assert!(!j.has(a) && j.has(b));
+    }
+
+    #[test]
+    fn a_job_a_fault_ended_says_bash_s_words_for_its_signal() {
+        use relay_abi::wait::{
+            FAULT_DIVIDE, FAULT_FPU, FAULT_GENERAL_PROTECTION, FAULT_INVALID_OPCODE,
+            FAULT_STACK_OVERFLOW,
+        };
+        // What bash 5.2 printed for jobs SIGSEGV, SIGILL and SIGFPE ended
+        // (without its `(core dumped)`, which nothing here does).
+        for (fault, words) in [
+            (FAULT_PAGE, "Segmentation fault      "),
+            (FAULT_GENERAL_PROTECTION, "Segmentation fault      "),
+            (FAULT_STACK_OVERFLOW, "Segmentation fault      "),
+            (FAULT_INVALID_OPCODE, "Illegal instruction     "),
+            (FAULT_DIVIDE, "Floating point exception "),
+            (FAULT_FPU, "Floating point exception "),
+        ] {
+            let mut j = Jobs::new();
+            let n = j.add(50, &[50], "t-fault x");
+            j.ended(50, WaitStatus::fault(fault, ACCESS_READ, 0, 0x40_1000));
+            assert_eq!(
+                j.take(n).unwrap(),
+                alloc::format!("[1]+  {words}t-fault x\n"),
+                "{fault}"
+            );
+        }
+        let mut j = Jobs::new();
+        let n = j.add(51, &[51], "t-spin");
+        j.ended(51, WaitStatus::killed(relay_abi::wait::KILLED_CTRL_C));
+        assert_eq!(j.take(n).unwrap(), "[1]+  Interrupt               t-spin\n");
     }
 }
