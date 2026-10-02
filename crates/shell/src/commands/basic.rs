@@ -124,7 +124,9 @@ pub fn help(ctx: &mut Ctx<'_>, _: &[String]) -> i32 {
         ctx,
         "Send output to a file with `> file` (replace) or `>> file` (append),\n\
          or into another program with `| cmd` (built-ins cannot be in a\n\
-         pipeline). End a line with `&` to run it in the background.\n\
+         pipeline). End a command with `&` to run it in the background, or\n\
+         with `;` to run the next one after it. `a && b` runs b if a\n\
+         succeeds, `a || b` if it fails, and `! a` turns a's status round.\n\
          `sh FILE ARG...` runs a script, which reads its arguments as\n\
          `$1`...`$9`, `$#` and \"$@\". `$?` is the last command's status, and\n\
          `NAME=value` sets `$NAME`."
@@ -346,9 +348,15 @@ mod tests {
             "\"$@\"",
             "$?",
             "NAME=value",
+            "`;`",
+            "&&",
+            "||",
+            "`! ",
         ] {
             assert!(builtins.contains(what), "{what}");
         }
+        // No line wider than the NUC's 120 columns, nor 72.
+        assert!(text.lines().all(|l| l.chars().count() <= 72), "{text}");
     }
 
     #[test]

@@ -203,6 +203,60 @@ mod tests {
     }
 
     #[test]
+    fn a_command_goes_on_across_the_lines_of_a_script() {
+        // Each line is traced as it is read; the command runs once a line
+        // finishes it. Blank and comment lines are not traced.
+        let mut h = Harness::new();
+        h.put(
+            "/tmp/s.sh",
+            b"echo a &&\n# c\n\necho b\necho c |\nwc -c\nfalse ||\n  echo d\n",
+        );
+        assert_eq!(
+            h.run("sh /tmp/s.sh"),
+            (
+                0,
+                "+ echo a &&\n+ echo b\na\nb\n+ echo c |\n+ wc -c\n2\n\
+                 + false ||\n+ echo d\nd\n"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_script_that_ends_inside_a_command_does_not_run_it() {
+        // `bash s.sh`'s message, without its `line 2:`; status 2.
+        let mut h = Harness::new();
+        h.put("/tmp/s.sh", b"echo a &&\n");
+        assert_eq!(
+            h.run("sh /tmp/s.sh"),
+            (
+                2,
+                "+ echo a &&\nrelay-sh: syntax error: unexpected end of file\n".into()
+            )
+        );
+        // A line that does not parse drops the command and the script goes
+        // on (user-space gate §8.3).
+        h.put("/tmp/t.sh", b"echo a &&\n|| b\necho after\n");
+        assert_eq!(
+            h.run("sh /tmp/t.sh"),
+            (
+                0,
+                "+ echo a &&\n+ || b\nrelay-sh: syntax error near unexpected token `||'\n\
+                 + echo after\nafter\n"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn ctrl_c_while_a_command_is_read_ends_the_script_there() {
+        let mut h = Harness::new();
+        h.put("/tmp/s.sh", b"echo a &&\necho b\n");
+        h.console.interrupt_after = Some(1);
+        assert_eq!(h.run("sh /tmp/s.sh"), (130, "+ echo a &&\n^C\n".into()));
+    }
+
+    #[test]
     fn a_line_that_does_not_parse_does_not_stop_the_script() {
         let mut h = Harness::new();
         h.put("/tmp/s.sh", b"echo 'open\nls; ;\necho after\n");

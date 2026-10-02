@@ -35,9 +35,11 @@
 //! `&&` and `||` join pipelines into an and-or list. bash's syntax errors
 //! name any of them with no command before it, and an and-or list ending
 //! with `&` is refused. An unquoted `!` word at a pipeline's start negates
-//! its status. bash's reserved words (`if`, `while`, `{`, …) are refused
-//! where a command name would stand. Every other shell feature is refused:
-//! an unquoted `*`, `?`,
+//! its status. A newline ends an item as `;` does, but after `|`, `&&` or
+//! `||` the command goes on to the next line; text that ends there is
+//! [`ParseError::Incomplete`], and a reader asks for more. bash's reserved
+//! words (`if`, `while`, `{`, …) are refused where a command name would
+//! stand. Every other shell feature is refused: an unquoted `*`, `?`,
 //! `<`, `` ` ``, `(` or `)` is an error naming the character, instead of
 //! being passed on as if it were plain text; so are `|&` (the errors into
 //! the pipe too), `>&` and `2>` (another stream).
@@ -48,6 +50,10 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::iter::Peekable;
 use core::str::CharIndices;
+
+/// The most a command being read across lines holds (programmable shell
+/// gate §4.5), as a script does.
+pub const COMMAND_MAX: usize = 64 * 1024;
 
 /// The home directory `~` stands for.
 pub const HOME: &str = "/root";
@@ -223,8 +229,12 @@ pub enum ParseError {
     /// that has no file name yet, or an operator with no command before
     /// it. Holds the token, as bash's message names it.
     MissingTarget(&'static str),
-    /// A `|` without a command after it.
-    UnexpectedEnd,
+    /// The text is the start of a command that needs more lines: it ends
+    /// after a `|`, `&&` or `||` (programmable shell gate §4.3). A reader
+    /// asks for the next line; where none can come it is bash's error.
+    Incomplete,
+    /// A command being read would be longer than [`COMMAND_MAX`].
+    TooLong,
     /// A `${` without its `}`.
     UnclosedBrace,
     /// From `parse` only: the line parses, but does not expand (why).
@@ -238,7 +248,8 @@ impl fmt::Display for ParseError {
             ParseError::UnterminatedQuote => f.write_str("syntax error: unterminated quote"),
             ParseError::TrailingBackslash => f.write_str("syntax error: nothing after \\"),
             ParseError::MissingTarget(t) => write!(f, "syntax error near unexpected token `{t}'"),
-            ParseError::UnexpectedEnd => f.write_str("syntax error: unexpected end of file"),
+            ParseError::Incomplete => f.write_str("syntax error: unexpected end of file"),
+            ParseError::TooLong => f.write_str("the command would be longer than 64 KiB"),
             ParseError::Expansion(why) => f.write_str(why),
             ParseError::UnclosedBrace => {
                 f.write_str("syntax error: unexpected EOF while looking for matching `}'")
@@ -691,6 +702,8 @@ pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
     let mut items = Items::default();
     // Where the item being read starts in the line.
     let mut item_start = 0;
+    // Where each comment starts and ends in the line.
+    let mut comments = Vec::new();
     let mut pipeline = Vec::new();
     let mut parts = Parts::default();
     let mut word = Building::default();
@@ -769,7 +782,8 @@ pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
                     return Err(ParseError::Unsupported(format!("& after {}", c.token())));
                 }
                 // Without its `!`, as bash's `jobs` shows it.
-                let mut text = line[item_start..at].trim_matches([' ', '\t']);
+                let typed = job_text(line, item_start, at, &comments);
+                let mut text = typed.as_str();
                 for _ in 0..parts.bangs {
                     text = text[1..].trim_start_matches([' ', '\t']);
                 }
@@ -811,9 +825,11 @@ pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
                 }
                 word.close_quote(before);
             }
+            // bash joins a line ending in `\` to the next; here, as before
+            // a command could go on to another line, it is an error.
             '\\' => match cur.next() {
+                Some('\n') | None => return Err(ParseError::TrailingBackslash),
                 Some(c) => word.quoted(c),
-                None => return Err(ParseError::TrailingBackslash),
             },
             '$' => match parameter(&mut cur, false)? {
                 Some(p) => word.param(p, false),
@@ -824,7 +840,32 @@ pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
                 }
             },
             // A comment runs to the end of the line.
-            '#' if !word.started => break,
+            '#' if !word.started => {
+                while cur.peek().is_some_and(|c| c != '\n') {
+                    cur.next();
+                }
+                comments.push((at, cur.pos()));
+            }
+            '\n' => {
+                parts.end_word(&mut word, line)?;
+                if parts.pending.is_some() {
+                    return Err(ParseError::MissingTarget("newline"));
+                }
+                // After `|`, `&&` or `||` the command goes on, past blank
+                // and comment lines, as bash's does.
+                // (A `!` counts only before a pipeline's first command.)
+                let nothing = parts.words.is_empty()
+                    && parts.redirect.is_none()
+                    && (parts.bangs == 0 || !pipeline.is_empty());
+                if nothing && (!pipeline.is_empty() || items.connector.is_some()) {
+                    continue;
+                }
+                if let Some(p) = end_pipeline(&mut parts, &mut pipeline, "newline")? {
+                    items.pipeline(p);
+                }
+                items.end(None);
+                item_start = cur.pos();
+            }
             c if UNSUPPORTED.contains(&c) => return Err(ParseError::Unsupported(c.into())),
             c => {
                 if !word.started && c == '~' {
@@ -847,16 +888,67 @@ pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
         return Err(ParseError::MissingTarget("newline"));
     }
     if !pipeline.is_empty() && parts.words.is_empty() && parts.redirect.is_none() {
-        return Err(ParseError::UnexpectedEnd);
+        return Err(ParseError::Incomplete);
     }
     // Nothing after the last `;` (or at all) is no item.
     match end_pipeline(&mut parts, &mut pipeline, "newline")? {
         Some(p) => items.pipeline(p),
-        None if items.connector.is_some() => return Err(ParseError::UnexpectedEnd),
+        None if items.connector.is_some() => return Err(ParseError::Incomplete),
         None => {}
     }
     items.end(None);
     Ok(List { items: items.items })
+}
+
+/// Whether `line`, read as the parser reads quotes, escapes and comments,
+/// ends after `|`, `&&` or `||`: the command it is in goes on after it, even
+/// when the line does not parse (a reader drops a refused command to its
+/// end). What is quoted counts as a word's characters, so a quote left
+/// open, the line's own error, ends nothing open.
+pub fn ends_open(line: &str) -> bool {
+    let mut seen = String::new();
+    let mut quote = None;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some('"'), '\\') => {
+                chars.next();
+            }
+            (Some(_), _) => {}
+            (None, '\'' | '"') => quote = Some(c),
+            (None, '\\') => {
+                chars.next();
+                seen.push('x');
+            }
+            (None, '#') if seen.chars().last().is_none_or(|p| " \t;&|<>()".contains(p)) => break,
+            (None, c) => seen.push(c),
+        }
+        if quote.is_some() {
+            seen.push('x');
+        }
+    }
+    let seen = seen.trim_end_matches([' ', '\t']);
+    seen.ends_with('|') || seen.ends_with("&&")
+}
+
+/// What was typed of a background job from `start` to `end` (its `&`), as
+/// bash's `jobs` shows it: one line, its lines joined by a blank, without
+/// its comments or blank lines.
+fn job_text(line: &str, start: usize, end: usize, comments: &[(usize, usize)]) -> String {
+    let mut typed = String::new();
+    let mut from = start;
+    for &(c, e) in comments.iter().filter(|&&(c, _)| c >= start && c < end) {
+        typed.push_str(&line[from..c]);
+        from = e;
+    }
+    typed.push_str(&line[from..end]);
+    let lines: Vec<&str> = typed
+        .split('\n')
+        .map(|l| l.trim_matches([' ', '\t']))
+        .filter(|l| !l.is_empty())
+        .collect();
+    lines.join(" ")
 }
 
 /// A `&&` or `||` (`connector`) ends the pipeline before it, which must
@@ -1476,7 +1568,7 @@ mod tests {
         }
         // `bash -c 'a &&'`.
         for line in ["a &&", "a || ", "a && # b"] {
-            assert_eq!(parse_line(line), Err(ParseError::UnexpectedEnd), "{line}");
+            assert_eq!(parse_line(line), Err(ParseError::Incomplete), "{line}");
         }
         // bash runs the whole and-or list in the background, in a shell
         // of its own (programmable shell gate §4.1).
@@ -1573,6 +1665,7 @@ mod tests {
                 alloc::format!("a && {word} b"),
                 alloc::format!("a | {word}"),
                 alloc::format!("! {word}"),
+                alloc::format!("a &\n{word}"),
             ] {
                 assert_eq!(
                     parse_line(&line),
@@ -1593,6 +1686,78 @@ mod tests {
             assert_eq!(parse(line).unwrap()[0].words, words, "{line}");
         }
         assert!(parse_line("if=1").is_ok(), "an assignment");
+    }
+
+    #[test]
+    fn a_newline_ends_an_item_but_not_after_an_operator() {
+        let names = |line: &str| -> Vec<Vec<String>> {
+            parse_line(line)
+                .unwrap()
+                .items
+                .iter()
+                .map(|i| {
+                    let mut ps = alloc::vec![&i.and_or.first];
+                    ps.extend(i.and_or.rest.iter().map(|(_, p)| p));
+                    ps.iter()
+                        .flat_map(|p| p.commands.iter().map(|c| c.words[0].typed.clone()))
+                        .collect()
+                })
+                .collect()
+        };
+        assert_eq!(names("a\nb\n"), [["a"], ["b"]]);
+        // Blank and comment lines hold nothing.
+        assert_eq!(names("\na\n\n  # c\n\tb # d\n"), [["a"], ["b"]]);
+        // After `|`, `&&` or `||` the command goes on, past them, as bash's.
+        assert_eq!(names("a &&\nb\nc"), [&["a", "b"][..], &["c"]]);
+        assert_eq!(names("a |\n\n# c\n b"), [["a", "b"]]);
+        assert_eq!(names("a ||  # c\nb && \n c"), [["a", "b", "c"]]);
+        // A `!` before the pipeline is no command typed after its `|`.
+        assert_eq!(names("! a |\n b"), [["a", "b"]]);
+        // A background job on a later line has its own text.
+        let list = parse_line("a\nsleep 5 &\nb").unwrap();
+        assert_eq!(list.items[1].background.as_deref(), Some("sleep 5"));
+    }
+
+    #[test]
+    fn a_job_typed_across_lines_has_one_line_of_text() {
+        // As bash's `jobs` shows it: the lines joined by a blank, without
+        // comments or blank lines (the review found them kept).
+        for (text, job) in [
+            ("sleep 5 |\n# c\ncat &", "sleep 5 | cat"),
+            ("sleep 5 |   # c\n\n  cat  &", "sleep 5 | cat"),
+            ("! sleep 5 |\n  cat &", "sleep 5 | cat"),
+            ("a\nsleep 5 &", "sleep 5"),
+            ("echo '#' \\# |\n cat&", "echo '#' \\# | cat"),
+        ] {
+            let list = parse_line(text).unwrap();
+            let last = list.items.last().unwrap();
+            assert_eq!(last.background.as_deref(), Some(job), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_command_that_needs_more_lines_is_incomplete() {
+        for text in ["a &&", "a &&\n", "a |\n# c\n", "a ||\n\n", "a\nb |"] {
+            assert_eq!(parse_line(text), Err(ParseError::Incomplete), "{text:?}");
+        }
+        assert_eq!(
+            ParseError::Incomplete.to_string(),
+            "syntax error: unexpected end of file"
+        );
+        // A newline is no target, and starts no item before `;` or `&&`.
+        for (text, token) in [("echo >\nb", "newline"), ("a\n;", ";"), ("a\n&& b", "&&")] {
+            assert_eq!(
+                parse_line(text).unwrap_err().to_string(),
+                alloc::format!("syntax error near unexpected token `{token}'"),
+                "{text:?}"
+            );
+        }
+        // A `\` at a line's end is still an error: bash would join the
+        // lines.
+        assert_eq!(
+            parse_line("echo a \\\nb"),
+            Err(ParseError::TrailingBackslash)
+        );
     }
 
     #[test]

@@ -23,6 +23,7 @@ pub mod killed;
 pub mod parser;
 mod pattern;
 mod program;
+mod reader;
 mod runner;
 mod shell;
 mod testing;
