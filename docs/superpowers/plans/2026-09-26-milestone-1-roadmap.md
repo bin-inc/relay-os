@@ -2,6 +2,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`
 
+**Status:** Done. All six plans were written and executed; milestone 1 ended at version 0.2.0 (tag `v0.2.0`, 2026-09-29). This roadmap is kept as it was planned.
+
 The milestone is split into six plans. Each one ends with software that can be tested by itself. Each plan is written just before it is executed, so it builds on the code that actually exists and on what the previous NUC check showed. Plans 1 and 2 are written in full; plans 3–6 are summarised here so their scope and order are agreed up front.
 
 ```

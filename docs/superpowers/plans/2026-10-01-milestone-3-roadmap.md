@@ -2,6 +2,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-29-user-space-gate-design.md` (the user-space gate; milestone 3 is its second half, "Pipes and jobs", version 0.4.0)
 
+**Status:** Done. All four plans were executed; milestone 3, and with it the user-space gate, ended at version 0.4.0 (tag `v0.4.0`, 2026-10-02).
+
 Milestone 3 connects the programs of milestone 2: pipes and standard input, background jobs with `ps` and `kill`, and script arguments and variables (spec §9). It is split into the four plans of spec §13, steps 6–9, named `m3-plan-1` to `m3-plan-4` (their files `docs/superpowers/plans/<date>-m3-plan-<n>-<name>.md`, their branches `m3p<n>/…`). Each one ends with software that can be tested by itself. Each plan is written just before it is executed, so it builds on the code that actually exists and on what the previous plan's checks showed.
 
 ```

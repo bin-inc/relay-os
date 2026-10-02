@@ -2,6 +2,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-29-user-space-gate-design.md` (the user-space gate; milestone 2 is its first half, "Programs", version 0.3.0)
 
+**Status:** Done. All seven plans were executed; milestone 2 ended at version 0.3.0 (tag `v0.3.0`, 2026-10-01).
+
 Milestone 2 moves the shell and every command out of the kernel into ring-3 programs loaded from a read-only `/bin`. It is split into seven plans (plan 3 became two while it was planned, spec §16 item 3, and so did plan 4, §16 item 5). Each one ends with software that can be tested by itself. Each plan is written just before it is executed, so it builds on the code that actually exists and on what the previous NUC check showed. All seven are written in full.
 
 ```
