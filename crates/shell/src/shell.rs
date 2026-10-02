@@ -191,33 +191,50 @@ impl<'a> Shell<'a> {
     /// status. Every command is followed by a sync, so its changes are on
     /// the disk when the prompt comes back.
     pub fn execute(&mut self, line: &str) -> i32 {
-        let typed = match parser::parse_line(line) {
-            Ok(typed) => typed,
+        let list = match parser::parse_line(line) {
+            Ok(list) => list,
             Err(e) => return self.finish(SYNTAX, format!("{NAME}: {e}\n")),
         };
-        if typed.is_blank() {
-            return self.status;
+        self.run_list(&list)
+    }
+
+    /// Runs a list's items one after another (programmable shell gate
+    /// §5.1); its status is the last one's. An empty list keeps the last
+    /// status.
+    fn run_list(&mut self, list: &parser::List<parser::Word>) -> i32 {
+        let mut status = self.status;
+        for item in &list.items {
+            status = self.run_pipeline(&item.and_or.first, item.background.as_deref());
         }
+        status
+    }
+
+    /// Runs one pipeline, or starts it in the background with the job's
+    /// text `background`, its words expanded just before.
+    fn run_pipeline(
+        &mut self,
+        typed: &parser::Pipeline<parser::Word>,
+        background: Option<&str>,
+    ) -> i32 {
         let assigns = typed
-            .pipeline
+            .commands
             .iter()
             .find_map(|c| c.words.first().filter(|w| w.assignment().is_some()));
         if let Some(first) = assigns {
             // Alone on its line; bash's changes nothing elsewhere.
-            let place = match (&typed.background, typed.pipeline.len()) {
+            let place = match (background, typed.commands.len()) {
                 (Some(_), _) => "the background",
-                (None, 1) => return self.assign(&typed.pipeline[0]),
+                (None, 1) => return self.assign(&typed.commands[0]),
                 (None, _) => "a pipeline",
             };
             let message = format!("{NAME}: {}: cannot be used in {place}\n", first.typed);
             return self.finish(1, message);
         }
-        let mut pipeline = match expand::expand(&typed, &self.vars, self.status) {
-            Ok(parser::Line {
-                pipeline,
-                background: Some(text),
-            }) => return self.background(&pipeline, &text),
-            Ok(line) => line.pipeline,
+        let mut pipeline = match expand::expand(typed, &self.vars, self.status) {
+            Ok(p) => match background {
+                Some(text) => return self.background(&p.commands, text),
+                None => p.commands,
+            },
             Err(e) => return self.finish(1, format!("{NAME}: {e}\n")),
         };
         if pipeline.len() > 1 {
@@ -512,7 +529,7 @@ impl<'a> Shell<'a> {
         for line in text.lines() {
             // Blank as typed: one whose words expand to nothing is traced
             // and runs.
-            if parser::parse_line(line).is_ok_and(|l| l.is_blank()) {
+            if parser::parse_line(line).is_ok_and(|l| l.items.is_empty()) {
                 continue;
             }
             if self.console.interrupted() {

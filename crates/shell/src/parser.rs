@@ -46,24 +46,44 @@ use core::str::CharIndices;
 /// The home directory `~` stands for.
 pub const HOME: &str = "/root";
 
-/// A line's commands: one, or several joined by `|`, each one's output the
-/// next one's input. A blank line is one command without words.
-pub type Pipeline<W = String> = Vec<Command<W>>;
-
-/// A command line: its pipeline, and, if it ends with `&`, what was typed
-/// before the `&` (a background job's text, spec §9.2).
+/// What a command line holds (programmable shell gate §4.1): its items,
+/// run one after another. A line of nothing but blanks or a comment holds
+/// none.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Line<W = String> {
-    pub pipeline: Pipeline<W>,
+pub struct List<W = String> {
+    pub items: Vec<Item<W>>,
+}
+
+/// One item of a list: an and-or list, and, if it ends with `&`, what was
+/// typed of it (a background job's text, user-space gate §9.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Item<W = String> {
+    pub and_or: AndOr<W>,
     pub background: Option<String>,
 }
 
-impl<W> Line<W> {
-    /// Nothing but blanks or a comment was typed.
-    pub fn is_blank(&self) -> bool {
-        matches!(&self.pipeline[..], [c] if c.words.is_empty() && c.redirect.is_none())
-            && self.background.is_none()
-    }
+/// Pipelines joined by `&&` and `||`: the first, then each one with what
+/// joins it to the ones before.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AndOr<W = String> {
+    pub first: Pipeline<W>,
+    pub rest: Vec<(Connector, Pipeline<W>)>,
+}
+
+/// What joins a pipeline to the ones before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Connector {
+    /// `&&`: it runs if the status so far is 0.
+    And,
+    /// `||`: it runs if the status so far is not 0.
+    Or,
+}
+
+/// One command, or several joined by `|`, each one's output the next
+/// one's input.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pipeline<W = String> {
+    pub commands: Vec<Command<W>>,
 }
 
 /// One command: its words and where its output goes. The parser gives
@@ -536,20 +556,26 @@ impl Parts {
     }
 }
 
-/// The commands of `line`, whether or not it ends with `&`, their words
-/// expanded with no variables set (for callers that run no shell: tests);
-/// a line that does not expand is `ParseError::Expansion`.
-pub fn parse(line: &str) -> Result<Pipeline, ParseError> {
-    let typed = parse_line(line)?;
-    match crate::expand::plain(&typed) {
-        Ok(l) => Ok(l.pipeline),
+/// The commands of the first pipeline of `line`, whether or not it ends
+/// with `&`, their words expanded with no variables set (for callers that
+/// run no shell: tests); a line that does not expand is
+/// `ParseError::Expansion`. A blank line is one command without words.
+pub fn parse(line: &str) -> Result<Vec<Command>, ParseError> {
+    let list = parse_line(line)?;
+    let Some(item) = list.items.first() else {
+        return Ok(alloc::vec![Command {
+            words: Vec::new(),
+            redirect: None,
+        }]);
+    };
+    match crate::expand::plain(&item.and_or.first) {
+        Ok(p) => Ok(p.commands),
         Err(e) => Err(ParseError::Expansion(e.to_string())),
     }
 }
 
-/// `line`'s commands, their words as typed, and whether it runs in the
-/// background.
-pub fn parse_line(line: &str) -> Result<Line<Word>, ParseError> {
+/// `line`'s list, its words as typed.
+pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
     let mut background = None;
     let mut pipeline = Vec::new();
     let mut parts = Parts::default();
@@ -687,9 +713,19 @@ pub fn parse_line(line: &str) -> Result<Line<Word>, ParseError> {
         });
     }
     pipeline.push(command(parts.words, parts.redirect)?);
-    Ok(Line {
-        pipeline,
-        background,
+    // Nothing but blanks or a comment (`&` alone is an error above).
+    if matches!(&pipeline[..], [c] if c.words.is_empty() && c.redirect.is_none()) {
+        return Ok(List { items: Vec::new() });
+    }
+    let first = Pipeline { commands: pipeline };
+    Ok(List {
+        items: alloc::vec![Item {
+            and_or: AndOr {
+                first,
+                rest: Vec::new(),
+            },
+            background,
+        }],
     })
 }
 
@@ -705,17 +741,46 @@ mod tests {
         })
     }
 
-    /// `line` as `Shell::execute` runs it: parsed, then expanded.
-    fn expanded(line: &str) -> Result<Line, ParseError> {
-        parse_line(line).and_then(|l| {
-            crate::expand::plain(&l).map_err(|e| ParseError::Expansion(e.to_string()))
-        })
+    /// The commands of `line`'s one pipeline, as typed.
+    fn typed(line: &str) -> Vec<Command<Word>> {
+        parse_line(line)
+            .unwrap()
+            .items
+            .remove(0)
+            .and_or
+            .first
+            .commands
+    }
+
+    /// The background text of `line`'s one item.
+    fn background(line: &str) -> Option<String> {
+        parse_line(line).unwrap().items.remove(0).background
     }
 
     fn words(line: &str) -> Vec<String> {
         let c = one(line).unwrap();
         assert_eq!(c.redirect, None);
         c.words
+    }
+
+    #[test]
+    fn a_line_is_a_list_of_items() {
+        // Blanks or a comment hold none; a pipeline is one item, with the
+        // text of a background job.
+        assert_eq!(parse_line(" \t# x").unwrap().items, []);
+        let list = parse_line("cat f | wc &").unwrap();
+        assert_eq!(list.items.len(), 1);
+        let item = &list.items[0];
+        assert_eq!(item.background.as_deref(), Some("cat f | wc"));
+        assert_eq!(item.and_or.rest, []);
+        let names: Vec<&str> = item
+            .and_or
+            .first
+            .commands
+            .iter()
+            .map(|c| c.words[0].typed.as_str())
+            .collect();
+        assert_eq!(names, ["cat", "wc"]);
     }
 
     #[test]
@@ -757,8 +822,8 @@ mod tests {
     #[test]
     fn a_word_keeps_which_of_its_pieces_were_quoted() {
         let text = |t: &str, quoted| Piece::Text(t.into(), quoted);
-        let l = parse_line(r#"a'b c'\d"e" '' "" ~/x"#).unwrap();
-        let pieces: Vec<&[Piece]> = l.pipeline[0].words.iter().map(|w| &w.pieces[..]).collect();
+        let c = typed(r#"a'b c'\d"e" '' "" ~/x"#);
+        let pieces: Vec<&[Piece]> = c[0].words.iter().map(|w| &w.pieces[..]).collect();
         assert_eq!(
             pieces,
             [
@@ -768,7 +833,7 @@ mod tests {
                 &[text("/root/x", false)],
             ]
         );
-        let c = &parse_line("echo >'o'ut").unwrap().pipeline[0];
+        let c = &typed("echo >'o'ut")[0];
         assert_eq!(
             c.redirect.as_ref().unwrap().path.pieces,
             [text("o", true), text("ut", false)]
@@ -800,7 +865,7 @@ mod tests {
 
     /// The pieces of `line`'s words.
     fn pieces(line: &str) -> Vec<Vec<Piece>> {
-        parse_line(line).unwrap().pipeline[0]
+        typed(line)[0]
             .words
             .iter()
             .map(|w| w.pieces.clone())
@@ -979,8 +1044,8 @@ mod tests {
 
     /// `word`'s assignment, the value's pieces joined.
     fn assignment(word: &str) -> Option<(String, String)> {
-        let l = parse_line(word).unwrap();
-        let (name, value) = l.pipeline[0].words[0].assignment()?;
+        let c = typed(word);
+        let (name, value) = c[0].words[0].assignment()?;
         let text = value
             .pieces
             .iter()
@@ -1077,8 +1142,7 @@ mod tests {
 
     #[test]
     fn a_word_is_kept_as_typed() {
-        let l = parse_line(r#"echo  a"b c"$D  > '$f'x# 2"#).unwrap();
-        let c = &l.pipeline[0];
+        let c = &typed(r#"echo  a"b c"$D  > '$f'x# 2"#)[0];
         let typed: Vec<&str> = c.words.iter().map(|w| w.typed.as_str()).collect();
         assert_eq!(typed, ["echo", r#"a"b c"$D"#, "2"]);
         assert_eq!(c.redirect.as_ref().unwrap().path.typed, "'$f'x#");
@@ -1250,9 +1314,8 @@ mod tests {
 
     #[test]
     fn a_line_ending_with_an_ampersand_runs_in_the_background() {
-        let l = expanded("sleep 5 &").unwrap();
-        assert_eq!(l.pipeline[0].words, ["sleep", "5"]);
-        assert_eq!(l.background.as_deref(), Some("sleep 5"));
+        assert_eq!(parse("sleep 5 &").unwrap()[0].words, ["sleep", "5"]);
+        assert_eq!(background("sleep 5 &").as_deref(), Some("sleep 5"));
         // The text is what was typed before the `&`, without the blanks
         // around it; a comment may follow.
         for (line, text) in [
@@ -1261,15 +1324,14 @@ mod tests {
             ("t-spin&", "t-spin"),
             ("grep x f | head -n 1 & # one", "grep x f | head -n 1"),
         ] {
-            let l = parse_line(line).unwrap();
-            assert_eq!(l.background.as_deref(), Some(text), "{line}");
+            assert_eq!(background(line).as_deref(), Some(text), "{line}");
         }
-        let l = expanded("cat f | wc -l > out &").unwrap();
-        assert_eq!(l.pipeline.len(), 2);
-        assert_eq!(l.pipeline[1].redirect.as_ref().unwrap().path, "out");
+        let p = parse("cat f | wc -l > out &").unwrap();
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[1].redirect.as_ref().unwrap().path, "out");
         // Quoted, escaped or in a comment it is a character.
         for line in ["echo '&' \"&\" \\&", "echo a # &", "echo a"] {
-            assert_eq!(parse_line(line).unwrap().background, None, "{line}");
+            assert_eq!(background(line), None, "{line}");
         }
         assert_eq!(words("echo '&' \\& # &"), ["echo", "&", "&"]);
     }
