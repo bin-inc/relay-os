@@ -1,7 +1,7 @@
 # The NUC checks' scripts (rootfs/root/checks/, spec §15 item 12) run in
 # QEMU as they do on the NUC: check 3's part 1, a reboot, part 2, then
-# check 4. Afterwards their transcripts on the disk must show what the
-# scripts expect.
+# checks 4 and 5. Afterwards their transcripts on the disk must show what
+# the scripts expect.
 timeout 30
 expect root@relay:~# $
 send sh checks/check3-a.sh
@@ -19,7 +19,12 @@ expect \n\+ rm -f /root/check4\.list .*\n
 expect \n\+ free\n(.*\n){3}\+ t-fault null-read\n
 expect \n\+ cat /root/check4-b\.log\n
 expect root@relay:~# $
+send sh checks/check5.sh
+expect \n\+ rm -f /root/check5-a\.sh .*\n
+expect \n\+ false\n\+ echo \$\?\n1\n
+expect root@relay:~# $
 poweroff
 check-script /root/checks/check3-a.sh
 check-script /root/checks/check3-b.sh
 check-script /root/checks/check4.sh
+check-script /root/checks/check5.sh

@@ -24,7 +24,7 @@ normally.
 1. In Mint: `cargo xtask flash --full` and type `ERASE` when asked.
 2. Boot the stick (see above).
 3. Within about 5 s the monitor must show, on black:
-   - `Relay OS 0.3.0`
+   - `Relay OS 0.4.0`
    - `[ ok ] console WxH (CxR cells)` — note W×H. It should be the monitor's
      native resolution (1920×1200 on the ASUS PA248QV); the terminal uses at
      most the top-left 1920×1080 of it, so wider or taller screens have a
@@ -158,7 +158,7 @@ The NUC has no serial port, so a keyboard that does not work cannot run
 | `[FAIL] keyboard: no USB keyboard found` and no `port 3` line | The K120 connected after the boot's wait, or not at all | Type anyway: a late keyboard is set up when it appears. If nothing works, `debug=usb`: a `port 3: connected` line means it appeared late, none means the port never saw it; the `ports settled` line shows the wait |
 | Keys show up twice or not at all | Firmware still emulating a keyboard (handoff) | `debug=usb`: the `legacy support` line |
 
-## Check 3 — files on the stick (plans 5 and 6; milestone 2), and check 4
+## Check 3 — files on the stick (plans 5 and 6; milestone 2), and checks 4 and 5
 
 The full checklist of spec §9.4. The K120 and the stick sit on the ports
 of check 2 (the stick on bus 4 port 3 in Mint's `lsusb -t`). Since plan 6
@@ -166,7 +166,8 @@ the commands come from two scripts on the stick,
 `/root/checks/check3-a.sh` and `check3-b.sh` (in the repository under
 `rootfs/root/checks/`), and since milestone 2's plan 4b a third,
 `check4.sh` (NUC check 4 of the user-space gate, spec §12.4), after which
-the error screen is visited by hand (plan 5). Every command is a program
+the error screen is visited by hand (plan 5), and since milestone 3's
+plan 4 a fourth, `check5.sh` (NUC check 5). Every command is a program
 now, and `/bin/sh` runs them, which the kernel's init starts as process 2:
 `sh` runs each line as if it were typed, shows it as `+ <command>` before
 its output, and writes everything it shows into a transcript next to the
@@ -249,11 +250,22 @@ every pull request.
    `t-abi` (`relay-sh: t-abi: Exec format error`: a program built for
    another ABI), `ls /bin` into a file (one name a line) and `cat` of a
    file into itself (refused), a script that runs another, and `free` again
-   (the same memory in use). Then one step by hand: `exit` at the prompt.
-   `init: /bin/sh (pid <n>) exited with 0; starting it again` and a new
-   prompt `root@relay:~# ` come at once, without the motd: the shell is a
-   program, and process 1 starts another. Photograph the screen.
-8. The error screen (milestone 2, plan 5): `reboot`, and choose the stick
+   (the same memory in use).
+8. Check 5 (milestone 3, plan 4): type `sh checks/check5.sh`. It runs for
+   a few seconds: pipes (`seq 1000000 | wc -c`, 6888896 bytes through a
+   16 KiB pipe; `seq 1000000 | head -n 1`, which ends at once;
+   `seq 1000 | grep 7 | wc -l`; a pipeline's status; `X | sh`), a
+   background job (`t-spin &`, `jobs`, `ps | grep -c t-spin`, `kill %1`,
+   `wait %1` and its status 137), and a script given three arguments, one
+   empty and one with two blanks, that passes them on to another
+   (`"$@"`, `$#`, `cd "$9"`, a variable whose value has blanks, `$?`). A
+   script prints no `[1] <pid>` and no Done line. The prompt comes back
+   after `+ false`, `+ echo $?` and `1`. Then one step by hand: `exit` at
+   the prompt. `init: /bin/sh (pid <n>) exited with 0; starting it again`
+   and a new prompt `root@relay:~# ` come at once, without the motd: the
+   shell is a program, and process 1 starts another. Photograph the
+   screen.
+9. The error screen (milestone 2, plan 5): `reboot`, and choose the stick
    again with F10, so that the kernel log's last lines are the boot's. At
    the prompt type `exit` three times within 10 s. After the first two,
    init's line and a new prompt; after the third,
@@ -266,17 +278,18 @@ every pull request.
    Photograph it, wait a few seconds (it waits for the key, however long),
    then press a key on the K120: the NUC restarts. Choose the stick again
    with F10: the motd and the prompt.
-9. `poweroff`: the NUC switches itself off (`relay: powering off`). If the
+10. `poweroff`: the NUC switches itself off (`relay: powering off`). If the
    screen says `System halted. It is now safe to power off.` instead, note
    the `relay:` line above it and hold the power button.
-10. Boot Mint and run `cargo xtask verify-usb`: `e2fsck: clean`, the tree
+11. Boot Mint and run `cargo xtask verify-usb`: `e2fsck: clean`, the tree
    lists `/root/notes/a`, `/root/notes/big` (8388608 bytes) and
-   `/root/notes/t`, and the last lines are
+   `/root/notes/t`, and the last lines are `system.img: built <time>`,
    `/root/checks/check3-a.sh: ok, 84 of 84 commands as expected (run <time>)`,
-   `/root/checks/check3-b.sh: ok, 5 of 5 commands as expected (run <time>)`
-   and `/root/checks/check4.sh: ok, 33 of 33 commands as expected (run
-   <time>)`, with the UTC times of the three runs, after the line
-   `system.img: built <time>`. A transcript older than the stick's
+   `/root/checks/check3-b.sh: ok, 5 of 5 commands as expected (run <time>)`,
+   `/root/checks/check4.sh: ok, 33 of 33 commands as expected (run
+   <time>)` and `/root/checks/check5.sh: ok, 29 of 29 commands as
+   expected (run <time>)`, with the UTC times of the four runs. A
+   transcript older than the stick's
    `system.img` (a run before the last `flash --kernel`, which keeps the
    transcripts; `flash --full` erases them) fails. A `FAILED` line is
    followed by the script line, the expectation that failed and what the
@@ -294,6 +307,9 @@ every pull request.
 | `[FAIL] system: ABI N, kernel wants M` or `[FAIL] system: system.img: …`, then the error screen | The archive on the ESP is from another build, or damaged | `cargo xtask flash --kernel` from the same worktree as the kernel |
 | `exit` at the prompt gives no new prompt, or the error screen | Init does not see the shell end, or its clock runs fast (three ends within 10 s) | Photograph the screen: the log's lines on it end with init's `init: /bin/sh (pid N) …` lines |
 | `check4.sh`: `t-spawn fill` fills the table with fewer than 60 children, or the second `free` differs | A process of an earlier command was left over (a zombie init did not collect, or a program still running) | `verify-usb` names the line; `dmesg` shows the `pid N (…)` lines of the programs killed |
+| `check5.sh` stops after a pipeline's `+` line: no output, no prompt | A pipe's reader or writer was not woken on this machine | Photograph the screen, then Ctrl-C: the prompt comes back, and `dmesg` ends with a `pid <n> (…): killed: Ctrl-C` line for each process of the pipeline still there (and the script's `/bin/sh`) |
+| `check5.sh` stops after `+ wait %1` | `kill %1` did not end the job, so the `t-spin` that `wait` waits for spins on | Photograph the screen, then Ctrl-C: it ends the script but not the job, which runs in its own group; `dmesg` shows no `pid <n> (/bin/t-spin): killed: kill` line, and `ps` shows the `t-spin`: end it with `kill <pid>` |
+| `check5.sh`: `ps \| grep -c t-spin` prints another count than 1 before `kill %1`, or than 0 after `wait %1` | A `t-spin` of an earlier command still runs, or the job's did not start | `verify-usb` names the line; `ps` at the prompt lists the processes |
 | The error screen with `/bin/sh cannot start: …` or `/bin/sh ended 3 times within 10 s` | The shell cannot be loaded, or ends as soon as it starts (its `init: /bin/sh (pid N) …` lines, in the log's lines on the screen, say how) | Photograph the screen; a key restarts the machine |
 | A key on the K120 at the error screen does nothing | The keyboard is not polled while init waits (the idle task polls it) | Photograph the screen and hold the power button |
 | The error screen's heading has scrolled away, or a program's line shows under `Press any key` | A log line takes more rows than counted, or a process still ran | Photograph the screen |
@@ -337,3 +353,4 @@ every pull request.
 | 2026-09-30 | 3 (milestone 2, plan 3b) | `0287f86` | Pass | `flash --full`, then F10: every startup line `[ ok ]`, `console 1920x1200 (120x33 cells)`, `cpu: SMEP on, SMAP on`, `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 2.0 GiB`, `[ ok ] system: 9 programs, ABI 1`. Check 3 by script: `ls -l /bin` listed the nine programs (`t-files` 50552 bytes, `t-mem` 39216, `t-read` 28232, `t-sys` 29496, `t-tee` 36832 among them); plan 3b's section ran on the stick's ext2 root as in QEMU, line for line: `t-files basic`, `dir`, `cwd` and `gone` (another process's removal of a program's working directory and open file: `ENOENT`, the new file kept `new`), `t-mem map` (`frames lost: 0`) and `grow 64` (`1928 blocks, 64 MiB, all there: true`), `t-tee end`, `t-sys uname` (`Relay relay 0.2.0 x86_64`) and `t-read apart` (`end of input`); `t-spin 1` made 4594860032 iterations, `t-spawn 100` lost no frame; the three steps by hand passed (typing during `t-spin 5`, now echoed as typed; Ctrl-C of `t-spin`; `hello wrold`, four Backspaces, `orld` into `t-read` gave `[12] hello world\n`, and Ctrl-D `end of input`); `reboot`, `poweroff` as before. In Mint `verify-usb`: `e2fsck: clean`; `check3-a.sh: ok, 84 of 84 commands as expected`, `check3-b.sh: ok, 5 of 5 commands as expected`. The transcripts replaced the hand-edited fixtures in `xtask/fixtures/checks/`. |
 | 2026-09-30 | 4 (milestone 2, plan 4b) | `a0cef95` | Pass | `flash --full`, then F10: every startup line `[ ok ]`, `console 1920x1200 (120x33 cells)`, `cpu: SMEP on, SMAP on`, `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 2.0 GiB`, `[ ok ] system: 34 programs, ABI 2`, then the motd printed by init and `/bin/sh`'s prompt (every command now a program; no shell in the kernel). Check 3 by script under `/bin/sh`: 84 of 84 and, after `reboot`, 5 of 5; the three steps by hand as before; `t-spin 1` made 4594860032 iterations, exactly plan 3b's count (4382 steps of 2^20), so the new poll on the way back to ring 3 costs a spinning program nothing. Check 4 by script: 33 of 33: `t-spawn fill` 60 children, `t-spawn 1000` `frames lost: 0` (4071601 free frames before and after), every `t-fault` kind killed, `t-abi` `Exec format error`, the nested script's lines in both transcripts, `free`'s used 41668 KiB before and after. `exit` by hand: `init: /bin/sh (pid 2) exited with 0; starting it again` and a new prompt without the motd; then three quick `exit`s reached the error screen (`*** Relay OS cannot run its shell ***`, `/bin/sh ended 3 times within 10 s`, the last 20 log lines with the wrapped ones fitting, `Press any key to reboot.`; photographed), and a K120 key restarted the machine. `verify-usb`: `e2fsck: clean`, 84 of 84, 5 of 5, 33 of 33. |
 | 2026-10-01 | 3 and 4 (milestone 2 done, 0.3.0) | `be269cd` | Pass | `flash --full` of 0.3.0, then F10: `Relay OS 0.3.0`, every startup line `[ ok ]`, `console 1920x1200 (120x33 cells)`, `cpu: SMEP on, SMAP on`, `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 2.0 GiB`, `[ ok ] system: 34 programs, ABI 2`. Check 3 by script: 84 of 84, `uname -a` → `Relay relay 0.3.0 x86_64`, `t-spin 1` 4594860032 iterations (the same as plans 3b and 4b; a kernel built without the poll on ticks from ring 3 made 4677697536 on 2026-10-01, so the poll costs 1.8 %); the three steps by hand as before; after `reboot` 5 of 5. Check 4 by script: 33 of 33 (`t-spawn fill` 60 children, `frames lost: 0`, every `t-fault` kind killed, `free`'s used 41668 KiB before and after); `exit` by hand restarted the shell. Then, after a `reboot`, three quick `exit`s reached the error screen (photographed): the heading at the top, `/bin/sh ended 3 times within 10 s`, the kernel log's last 20 lines from `xhci 00:14.0: port 15: reset done` to init's three, the 122-column `xhci 00:14.0: slot 4: interface 0 class 8/6/80, …` line taking two rows, and `Press any key to reboot.`; a K120 key restarted the machine. `verify-usb`: `e2fsck: clean`, `system.img: built Thu Oct  1 02:21:57 UTC 2026`, 84 of 84, 5 of 5, 33 of 33, each run after the build. |
+| 2026-10-02 | 3, 4 and 5 (milestone 3 done, 0.4.0) | `7ef2413` | Pass | `flash --full` of 0.4.0, then F10: `Relay OS 0.4.0`, every startup line `[ ok ]`, `console 1920x1200 (120x33 cells)`, `boot info: 15944 MiB usable in 34 regions`, `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 2.0 GiB`, `[ ok ] system: 42 programs, ABI 3` (photographed). Check 3 by script: 84 of 84, `uname -a` → `Relay relay 0.4.0 x86_64`, `t-spin 1` 4594860032 iterations (as since plan 3b); the three steps by hand as before; after `reboot` 5 of 5. Check 4 by script: 33 of 33 (`t-spawn 1000` 4071233 free frames before and after, every `t-fault` kind killed, `free`'s used 41964 KiB before and after). Check 5 by script: 29 of 29, its transcript byte for byte QEMU's (pipes, `t-spin &` killed and waited for with 137, a nested script's arguments and `cd "$9"`). `exit` by hand restarted the shell. After a `reboot`, three quick `exit`s reached the error screen (photographed): the heading at the top, `/bin/sh ended 3 times within 10 s`, the 122-column `xhci 00:14.0: slot 4: interface 0 class 8/6/80, …` line taking two rows, init's three lines (the third shell's `exited with 127`: two mistyped tries at it, `et` and `eit`, were not found, and `exit` alone takes the last command's status; it still ended within 10 s), and `Press any key to reboot.`; a K120 key restarted the machine. `verify-usb`: `e2fsck: clean`, `system.img: built Fri Oct  2 00:40:53 UTC 2026`, 84 of 84, 5 of 5, 33 of 33, 29 of 29, each run after the build. The transcripts replaced those edited by hand to say `ABI 3` (milestone 3's plans 1–3 had no NUC check). |

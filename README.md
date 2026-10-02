@@ -11,14 +11,20 @@ runtime gives them a heap), read the console a line at a time or as it is
 typed, and copy what the console shows into files (tees). Every command
 is also a program of its own in `/bin` (`/bin/ls`), which prints what the
 shell's command prints, and the shell itself is one too: `/bin/sh` runs
-every command but `cd`, `exit` and `help` as a program, and its scripts
-may run scripts. Process 1 is the kernel's init: it starts `/bin/sh` at
-boot and again whenever it ends, and a machine that cannot run its shell
-(no `system.img`, or a shell that keeps ending) shows an error screen and
-restarts at a key. The kernel holds no shell of its own any more.
+every command but its built-ins (`cd`, `exit`, `help`, `jobs`, `wait`,
+`kill`) as a program, and its scripts may run scripts. Process 1 is the
+kernel's init: it starts `/bin/sh` at boot and again whenever it ends, and
+a machine that cannot run its shell (no `system.img`, or a shell that
+keeps ending) shows an error screen and restarts at a key. The kernel
+holds no shell of its own any more.
 
-Milestone 1 is version 0.2.0 and milestone 2 version 0.3.0; milestone 3
-(pipes, background jobs, `ps` and `kill`, script variables) comes next.
+Milestone 3 connects the programs: pipes (`seq 1000 | grep 7 | wc -l`),
+with `grep`, `seq`, `sleep`, `true` and `false`; jobs in the background
+(`t-spin &`), with `jobs`, `wait`, `kill %1` and `ps`; and scripts with
+arguments and variables (`sh FILE a b`, `$1`, `"$@"`, `$?`, `NAME=value`).
+
+Milestone 1 is version 0.2.0, milestone 2 version 0.3.0 and milestone 3
+version 0.4.0, which ends the user-space gate.
 
 Design: `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`
 (milestone 1) and `docs/superpowers/specs/2026-09-29-user-space-gate-design.md`
@@ -42,9 +48,10 @@ has the whole checklist):
 3. Reboot, press F10 and choose the UEFI entry for the Kingston stick. Every
    startup line says `[ ok ]` and the prompt `root@relay:~# ` follows.
 4. Type `sh checks/check3-a.sh`, then `reboot`, boot the stick again, type
-   `sh checks/check3-b.sh` and `sh checks/check4.sh`, then `poweroff`.
+   `sh checks/check3-b.sh`, `sh checks/check4.sh` and `sh checks/check5.sh`,
+   then `poweroff`.
 5. Back in Linux Mint: `cargo xtask verify-usb` checks the filesystem and
-   the output of the three scripts.
+   the output of every script.
 
 After a code change, `cargo xtask flash --kernel` replaces only the loader,
 the kernel and the programs of `/bin` (`system.img`) and keeps the files on
