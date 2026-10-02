@@ -1,7 +1,7 @@
 # Relay OS — Programmable Shell Gate Design (milestones 4 and 5)
 
 - **Date:** 2026-10-02
-- **Status:** Approved 2026-10-02; revised while planning milestone 4's plans 1 and 2 (see §15)
+- **Status:** Approved 2026-10-02; revised while planning milestone 4's plans 1 to 3 (see §15)
 - **Builds on:** the user-space gate (version 0.4.0,
   `docs/superpowers/specs/2026-09-29-user-space-gate-design.md`, cited below
   as "UG §n") and milestone 1 (`2026-09-26-milestone-1-boot-shell-fs-design.md`,
@@ -279,25 +279,30 @@ not traced, inside a construct or not.
 
 `crates/shell/src/commands/test.rs` holds the command function; `COMMANDS`
 lists it as `test` and as `[`, so both run in the shell's tests, in
-`host-shell` and as programs. If Cargo refuses `[` as a binary's name,
+`host-shell` and as programs. Cargo refuses `[` as a binary's name, so
 xtask packs the `test` ELF into `system.img` under both names (the archive
-allows the name, `crates/sysimg` `valid_name`). Called as `[`, its last
-argument must be `]`: otherwise GNU's `[: missing ']'`, status 2. GNU's
+allows the name, `crates/sysimg` `valid_name`), and the program takes the
+name it was started by from its argument 0 (§15 item 3). Called as `[`,
+its last argument must be `]`: otherwise GNU's `[: missing ']'`, status 2.
+GNU's
 messages are taken in the C locale, with plain quotes, as every command's
 are.
 
 ### 6.2 Expressions
 
-GNU coreutils' grammar in full, since a partial one would differ silently:
+GNU coreutils' grammar in full (9.4's, as CI's ubuntu-24.04 has it),
+since a partial one would differ silently:
 
 - POSIX's rules by argument count for 0 to 4 arguments, then `!`, `-a`,
   `-o`, `(` and `)` with GNU's precedence. The shell refuses an unquoted
   `(`, so one writes `\(` or `'('`, as in bash.
-- **Strings:** one argument (true if not empty), `-n`, `-z`, `=`, `==`,
-  `!=`, and `\<` and `\>` comparing bytes, as in the C locale.
+- **Strings:** one argument (true if not empty), `-n`, `-z`, `=`, `==`
+  and `!=`, comparing bytes. GNU's program has no `<` or `>`, which
+  bash's built-in has (§15 item 3).
 - **Integers:** `-eq`, `-ne`, `-lt`, `-le`, `-gt`, `-ge`, parsed as GNU
   parses them: blanks around the number, an optional sign, any length,
-  compared as digit strings so nothing overflows. A bad one is GNU's
+  compared as digit strings so nothing overflows; `-l STRING` on either
+  side is STRING's length (§15 item 3). A bad one is GNU's
   `test: invalid integer 'x'`, status 2 (bash's built-in says
   `integer expression expected`; ours is the program's).
 - **Files**, answered from `stat` (`relay_abi::Stat`): `-e`, `-f`, `-d`,
@@ -305,14 +310,16 @@ GNU coreutils' grammar in full, since a partial one would differ silently:
   `-N`, `-t FD`, and `-nt`, `-ot`, `-ef`.
   - `-r`, `-w` and `-x` answer as GNU does for root: `-r` is true if the
     file exists, `-w` too except on a read-only filesystem (so
-    `test -w /bin/ls` is false), `-x` if any execute bit is set or it is a
-    directory.
-  - `-t FD` is true for the console.
+    `test -w /bin/ls` is false: the file is on `/bin`'s filesystem; a
+    root mounted read-only is not told, §10, §15 item 3), `-x` if any
+    execute bit is set or it is a directory.
+  - `-t FD` is true for the console (§15 item 3).
   - Symbolic links are never followed (UG §16 item 4), so `-e`, `-f` and
     `-d` of a link look at the link itself, where GNU's follow it (§10).
 - 0 is true, 1 false, 2 an error. `[ --help` and `[ --version` are refused
-  as other commands refuse an unknown option (GNU's first message line,
-  status 2); `test --help` is one non-empty string, true, as in GNU.
+  as other commands refuse an unknown option (`[: unrecognized option
+  '--help'`, status 2, where GNU prints its help, §15 item 3);
+  `test --help` is one non-empty string, true, as in GNU.
 
 ## 7. Milestone 5: redirection
 
@@ -506,6 +513,9 @@ comments:
 - An environment entry without a valid name is dropped, where bash passes
   it on (§8.5).
 - `test`'s file operators do not follow symbolic links (§6.2).
+- `test -w` is false only on `/bin`'s filesystem, so on a root the kernel
+  mounted read-only it is true, until milestone 5's ABI 4 says which
+  filesystems are read-only (§15 item 3).
 - `:` is not a built-in; `true` is the program for it (§14).
 - A `\` at a line's end is an error, where bash joins the line to the
   next (§15 item 1).
@@ -533,7 +543,9 @@ comments:
   depth, `&` mid-line, an expansion error ending the top-level command.
 - **`test`:** every case of §6.2, word for word and status for status with
   the host's `/usr/bin/test` and `/usr/bin/[` (GNU's, not bash's
-  built-in), including `[ -n ]`, `[ ! = ]`, `[ -a -a -a ]` and the errors.
+  built-in), including `[ -n ]`, `[ ! = ]`, `[ -a -a -a ]` and the errors;
+  the file operators through `unshare -r`, so that GNU answers as root
+  (§15 item 3).
 - **Milestone 5:** `relay-abi`'s new offsets and `VERSION == 4`; the
   kernel library's checks of the block and its place on the stack;
   `/dev/null`'s calls; the fd context and a replaced file's close; built-ins
@@ -591,8 +603,9 @@ after check 5, and `check3-a.sh` from `/root/checks` (§9.2).
 - **Milestone 4:** `/bin` gains `test` and `[` (42 → 44 programs:
   `system: 44 programs, ABI 3`), so the `system` scenario's `ls /bin`, the
   comment in `kernel/src/system.rs` and `docs/hardware-test.md` change. `[`
-  sorts before `cat` in the C locale, so check 4's `ls /bin` lines change,
-  and `help` gains two lines. Tests that assert `;` or `a & b` are refused
+  sorts before `cat` in the C locale, so check 4's `ls /bin` lines change
+  (its NUC transcript by hand until plan 4's NUC run, §15 item 3), and
+  `help` gains two lines. Tests that assert `;` or `a & b` are refused
   become tests of what they do now.
 - **Milestone 5:** `env` and `t-env` (46 programs, `ABI 4`); the startup
   line of `/dev`; `df`'s `/dev` line; the `+ cd /root` lines; version
@@ -606,7 +619,7 @@ Each milestone's roadmap fixes its plans; this is the expected split.
 |---|---|---|
 | 4 | 1 · Lists | The tree, `;`, `&&`, `\|\|`, `!`, `&` mid-line; the `Incomplete` reader for the prompt (`> `), `sh FILE` and `X \| sh`; the corpus harness |
 | 4 | 2 · Compound commands | `if`, `while`, `until`, `for`; reserved and refused words; the nesting bound; Ctrl-C between commands; the trace of a construct; the `control` scenario |
-| 4 | 3 · `test` and `[` | The command under both names; the `test_cmd` scenario |
+| 4 | 3 · `test` and `[` | The command under both names; the `test_cmd` scenario; `grep -q`; every scenario's input paced by its prompt (§15 item 3) |
 | 4 | 4 · Hardening, 0.5.0 | `check6.sh`; milestone 3's deferred minors (`tmp/m3p4/plan-ledger-final.md`: `verify-usb`'s reason for an unreadable `system.img`, the fixtures test listing files that are not `.sh`, the TLB scan reading comments; the two commit scopes are history and are ruled out); this spec's decision log; NUC checks 3–6 |
 | 5 | 1 · Redirection | The forms of §7, the fd context, built-ins' error target, redirection of compound commands; the `redirect` scenario (without `/dev/null`) |
 | 5 | 2 · ABI 4 and `/dev` | `SpawnArgs::env`, the entry registers, `relay_rt::env`, init's `HOME`, `t-env` and `env_calls`; `/dev/null` and the `redirect` scenario's `/dev/null` lines |
@@ -847,3 +860,92 @@ does.
      echo $?` gives the bad substitution and 1, where bash's subshells fail
      only `echo` and `cat` gives 0. This is kept, a decided difference
      (§10), rather than expanding each command of a pipeline apart.
+
+3. **Decisions made while planning milestone 4's plan 3** (`test` and
+   `[`):
+   - **The two names** (§6.1). Cargo refuses `[` as a binary's name
+     (`invalid character '[' in crate name`), so `relay-utils` builds one
+     program, `test`, and xtask packs its ELF into `system.img` under both
+     names, the bytes twice (the format gains no shared entries): 44
+     programs. The program is `[` when the last part of its argument 0's
+     path is `[`, as the shells give a command's name as typed. `COMMANDS`
+     lists `[`, first in the C locale's order, and `test`: two functions
+     over one evaluator. Plan 3 is five pull requests: its plan; `test`
+     and `[` in the shell with their unit tests, `/bin` unchanged; both
+     names in `/bin` with every ripple, the scenario `test_cmd` and corpus
+     scripts using `test`; `grep -q` with two of plan 2's deferred
+     minors; the pacing of every scenario's input. It has no NUC check;
+     plan 4's check 6 runs `test` there.
+   - **The grammar** (§6.2) is GNU coreutils 9.4's (`src/test.c`), rule
+     for rule: the rules by argument count for 1 to 4 arguments, else
+     `-o` over `-a` over terms; a term is a run of `!`, then `(` (an
+     expression of up to 4 arguments before its `)`, or the rest), a
+     binary operator if the argument after next is one, a unary operator
+     of the form `-X`, or a string. Its messages are GNU's, each quoting
+     its argument as GNU's `quote()` does in the C locale (`'\t1\n'`,
+     `'\331\241'`): `missing argument after 'X'`, `'X': unary operator
+     expected`, `'X': binary operator expected`, `extra argument 'X'`,
+     `')' expected` (in `[`, `')' expected, found ']'` when the `]` is
+     where the `)` should be), `invalid integer 'X'`, `-nt does not accept
+     -l` (and `-ot`, `-ef`), `missing ']'`.
+   - **No `<` or `>`** (§6.2). GNU's program has neither (`test a '<' b`
+     is `'<': binary operator expected`, status 2); bash's built-in has
+     them. Plan 3 follows GNU, so §6.2's `\<` and `\>` are dropped (the
+     maintainer, 2026-10-02).
+   - **`-l STRING`**, GNU's length of STRING, stands for an integer on
+     either side of `-eq`, `-ne`, `-lt`, `-le`, `-gt` and `-ge`, as
+     "GNU's grammar in full" asks.
+   - **No recursion.** GNU nests `( x -a ( x -a … ) )` 30,000 levels deep
+     on its 8 MB stack, and an argument list of 64 KiB can ask for more
+     than that; a program here has a stack of 255 pages, so the evaluator
+     keeps its open `(` on a stack of its own and nests as deep as GNU.
+   - **`[ --help` and `[ --version`** (§6.2). GNU 9.4 prints its help and
+     version when one of them is `[`'s only argument; here they are refused
+     as §6.2 says, `[: unrecognized option '--help'` (or `'--version'`),
+     status 2, and only then: `[ --help ]` is one string, true.
+   - **`-w`** (§6.2). No call says that a filesystem is read-only, and
+     `open` for writing succeeds on `/bin` (`EROFS` comes with the write),
+     so `-w` is false for a file on `/bin`'s filesystem (the `dev` of its
+     `stat` is `/bin`'s), `system.img`. The kernel also mounts the root
+     read-only (ext2 after an `EIO`, or an empty filesystem when no root
+     mounts), and there `-w` is true where GNU says false (the prototype's
+     review): a decided difference (§10). Nothing in the kernel or the ABI
+     changes; milestone 5's ABI 4 gives `statfs` a read-only flag, and
+     `test -w` uses it then (the maintainer, 2026-10-02).
+   - **`-t FD`** is true when FD, read as GNU reads an integer, is open on
+     the console (`fstat`: a character device on filesystem 0); a number
+     past `int` is false, as in GNU.
+   - **Testing** (§11.1). The unit tests run GNU's `test` and `[` through
+     `unshare -r`, so that it answers as root, as Relay OS runs every
+     program; CI's ubuntu-24.04 restricts user namespaces, so its `unit`
+     job sets `kernel.apparmor_restrict_unprivileged_userns=0` first, and
+     a namespace refused fails the test (the maintainer, 2026-10-02). The
+     cases a symbolic link answers differently (§10) are checked against
+     GNU's `-h` and named as the difference.
+   - **The NUC transcript** (§11.5). `check4.nuc.log` gets the `[` line of
+     `ls /bin` by hand, as milestone 2's plans edited NUC transcripts, until
+     plan 4's NUC run replaces it; `check4.qemu.log` is recorded again.
+   - **`grep -q`** (the roadmap's note): GNU grep 3.11's quiet mode. It
+     prints nothing and ends, status 0, at the first selected line,
+     opening no later file; an error before it is still told, and status
+     2 needs an error and no line selected. `-q` outweighs `-c` and `-n`,
+     says nothing of a binary file, and skips the check of an input that
+     is the output file, as GNU does.
+   - **Input paced by its prompt** (§11.3). A line sent while a program
+     runs is echoed twice, by the line discipline as it is typed and by
+     the shell's editor once the console is handed back, as on Linux;
+     sent before a scenario's last command has ended, it can land inside
+     the output an `expect` waits for (#103's failed CI run). So every
+     `send`, `key` and `type` follows an `expect` that ends at a prompt,
+     the scenario parser refuses one that does not, and a step marked as
+     typed ahead (`send-ahead`, and the same for `key` and `type`) is
+     sent while something runs on purpose: input for a program, Ctrl-C, a
+     line beside a background job's output (the maintainer, 2026-10-02).
+     The parser refuses that mark right after an expect of the prompt,
+     where the input waits for nothing (the prototype's review).
+   - **Plan 2's deferred minors.** Plan 3 settles two: the stale comments
+     of `RESERVED` (`crates/shell/src/parser.rs`) and of the scan's
+     `depth` (`crates/shell/src/scan.rs`), and `control.txt`'s `kill %1` /
+     `wait %1` pair, which nothing paced. The scan reading `(( x = 1 << 2
+     ))` as a here-document (on the safe side) and a test of the kernel's
+     `tty::ctrl_c` wiring go to plan 4 (the maintainer, 2026-10-02).

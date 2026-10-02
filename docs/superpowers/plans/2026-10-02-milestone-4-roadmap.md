@@ -2,7 +2,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-02-programmable-shell-gate-design.md` (the programmable shell gate; milestone 4 is its first half, "Control flow", version 0.5.0)
 
-**Status:** Plan 1 is done (#99–#101); plan 2 is planned and lands with these notes; plans 3 and 4 are written just before each runs.
+**Status:** Plans 1 and 2 are done (#99–#101, #103–#106); plan 3 is planned and lands with these notes; plan 4 is written just before it runs.
 
 Milestone 4 makes `/bin/sh` a shell one can program in: lists (`;`, `&&`, `||`, `!`, `&` mid-line), commands read across lines with bash's `> ` prompt, the compound commands `if`, `while`, `until` and `for`, and `test` and `[` as programs (spec §4–§6). It is split into the four plans of spec §12, named `m4-plan-1` to `m4-plan-4` (their files `docs/superpowers/plans/<date>-m4-plan-<n>-<name>.md`, their branches `m4p<n>/…`). Each one ends with software that can be tested by itself. Each plan is written just before it is executed, so it builds on the code that actually exists and on what the previous plan's checks showed.
 
@@ -30,5 +30,11 @@ Plan 1 ──► Plan 2 ──► Plan 3 ──► Plan 4
 - **Plan 2 has no NUC check** (spec §15 item 2): the stick keeps 0.4.0, and plan 4's `check6.sh` runs compound commands on the NUC.
 - **Plan 2 changes the kernel and `relay-rt`** (spec §15 item 2): `wait(0, WAIT_NOHANG | WAIT_CTRL_C)` asks for a raw Ctrl-C between the shell's own commands, and a line-mode Ctrl-C that reaches an ended group is kept for the next holder; the ABI stays at 3.
 - **Plan 3 adds `grep -q`** (the maintainer, 2026-10-02): a condition's usual command, which `grep` (`-i`, `-v`, `-n`, `-c`) lacks.
+- **Plan 2's deferred minors** (`tmp/m4p2/plan-ledger-final.md`): plan 3 settles two, the stale comments of `RESERVED` in `crates/shell/src/parser.rs` and of the scan's `depth` in `crates/shell/src/scan.rs`, and `tests/e2e/control.txt`'s `send kill %1` / `send wait %1`, which no `expect` paced. Plan 4 takes the other two: the drop scan reads `(( x = 1 << 2 ))` as a here-document, so the rest of a dropped script is dropped without a word (the safe side), and no test pins the kernel's wiring `tty::ctrl_c(|g| t.has_group(g))` in `kernel/src/proc.rs` (the input queue's rule is tested).
+- **Plan 2's rulings that reach later plans:** an unterminated quote in a script drops the lines up to the one that closes it (the scan reads on, as bash does), while the parser still refuses a quote across lines, which plan 4 adds to §10; `X | sh` keeps `\r`, as since milestone 1; `host-shell` cannot end a loop at Ctrl-C.
+- **Plan 3 has no NUC check** (spec §15 item 3): the stick keeps 0.4.0, `check4.nuc.log` gets the `[` line of `ls /bin` by hand, and plan 4's NUC run records it again with the others.
+- **Plan 3 changes CI** (spec §15 item 3): the `unit` job lets unprivileged user namespaces be made, since the `test` unit tests run GNU's `test` through `unshare -r` to get root's answers.
+- **For milestone 5's plan 2 (ABI 4):** `statfs` gains a flag that says a filesystem is read-only, and `test -w` answers false on every read-only filesystem with it, as GNU does; until then it knows only `/bin`'s (spec §10, §15 item 3; plan 3's review found the root mounted read-only after an `EIO`).
+- **Every scenario's input is paced by its prompt** from plan 3 on (spec §15 item 3): the scenario parser refuses a `send`, `key` or `type` that no `expect` of a prompt comes before, unless it is marked as typed ahead (`send-ahead`); #103's first CI run failed on a line typed ahead.
 - **Fixed outside the plans:** the xtask test `qmp::tests::an_event_cut_at_the_deadline_is_read_whole_later`, which failed in a checkout whose path is long, binds its fake QEMU's socket through a short path since #102.
 - **Still out of the gate** (spec §14): command substitution, arithmetic, globbing, word splitting, functions, `case`, `break`, `continue`, `read`, here-documents, subshells; `PATH`, `CDPATH`; users, an editor, interrupts, floating point, networking, other architectures.
