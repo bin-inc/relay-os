@@ -11,7 +11,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::Cell;
 use relay_abi::WaitStatus;
-use vfs::{DirEntry, Env, Errno, FileSystem, Ino, MemFs, MountTable, Node, Stat, StatFs, Vfs};
+use vfs::{
+    DirEntry, Env, Errno, FileSystem, FileType, Ino, MemFs, MountTable, Node, Stat, StatFs, Vfs,
+};
 
 /// The time every test runs at: Sat Sep 26 12:00:00 UTC 2026.
 pub const NOW: u64 = 1_790_424_000;
@@ -799,6 +801,9 @@ pub struct TestFile<'a> {
     pub made: Made<'a>,
     /// Access and modification times, in seconds since 1970.
     pub times: Option<(u64, u64)>,
+    /// The mode's permission bits (`0o644` for a file, a FIFO or a socket
+    /// and `0o755` for a directory unless given; a link's are its own).
+    pub mode: Option<u16>,
 }
 
 /// What a [`TestFile`] is.
@@ -808,6 +813,21 @@ pub enum Made<'a> {
     Dir,
     /// Another name for the file of that name, made before it.
     HardLink(&'a str),
+    /// A symbolic link to that path.
+    Link(&'a str),
+    Fifo,
+    Socket,
+}
+
+impl Made<'_> {
+    /// The mode a test file has unless one is given.
+    fn mode(&self) -> Option<u16> {
+        match self {
+            Made::Dir => Some(0o755),
+            Made::HardLink(_) | Made::Link(_) => None,
+            _ => Some(0o644),
+        }
+    }
 }
 
 impl<'a> TestFile<'a> {
@@ -823,12 +843,37 @@ impl<'a> TestFile<'a> {
         TestFile::made(name, Made::HardLink(to))
     }
 
+    pub fn link(name: &'a str, to: &'a str) -> TestFile<'a> {
+        TestFile::made(name, Made::Link(to))
+    }
+
+    pub fn fifo(name: &'a str) -> TestFile<'a> {
+        TestFile::made(name, Made::Fifo)
+    }
+
+    pub fn socket(name: &'a str) -> TestFile<'a> {
+        TestFile::made(name, Made::Socket)
+    }
+
     fn made(name: &'a str, made: Made<'a>) -> TestFile<'a> {
         TestFile {
             name,
             made,
             times: None,
+            mode: None,
         }
+    }
+
+    pub fn mode(self, mode: u16) -> TestFile<'a> {
+        TestFile {
+            mode: Some(mode),
+            ..self
+        }
+    }
+
+    /// Its mode, if it is one to set.
+    fn chmod(&self) -> Option<u16> {
+        self.mode.or(self.made.mode())
     }
 
     pub fn times(self, atime: u64, mtime: u64) -> TestFile<'a> {
@@ -863,6 +908,9 @@ pub fn like_host_files(args: &[&str], files: &[TestFile<'_>]) -> (i32, String, S
                 fs.link(dir, name.as_bytes(), ino).unwrap();
                 ino
             }
+            Made::Link(to) => fs.symlink(dir, name.as_bytes(), to.as_bytes()).unwrap(),
+            Made::Fifo => fs.special(dir, name.as_bytes(), FileType::Fifo).unwrap(),
+            Made::Socket => fs.special(dir, name.as_bytes(), FileType::Socket).unwrap(),
         };
         made.push((f.name, ino));
     }
@@ -870,6 +918,9 @@ pub fn like_host_files(args: &[&str], files: &[TestFile<'_>]) -> (i32, String, S
     for (f, &(_, ino)) in files.iter().zip(&made) {
         if let Some((atime, mtime)) = f.times {
             fs.set_times(ino, atime, mtime).unwrap();
+        }
+        if let Some(mode) = f.chmod() {
+            fs.set_mode(ino, mode).unwrap();
         }
     }
     let mut h = Harness::on(fs);
@@ -902,6 +953,17 @@ pub fn host_files(args: &[&str], files: &[TestFile<'_>], root: bool) -> (i32, St
             Made::File(data) => std::fs::write(&path, data).unwrap(),
             Made::Dir => std::fs::create_dir(&path).unwrap(),
             Made::HardLink(to) => std::fs::hard_link(dir.join(to), &path).unwrap(),
+            Made::Link(to) => std::os::unix::fs::symlink(to, &path).unwrap(),
+            Made::Fifo => {
+                let ok = std::process::Command::new("mkfifo")
+                    .arg(&path)
+                    .status()
+                    .expect("the host's mkfifo is needed")
+                    .success();
+                assert!(ok, "mkfifo {}", f.name);
+            }
+            // The socket's file stays when the listener goes.
+            Made::Socket => drop(std::os::unix::net::UnixListener::bind(&path).unwrap()),
         }
     }
     for f in files {
@@ -915,6 +977,15 @@ pub fn host_files(args: &[&str], files: &[TestFile<'_>], root: bool) -> (i32, St
                     .success();
                 assert!(ok, "touch {flag} {}", f.name);
             }
+        }
+    }
+    // Last, and a directory's entries before it, so that a directory
+    // without write or search bits is made full.
+    for f in files.iter().rev() {
+        if let Some(mode) = f.chmod() {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::Permissions::from_mode(u32::from(mode));
+            std::fs::set_permissions(dir.join(f.name), mode).unwrap();
         }
     }
     let mut cmd = if root {
@@ -932,6 +1003,14 @@ pub fn host_files(args: &[&str], files: &[TestFile<'_>], root: bool) -> (i32, St
         .stdin(std::process::Stdio::null())
         .output()
         .unwrap_or_else(|e| panic!("the host's {} is needed: {e}", args[0]));
+    // A directory without write or search bits could not be emptied.
+    for f in files {
+        if matches!(f.made, Made::Dir) {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::Permissions::from_mode(0o755);
+            let _ = std::fs::set_permissions(dir.join(f.name), mode);
+        }
+    }
     let _ = std::fs::remove_dir_all(&dir);
     let text = |b: Vec<u8>| String::from_utf8_lossy(&b).into_owned();
     let stderr = text(out.stderr);

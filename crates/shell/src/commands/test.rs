@@ -13,7 +13,10 @@
 //! has no `<` or `>`, which bash's built-in has. Integers are read as GNU
 //! reads them (blanks around, a sign, any number of digits) and compared as
 //! digit strings, so nothing overflows; `-l STRING` stands for STRING's
-//! length. Files are answered from `stat`, as for root. The evaluator never
+//! length. Files are answered from `stat`, as for root, with two decided
+//! differences (spec §10): a symbolic link is never followed, so `-e`, `-f`
+//! and `-d` look at the link itself, and `-w` is false only on `/bin`'s
+//! filesystem, the read-only one a program can tell. The evaluator never
 //! recurses: each open `(` waits on a stack of its own, so it nests as deep
 //! as the arguments go, as GNU does on its larger stack.
 
@@ -23,6 +26,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cmp::Ordering;
+use vfs::FileType;
 
 pub fn test(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     evaluate(ctx, "test", args, None)
@@ -325,11 +329,47 @@ impl<'e> Eval<'e, '_> {
 
     fn unary(&mut self) -> Answer {
         let op = &self.args[self.pos];
-        match op.as_bytes()[1] {
-            b'n' => Ok(!self.unary_operand()?.is_empty()),
-            b'z' => Ok(self.unary_operand()?.is_empty()),
-            _ => Err(format!("{}: unary operator expected", quote(op))),
-        }
+        let file: fn(&vfs::Stat) -> bool = match op.as_bytes()[1] {
+            b'n' => return Ok(!self.unary_operand()?.is_empty()),
+            b'z' => return Ok(self.unary_operand()?.is_empty()),
+            b'w' => {
+                let path = self.unary_operand()?;
+                return Ok(self.stat(path).is_some_and(|(node, _)| !self.on_bin(node)));
+            }
+            // As for root, which reads every file.
+            b'e' | b'r' => |_| true,
+            // As for root: any execute bit, or a directory to search.
+            b'x' => |s| s.perm & 0o111 != 0 || s.kind == FileType::Directory,
+            b'f' => |s| s.kind == FileType::Regular,
+            b'd' => |s| s.kind == FileType::Directory,
+            b'h' | b'L' => |s| s.kind == FileType::Symlink,
+            b'p' => |s| s.kind == FileType::Fifo,
+            b'S' => |s| s.kind == FileType::Socket,
+            b'b' => |s| s.kind == FileType::BlockDev,
+            b'c' => |s| s.kind == FileType::CharDev,
+            b's' => |s| s.size > 0,
+            b'u' => |s| s.perm & 0o4000 != 0,
+            b'g' => |s| s.perm & 0o2000 != 0,
+            b'k' => |s| s.perm & 0o1000 != 0,
+            // Every program runs as root, user and group 0.
+            b'O' => |s| s.uid == 0,
+            b'G' => |s| s.gid == 0,
+            b'N' => |s| s.mtime > s.atime,
+            _ => return Err(format!("{}: unary operator expected", quote(op))),
+        };
+        let path = self.unary_operand()?;
+        Ok(self.stat(path).is_some_and(|(_, s)| file(&s)))
+    }
+
+    /// Whether `node` is on `/bin`'s filesystem, `system.img`, which is
+    /// read-only: no call says which filesystems are, and `open` for writing
+    /// succeeds on them, so a root the kernel mounted read-only is not told
+    /// (spec §10, §15 item 3).
+    fn on_bin(&mut self, node: vfs::Node) -> bool {
+        self.ctx
+            .vfs
+            .lookup(b"/bin")
+            .is_ok_and(|bin| bin.mount == node.mount)
     }
 
     /// GNU's `binary_operator`, at the left operand (or at the `-l`
@@ -528,9 +568,33 @@ fn quote(arg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::named;
-    use crate::testing::{Harness, TestFile, host_files, host_tool, like_host_files};
+    use crate::testing::{Harness, TestFile, host_files, host_tool, like_host_files, memfs};
+    use alloc::boxed::Box;
     use alloc::string::String;
     use alloc::vec::Vec;
+    use vfs::{FileSystem, FileType, Vfs};
+
+    /// Every unary operator on files, `-t` aside.
+    const FILE_OPERATORS: [&str; 19] = [
+        "-e", "-f", "-d", "-s", "-r", "-w", "-x", "-O", "-G", "-N", "-u", "-g", "-k", "-p", "-S",
+        "-b", "-c", "-h", "-L",
+    ];
+
+    /// `op path` under both names, as GNU answers it (as root, with
+    /// `files` made on the host) and as ours does.
+    fn unary_like_gnu(files: &[TestFile<'_>], op: &str, path: &str) {
+        for name in ["test", "["] {
+            let mut line = alloc::vec![name, op, path];
+            if name == "[" {
+                line.push("]");
+            }
+            assert_eq!(
+                like_host_files(&line, files),
+                host_files(&line, files, true),
+                "{line:?}"
+            );
+        }
+    }
 
     /// `args` (without the name) under `name`, as GNU's program and as
     /// ours; for `[` the `]` is added.
@@ -873,6 +937,183 @@ mod tests {
                     "{line:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn file_operators_answer_as_gnu_s_do_for_root() {
+        // GNU's answers as root, through `unshare -r` (spec §15 item 3):
+        // probe u1, `-r` and `-w` true without the bits, `-x` true for a
+        // directory. Every file has its times, so that `-N` does not
+        // depend on the host's clock.
+        let files = [
+            TestFile::file("f", b"data"),
+            TestFile::file("empty", b""),
+            TestFile::file("x", b"#").mode(0o100),
+            TestFile::file("g", b"#").mode(0o010),
+            TestFile::file("none", b"x").mode(0o000),
+            TestFile::file("su", b"x").mode(0o4755),
+            TestFile::file("sg", b"x").mode(0o2644),
+            TestFile::file("read", b"x").times(1_000, 2_000),
+            TestFile::file("unread", b"x").times(2_000, 1_000),
+            TestFile::file("same", b"x").times(2_000, 2_000),
+            // Each directory holds a file, so that `-s` does not depend on
+            // the size the host's filesystem gives an empty one.
+            TestFile::dir("d"),
+            TestFile::file("d/in", b""),
+            TestFile::dir("closed").mode(0o600),
+            TestFile::file("closed/in", b""),
+            TestFile::dir("search").mode(0o100),
+            TestFile::file("search/in", b""),
+            TestFile::dir("sticky").mode(0o1777),
+            TestFile::file("sticky/in", b""),
+            TestFile::fifo("p"),
+            TestFile::socket("s"),
+        ];
+        let names = [
+            "f", "empty", "x", "g", "none", "su", "sg", "read", "unread", "same", "d", "closed",
+            "search", "sticky", "p", "s", "nope", "", "d/", "f/",
+        ];
+        let files = files.map(|f| match f.times {
+            Some(_) => f,
+            None => f.times(5_000, 5_000),
+        });
+        for op in FILE_OPERATORS {
+            for path in names {
+                unary_like_gnu(&files, op, path);
+            }
+        }
+        // Missing their file: GNU's message.
+        like_gnu(&[
+            &["-e"],
+            &["!", "-f"],
+            &["-d", "-a", "x"],
+            &["-x", "-o", "-f"],
+        ]);
+    }
+
+    #[test]
+    fn devices_answer_as_gnu_s_do() {
+        // The host's /dev/null and a block device of its own stand for
+        // the harness's.
+        let block = std::fs::read_dir("/dev")
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|e| {
+                use std::os::unix::fs::FileTypeExt;
+                e.file_type().is_ok_and(|t| t.is_block_device())
+            })
+            .expect("a block device in the host's /dev")
+            .path();
+        let block = block.to_str().unwrap();
+        for (host, kind) in [
+            ("/dev/null", FileType::CharDev),
+            (block, FileType::BlockDev),
+        ] {
+            for op in ["-e", "-f", "-d", "-p", "-S", "-b", "-c", "-h", "-L"] {
+                let mut fs = memfs();
+                let root = fs.root();
+                fs.special(root, b"dev", kind).unwrap();
+                let mut h = Harness::on(fs);
+                let line = alloc::format!("test {op} /dev");
+                let gnu = host_tool(&["test", op, host], &[], b"");
+                assert_eq!(h.run(&line), (gnu.0, gnu.2), "{op} {host}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_symbolic_link_is_never_followed() {
+        // A decided difference (spec §6.2, §10): GNU's operators but -h
+        // and -L look at what the link names; these look at the link.
+        let files = [
+            TestFile::file("f", b"data"),
+            TestFile::dir("d"),
+            TestFile::link("lf", "f"),
+            TestFile::link("ld", "d"),
+            TestFile::link("dangling", "nope"),
+        ];
+        for path in ["lf", "ld", "dangling"] {
+            unary_like_gnu(&files, "-h", path);
+            unary_like_gnu(&files, "-L", path);
+        }
+        for (op, path, ours, gnu) in [
+            ("-e", "dangling", 0, 1),
+            ("-f", "lf", 1, 0),
+            ("-d", "ld", 1, 0),
+            ("-r", "dangling", 0, 1),
+            ("-x", "lf", 0, 1),
+            ("-s", "dangling", 0, 1),
+        ] {
+            let line = ["test", op, path];
+            assert_eq!(host_files(&line, &files, true).0, gnu, "{line:?}");
+            assert_eq!(like_host_files(&line, &files).0, ours, "{line:?}");
+        }
+        let line = ["test", "lf", "-ef", "f"];
+        assert_eq!(host_files(&line, &files, false).0, 0);
+        assert_eq!(like_host_files(&line, &files).0, 1);
+    }
+
+    #[test]
+    fn nothing_on_bin_s_filesystem_is_writable() {
+        // `/bin` is read-only (system.img), which no call tells: a file
+        // on its filesystem is not writable (spec §15 item 3).
+        let mut programs = memfs();
+        let root = programs.root();
+        let ls = programs.create(root, b"ls").unwrap();
+        programs.set_mode(ls, 0o755).unwrap();
+        let mut h = Harness::new();
+        h.vfs.mkdir(b"/bin").unwrap();
+        h.vfs
+            .mount(b"/bin", Box::new(programs.read_only()))
+            .unwrap();
+        for (line, status) in [
+            ("test -w /bin/ls", 1),
+            ("[ -w /bin ]", 1),
+            ("test -w /bin/.", 1),
+            ("test -w /bin/..", 0),
+            ("test -w /root", 0),
+            ("test -w /etc/motd", 0),
+            ("test -r /bin/ls", 0),
+            ("test -x /bin/ls", 0),
+            ("test -f /bin/ls", 0),
+            // One inode number, two filesystems.
+            ("test /bin/ls -ef /etc", 1),
+            ("test /bin/ls -ef /bin/ls", 0),
+            ("test /bin -ef /bin/.", 0),
+        ] {
+            assert_eq!(h.run(line), (status, String::new()), "{line}");
+        }
+        let etc = h.vfs.lookup(b"/etc").unwrap();
+        assert_eq!(etc.ino, h.vfs.lookup(b"/bin/ls").unwrap().ino);
+    }
+
+    #[test]
+    fn owned_by_another_is_not_owned_by_root() {
+        // Relay OS runs every program as root; a file another made (on a
+        // disk written elsewhere) is not its.
+        let mut fs = memfs();
+        let root = fs.root();
+        for (name, uid, gid) in [
+            (&b"theirs"[..], 1000, 0),
+            (b"group", 0, 100),
+            (b"mine", 0, 0),
+        ] {
+            let ino = fs.create(root, name).unwrap();
+            fs.set_owner(ino, uid, gid).unwrap();
+        }
+        let mut h = Harness::on(fs);
+        for (line, status) in [
+            ("test -O /theirs", 1),
+            ("test -G /theirs", 0),
+            ("test -O /group", 0),
+            ("test -G /group", 1),
+            ("test -O /mine", 0),
+            ("test -G /mine", 0),
+            ("test -O /nope", 1),
+            ("test -G /nope", 1),
+        ] {
+            assert_eq!(h.run(line), (status, String::new()), "{line}");
         }
     }
 
