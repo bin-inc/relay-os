@@ -4,13 +4,13 @@ filled the table with 60 children
 + t-spin 1
 4592762880 iterations
 + t-spawn 1000
-free frames before: 4071600
-free frames after: 4071600
+free frames before: 4071233
+free frames after: 4071233
 frames lost: 0
 + free
               total        used        free
-Mem:       16328028       41668    16286360
-Heap:         32768        8543       24225
+Mem:       16326868       41964    16284904
+Heap:         32768        8544       24224
 + t-fault null-read
 relay-sh: t-fault: killed (page fault at 0x0, read, ip 0x4001e9)
 + t-fault null-write
@@ -43,7 +43,7 @@ t-args: kill
 + t-spawn orphan
 + t-spin 1
 2325741568 iterations
-2391801856 iterations
+2392850432 iterations
 + t-args a 'b c' ''
 [1] a
 [2] b c
@@ -59,17 +59,22 @@ date
 df
 dmesg
 echo
+false
 free
+grep
 head
 ls
 mkdir
 mv
 poweroff
+ps
 pwd
 reboot
 rm
 rmdir
+seq
 sh
+sleep
 stat
 sync
 t-abi
@@ -77,6 +82,8 @@ t-args
 t-fault
 t-files
 t-mem
+t-pipe
+t-proc
 t-read
 t-spawn
 t-spin
@@ -84,6 +91,7 @@ t-sys
 t-tee
 tail
 touch
+true
 uname
 wc
 + cat /root/check4.list >> /root/check4.list
@@ -102,5 +110,5 @@ two
 two
 + free
               total        used        free
-Mem:       16328028       41668    16286360
+Mem:       16326868       41964    16284904
 Heap:         32768        8544       24224

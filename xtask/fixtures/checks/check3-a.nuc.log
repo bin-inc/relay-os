@@ -2,19 +2,19 @@
 + uname -a
 Relay relay 0.4.0 x86_64
 + date
-Thu Oct  1 02:24:04 UTC 2026
+Fri Oct  2 00:48:14 UTC 2026
 + dmesg
 Relay OS 0.4.0
 [[32m ok [0m] console 1920x1200 (120x33 cells)
 [[32m ok [0m] cpu tables
 cpu: SMEP on, SMAP on
-[[32m ok [0m] boot info: 15945 MiB usable in 34 regions, cmdline ''
-[[32m ok [0m] memory: 15911 MiB free of 15945 MiB, heap 32 MiB
+[[32m ok [0m] boot info: 15944 MiB usable in 34 regions, cmdline ''
+[[32m ok [0m] memory: 15909 MiB free of 15944 MiB, heap 32 MiB
 acpi: tables FACP FIDT SSDT SSDT SSDT SSDT SSDT HPET APIC MCFG SSDT SSDT UEFI NHLT LPIT WDAT SSDT SSDT DBGP DBG2 DMAR FPDT SSDT SSDT SSDT SSDT TPM2 BGRT PHAT WSMT
 acpi: FADT reset io 0xcf9 <- 0x6, PM1a_CNT io 0x1804, PM1b_CNT none, century register 0x32
 [[32m ok [0m] acpi: 30 tables, ECAM 0xc0000000 buses 0-255, HPET 0xfed00000, S5 7/0
 [[32m ok [0m] timer: TSC 2496.000 MHz (CPUID 0x15), 1000 Hz tick (xAPIC)
-[[32m ok [0m] rtc: 2026-10-01 02:23:44 UTC
+[[32m ok [0m] rtc: 2026-10-02 00:47:11 UTC
 pci: 00:00.0 8086:4621 060000 host bridge
 pci: 00:02.0 8086:46a6 030000 display, bar0 mem64 0x603c000000 16M, bar2 mem64 0x4000000000 256M pf, bar4 io 0x3000 64
 pci: 00:06.0 8086:464d 060400 PCI bridge
@@ -97,45 +97,53 @@ usb: 00:14.0 port 15: 0951:1666 SuperSpeed, disk Kingston DataTraveler 3.0, 14.4
 [[32m ok [0m] usb: 2 controllers, 4 devices
 [[32m ok [0m] keyboard: 2 keyboards
 storage: 00:14.0 port 15: GPT with 2 partitions
-storage: root on 00:14.0 port 15, the disk with the boot partition 1A986FFA-A474-4233-B2D4-ECB7E558BA2C
+storage: root on 00:14.0 port 15, the disk with the boot partition 5633C56C-4287-44C3-8F57-E87023A1CDFC
 [[32m ok [0m] mount /: ext2 on 00:14.0 port 15 partition 2, 2.0 GiB
-[[32m ok [0m] system: 34 programs, ABI 3
+[[32m ok [0m] system: 42 programs, ABI 3
 + ls -l /bin
-total 2467
--rwxr-xr-x 1 root root  90832 Oct  1 02:21 cat
--rwxr-xr-x 1 root root  71096 Oct  1 02:21 clear
--rwxr-xr-x 1 root root  84616 Oct  1 02:21 cp
--rwxr-xr-x 1 root root  80608 Oct  1 02:21 date
--rwxr-xr-x 1 root root  80728 Oct  1 02:21 df
--rwxr-xr-x 1 root root  76176 Oct  1 02:21 dmesg
--rwxr-xr-x 1 root root  81392 Oct  1 02:21 echo
--rwxr-xr-x 1 root root  80336 Oct  1 02:21 free
--rwxr-xr-x 1 root root  90864 Oct  1 02:21 head
--rwxr-xr-x 1 root root 133000 Oct  1 02:21 ls
--rwxr-xr-x 1 root root  80416 Oct  1 02:21 mkdir
--rwxr-xr-x 1 root root  80312 Oct  1 02:21 mv
--rwxr-xr-x 1 root root  76272 Oct  1 02:21 poweroff
--rwxr-xr-x 1 root root  71160 Oct  1 02:21 pwd
--rwxr-xr-x 1 root root  76264 Oct  1 02:21 reboot
--rwxr-xr-x 1 root root 114728 Oct  1 02:21 rm
--rwxr-xr-x 1 root root  76096 Oct  1 02:21 rmdir
--rwxr-xr-x 1 root root 269272 Oct  1 02:21 sh
--rwxr-xr-x 1 root root  84808 Oct  1 02:21 stat
--rwxr-xr-x 1 root root  76096 Oct  1 02:21 sync
--rwxr-xr-x 1 root root  19688 Oct  1 02:21 t-abi
--rwxr-xr-x 1 root root  19688 Oct  1 02:21 t-args
--rwxr-xr-x 1 root root  19296 Oct  1 02:21 t-fault
--rwxr-xr-x 1 root root  50616 Oct  1 02:21 t-files
--rwxr-xr-x 1 root root  43368 Oct  1 02:21 t-mem
--rwxr-xr-x 1 root root  28232 Oct  1 02:21 t-read
--rwxr-xr-x 1 root root  28904 Oct  1 02:21 t-spawn
--rwxr-xr-x 1 root root  19560 Oct  1 02:21 t-spin
--rwxr-xr-x 1 root root  29496 Oct  1 02:21 t-sys
--rwxr-xr-x 1 root root  36904 Oct  1 02:21 t-tee
--rwxr-xr-x 1 root root  90864 Oct  1 02:21 tail
--rwxr-xr-x 1 root root  76096 Oct  1 02:21 touch
--rwxr-xr-x 1 root root  76344 Oct  1 02:21 uname
--rwxr-xr-x 1 root root  95064 Oct  1 02:21 wc
+total 3611
+-rwxr-xr-x 1 root root 103712 Oct  2 00:40 cat
+-rwxr-xr-x 1 root root  83752 Oct  2 00:40 clear
+-rwxr-xr-x 1 root root  93184 Oct  2 00:40 cp
+-rwxr-xr-x 1 root root  89168 Oct  2 00:40 date
+-rwxr-xr-x 1 root root  93384 Oct  2 00:40 df
+-rwxr-xr-x 1 root root  88832 Oct  2 00:40 dmesg
+-rwxr-xr-x 1 root root  94048 Oct  2 00:40 echo
+-rwxr-xr-x 1 root root  83592 Oct  2 00:40 false
+-rwxr-xr-x 1 root root  88904 Oct  2 00:40 free
+-rwxr-xr-x 1 root root 112904 Oct  2 00:40 grep
+-rwxr-xr-x 1 root root 103592 Oct  2 00:40 head
+-rwxr-xr-x 1 root root 145656 Oct  2 00:40 ls
+-rwxr-xr-x 1 root root  88984 Oct  2 00:40 mkdir
+-rwxr-xr-x 1 root root  93040 Oct  2 00:40 mv
+-rwxr-xr-x 1 root root  88928 Oct  2 00:40 poweroff
+-rwxr-xr-x 1 root root  89120 Oct  2 00:40 ps
+-rwxr-xr-x 1 root root  83808 Oct  2 00:40 pwd
+-rwxr-xr-x 1 root root  88920 Oct  2 00:40 reboot
+-rwxr-xr-x 1 root root 127392 Oct  2 00:40 rm
+-rwxr-xr-x 1 root root  88752 Oct  2 00:40 rmdir
+-rwxr-xr-x 1 root root 103584 Oct  2 00:40 seq
+-rwxr-xr-x 1 root root 430440 Oct  2 00:40 sh
+-rwxr-xr-x 1 root root  99680 Oct  2 00:40 sleep
+-rwxr-xr-x 1 root root  97392 Oct  2 00:40 stat
+-rwxr-xr-x 1 root root  88752 Oct  2 00:40 sync
+-rwxr-xr-x 1 root root  19688 Oct  2 00:40 t-abi
+-rwxr-xr-x 1 root root  19688 Oct  2 00:40 t-args
+-rwxr-xr-x 1 root root  19296 Oct  2 00:40 t-fault
+-rwxr-xr-x 1 root root  54712 Oct  2 00:40 t-files
+-rwxr-xr-x 1 root root  43256 Oct  2 00:40 t-mem
+-rwxr-xr-x 1 root root  52008 Oct  2 00:40 t-pipe
+-rwxr-xr-x 1 root root  66008 Oct  2 00:40 t-proc
+-rwxr-xr-x 1 root root  28344 Oct  2 00:40 t-read
+-rwxr-xr-x 1 root root  52056 Oct  2 00:40 t-spawn
+-rwxr-xr-x 1 root root  19560 Oct  2 00:40 t-spin
+-rwxr-xr-x 1 root root  33600 Oct  2 00:40 t-sys
+-rwxr-xr-x 1 root root  37136 Oct  2 00:40 t-tee
+-rwxr-xr-x 1 root root 108344 Oct  2 00:40 tail
+-rwxr-xr-x 1 root root  88752 Oct  2 00:40 touch
+-rwxr-xr-x 1 root root  83592 Oct  2 00:40 true
+-rwxr-xr-x 1 root root  89000 Oct  2 00:40 uname
+-rwxr-xr-x 1 root root 113032 Oct  2 00:40 wc
 + t-args a 'b c' ''
 [1] a
 [2] b c
@@ -145,8 +153,8 @@ relay-sh: t-fault: killed (page fault at 0x0, read, ip 0x4001e9)
 + t-spin 1
 4594860032 iterations
 + t-spawn 100
-free frames before: 4071603
-free frames after: 4071603
+free frames before: 4071236
+free frames after: 4071236
 frames lost: 0
 + t-spawn kill
 t-spin: kill
@@ -252,8 +260,8 @@ remember me
 and me
 + ls -l /root/notes
 total 8
--rw-r--r-- 1 root root   19 Oct  1 02:24 a
-drwxr-xr-x 2 root root 4096 Oct  1 02:24 old
+-rw-r--r-- 1 root root   19 Oct  2 00:48 a
+drwxr-xr-x 2 root root 4096 Oct  2 00:48 old
 + cp /root/notes/a /root/notes/b
 + mv /root/notes/b /root/notes/old/c
 + ls /root/notes /root/notes/old
@@ -273,9 +281,9 @@ a
   Size: 0         	Blocks: 0          IO Block: 4096   regular empty file
 Inode: 8195        Links: 1
 Access: (0644/-rw-r--r--)  Uid: (    0/    root)   Gid: (    0/    root)
-Access: 2026-10-01 02:24:15.000000000 +0000
-Modify: 2026-10-01 02:24:15.000000000 +0000
-Change: 2026-10-01 02:24:15.000000000 +0000
+Access: 2026-10-02 00:48:25.000000000 +0000
+Modify: 2026-10-02 00:48:25.000000000 +0000
+Change: 2026-10-02 00:48:25.000000000 +0000
  Birth: -
 + head -n 1 /root/notes/a
 remember me
@@ -332,4 +340,4 @@ rm: it is dangerous to operate recursively on '/'
 a  big  t
 + df
 Filesystem     1K-blocks Used Available Use% Mounted on
-/dev/root        2064208 8316   1951036   1% /
+/dev/root        2064208 8320   1951032   1% /
