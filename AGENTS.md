@@ -140,11 +140,16 @@ test stick and the maintainer; do not run them unless asked.
   output.
 - **e2e expectations:** an `expect` consumes its match, including a
   trailing newline or the prompt it ended at; the command echo follows the
-  prompt (match `root@relay:~# <cmd>`); output printed while the shell
-  waits at its prompt has no newline before it; kernel log lines
-  (`pid N (…): killed: …`) can arrive between other lines. `key` and
-  `type` cannot type `{`, which opens a key name (`{ctrl-c}`), so send it
-  over serial (`send`).
+  prompt, which the `expect` before the input has consumed (match
+  `<cmd>\n…`, or `\n<output>`); output printed while the shell waits at
+  its prompt has no newline before it; kernel log lines (`pid N (…):
+  killed: …`) can arrive between other lines. `key` and `type` cannot type
+  `{`, which opens a key name (`{ctrl-c}`), so send it over serial
+  (`send`). Every `send`, `key` and `type` waits for the prompt: an
+  `expect` that ends at it must come since the input before, or the
+  scenario is refused; input for a running program, a Ctrl-C, or a line
+  beside a background job's output is `send-ahead`, `key-ahead` or
+  `type-ahead`.
 - **Mutation checks:** for a guard, break it and see a test fail. A
   mutant that does not compile is no kill; a surviving mutant usually
   names a case no test reaches.
