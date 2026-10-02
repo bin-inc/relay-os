@@ -83,11 +83,13 @@ send sh a.sh &
 expect \n\[4\] \d+\n
 send echo 'echo hello' > b.sh
 send sh b.sh
-expect \+ echo hello\nhello\n
+# Typed only at the prompt: until then the console is still the ended
+# script's, in line mode, which echoed a line typed early once more.
+expect \+ echo hello\nhello\nroot@relay:~# $
 # A bare wait says how the jobs it waited for ended (those that ended
 # before it were told of at the prompt).
 send wait
-expect root@relay:~# wait\n(\[\d\][-+ ]  Done                    sh a\.sh\n){0,4}root@relay:~# $
+expect wait\n(\[\d\][-+ ]  Done                    sh a\.sh\n){0,4}root@relay:~# $
 # exit leaves a running job to process 1, which collects it when it ends.
 send t-spin 1 &
 expect \n\[1\] \d+\n
