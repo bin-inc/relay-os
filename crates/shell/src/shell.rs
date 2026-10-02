@@ -1020,6 +1020,17 @@ mod tests {
     }
 
     #[test]
+    fn a_line_bash_ends_in_error_drops_no_more() {
+        // The prototype's review: bash runs `next` after each.
+        for text in [
+            &b"t-args a && >\nt-args next\n"[..],
+            b"if t-args a; then t-args b; fi if t-args c\nt-args next\n",
+        ] {
+            assert_eq!(piped(text), ["next"], "{}", String::from_utf8_lossy(text));
+        }
+    }
+
+    #[test]
     fn jobs_shows_a_job_typed_across_lines_on_one_line() {
         let mut h = with_jobs();
         let mut input = crate::Bytes::new(b"sleep 5 |\n# c\ncat &\njobs\n".to_vec());

@@ -23,6 +23,9 @@ enum For {
 /// The longest keyword the scan looks for, `select`.
 const KEYWORD_MAX: usize = 6;
 
+/// The words that open a construct.
+const OPENERS: &[&[u8]] = &[b"if", b"while", b"until", b"for", b"select", b"case"];
+
 /// What the lines read so far open and close.
 pub(crate) struct Scan {
     /// The constructs open: each `if`, `while`, `until` and `for` where a
@@ -51,6 +54,9 @@ pub(crate) struct Scan {
     command: bool,
     /// The next word is a redirection's target.
     target: bool,
+    /// The word before was a closer (`fi`, `done`, `esac`, `}`), after
+    /// which an opener is bash's error, no construct.
+    closed: bool,
     for_: For,
 }
 
@@ -69,6 +75,7 @@ impl Scan {
             in_word: false,
             command: true,
             target: false,
+            closed: false,
             for_: For::No,
         }
     }
@@ -170,6 +177,7 @@ impl Scan {
         self.open = false;
         self.command = true;
         self.target = false;
+        self.closed = false;
         self.for_ = For::No;
     }
 
@@ -180,7 +188,12 @@ impl Scan {
         self.nested = 0;
         self.last = b'\n';
         self.command = true;
-        self.target = false;
+        // A redirection with no target is the line's error: its command
+        // goes on no further, as bash's does not.
+        if core::mem::take(&mut self.target) {
+            self.open = false;
+        }
+        self.closed = false;
         // A `for`'s words end with their line; an `in` on a later line is
         // a word that makes the rest of its line arguments, as the
         // parser's `in` would.
@@ -218,7 +231,9 @@ impl Scan {
         if !self.command {
             return;
         }
+        let closed = core::mem::take(&mut self.closed);
         match word {
+            _ if closed && OPENERS.contains(&word) => self.command = false,
             b"if" | b"while" | b"until" => self.depth = self.depth.saturating_add(1),
             b"for" | b"select" => {
                 self.depth = self.depth.saturating_add(1);
@@ -230,8 +245,12 @@ impl Scan {
                 self.depth = self.depth.saturating_add(1);
                 self.command = false;
             }
-            b"fi" | b"done" | b"esac" => self.depth = self.depth.saturating_sub(1),
-            b"then" | b"elif" | b"else" | b"do" | b"!" | b"time" | b"{" | b"}" => {}
+            b"fi" | b"done" | b"esac" => {
+                self.depth = self.depth.saturating_sub(1);
+                self.closed = true;
+            }
+            b"}" => self.closed = true,
+            b"then" | b"elif" | b"else" | b"do" | b"!" | b"time" | b"{" => {}
             _ => self.command = false,
         }
     }
@@ -420,6 +439,26 @@ mod tests {
         // Left open at a line's end, they end with it as quotes do.
         assert_eq!(after(&["echo $(a", "if b"]), (1, false));
         assert_eq!(after(&["echo `a", "if b"]), (1, false));
+    }
+
+    #[test]
+    fn a_line_bash_ends_in_error_leaves_nothing_open() {
+        // The prototype's review: bash runs the next line after these, so
+        // the scan drops nothing more.
+        // A redirection with no target ends the line's command.
+        assert_eq!(after(&["a && >"]), (0, false));
+        assert_eq!(after(&["a | >>"]), (0, false));
+        // An opener right after a closer is an error, no construct (fiif,
+        // brace_if); a closer there still closes.
+        for line in [
+            "if a; then b; fi if c; then",
+            "while a; do b; done while c; do",
+            "{ a; } if b; then",
+            "case a in b) c;; esac for x in y; do",
+        ] {
+            assert_eq!(after(&[line]), (0, false), "{line}");
+        }
+        assert_eq!(after(&["if a; then if b; then c; fi fi"]), (0, false));
     }
 
     #[test]
