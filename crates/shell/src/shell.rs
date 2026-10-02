@@ -58,6 +58,9 @@ pub struct Shell<'a> {
     /// An expansion failed in a way that abandons the rest of the line
     /// (programmable shell gate §5.1).
     abandoned: bool,
+    /// A command of the line ended with Ctrl-C (status 130, spec §6.4),
+    /// whatever a `!` made of its status.
+    cancelled: bool,
 }
 
 impl<'a> Shell<'a> {
@@ -106,6 +109,7 @@ impl<'a> Shell<'a> {
             prompting: false,
             vars: Vars::new(NAME),
             abandoned: false,
+            cancelled: false,
         }
     }
 
@@ -209,6 +213,7 @@ impl<'a> Shell<'a> {
     /// abandons the line stop the rest.
     fn run_list(&mut self, list: &parser::List<parser::Word>) -> i32 {
         self.abandoned = false;
+        self.cancelled = false;
         let mut status = self.status;
         for item in &list.items {
             status = match &item.background {
@@ -216,7 +221,7 @@ impl<'a> Shell<'a> {
                 Some(text) => self.run_pipeline(&item.and_or.first, Some(text)),
                 None => self.run_and_or(&item.and_or),
             };
-            if self.ends_line(status) {
+            if self.ends_line() {
                 break;
             }
         }
@@ -230,7 +235,7 @@ impl<'a> Shell<'a> {
     fn run_and_or(&mut self, and_or: &parser::AndOr<parser::Word>) -> i32 {
         let mut status = self.run_pipeline(&and_or.first, None);
         for (connector, pipeline) in &and_or.rest {
-            if self.ends_line(status) {
+            if self.ends_line() {
                 break;
             }
             let runs = match connector {
@@ -244,10 +249,10 @@ impl<'a> Shell<'a> {
         status
     }
 
-    /// The command that ended with `status` ends the rest of the line:
-    /// `exit`, Ctrl-C or an expansion that abandons it.
-    fn ends_line(&self, status: i32) -> bool {
-        self.stopped || status == CANCELLED || self.abandoned
+    /// The command that ran last ends the rest of the line: `exit`,
+    /// Ctrl-C or an expansion that abandons it.
+    fn ends_line(&self) -> bool {
+        self.stopped || self.cancelled || self.abandoned
     }
 
     /// An expansion that failed: the command fails with status 1. A bad
@@ -264,8 +269,28 @@ impl<'a> Shell<'a> {
     }
 
     /// Runs one pipeline, or starts it in the background with the job's
-    /// text `background`, its words expanded just before.
+    /// text `background`. After a `!` its status is negated, as bash's is:
+    /// 0 becomes 1 and anything else 0, even 130 after Ctrl-C, which still
+    /// ends the line. Neither a background job's start nor `exit` is.
     fn run_pipeline(
+        &mut self,
+        typed: &parser::Pipeline<parser::Word>,
+        background: Option<&str>,
+    ) -> i32 {
+        let status = self.run_commands(typed, background);
+        if status == CANCELLED {
+            self.cancelled = true;
+        }
+        if !typed.negated || background.is_some() || self.stopped {
+            return status;
+        }
+        self.status = i32::from(status == 0);
+        self.status
+    }
+
+    /// Runs a pipeline's commands, or starts them in the background, their
+    /// words expanded just before.
+    fn run_commands(
         &mut self,
         typed: &parser::Pipeline<parser::Word>,
         background: Option<&str>,
@@ -601,7 +626,7 @@ impl<'a> Shell<'a> {
             self.write_transcript();
             self.sync();
             status = self.execute(line);
-            if status == CANCELLED || self.stopped {
+            if self.cancelled || self.stopped {
                 break;
             }
         }
@@ -945,6 +970,59 @@ mod tests {
             .map(|s| s.args[1].as_str())
             .collect();
         assert_eq!(args, ["a", "c", "d"]);
+    }
+
+    #[test]
+    fn a_bang_negates_a_pipeline_s_status() {
+        let mut h = Harness::new();
+        // What bash prints for each (an interactive bash 5.2).
+        assert_eq!(h.run("! true"), (1, "".into()));
+        assert_eq!(h.run("! false"), (0, "".into()));
+        assert_eq!(
+            h.run("! nope"),
+            (0, "relay-sh: nope: command not found\n".into())
+        );
+        assert_eq!(h.run("! ! false; echo $?"), (0, "1\n".into()));
+        assert_eq!(h.run("! ; echo $?"), (0, "1\n".into()));
+        assert_eq!(h.run("! false && echo t"), (0, "t\n".into()));
+        assert_eq!(h.run("! true | false; echo $?"), (0, "0\n".into()));
+        assert_eq!(h.run("! A=1; echo $? $A"), (0, "1 1\n".into()));
+        // `exit` stops the shell with its own status.
+        assert_eq!(h.run("! exit 3"), (3, "".into()));
+    }
+
+    #[test]
+    fn ctrl_c_ends_a_negated_pipeline_s_line_and_script() {
+        let mut h = Harness::new();
+        h.put("/tmp/big", &alloc::vec![b'x'; 300_000]);
+        // `$?` is the negated 130, as in bash, and the rest does not run.
+        h.console.interrupt = true;
+        assert_eq!(h.run("! cat /tmp/big | wc -c; echo no"), (0, "^C\n".into()));
+        // Only that line: the next one runs whole.
+        let mut shell = Shell::new(&mut h.vfs, &mut h.console, &mut h.system);
+        shell.execute("cat /tmp/big");
+        assert_eq!(shell.execute("echo a; echo b"), 0);
+        assert_eq!(h.console.take(), "^C\na\nb\n");
+        h.console.interrupt = false;
+        h.put("/tmp/s.sh", b"! cat /tmp/big | wc -c\necho no\n");
+        h.console.interrupt_after = Some(1);
+        assert_eq!(
+            h.run("sh /tmp/s.sh").1,
+            "+ ! cat /tmp/big | wc -c\n^C\n",
+            "the script ends there"
+        );
+    }
+
+    #[test]
+    fn a_negated_background_job_starts_with_status_0() {
+        let mut h = with_jobs();
+        let out = typed(&mut h, &["! sleep 5 &", "t-args $?", ""]);
+        assert!(
+            out.starts_with("root@relay:/# ! sleep 5 &\n[1] 101\n"),
+            "{out}"
+        );
+        assert_eq!(h.programs.spawned[1].args, ["t-args", "0"], "as bash's");
+        assert!(out.contains("Done                    sleep 5\n"), "{out}");
     }
 
     #[test]

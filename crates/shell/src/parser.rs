@@ -33,7 +33,8 @@
 //! the background (§9.2). A line is a [`List`] (programmable shell gate
 //! §4.1): an unquoted `;` ends one of its items, and `&&` and `||` join
 //! pipelines into an and-or list; bash's syntax errors name one with no
-//! command before it, and an and-or list ending with `&` is refused. Every
+//! command before it, and an and-or list ending with `&` is refused. An
+//! unquoted `!` word at a pipeline's start negates its status. Every
 //! other shell feature is refused: an unquoted `&` before more, `*`, `?`,
 //! `<`, `` ` ``, `(` or `)` is an error naming the character, instead of
 //! being passed on as if it were plain text; so are `|&` (the errors into
@@ -83,9 +84,10 @@ pub enum Connector {
 }
 
 /// One command, or several joined by `|`, each one's output the next
-/// one's input.
+/// one's input; after a `!`, its status negated.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pipeline<W = String> {
+    pub negated: bool,
     pub commands: Vec<Command<W>>,
 }
 
@@ -186,6 +188,11 @@ impl Word {
             .split_once('=')
             .and_then(|(before, _)| before.strip_suffix('+'))
             .is_some_and(is_name)
+    }
+
+    /// The word is `!`, unquoted.
+    fn is_bang(&self) -> bool {
+        matches!(&self.pieces[..], [Piece::Text(t, false)] if t == "!")
     }
 
     /// The word if it is one unquoted piece of text, all ASCII digits (`2`
@@ -528,6 +535,11 @@ struct Parts {
     redirect: Option<Redirect<Word>>,
     /// A `>` (false) or `>>` (true) seen, waiting for its file name.
     pending: Option<bool>,
+    /// How many `!` stood before the pipeline's first command.
+    bangs: usize,
+    /// The command is not the pipeline's first, so a `!` cannot stand
+    /// before it.
+    later: bool,
 }
 
 impl Parts {
@@ -540,6 +552,14 @@ impl Parts {
         match self.pending.take() {
             Some(_) if self.redirect.is_some() => return Err(ParseError::Unsupported(">".into())),
             Some(append) => self.redirect = Some(Redirect { path: w, append }),
+            // A `!` before anything of the command negates the pipeline
+            // (programmable shell gate §4.1), only the first command's.
+            None if w.is_bang() && self.words.is_empty() && self.redirect.is_none() => {
+                if self.later {
+                    return Err(ParseError::MissingTarget("!"));
+                }
+                self.bangs += 1;
+            }
             None => self.words.push(w),
         }
         Ok(())
@@ -556,6 +576,8 @@ impl Parts {
             return Err(ParseError::Unsupported("> before |".into()));
         }
         let p = core::mem::take(self);
+        self.bangs = p.bangs;
+        self.later = true;
         command(p.words, None)
     }
 }
@@ -590,7 +612,9 @@ fn end_pipeline(
     }
     if parts.words.is_empty() {
         match (pipeline.is_empty(), &parts.redirect) {
-            (true, None) => return Ok(None),
+            // `!` alone is a command that does nothing, negated.
+            (true, None) if parts.bangs == 0 => return Ok(None),
+            (true, None) => {}
             (true, Some(_)) => {}
             (false, None) => return Err(ParseError::MissingTarget(end)),
             (false, Some(_)) => return Err(ParseError::Unsupported("| >".into())),
@@ -599,6 +623,7 @@ fn end_pipeline(
     let p = core::mem::take(parts);
     pipeline.push(command(p.words, p.redirect)?);
     Ok(Some(Pipeline {
+        negated: p.bangs % 2 == 1,
         commands: core::mem::take(pipeline),
     }))
 }
@@ -740,7 +765,12 @@ pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
                     // `a & b` runs both in bash.
                     return Err(ParseError::Unsupported("&".into()));
                 }
-                background = Some(String::from(line[item_start..at].trim_matches([' ', '\t'])));
+                // Without its `!`, as bash's `jobs` shows it.
+                let mut text = line[item_start..at].trim_matches([' ', '\t']);
+                for _ in 0..parts.bangs {
+                    text = text[1..].trim_start_matches([' ', '\t']);
+                }
+                background = Some(String::from(text));
                 break;
             }
             '\'' => {
@@ -829,6 +859,10 @@ fn join(
     pipeline: &mut Vec<Command<Word>>,
     connector: Connector,
 ) -> Result<(), ParseError> {
+    // Not even after a `!`, as bash's grammar has it.
+    if parts.words.is_empty() && parts.redirect.is_none() && pipeline.is_empty() {
+        return Err(ParseError::MissingTarget(connector.token()));
+    }
     match end_pipeline(parts, pipeline, connector.token())? {
         Some(p) => items.pipeline(p),
         None => return Err(ParseError::MissingTarget(connector.token())),
@@ -1446,6 +1480,72 @@ mod tests {
             parse_line("a && b || c &"),
             Err(ParseError::Unsupported("& after ||".into()))
         );
+    }
+
+    /// The first pipeline of `line`, as typed.
+    fn first(line: &str) -> Pipeline<Word> {
+        parse_line(line).unwrap().items.remove(0).and_or.first
+    }
+
+    #[test]
+    fn a_bang_before_a_pipeline_negates_it() {
+        let p = first("! a | b");
+        assert!(p.negated);
+        assert_eq!(p.commands.len(), 2);
+        // Each `!` turns it again, as bash's does.
+        assert!(!first("! ! a").negated && first("! ! ! a").negated);
+        assert!(!first("a").negated);
+        // Alone before `;` or the line's end, it negates nothing.
+        let list = parse_line("! ; !").unwrap();
+        assert_eq!(list.items.len(), 2);
+        for item in &list.items {
+            let p = &item.and_or.first;
+            assert!(p.negated && p.commands[0].words.is_empty());
+        }
+        // Each pipeline of an and-or list has its own.
+        let ao = parse_line("! a && ! b || c")
+            .unwrap()
+            .items
+            .remove(0)
+            .and_or;
+        let negated: Vec<bool> = core::iter::once(&ao.first)
+            .chain(ao.rest.iter().map(|(_, p)| p))
+            .map(|p| p.negated)
+            .collect();
+        assert_eq!(negated, [true, true, false]);
+        // Only a whole unquoted word at a pipeline's start: elsewhere, as
+        // bash's, it is a word (after a redirection, a command's name).
+        for (line, words) in [
+            ("echo !", &["echo", "!"][..]),
+            ("'!' a", &["!", "a"]),
+            ("\\! a", &["!", "a"]),
+            ("!a b", &["!a", "b"]),
+            ("> f ! a", &["!", "a"]),
+        ] {
+            assert!(!first(line).negated, "{line}");
+            assert_eq!(parse(line).unwrap()[0].words, words, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_bang_stands_only_at_a_pipeline_s_start() {
+        // bash's messages (an interactive bash 5.2, for each line).
+        for (line, token) in [
+            ("a | ! b", "!"),
+            ("! | a", "|"),
+            ("! && a", "&&"),
+            ("! || a", "||"),
+            ("! &", "&"),
+        ] {
+            assert_eq!(
+                parse_line(line).unwrap_err().to_string(),
+                alloc::format!("syntax error near unexpected token `{token}'"),
+                "{line}"
+            );
+        }
+        // A background job's text leaves it out, as bash's `jobs` does.
+        assert_eq!(background("! sleep 5 &").as_deref(), Some("sleep 5"));
+        assert_eq!(background("! ! sleep 5 &").as_deref(), Some("sleep 5"));
     }
 
     #[test]

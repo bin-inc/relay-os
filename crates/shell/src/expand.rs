@@ -104,7 +104,10 @@ pub(crate) fn expand(
     for c in &pipeline.commands {
         commands.push(x.command(c)?);
     }
-    Ok(Pipeline { commands })
+    Ok(Pipeline {
+        negated: pipeline.negated,
+        commands,
+    })
 }
 
 /// An assignment's value: one string, however it expands (`$@` joined by
