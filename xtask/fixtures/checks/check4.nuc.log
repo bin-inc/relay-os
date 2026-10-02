@@ -52,6 +52,7 @@ t-args: kill
 relay-sh: t-abi: Exec format error
 + ls /bin > /root/check4.list
 + cat /root/check4.list
+[
 cat
 clear
 cp
@@ -90,6 +91,7 @@ t-spin
 t-sys
 t-tee
 tail
+test
 touch
 true
 uname

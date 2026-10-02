@@ -55,6 +55,16 @@ pub fn build() -> Result<Vec<Program>> {
             }
         }
     }
+    // Cargo refuses `[` as a binary's name, so the `test` program is packed
+    // under both names; it takes its name from its argument 0 (spec §15
+    // item 3).
+    if let Some(test) = programs.iter().find(|p| p.name == "test") {
+        let path = test.path.clone();
+        programs.push(Program {
+            name: "[".into(),
+            path,
+        });
+    }
     programs.sort_by(|a, b| a.name.cmp(&b.name));
     require_tool("readelf", "binutils")?;
     for p in &programs {
@@ -647,6 +657,12 @@ mod tests {
         let t = archive.entry(archive.find(b"t-args").unwrap()).unwrap();
         assert_eq!(t.mode, 0o755);
         assert_eq!(t.data, fs::read(t_args().path).unwrap());
+        // One program under two names (spec §15 item 3): Cargo refuses `[`
+        // as a binary's name.
+        let test = archive.entry(archive.find(b"test").unwrap()).unwrap();
+        let bracket = archive.entry(archive.find(b"[").unwrap()).unwrap();
+        assert_eq!((bracket.mode, bracket.data), (0o755, test.data));
+        assert_eq!(programs[0].name, "[", "first, as the archive sorts");
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
