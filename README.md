@@ -35,7 +35,7 @@ Design: `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`
 In QEMU, on any Linux machine with the tools below:
 
 ```sh
-cargo xtask test      # unit tests, then every QEMU scenario (a few minutes)
+cargo xtask test      # unit tests, then every QEMU scenario (a minute or two)
 cargo xtask qemu      # boot it in a window; type `help` at the prompt
 ```
 
@@ -72,7 +72,7 @@ are installed automatically from `rust-toolchain.toml`.
 | `cargo xtask ci` | Everything a pull request must pass: lint, unit tests, QEMU scenarios |
 | `cargo xtask lint` | `cargo fmt --check` and clippy (warnings are errors) on every crate |
 | `cargo xtask unit` | Host unit tests |
-| `cargo xtask test` | Host unit tests, then every QEMU scenario in `tests/e2e/` |
+| `cargo xtask test` | Host unit tests, then every QEMU scenario in `tests/e2e/`, up to 4 at once (`--jobs 1` for one at a time) |
 | `cargo xtask qemu` | Boot the image in a QEMU window (serial on this terminal) |
 | `cargo xtask image` | Build `target/relay/relay-os.img` |
 | `cargo xtask host-shell <img>` | Run the shell on this machine over the image's ext2 partition (changes it in place; `poweroff` leaves) |

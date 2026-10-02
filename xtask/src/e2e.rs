@@ -68,6 +68,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -883,8 +884,44 @@ pub fn load_scenarios(only: Option<&str>) -> Result<Vec<Scenario>> {
     Ok(out)
 }
 
-/// Builds the image and runs every scenario (or only `only`).
-pub fn run_all(only: Option<&str>) -> Result<()> {
+/// Scenarios run at once by default: one per core, at most 4. Each machine
+/// has one CPU and 1 GiB, so 4 fit CI's runner (4 CPUs, 16 GiB), which
+/// then runs the scenarios in a third of the time one at a time takes.
+pub fn default_jobs() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get().min(4))
+}
+
+/// Runs `f` on every item, `jobs` at a time (0 means 1), each thread taking
+/// the next item not yet started. A failure stops nothing: the failures
+/// come back, in the items' order.
+fn run_queue<T: Sync>(
+    items: &[T],
+    jobs: usize,
+    f: impl Fn(&T) -> Result<()> + Sync,
+) -> Vec<anyhow::Error> {
+    let next = AtomicUsize::new(0);
+    let failures = Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for _ in 0..jobs.clamp(1, items.len().max(1)) {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(item) = items.get(i) else { break };
+                    if let Err(e) = f(item) {
+                        failures.lock().unwrap().push((i, e));
+                    }
+                }
+            });
+        }
+    });
+    let mut failures = failures.into_inner().unwrap();
+    failures.sort_by_key(|(i, _)| *i);
+    failures.into_iter().map(|(_, e)| e).collect()
+}
+
+/// Builds the image and runs every scenario (or only `only`), `jobs` at
+/// once; each has its own copy of the disk and its own run directory.
+pub fn run_all(only: Option<&str>, jobs: usize) -> Result<()> {
     let scenarios = load_scenarios(only)?;
     let art = build::build()?;
     let img = image::build_image(&art, DEFAULT_CMDLINE)?;
@@ -901,14 +938,33 @@ pub fn run_all(only: Option<&str>) -> Result<()> {
     } else {
         None
     };
-    for s in &scenarios {
+    let started = Instant::now();
+    let failures = run_queue(&scenarios, jobs, |s| {
         println!("== e2e {}", s.name);
-        match (&small, s.small_disk) {
-            (Some((img, layout)), true) => run_scenario(img, layout, s)?,
-            _ => run_scenario(&img, &layout, s)?,
-        }
+        let t = Instant::now();
+        let result = match (&small, s.small_disk) {
+            (Some((img, layout)), true) => run_scenario(img, layout, s),
+            _ => run_scenario(&img, &layout, s),
+        };
+        let verdict = if result.is_ok() { "ok" } else { "FAILED" };
+        println!("{verdict} {} {:.1}s", s.name, t.elapsed().as_secs_f64());
+        result
+    });
+    if !failures.is_empty() {
+        let all: Vec<String> = failures.iter().map(|e| format!("{e:#}")).collect();
+        bail!(
+            "{} of {} scenario(s) failed:\n\n{}",
+            failures.len(),
+            scenarios.len(),
+            all.join("\n\n")
+        );
     }
-    println!("all {} scenario(s) passed", scenarios.len());
+    println!(
+        "all {} scenario(s) passed in {:.1}s with {} job(s)",
+        scenarios.len(),
+        started.elapsed().as_secs_f64(),
+        jobs.clamp(1, scenarios.len())
+    );
     Ok(())
 }
 
@@ -1331,5 +1387,70 @@ mod tests {
             "only row 0 considered"
         );
         assert!(ppm_top_is_nonblank(b"P5\n1 1\n255\n\0", 1).is_err());
+    }
+
+    #[test]
+    fn the_queue_runs_every_item_once() {
+        let ran = Mutex::new(Vec::new());
+        let failures = run_queue(&(0..20).collect::<Vec<_>>(), 4, |i| {
+            ran.lock().unwrap().push(*i);
+            Ok(())
+        });
+        assert!(failures.is_empty());
+        let mut ran = ran.into_inner().unwrap();
+        ran.sort();
+        assert_eq!(ran, (0..20).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn the_queue_runs_at_most_jobs_items_at_once() {
+        let (active, most) = (Mutex::new(0), Mutex::new(0));
+        run_queue(&[(); 12], 3, |_| {
+            {
+                let mut a = active.lock().unwrap();
+                *a += 1;
+                let mut m = most.lock().unwrap();
+                *m = (*m).max(*a);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            *active.lock().unwrap() -= 1;
+            Ok(())
+        });
+        assert_eq!(most.into_inner().unwrap(), 3);
+    }
+
+    /// A failure does not stop the others: every item runs, and every
+    /// failure comes back, in the items' order.
+    #[test]
+    fn the_queue_runs_on_past_failures_and_returns_them_all() {
+        let ran = Mutex::new(0);
+        let failures = run_queue(&(0..10).collect::<Vec<_>>(), 4, |i| {
+            *ran.lock().unwrap() += 1;
+            if *i == 3 || *i == 7 {
+                bail!("item {i}");
+            }
+            Ok(())
+        });
+        assert_eq!(ran.into_inner().unwrap(), 10);
+        let messages: Vec<String> = failures.iter().map(|e| e.to_string()).collect();
+        assert_eq!(messages, ["item 3", "item 7"]);
+    }
+
+    /// One job (and zero, which means one) runs the items in their order.
+    #[test]
+    fn one_job_runs_the_items_in_order() {
+        for jobs in [0, 1] {
+            let ran = Mutex::new(Vec::new());
+            run_queue(&(0..10).collect::<Vec<_>>(), jobs, |i| {
+                ran.lock().unwrap().push(*i);
+                Ok(())
+            });
+            assert_eq!(ran.into_inner().unwrap(), (0..10).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn default_jobs_is_one_to_four() {
+        assert!((1..=4).contains(&default_jobs()));
     }
 }
