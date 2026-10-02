@@ -316,6 +316,25 @@ mod tests {
     }
 
     #[test]
+    fn a_construct_nested_too_deep_is_dropped_to_its_end() {
+        let mut r = Reader::new();
+        for _ in 0..32 {
+            assert_eq!(r.add("if b; then"), Ok(None));
+        }
+        assert_eq!(
+            r.add("if b; then"),
+            Err(ParseError::Unsupported(
+                "more than 32 levels of nesting".into()
+            ))
+        );
+        for _ in 0..33 {
+            assert!(r.reading());
+            assert_eq!(r.add("echo c; fi"), Ok(None));
+        }
+        assert!(!r.reading());
+    }
+
+    #[test]
     fn an_if_with_an_error_inside_is_dropped_to_its_fi() {
         // Nothing of it runs, the lines after the error included; the line
         // after its `fi` starts afresh (programmable shell gate §15 item 2).

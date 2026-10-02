@@ -60,6 +60,12 @@ use core::str::CharIndices;
 /// gate §4.5), as a script does.
 pub const COMMAND_MAX: usize = 64 * 1024;
 
+/// How deep compound commands may nest (programmable shell gate §4.5):
+/// each counts a level, and one that follows `&&` or `||` one more, as the
+/// walker, which recurses on `/bin/sh`'s fixed stack, has the and-or list's
+/// frame under it.
+pub const NESTING_MAX: usize = 32;
+
 /// The home directory `~` stands for.
 pub const HOME: &str = "/root";
 
@@ -380,6 +386,8 @@ enum Stage {
 struct Open {
     /// The list it stands in, put back when it closes.
     outer: Items,
+    /// The levels of nesting it counts ([`NESTING_MAX`]).
+    levels: usize,
     /// The `!`s before it.
     bangs: usize,
     stage: Stage,
@@ -1146,9 +1154,16 @@ impl Parser {
             if !self.pipeline.is_empty() {
                 return Err(ParseError::Unsupported(format!("{} after |", k.token())));
             }
+            let levels = 1 + usize::from(self.items.connector.is_some());
+            if self.open.iter().map(|o| o.levels).sum::<usize>() + levels > NESTING_MAX {
+                return Err(ParseError::Unsupported(format!(
+                    "more than {NESTING_MAX} levels of nesting"
+                )));
+            }
             let bangs = core::mem::take(&mut self.parts).bangs;
             self.open.push(Open {
                 outer: core::mem::take(&mut self.items),
+                levels,
                 bangs,
                 stage: Stage::Condition,
                 lists: Vec::new(),
@@ -1502,6 +1517,36 @@ mod tests {
         assert_eq!(p.line("if true"), Ok(None));
         assert_eq!(p.line("then"), Ok(None));
         assert_eq!(p.line("fi"), Err(ParseError::MissingTarget("fi")));
+    }
+
+    /// `n` `if`s nested, each after `a &&` if `chained`.
+    fn nested(n: usize, chained: bool) -> String {
+        let open = if chained {
+            "a && if b; then "
+        } else {
+            "if b; then "
+        };
+        alloc::format!("{}c{}", open.repeat(n), "; fi".repeat(n))
+    }
+
+    #[test]
+    fn compound_commands_nest_at_most_32_levels_deep() {
+        // The walker recurses on a fixed stack (§4.5): each one counts a
+        // level, and one after `&&` or `||` one more.
+        let too_deep = ParseError::Unsupported("more than 32 levels of nesting".into());
+        let refused = Err(too_deep.clone());
+        assert!(parse_line(&nested(32, false)).is_ok());
+        assert_eq!(parse_line(&nested(33, false)), refused);
+        assert!(parse_line(&nested(16, true)).is_ok());
+        assert_eq!(parse_line(&nested(17, true)), refused);
+        let mixed = alloc::format!("{}a || {}", "if b; then ".repeat(31), nested(1, false));
+        assert_eq!(parse_line(&(mixed + &"; fi".repeat(31))), refused);
+        // Levels close with their constructs: one after another is none.
+        assert!(parse_line(&"if b; then c; fi; ".repeat(100)).is_ok());
+        assert_eq!(
+            too_deep.to_string(),
+            "unsupported syntax: more than 32 levels of nesting"
+        );
     }
 
     #[test]

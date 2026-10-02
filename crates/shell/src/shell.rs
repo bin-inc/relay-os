@@ -1500,6 +1500,17 @@ mod tests {
     }
 
     #[test]
+    fn an_if_32_levels_deep_runs() {
+        let mut h = Harness::new();
+        let line = alloc::format!(
+            "{}echo deep{}",
+            "if true; then ".repeat(32),
+            "; fi".repeat(32)
+        );
+        assert_eq!(h.run(&line), (0, "deep\n".into()));
+    }
+
+    #[test]
     fn exit_ctrl_c_and_a_bad_substitution_end_an_if_and_its_line() {
         let mut h = Harness::new();
         // r7: `exit` deep inside stops the shell at once.

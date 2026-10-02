@@ -2,6 +2,7 @@
 # || and ! under /bin/sh; a command typed across lines with bash's >
 # prompt, and Ctrl-C there; Ctrl-C in the middle of a list; & mid-line;
 # and a script whose command goes on across lines, with its transcript.
+# Compound commands (plan 2): the nesting bound under /bin/sh.
 timeout 30
 expect root@relay:~# $
 send echo a; false; echo $?
@@ -42,4 +43,12 @@ send sh s.sh
 expect \n\+ echo s1 &&\n\+ echo s2\ns1\ns2\nroot@relay:~# $
 send cat s.log
 expect \n\+ echo s1 &&\n\+ echo s2\ns1\ns2\nroot@relay:~# $
+# Compound commands nest 32 levels deep, the most (§4.5): a script runs
+# them on /bin/sh's fixed stack, and a 33rd level is refused.
+send echo 'if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then echo deep; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi' > deep.sh
+expect \nroot@relay:~# $
+send sh deep.sh
+expect \ndeep\nroot@relay:~# $
+send if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then echo deep; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi
+expect \nrelay-sh: unsupported syntax: more than 32 levels of nesting\nroot@relay:~# $
 poweroff
