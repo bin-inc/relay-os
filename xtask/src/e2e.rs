@@ -25,6 +25,10 @@
 //! key <text>                       (types <text> + Enter on the USB keyboard,
 //!                                   QMP send-key; {up}, {ctrl-c}: see keys.rs)
 //! type <text>                      (as key, without the Enter)
+//! send-ahead <text>                (as send, while something runs on purpose:
+//!                                   input for a program, a line typed ahead;
+//!                                   send-crlf-ahead, key-ahead and type-ahead
+//!                                   likewise)
 //! screenshot-nonblank              (QMP screendump; top rows not one colour)
 //! alive 12                         (fails if QEMU exits within 12 seconds)
 //! screenshot-pixel 2540 20 #000000 (QMP screendump; that pixel has that colour)
@@ -254,13 +258,13 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
             "expect-same" => {
                 parse_expect_same(rest).with_context(|| format!("{name}:{line_no}"))?
             }
-            "send" => Step::Send(rest.to_string()),
-            "send-crlf" => Step::SendCrLf(rest.to_string()),
-            "key" => {
+            "send" | "send-ahead" => Step::Send(rest.to_string()),
+            "send-crlf" | "send-crlf-ahead" => Step::SendCrLf(rest.to_string()),
+            "key" | "key-ahead" => {
                 keys::presses(rest).with_context(|| format!("{name}:{line_no}"))?;
                 Step::Key(rest.to_string())
             }
-            "type" => {
+            "type" | "type-ahead" => {
                 keys::typed(rest).with_context(|| format!("{name}:{line_no}"))?;
                 Step::Type(rest.to_string())
             }
@@ -991,6 +995,27 @@ mod tests {
                 (7, Step::ScreenshotNonblank),
             ]
         );
+    }
+
+    #[test]
+    fn input_typed_ahead_is_sent_as_other_input_is() {
+        let s = parse_scenario(
+            "x",
+            "send-ahead a b\nkey-ahead {ctrl-c}\ntype-ahead q\nsend-crlf-ahead c\n",
+        )
+        .unwrap();
+        assert_eq!(
+            s.steps,
+            vec![
+                (1, Step::Send("a b".into())),
+                (2, Step::Key("{ctrl-c}".into())),
+                (3, Step::Type("q".into())),
+                (4, Step::SendCrLf("c".into())),
+            ]
+        );
+        // A key name is checked as for `key` and `type`.
+        assert!(parse_scenario("x", "key-ahead {nope}").is_err());
+        assert!(parse_scenario("x", "type-ahead {nope}").is_err());
     }
 
     #[test]
