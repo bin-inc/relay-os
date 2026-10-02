@@ -129,7 +129,11 @@ pub fn help(ctx: &mut Ctx<'_>, _: &[String]) -> i32 {
          succeeds, `a || b` if it fails, and `! a` turns a's status round.\n\
          `sh FILE ARG...` runs a script, which reads its arguments as\n\
          `$1`...`$9`, `$#` and \"$@\". `$?` is the last command's status, and\n\
-         `NAME=value` sets `$NAME`."
+         `NAME=value` sets `$NAME`. `if a; then b; fi` runs b if a succeeds,\n\
+         with `elif c; then d;` and `else e;` before `fi` for other cases;\n\
+         `while a; do b; done` repeats b while a succeeds, `until` while it\n\
+         fails; `for x in w...; do b; done` runs b with each w as `$x`, and\n\
+         `for x; do` with each argument. Each may go on across lines, at `> `."
     );
     0
 }
@@ -352,6 +356,13 @@ mod tests {
             "&&",
             "||",
             "`! ",
+            "`if ",
+            "elif",
+            "else",
+            "`while ",
+            "`until`",
+            "`for ",
+            "`> `",
         ] {
             assert!(builtins.contains(what), "{what}");
         }
