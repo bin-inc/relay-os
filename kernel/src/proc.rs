@@ -825,6 +825,10 @@ impl Caller for Current {
         collect(child, nohang, ctrl_c)
     }
 
+    fn take_ctrl_c(&mut self) -> bool {
+        holds_ctrl_c()
+    }
+
     fn kill(&mut self, target: i64) -> Result<(), Errno> {
         PROCS.lock().kill(target, relay_abi::wait::KILLED_KILL)
     }

@@ -23,7 +23,11 @@ pub const WAIT_NOHANG: u32 = 1;
 /// `wait`'s flags: a Ctrl-C typed while the caller's group has the console
 /// in raw mode ends the wait with `EINTR`, and is taken from the input
 /// (a shell's `wait` built-in, spec §9.2, §16 item 9). Without it a raw
-/// Ctrl-C is only input, which the shell would read after the wait.
+/// Ctrl-C is only input, which the shell would read after the wait. With
+/// [`WAIT_NOHANG`] and pid 0, `wait` only asks whether such a Ctrl-C was
+/// typed: `EINTR` if one was, which it takes, 0 if not; no child is
+/// collected (a shell between its own commands, programmable shell gate
+/// §15 item 2).
 pub const WAIT_CTRL_C: u32 = 2;
 
 /// One of the child's fds: `child` gets what the caller has open as
