@@ -75,6 +75,7 @@ t-abi
 # not columns, and never its own input (plan 4b).
 ls /bin > /root/check4.list
 cat /root/check4.list
+#> \[
 #> cat
 #> clear
 #> cp

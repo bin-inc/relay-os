@@ -2,14 +2,14 @@
 + t-spawn fill
 filled the table with 60 children
 + t-spin 1
-4493148160 iterations
+4418699264 iterations
 + t-spawn 1000
-free frames before: 247463
-free frames after: 247463
+free frames before: 246961
+free frames after: 246961
 frames lost: 0
 + free
               total        used        free
-Mem:        1030532       40720      989812
+Mem:        1029016       41200      987816
 Heap:         32768        8524       24244
 + t-fault null-read
 relay-sh: t-fault: killed (page fault at 0x0, read, ip 0x4001e9)
@@ -42,8 +42,8 @@ relay-sh: t-fault: killed (invalid opcode, ip 0x40010a)
 t-args: kill
 + t-spawn orphan
 + t-spin 1
-2300575744 iterations
-2312110080 iterations
+2319450112 iterations
+2321547264 iterations
 + t-args a 'b c' ''
 [1] a
 [2] b c
@@ -52,6 +52,7 @@ t-args: kill
 relay-sh: t-abi: Exec format error
 + ls /bin > /root/check4.list
 + cat /root/check4.list
+[
 cat
 clear
 cp
@@ -59,17 +60,22 @@ date
 df
 dmesg
 echo
+false
 free
+grep
 head
 ls
 mkdir
 mv
 poweroff
+ps
 pwd
 reboot
 rm
 rmdir
+seq
 sh
+sleep
 stat
 sync
 t-abi
@@ -77,13 +83,17 @@ t-args
 t-fault
 t-files
 t-mem
+t-pipe
+t-proc
 t-read
 t-spawn
 t-spin
 t-sys
 t-tee
 tail
+test
 touch
+true
 uname
 wc
 + cat /root/check4.list >> /root/check4.list
@@ -102,5 +112,5 @@ two
 two
 + free
               total        used        free
-Mem:        1030532       40720      989812
+Mem:        1029016       41200      987816
 Heap:         32768        8524       24244
