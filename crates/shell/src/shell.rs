@@ -27,6 +27,8 @@ pub const CANNOT_RUN: i32 = 126;
 pub const SYNTAX: i32 = 2;
 /// Exit status after Ctrl-C.
 pub const CANCELLED: i32 = 130;
+/// The prompt while a command needs more lines, bash's `PS2`.
+const CONTINUE: &str = "> ";
 /// How much of a line over 64 KiB `X | sh` keeps: its last bytes, between
 /// this and twice it.
 const LINE_TAIL: usize = 1024;
@@ -147,21 +149,32 @@ impl<'a> Shell<'a> {
     }
 
     /// Reads and runs commands until the input ends, `exit` or
-    /// `reboot`/`poweroff` return.
+    /// `reboot`/`poweroff` return. While a command needs more lines the
+    /// prompt is bash's `> ` (programmable shell gate §5.5): Ctrl-C there
+    /// drops the command, and the input's end is bash's `unexpected end of
+    /// file`. Jobs that ended are reported before a full prompt only.
     pub fn run(&mut self) {
         self.stopped = false;
         self.prompting = true;
+        let mut reader = Reader::new();
         while !self.stopped {
-            self.collect_jobs();
-            for line in self.jobs.report() {
-                self.say(line.as_bytes());
-            }
+            let prompt = if reader.reading() {
+                String::from(CONTINUE)
+            } else {
+                self.collect_jobs();
+                for line in self.jobs.report() {
+                    self.say(line.as_bytes());
+                }
+                self.prompt()
+            };
             let mut out = Vec::new();
-            let prompt = self.prompt();
             self.editor.start(&prompt, self.console.columns(), &mut out);
             self.console.write(&out);
             loop {
                 let Some(byte) = self.console.read_byte() else {
+                    if let Some(e) = reader.end() {
+                        self.finish(SYNTAX, format!("{NAME}: {e}\n"));
+                    }
                     return;
                 };
                 out.clear();
@@ -170,6 +183,7 @@ impl<'a> Shell<'a> {
                 match feed {
                     Feed::Pending => {}
                     Feed::Cancelled => {
+                        reader.clear();
                         self.status = CANCELLED;
                         break;
                     }
@@ -178,7 +192,7 @@ impl<'a> Shell<'a> {
                         // the process table before the line runs; it is
                         // reported at the next prompt.
                         self.collect_jobs();
-                        self.execute(&line);
+                        self.read_line(&mut reader, &line);
                         break;
                     }
                 }
@@ -2029,6 +2043,55 @@ mod tests {
         assert_eq!(
             h.console.text(),
             "root@relay:/# echo hi\nhi\nroot@relay:/# pwd\n/\nroot@relay:/# "
+        );
+    }
+
+    #[test]
+    fn a_command_typed_across_lines_shows_the_continuation_prompt() {
+        // bash's `> `, for each line the command needs.
+        let mut h = Harness::new();
+        h.console.type_in(b"echo a &&\recho b |\r\rwc -c\r");
+        Shell::new(&mut h.vfs, &mut h.console, &mut h.system).run();
+        assert_eq!(
+            h.console.text(),
+            "root@relay:/# echo a &&\n> echo b |\n> \n> wc -c\na\n2\nroot@relay:/# "
+        );
+    }
+
+    #[test]
+    fn ctrl_c_at_the_continuation_prompt_drops_the_command() {
+        let mut h = Harness::new();
+        h.console.type_in(b"echo a &&\recho no\x03echo $?\r");
+        Shell::new(&mut h.vfs, &mut h.console, &mut h.system).run();
+        assert_eq!(
+            h.console.text(),
+            "root@relay:/# echo a &&\n> echo no^C\nroot@relay:/# echo $?\n130\nroot@relay:/# "
+        );
+    }
+
+    #[test]
+    fn the_end_of_input_at_the_continuation_prompt_is_an_error() {
+        // As bash's, which then ends.
+        let mut h = Harness::new();
+        h.console.type_in(b"echo a ||\r");
+        let mut shell = Shell::new(&mut h.vfs, &mut h.console, &mut h.system);
+        shell.run();
+        assert_eq!(shell.status(), 2);
+        assert_eq!(
+            h.console.text(),
+            "root@relay:/# echo a ||\n> relay-sh: syntax error: unexpected end of file\n"
+        );
+    }
+
+    #[test]
+    fn a_job_is_reported_only_at_a_full_prompt() {
+        let mut h = with_jobs();
+        let out = typed(&mut h, &["sleep 5 &", "t-args a &&", "t-args b"]);
+        assert!(
+            out.ends_with(
+                "# t-args a &&\n> t-args b\n[1]+  Done                    sleep 5\nroot@relay:/# "
+            ),
+            "{out}"
         );
     }
 
