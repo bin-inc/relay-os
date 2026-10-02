@@ -44,12 +44,13 @@ pub fn foreground() -> u32 {
 }
 
 /// The foreground group a Ctrl-C typed in line mode is for, if one was
-/// typed: what was typed before it is dropped (spec §6.4).
-pub fn ctrl_c() -> Option<u32> {
-    INPUT
-        .lock()
-        .take_line_interrupt()
-        .then(|| FOREGROUND.load(Ordering::Relaxed))
+/// typed: what was typed before it is dropped (spec §6.4). Only while the
+/// group is `alive`: once it has ended, the Ctrl-C waits for the group
+/// that takes the console back.
+pub fn ctrl_c(alive: impl FnOnce(u32) -> bool) -> Option<u32> {
+    let pgid = FOREGROUND.load(Ordering::Relaxed);
+    let alive = alive(pgid);
+    INPUT.lock().take_line_interrupt_for(alive).then_some(pgid)
 }
 
 /// Whether a Ctrl-C typed in raw mode waits to be read.
