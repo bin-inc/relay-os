@@ -1,0 +1,66 @@
+# test and [ on the real disk (programmable shell gate §6, §11.3, §15
+# item 3; milestone 4, plan 3): one program under two names in the
+# read-only /bin, files on the ext2 root, the console as fd 0 and 1.
+timeout 30
+expect root@relay:~# $
+# /bin is read-only: nothing on its filesystem is writable.
+send [ -w /bin/ls ]; echo "w $?"
+expect \nw 1\nroot@relay:~# $
+send test -w /bin; echo "w $?"
+expect \nw 1\nroot@relay:~# $
+send test -w /root; echo "w $?"
+expect \nw 0\nroot@relay:~# $
+send [ -x /bin/[ -a -f /bin/test -a -d /bin ]; echo "x $?"
+expect \nx 0\nroot@relay:~# $
+# The console is fd 0 and fd 1, a pipe or a file is not.
+send [ -t 0 ]; echo "t $?"
+expect \nt 0\nroot@relay:~# $
+send test -t 1; echo "t $?"
+expect \nt 0\nroot@relay:~# $
+send echo | test -t 0; echo "t $?"
+expect \nt 1\nroot@relay:~# $
+send test -t 1 > /root/t-out; echo "t $?"
+expect \nt 1\nroot@relay:~# $
+# Two files made seconds apart, by the RTC's clock.
+send touch /root/older
+expect \nroot@relay:~# $
+send sleep 2
+expect \nroot@relay:~# $
+send touch /root/newer
+expect \nroot@relay:~# $
+send [ /root/newer -nt /root/older ]; echo "nt $?"
+expect \nnt 0\nroot@relay:~# $
+send [ /root/older -nt /root/newer ]; echo "nt $?"
+expect \nnt 1\nroot@relay:~# $
+send test /root/older -ot /root/newer; echo "ot $?"
+expect \not 0\nroot@relay:~# $
+# Two filesystems, and two entries of /bin with one program's bytes.
+send [ /bin/ls -ef /root ]; echo "ef $?"
+expect \nef 1\nroot@relay:~# $
+send [ /bin/[ -ef /bin/test ]; echo "ef $?"
+expect \nef 1\nroot@relay:~# $
+send [ /bin/ls -ef /bin/./ls ]; echo "ef $?"
+expect \nef 0\nroot@relay:~# $
+# GNU's messages, by the name each program was started by.
+send [ 1
+expect \n\[: missing '\]'\nroot@relay:~# $
+send echo $?
+expect \n2\nroot@relay:~# $
+send /bin/[ 12 -eq x ]
+expect \n\[: invalid integer 'x'\nroot@relay:~# $
+send test 1 -eq 1 -a
+expect \ntest: missing argument after '-a'\nroot@relay:~# $
+send [ --help
+expect \n\[: unrecognized option '--help'\nroot@relay:~# $
+send test --help; echo "help $?"
+expect \nhelp 0\nroot@relay:~# $
+send [ 99999999999999999999 -gt 99999999999999999998 ] && echo bigger
+expect \nbigger\nroot@relay:~# $
+# A script's conditions.
+send echo 'if [ "$1" = go ]; then echo going; fi' > /root/t.sh
+expect \nroot@relay:~# $
+send echo 'while [ ! -f /root/stop ]; do touch /root/stop; echo once; done' >> /root/t.sh
+expect \nroot@relay:~# $
+send sh /root/t.sh go
+expect \n\+ if \[ "\$1" = go \]; then echo going; fi\ngoing\n\+ while \[ ! -f /root/stop \]; do touch /root/stop; echo once; done\nonce\nroot@relay:~# $
+poweroff
