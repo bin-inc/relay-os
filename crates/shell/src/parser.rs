@@ -702,6 +702,8 @@ pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
     let mut items = Items::default();
     // Where the item being read starts in the line.
     let mut item_start = 0;
+    // Where each comment starts and ends in the line.
+    let mut comments = Vec::new();
     let mut pipeline = Vec::new();
     let mut parts = Parts::default();
     let mut word = Building::default();
@@ -780,7 +782,8 @@ pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
                     return Err(ParseError::Unsupported(format!("& after {}", c.token())));
                 }
                 // Without its `!`, as bash's `jobs` shows it.
-                let mut text = line[item_start..at].trim_matches([' ', '\t']);
+                let typed = job_text(line, item_start, at, &comments);
+                let mut text = typed.as_str();
                 for _ in 0..parts.bangs {
                     text = text[1..].trim_start_matches([' ', '\t']);
                 }
@@ -841,6 +844,7 @@ pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
                 while cur.peek().is_some_and(|c| c != '\n') {
                     cur.next();
                 }
+                comments.push((at, cur.pos()));
             }
             '\n' => {
                 parts.end_word(&mut word, line)?;
@@ -894,6 +898,25 @@ pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
     }
     items.end(None);
     Ok(List { items: items.items })
+}
+
+/// What was typed of a background job from `start` to `end` (its `&`), as
+/// bash's `jobs` shows it: one line, its lines joined by a blank, without
+/// its comments or blank lines.
+fn job_text(line: &str, start: usize, end: usize, comments: &[(usize, usize)]) -> String {
+    let mut typed = String::new();
+    let mut from = start;
+    for &(c, e) in comments.iter().filter(|&&(c, _)| c >= start && c < end) {
+        typed.push_str(&line[from..c]);
+        from = e;
+    }
+    typed.push_str(&line[from..end]);
+    let lines: Vec<&str> = typed
+        .split('\n')
+        .map(|l| l.trim_matches([' ', '\t']))
+        .filter(|l| !l.is_empty())
+        .collect();
+    lines.join(" ")
 }
 
 /// A `&&` or `||` (`connector`) ends the pipeline before it, which must
@@ -1661,6 +1684,23 @@ mod tests {
         // A background job on a later line has its own text.
         let list = parse_line("a\nsleep 5 &\nb").unwrap();
         assert_eq!(list.items[1].background.as_deref(), Some("sleep 5"));
+    }
+
+    #[test]
+    fn a_job_typed_across_lines_has_one_line_of_text() {
+        // As bash's `jobs` shows it: the lines joined by a blank, without
+        // comments or blank lines (the review found them kept).
+        for (text, job) in [
+            ("sleep 5 |\n# c\ncat &", "sleep 5 | cat"),
+            ("sleep 5 |   # c\n\n  cat  &", "sleep 5 | cat"),
+            ("! sleep 5 |\n  cat &", "sleep 5 | cat"),
+            ("a\nsleep 5 &", "sleep 5"),
+            ("echo '#' \\# |\n cat&", "echo '#' \\# | cat"),
+        ] {
+            let list = parse_line(text).unwrap();
+            let last = list.items.last().unwrap();
+            assert_eq!(last.background.as_deref(), Some(job), "{text:?}");
+        }
     }
 
     #[test]

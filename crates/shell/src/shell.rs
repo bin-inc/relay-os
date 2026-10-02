@@ -942,6 +942,19 @@ mod tests {
     }
 
     #[test]
+    fn jobs_shows_a_job_typed_across_lines_on_one_line() {
+        let mut h = with_jobs();
+        let mut input = crate::Bytes::new(b"sleep 5 |\n# c\ncat &\njobs\n".to_vec());
+        Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+            .run_input(&mut input);
+        let out = h.console.take();
+        assert!(
+            out.contains("Done                    sleep 5 | cat\n"),
+            "{out}"
+        );
+    }
+
+    #[test]
     fn a_command_read_across_lines_holds_at_most_64_kib() {
         let mut h = spawning();
         let line = alloc::format!("t-args {} &&\n", "x".repeat(40_000));
