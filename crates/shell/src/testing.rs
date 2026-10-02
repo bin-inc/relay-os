@@ -116,6 +116,9 @@ pub struct TestSystem {
     pub slept: Vec<u64>,
     /// What `processes` says.
     pub processes: Option<Vec<relay_abi::ProcInfo>>,
+    /// The fds open on the console (none, as on the host where a test's
+    /// tool has pipes).
+    pub terminals: Vec<u32>,
 }
 
 impl TestSystem {
@@ -140,6 +143,7 @@ impl TestSystem {
             forced: Vec::new(),
             slept: Vec::new(),
             processes: None,
+            terminals: Vec::new(),
         }
     }
 }
@@ -156,6 +160,9 @@ impl System for TestSystem {
     }
     fn processes(&self) -> Option<Vec<relay_abi::ProcInfo>> {
         self.processes.clone()
+    }
+    fn is_terminal(&self, fd: u32) -> bool {
+        self.terminals.contains(&fd)
     }
     fn sleep(&mut self, ms: u64) {
         self.slept.push(ms);

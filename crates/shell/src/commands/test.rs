@@ -332,6 +332,10 @@ impl<'e> Eval<'e, '_> {
         let file: fn(&vfs::Stat) -> bool = match op.as_bytes()[1] {
             b'n' => return Ok(!self.unary_operand()?.is_empty()),
             b'z' => return Ok(self.unary_operand()?.is_empty()),
+            b't' => {
+                let fd = Number::parse(self.unary_operand()?)?;
+                return Ok(fd.fd().is_some_and(|fd| self.ctx.system.is_terminal(fd)));
+            }
             b'w' => {
                 let path = self.unary_operand()?;
                 return Ok(self.stat(path).is_some_and(|(node, _)| !self.on_bin(node)));
@@ -512,6 +516,16 @@ impl Number {
             negative: negative && !digits.is_empty(),
             digits: String::from(digits),
         })
+    }
+
+    /// The fd this names, if any can be: from 0 to `int`'s largest, as
+    /// GNU's `-t` takes them.
+    fn fd(&self) -> Option<u32> {
+        match (self.negative, self.digits.as_str()) {
+            (true, _) => None,
+            (false, "") => Some(0),
+            (false, digits) => digits.parse().ok().filter(|&fd| fd <= i32::MAX as u32),
+        }
     }
 
     /// `-l`'s length of `s`, in bytes.
@@ -1137,6 +1151,50 @@ mod tests {
         ] {
             assert_eq!(h.run(line), (status, String::new()), "{line}");
         }
+    }
+
+    #[test]
+    fn dash_t_reads_its_fd_as_gnu_reads_an_integer() {
+        // The host's tool has pipes, and the harness no console: false,
+        // or GNU's message.
+        like_gnu(&[
+            &["-t", "0"],
+            &["-t", "1"],
+            &["-t", "2"],
+            &["-t", "-1"],
+            &["-t", "x"],
+            &["-t", ""],
+            &["-t", "0x0"],
+            &["-t", "99999999999999999999"],
+            &["-t", "é"],
+            &["-t"],
+            &["-t", "0", "-a", "x"],
+            &["!", "-t", "1"],
+        ]);
+        // On a console: probes/tty.txt (fds 0 and 1 on a pty).
+        let mut h = Harness::new();
+        h.system.terminals = alloc::vec![0, 1];
+        for (fd, status) in [
+            ("0", 0),
+            ("1", 0),
+            ("2", 1),
+            ("3", 1),
+            ("-0", 0),
+            ("00", 0),
+            ("+0", 0),
+            ("' 1 '", 0),
+            ("-1", 1),
+            ("2147483647", 1),
+            ("2147483648", 1),
+            ("99999999999999999999", 1),
+        ] {
+            let line = alloc::format!("test -t {fd}");
+            assert_eq!(h.run(&line), (status, String::new()), "{line}");
+        }
+        // GNU takes fds up to `int`'s largest, as an fd is.
+        h.system.terminals = alloc::vec![2_147_483_647, 2_147_483_648];
+        assert_eq!(h.run("[ -t 2147483647 ]"), (0, String::new()));
+        assert_eq!(h.run("[ -t 2147483648 ]"), (1, String::new()));
     }
 
     #[test]
