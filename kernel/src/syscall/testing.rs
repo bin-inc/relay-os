@@ -222,6 +222,9 @@ impl Caller for Fake {
             None => Err(Errno::ECHILD),
         }
     }
+    fn take_ctrl_c(&mut self) -> bool {
+        core::mem::take(&mut self.ctrl_c_typed)
+    }
     fn kill(&mut self, target: i64) -> Result<(), Errno> {
         self.killed.push(target);
         if target == 1 {

@@ -252,7 +252,8 @@ mod tests {
     fn ctrl_c_while_a_command_is_read_ends_the_script_there() {
         let mut h = Harness::new();
         h.put("/tmp/s.sh", b"echo a &&\necho b\n");
-        h.console.interrupt_after = Some(1);
+        // Asked before `sh` runs and before each line.
+        h.console.interrupt_after = Some(2);
         assert_eq!(h.run("sh /tmp/s.sh"), (130, "+ echo a &&\n^C\n".into()));
     }
 
@@ -324,15 +325,15 @@ mod tests {
     fn ctrl_c_stops_the_script() {
         let mut h = Harness::new();
         h.put("/tmp/s.sh", b"echo a\necho b\necho c\n");
-        // Asked once before each line: the second time Ctrl-C was pressed.
-        h.console.interrupt_after = Some(1);
+        // Asked before `sh` runs, before each line and before its command:
+        // Ctrl-C is pressed before the second line.
+        h.console.interrupt_after = Some(3);
         assert_eq!(h.run("sh /tmp/s.sh"), (130, "+ echo a\na\n^C\n".into()));
         assert_eq!(h.get("/tmp/s.log"), b"+ echo a\na\n^C\n");
         // A command that Ctrl-C stopped stops the script too.
         h.put("/tmp/big", &alloc::vec![b'x'; 200_000]);
         h.put("/tmp/s.sh", b"cat /tmp/big > /tmp/copy\necho after\n");
-        h.console.interrupt = false;
-        h.console.interrupt_after = Some(1);
+        h.console.interrupt_after = Some(3);
         assert_eq!(
             h.run("sh /tmp/s.sh"),
             (130, "+ cat /tmp/big > /tmp/copy\n^C\n".into())

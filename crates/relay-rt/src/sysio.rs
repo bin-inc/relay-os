@@ -58,12 +58,7 @@ impl Default for SysConsole {
 
 impl Console for SysConsole {
     fn read_byte(&mut self) -> Option<u8> {
-        if self.interactive {
-            let _ = sys::console_mode(MODE_RAW);
-        }
-        if let Some(pgid) = self.group {
-            let _ = sys::console_foreground(pgid);
-        }
+        self.take_back();
         let mut byte = [0];
         match sys::read(0, &mut byte) {
             Ok(1) => Some(byte[0]),
@@ -77,6 +72,22 @@ impl Console for SysConsole {
 
     fn columns(&self) -> usize {
         sys::console_size().0 as usize
+    }
+
+    /// Only an interactive shell keeps the console in raw mode while its
+    /// own commands run, a Ctrl-C there being input to ask the kernel for;
+    /// another program's group has it in line mode, where Ctrl-C kills it.
+    fn interrupted(&mut self) -> bool {
+        self.interactive && sys::take_ctrl_c()
+    }
+
+    fn take_back(&mut self) {
+        if self.interactive {
+            let _ = sys::console_mode(MODE_RAW);
+        }
+        if let Some(pgid) = self.group {
+            let _ = sys::console_foreground(pgid);
+        }
     }
 }
 

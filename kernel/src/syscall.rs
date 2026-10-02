@@ -119,6 +119,9 @@ pub trait Caller {
         nohang: bool,
         ctrl_c: bool,
     ) -> Result<Option<(u32, WaitStatus)>, Errno>;
+    /// Whether a Ctrl-C was typed while the program's group has the console
+    /// in raw mode; it is taken.
+    fn take_ctrl_c(&mut self) -> bool;
     /// Kills a process, or a group for a negative `target`.
     fn kill(&mut self, target: i64) -> Result<(), Errno>;
     fn pid(&self) -> u32;
@@ -252,7 +255,9 @@ fn spawn(caller: &mut impl Caller, addr: u64) -> Result<u64, Errno> {
 
 /// `wait(pid or -1, flags, &mut WaitStatus or 0)` (spec §7.3). The status's
 /// memory is checked before a child is collected, so a bad pointer never
-/// loses a child's status.
+/// loses a child's status. `wait(0, WAIT_NOHANG | WAIT_CTRL_C)` only asks
+/// whether a Ctrl-C was typed (`EINTR`, taken; 0 if not), as a shell does
+/// between its own commands (programmable shell gate §15 item 2).
 fn wait(caller: &mut impl Caller, pid: i64, flags: u64, addr: u64) -> Result<u64, Errno> {
     if flags & !u64::from(WAIT_NOHANG | WAIT_CTRL_C) != 0 {
         return Err(Errno::EINVAL);
@@ -260,6 +265,13 @@ fn wait(caller: &mut impl Caller, pid: i64, flags: u64, addr: u64) -> Result<u64
     let child = match pid {
         WAIT_ANY => Child::Any,
         p if p > 0 => Child::Pid(u32::try_from(p).map_err(|_| Errno::ECHILD)?),
+        0 if flags == u64::from(WAIT_NOHANG | WAIT_CTRL_C) => {
+            return if caller.take_ctrl_c() {
+                Err(Errno::EINTR)
+            } else {
+                Ok(0)
+            };
+        }
         _ => return Err(Errno::EINVAL),
     };
     let size = core::mem::size_of::<WaitStatus>() as u64;
@@ -862,6 +874,30 @@ mod tests {
         }
         assert_eq!(f.ended.len(), 1, "still there");
         assert_eq!(call(&mut f, Call::Wait, [7, 0, W]), Ok(7));
+    }
+
+    #[test]
+    fn wait_for_pid_0_asks_only_whether_ctrl_c_was_typed() {
+        // A shell between its own commands (programmable shell gate §5.2):
+        // the Ctrl-C is taken, and no child is collected.
+        let mut f = fake();
+        f.ended = vec![(7, WaitStatus::exited(3))];
+        let ask = u64::from(WAIT_NOHANG | WAIT_CTRL_C);
+        assert_eq!(call(&mut f, Call::Wait, [0, ask, 0]), Ok(0), "none typed");
+        f.ctrl_c_typed = true;
+        assert_eq!(call(&mut f, Call::Wait, [0, ask, W]), Err(errno::EINTR));
+        assert_eq!(call(&mut f, Call::Wait, [0, ask, 0]), Ok(0), "taken");
+        assert_eq!(f.ended.len(), 1, "no child collected");
+        // Only with both flags.
+        f.ctrl_c_typed = true;
+        for flags in [0, WAIT_NOHANG, WAIT_CTRL_C] {
+            assert_eq!(
+                call(&mut f, Call::Wait, [0, u64::from(flags), 0]),
+                Err(errno::EINVAL),
+                "{flags}"
+            );
+        }
+        assert!(f.ctrl_c_typed, "not taken");
     }
 
     #[test]

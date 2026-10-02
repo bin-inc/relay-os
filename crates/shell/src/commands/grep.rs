@@ -357,7 +357,7 @@ mod tests {
             h.run("grep '^line.39999$' /tmp/big"),
             (0, "line 39999\n".into())
         );
-        h.console.interrupt = true;
+        h.console.interrupt_after = Some(1);
         assert_eq!(h.run("grep x /tmp/big"), (130, "^C\n".into()));
     }
 }

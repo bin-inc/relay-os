@@ -306,6 +306,13 @@ pub fn wait_with(pid: i64, flags: u32) -> Result<Option<(u32, WaitStatus)>, u16>
     }
 }
 
+/// Whether a Ctrl-C was typed while this program's group has the console
+/// in raw mode; it is taken (`wait(0, WAIT_NOHANG | WAIT_CTRL_C)`).
+pub fn take_ctrl_c() -> bool {
+    use relay_abi::spawn::{WAIT_CTRL_C, WAIT_NOHANG};
+    wait_with(0, WAIT_NOHANG | WAIT_CTRL_C) == Err(relay_abi::errno::EINTR)
+}
+
 /// Kills the process `target`, or the process group `-target`.
 pub fn kill(target: i64) -> Result<(), u16> {
     decode(unsafe { syscall(Call::Kill, [target as u64, 0, 0, 0, 0, 0]) }).map(|_| ())

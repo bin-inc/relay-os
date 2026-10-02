@@ -152,9 +152,10 @@ pub fn kernel_tick() {
 
 /// What the console's input asks of the processes: a Ctrl-C in line mode
 /// kills the foreground group (spec §6.4), and anything typed wakes whoever
-/// waits for input.
+/// waits for input. A group that has ended gets no Ctrl-C: the shell that
+/// takes the console back reads it as raw input.
 fn console_input(t: &mut Table<Res>) {
-    if let Some(pgid) = tty::ctrl_c() {
+    if let Some(pgid) = tty::ctrl_c(|g| t.has_group(g)) {
         // Refused only for process 1's group, which never has the console
         // in line mode.
         let _ = t.kill(-i64::from(pgid), relay_abi::wait::KILLED_CTRL_C);
@@ -823,6 +824,10 @@ impl Caller for Current {
         ctrl_c: bool,
     ) -> Result<Option<(u32, WaitStatus)>, Errno> {
         collect(child, nohang, ctrl_c)
+    }
+
+    fn take_ctrl_c(&mut self) -> bool {
+        holds_ctrl_c()
     }
 
     fn kill(&mut self, target: i64) -> Result<(), Errno> {

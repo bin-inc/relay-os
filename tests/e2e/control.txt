@@ -2,7 +2,8 @@
 # || and ! under /bin/sh; a command typed across lines with bash's >
 # prompt, and Ctrl-C there; Ctrl-C in the middle of a list; & mid-line;
 # and a script whose command goes on across lines, with its transcript.
-# Compound commands (plan 2): the nesting bound under /bin/sh.
+# Compound commands (plan 2): Ctrl-C in a loop of built-ins and of
+# programs, and the nesting bound, under /bin/sh.
 timeout 30
 expect root@relay:~# $
 send echo a; false; echo $?
@@ -43,6 +44,37 @@ send sh s.sh
 expect \n\+ echo s1 &&\n\+ echo s2\ns1\ns2\nroot@relay:~# $
 send cat s.log
 expect \n\+ echo s1 &&\n\+ echo s2\ns1\ns2\nroot@relay:~# $
+# A loop of built-ins ends at a Ctrl-C (§5.2): /bin/sh asks the kernel
+# for one before each command. A loop of programs ends at one too.
+send while cd; do cd; done
+alive 1
+type {ctrl-c}
+expect \n\^C\nroot@relay:~# $
+send echo $?
+expect \n130\nroot@relay:~# $
+send while true; do sleep 1; done
+alive 2
+type {ctrl-c}
+expect \^C\nroot@relay:~# $
+send echo $?
+expect \n130\nroot@relay:~# $
+# The same after a program ran on the line (the prototype's review): the
+# shell takes the console back once a program has ended, and a Ctrl-C
+# typed meanwhile is kept for it; plan 1's `wait` too.
+send true; while cd; do cd; done
+alive 1
+type {ctrl-c}
+expect \n\^C\nroot@relay:~# $
+send echo $?
+expect \n130\nroot@relay:~# $
+send sleep 30 & true; wait
+expect \n\[1\] \d+\n
+alive 1
+type {ctrl-c}
+expect \^C\nroot@relay:~# $
+send kill %1
+send wait %1
+expect \n\[1\]\+  Killed                  sleep 30\nroot@relay:~# $
 # Compound commands nest 32 levels deep, the most (§4.5): a script runs
 # them on /bin/sh's fixed stack, and a 33rd level is refused.
 send echo 'if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then echo deep; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi' > deep.sh
@@ -63,4 +95,9 @@ send echo hello >> p.sh
 expect \nroot@relay:~# $
 send cat p.sh | sh
 expect \nhello\nroot@relay:~# $
+# A loop that starts jobs collects those that ended before each start
+# (the final review: the process table filled after about 62 passes).
+send for x in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68 69 70; do true & true; done; echo end $?
+expect \nend 0\n
+expect root@relay:~# $
 poweroff

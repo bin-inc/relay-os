@@ -110,6 +110,14 @@ impl InputQueue {
         core::mem::take(&mut self.interrupted)
     }
 
+    /// As [`InputQueue::take_line_interrupt`], for a foreground group that
+    /// is `alive`: one with no process left to kill leaves the Ctrl-C for
+    /// whoever takes the console back, to whom the switch to raw mode
+    /// hands it (programmable shell gate §15 item 2).
+    pub fn take_line_interrupt_for(&mut self, alive: bool) -> bool {
+        alive && self.take_line_interrupt()
+    }
+
     /// What the line discipline echoed since the last call.
     pub fn take_echo(&mut self) -> Vec<u8> {
         core::mem::take(&mut self.echo)
@@ -703,6 +711,27 @@ mod tests {
             [&b"a"[..], b"\x1b[1;5C", b"b", b"\x1b", b"x", b"c", b"\x1b["]
         );
         assert_eq!(keys(b"\x1b").collect::<Vec<_>>(), [&b"\x1b"[..]]);
+    }
+
+    #[test]
+    fn a_line_ctrl_c_for_a_group_that_ended_waits_for_the_next_holder() {
+        // The prototype's review: a Ctrl-C typed after a program ended,
+        // its group still holding the console in line mode, killed no one
+        // and was lost. It waits, and the shell that takes the console back
+        // in raw mode reads it.
+        let mut q = InputQueue::new();
+        q.set_line_mode(true);
+        q.push(&[INTERRUPT]);
+        assert!(!q.take_line_interrupt_for(false), "no process to kill");
+        q.set_line_mode(false);
+        assert!(q.take_raw_interrupt());
+        // A group with a process gets it, as before.
+        let mut q = InputQueue::new();
+        q.set_line_mode(true);
+        q.push(&[INTERRUPT]);
+        assert!(q.take_line_interrupt_for(true));
+        q.set_line_mode(false);
+        assert!(!q.has_raw_interrupt(), "taken");
     }
 
     #[test]
