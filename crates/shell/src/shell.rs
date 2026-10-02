@@ -969,6 +969,30 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_line_drops_the_rest_of_its_chain() {
+        // Under `X | sh` and `sh FILE` alike, the end of the chain never
+        // runs without its guard (the final review found it run).
+        assert_eq!(
+            piped(b"t-args a $(x) &&\nt-args tail\nt-args next\n"),
+            ["next"]
+        );
+        let mut h = spawning();
+        h.put(
+            "/tmp/s.sh",
+            b"t-args a 2> log &&\nt-args tail\nt-args next\n",
+        );
+        let mut out = FakeStdout::console();
+        h.sh(&["/tmp/s.sh"], &mut out);
+        let args: Vec<String> = h
+            .programs
+            .spawned
+            .iter()
+            .map(|s| s.args[1..].join(" "))
+            .collect();
+        assert_eq!(args, ["next"]);
+    }
+
+    #[test]
     fn a_command_read_across_lines_holds_at_most_64_kib() {
         let mut h = spawning();
         let line = alloc::format!("t-args {} &&\n", "x".repeat(40_000));

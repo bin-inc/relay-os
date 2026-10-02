@@ -53,9 +53,16 @@ impl Reader {
         }
         match parser::parse_line(&self.text) {
             Err(ParseError::Incomplete) => Ok(None),
-            done => {
+            Err(e) => {
+                // A line refused while it leaves the command open drops the
+                // rest of the command with it, as `drop_line` does.
                 self.text.clear();
-                done.map(Some)
+                self.dropping = parser::ends_open(line);
+                Err(e)
+            }
+            Ok(list) => {
+                self.text.clear();
+                Ok(Some(list))
             }
         }
     }
@@ -255,6 +262,42 @@ mod tests {
         r.clear();
         r.drop_line("   ");
         assert!(!r.reading());
+    }
+
+    #[test]
+    fn a_line_that_does_not_parse_drops_its_command_to_its_end() {
+        // The final review found the end of an `&&` chain run after a line
+        // of it was refused (`cd build 2> /dev/null &&`, then `rm -r out`).
+        let mut r = Reader::new();
+        assert_eq!(r.add("a &&"), Ok(None));
+        assert_eq!(
+            r.add("b 2> f &&"),
+            Err(ParseError::Unsupported("2>".into()))
+        );
+        assert!(r.reading(), "still inside the dropped command");
+        assert_eq!(r.add("c"), Ok(None), "its last line, dropped");
+        assert_eq!(names(&r.add("d").unwrap().unwrap()), ["d"]);
+        // So from its first line, past a comment after the operator, and
+        // with a `#` a quote holds.
+        for line in ["a $(x) && # c", "a $(x) ' #' &&"] {
+            assert!(r.add(line).is_err(), "{line}");
+            assert!(r.reading(), "{line}");
+            r.clear();
+        }
+        // A refused line that does not end after an operator ends the
+        // command there: the next line starts afresh.
+        for line in [
+            "a $(x)",
+            "echo '&&' $(x)",
+            "echo \"a ||\" $(x)",
+            "a $(x) \\|",
+            "a $(x) # &&",
+            "|| b",
+            "a |& b",
+        ] {
+            assert!(r.add(line).is_err(), "{line}");
+            assert!(!r.reading(), "{line}");
+        }
     }
 
     #[test]
