@@ -30,11 +30,13 @@
 //! gate §9.1); each has a name, only the last may redirect its output, and
 //! bash's syntax errors name a `|` with no command before it or none after.
 //! An unquoted `&` at the end of the line (a comment may follow) runs it in
-//! the background (§9.2). Every other shell feature is refused: an unquoted
-//! `;`, `&` before more, `*`, `?`, `<`, `` ` ``, `(` or `)` is an error
-//! naming the character, instead of being passed on as if it were plain
-//! text; so are `||`, `&&`, `|&` (the errors into the pipe too), `>&` and
-//! `2>` (another stream).
+//! the background (§9.2). A line is a [`List`] (programmable shell gate
+//! §4.1): an unquoted `;` ends one of its items, and bash's syntax errors
+//! name a `;` with no command before it. Every other shell feature is
+//! refused: an unquoted `&` before more, `*`, `?`, `<`, `` ` ``, `(` or
+//! `)` is an error naming the character, instead of being passed on as if
+//! it were plain text; so are `||`, `&&`, `|&` (the errors into the pipe
+//! too), `>&` and `2>` (another stream).
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -202,8 +204,9 @@ pub enum ParseError {
     UnterminatedQuote,
     /// A `\` with nothing after it.
     TrailingBackslash,
-    /// A redirection without a file name, or a `|` without a command
-    /// before it; holds what came instead.
+    /// A token where bash's grammar allows none: after a redirection
+    /// that has no file name yet, or an operator with no command before
+    /// it. Holds the token, as bash's message names it.
     MissingTarget(&'static str),
     /// A `|` without a command after it.
     UnexpectedEnd,
@@ -229,7 +232,7 @@ impl fmt::Display for ParseError {
     }
 }
 
-const UNSUPPORTED: &[char] = &[';', '*', '?', '<', '`', '(', ')'];
+const UNSUPPORTED: &[char] = &['*', '?', '<', '`', '(', ')'];
 
 /// The characters a line is read from, and where each is.
 struct Cursor<'l> {
@@ -574,8 +577,48 @@ pub fn parse(line: &str) -> Result<Vec<Command>, ParseError> {
     }
 }
 
-/// `line`'s list, its words as typed.
+/// The pipeline the command so far ends, at `end` (`;` or `&`, as
+/// bash's error names it); none if nothing was typed since the last item.
+fn end_pipeline(
+    parts: &mut Parts,
+    pipeline: &mut Vec<Command<Word>>,
+    end: &'static str,
+) -> Result<Option<Pipeline<Word>>, ParseError> {
+    if parts.pending.is_some() {
+        return Err(ParseError::MissingTarget(end));
+    }
+    if parts.words.is_empty() {
+        match (pipeline.is_empty(), &parts.redirect) {
+            (true, None) => return Ok(None),
+            (true, Some(_)) => {}
+            (false, None) => return Err(ParseError::MissingTarget(end)),
+            (false, Some(_)) => return Err(ParseError::Unsupported("| >".into())),
+        }
+    }
+    let p = core::mem::take(parts);
+    pipeline.push(command(p.words, p.redirect)?);
+    Ok(Some(Pipeline {
+        commands: core::mem::take(pipeline),
+    }))
+}
+
+/// An item of one pipeline.
+fn item(first: Pipeline<Word>, background: Option<String>) -> Item<Word> {
+    Item {
+        and_or: AndOr {
+            first,
+            rest: Vec::new(),
+        },
+        background,
+    }
+}
+
+/// `line`'s list, its words as typed. `;` ends an item, as bash's does;
+/// one ending in nothing typed is bash's syntax error at the `;`.
 pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
+    let mut items = Vec::new();
+    // Where the item being read starts in the line.
+    let mut item_start = 0;
     let mut background = None;
     let mut pipeline = Vec::new();
     let mut parts = Parts::default();
@@ -618,6 +661,18 @@ pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
                 parts.end_word(&mut word, line)?;
                 pipeline.push(parts.take_before_pipe()?);
             }
+            ';' => {
+                // bash's `;;` ends a `case` branch.
+                if cur.next_if_eq(';') {
+                    return Err(ParseError::MissingTarget(";;"));
+                }
+                parts.end_word(&mut word, line)?;
+                match end_pipeline(&mut parts, &mut pipeline, ";")? {
+                    Some(p) => items.push(item(p, None)),
+                    None => return Err(ParseError::MissingTarget(";")),
+                }
+                item_start = cur.pos();
+            }
             '&' => {
                 if cur.next_if_eq('&') {
                     return Err(ParseError::Unsupported("&&".into()));
@@ -638,7 +693,7 @@ pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
                     // `a & b` runs both in bash.
                     return Err(ParseError::Unsupported("&".into()));
                 }
-                background = Some(String::from(line[..at].trim_matches([' ', '\t'])));
+                background = Some(String::from(line[item_start..at].trim_matches([' ', '\t'])));
                 break;
             }
             '\'' => {
@@ -706,27 +761,14 @@ pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
     if parts.pending.is_some() {
         return Err(ParseError::MissingTarget("newline"));
     }
-    if !pipeline.is_empty() && parts.words.is_empty() {
-        return Err(match parts.redirect {
-            None => ParseError::UnexpectedEnd,
-            Some(_) => ParseError::Unsupported("| >".into()),
-        });
+    if !pipeline.is_empty() && parts.words.is_empty() && parts.redirect.is_none() {
+        return Err(ParseError::UnexpectedEnd);
     }
-    pipeline.push(command(parts.words, parts.redirect)?);
-    // Nothing but blanks or a comment (`&` alone is an error above).
-    if matches!(&pipeline[..], [c] if c.words.is_empty() && c.redirect.is_none()) {
-        return Ok(List { items: Vec::new() });
+    // Nothing after the last `;` (or at all) is no item.
+    if let Some(p) = end_pipeline(&mut parts, &mut pipeline, "newline")? {
+        items.push(item(p, background));
     }
-    let first = Pipeline { commands: pipeline };
-    Ok(List {
-        items: alloc::vec![Item {
-            and_or: AndOr {
-                first,
-                rest: Vec::new(),
-            },
-            background,
-        }],
-    })
+    Ok(List { items })
 }
 
 #[cfg(test)]
@@ -1211,7 +1253,6 @@ mod tests {
     #[test]
     fn unsupported_syntax_names_the_character() {
         for (line, c) in [
-            ("a; b", ';'),
             ("ls *.txt", '*'),
             ("ls file?", '?'),
             ("cat < f", '<'),
@@ -1223,6 +1264,50 @@ mod tests {
         assert_eq!(
             one("echo a 2>f").unwrap_err().to_string(),
             "unsupported syntax: 2>"
+        );
+    }
+
+    #[test]
+    fn a_semicolon_ends_an_item() {
+        let list = parse_line("echo a;echo b ; cat f | wc;").unwrap();
+        let firsts: Vec<&str> = list
+            .items
+            .iter()
+            .map(|i| i.and_or.first.commands[0].words[0].typed.as_str())
+            .collect();
+        assert_eq!(firsts, ["echo", "echo", "cat"]);
+        assert!(list.items.iter().all(|i| i.background.is_none()));
+        // Quoted, escaped or in a comment it is a character.
+        assert_eq!(
+            parse(r#"echo ';' ";" \; # ; x"#).unwrap()[0].words,
+            ["echo", ";", ";", ";"]
+        );
+        // A background job's text is its own item's.
+        let list = parse_line("echo a; sleep 5 &").unwrap();
+        assert_eq!(list.items[1].background.as_deref(), Some("sleep 5"));
+    }
+
+    #[test]
+    fn a_semicolon_needs_a_command_before_it() {
+        // bash's messages (an interactive bash 5.2, for each line).
+        for (line, token) in [
+            (";", ";"),
+            ("; echo a", ";"),
+            ("echo a; ;", ";"),
+            ("echo a;;", ";;"),
+            ("echo a ;; echo b", ";;"),
+            ("echo > ;", ";"),
+            ("ls | ;", ";"),
+        ] {
+            assert_eq!(
+                parse_line(line).unwrap_err().to_string(),
+                alloc::format!("syntax error near unexpected token `{token}'"),
+                "{line}"
+            );
+        }
+        assert_eq!(
+            parse_line("a | > f; b"),
+            Err(ParseError::Unsupported("| >".into()))
         );
     }
 

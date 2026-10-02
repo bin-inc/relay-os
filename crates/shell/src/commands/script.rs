@@ -193,15 +193,26 @@ mod tests {
     }
 
     #[test]
+    fn a_line_of_a_list_is_traced_once() {
+        let mut h = Harness::new();
+        h.put("/tmp/s.sh", b"echo a; echo b\n");
+        assert_eq!(
+            h.run("sh /tmp/s.sh"),
+            (0, "+ echo a; echo b\na\nb\n".into())
+        );
+    }
+
+    #[test]
     fn a_line_that_does_not_parse_does_not_stop_the_script() {
         let mut h = Harness::new();
-        h.put("/tmp/s.sh", b"echo 'open\nls; wc\necho after\n");
+        h.put("/tmp/s.sh", b"echo 'open\nls; ;\necho after\n");
         assert_eq!(
             h.run("sh /tmp/s.sh"),
             (
                 0,
                 "+ echo 'open\nrelay-sh: syntax error: unterminated quote\n\
-                 + ls; wc\nrelay-sh: unsupported syntax: ;\n+ echo after\nafter\n"
+                 + ls; ;\nrelay-sh: syntax error near unexpected token `;'\n\
+                 + echo after\nafter\n"
                     .into()
             )
         );

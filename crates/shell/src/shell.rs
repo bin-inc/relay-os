@@ -55,6 +55,9 @@ pub struct Shell<'a> {
     prompting: bool,
     /// Its variables and arguments (spec §9.4).
     vars: Vars,
+    /// An expansion failed in a way that abandons the rest of the line
+    /// (programmable shell gate §5.1).
+    abandoned: bool,
 }
 
 impl<'a> Shell<'a> {
@@ -102,6 +105,7 @@ impl<'a> Shell<'a> {
             jobs: Jobs::new(),
             prompting: false,
             vars: Vars::new(NAME),
+            abandoned: false,
         }
     }
 
@@ -201,12 +205,31 @@ impl<'a> Shell<'a> {
     /// Runs a list's items one after another (programmable shell gate
     /// §5.1); its status is the last one's. An empty list keeps the last
     /// status.
+    /// `exit`, Ctrl-C (status 130, spec §6.4) and an expansion that
+    /// abandons the line stop the rest.
     fn run_list(&mut self, list: &parser::List<parser::Word>) -> i32 {
+        self.abandoned = false;
         let mut status = self.status;
         for item in &list.items {
             status = self.run_pipeline(&item.and_or.first, item.background.as_deref());
+            if self.stopped || status == CANCELLED || self.abandoned {
+                break;
+            }
         }
         status
+    }
+
+    /// An expansion that failed: the command fails with status 1. A bad
+    /// substitution, or a line that would expand past 64 KiB, abandons the
+    /// rest of the line too, as interactive bash abandons it; a
+    /// redirection target that is not one word, or a variable that does
+    /// not fit, fails only its command.
+    fn not_expanded(&mut self, e: expand::Error) -> i32 {
+        self.abandoned = matches!(
+            e,
+            expand::Error::BadSubstitution(_) | expand::Error::TooLong
+        );
+        self.finish(1, format!("{NAME}: {e}\n"))
     }
 
     /// Runs one pipeline, or starts it in the background with the job's
@@ -235,7 +258,7 @@ impl<'a> Shell<'a> {
                 Some(text) => return self.background(&p.commands, text),
                 None => p.commands,
             },
-            Err(e) => return self.finish(1, format!("{NAME}: {e}\n")),
+            Err(e) => return self.not_expanded(e),
         };
         if pipeline.len() > 1 {
             return self.pipeline(&pipeline);
@@ -298,13 +321,13 @@ impl<'a> Shell<'a> {
             let set =
                 expand::value(&value, &self.vars, self.status).and_then(|v| self.vars.set(name, v));
             if let Err(e) = set {
-                return self.finish(1, format!("{NAME}: {e}\n"));
+                return self.not_expanded(e);
             }
         }
         let redirect = match cmd.redirect.as_ref() {
             Some(r) => match expand::redirect(r, &self.vars, self.status) {
                 Ok(r) => Some(r),
-                Err(e) => return self.finish(1, format!("{NAME}: {e}\n")),
+                Err(e) => return self.not_expanded(e),
             },
             None => None,
         };
@@ -413,6 +436,8 @@ impl<'a> Shell<'a> {
         if self.exited {
             self.stopped = false;
         }
+        // What abandoned a line of the script leaves the line that ran it.
+        self.abandoned = false;
         self.write_transcript();
         self.transcript = None;
         status
@@ -760,6 +785,87 @@ mod tests {
     }
 
     #[test]
+    fn a_list_runs_its_items_one_after_another() {
+        let mut h = Harness::new();
+        // What bash prints for each (an interactive bash 5.2).
+        assert_eq!(h.run("echo a;echo b;"), (0, "a\nb\n".into()));
+        // Each item reads the status of the one before.
+        assert_eq!(
+            h.run("false; echo $?; nope; echo $?"),
+            (0, "1\nrelay-sh: nope: command not found\n127\n".into())
+        );
+        assert_eq!(h.run("echo a; false"), (1, "a\n".into()));
+        // An assignment is an item too, and the next one reads it.
+        assert_eq!(h.run("A=1; echo $A"), (0, "1\n".into()));
+        assert_eq!(h.run("cd /etc; pwd"), (0, "/etc\n".into()));
+    }
+
+    #[test]
+    fn exit_and_ctrl_c_stop_the_rest_of_a_list() {
+        let mut h = Harness::new();
+        assert_eq!(h.run("exit 3; echo no"), (3, "".into()));
+        h.put("/tmp/big", &alloc::vec![b'x'; 300_000]);
+        h.console.interrupt = true;
+        assert_eq!(h.run("cat /tmp/big | wc -c; echo no"), (130, "^C\n".into()));
+    }
+
+    #[test]
+    fn a_bad_substitution_abandons_the_rest_of_the_line() {
+        // As interactive bash: the rest of the line does not run. A
+        // redirection that cannot be made fails only its own command.
+        let mut h = Harness::new();
+        assert_eq!(
+            h.run("echo ${1A}; echo after"),
+            (1, "relay-sh: ${1A}: bad substitution\n".into())
+        );
+        assert_eq!(
+            h.run("echo x > $E; echo after"),
+            (0, "relay-sh: $E: ambiguous redirect\nafter\n".into())
+        );
+        // So in an assignment.
+        assert_eq!(
+            h.run("A=${1A}; echo after"),
+            (1, "relay-sh: ${1A}: bad substitution\n".into())
+        );
+        assert_eq!(
+            h.run("A=1 > $E; echo after"),
+            (0, "relay-sh: $E: ambiguous redirect\nafter\n".into())
+        );
+        let big = "x".repeat(40_000);
+        let mut shell = Shell::new(&mut h.vfs, &mut h.console, &mut h.system);
+        shell.execute(&alloc::format!("A={big}"));
+        assert_eq!(shell.execute("echo $A $A; echo after"), 1);
+        // Only that line: the next one runs whole.
+        assert_eq!(shell.execute("echo a; echo b"), 0);
+        assert_eq!(
+            h.console.take(),
+            "relay-sh: the line would expand to more than 64 KiB\na\nb\n"
+        );
+    }
+
+    #[test]
+    fn a_line_a_script_abandons_leaves_the_line_that_ran_it() {
+        // bash's script is a shell of its own; so is the in-process
+        // runner's, as far as the lines after it go.
+        let mut h = Harness::new();
+        h.put("/tmp/s.sh", b"echo ${1A}\n");
+        assert_eq!(
+            h.run("sh /tmp/s.sh; echo after"),
+            (
+                0,
+                "+ echo ${1A}\nrelay-sh: ${1A}: bad substitution\nafter\n".into()
+            )
+        );
+    }
+
+    #[test]
+    fn each_item_of_a_list_is_synced() {
+        let mut h = Harness::new();
+        h.run("pwd; pwd; pwd");
+        assert_eq!(h.spy.syncs.get(), 3);
+    }
+
+    #[test]
     fn unknown_commands_and_syntax_errors() {
         let mut h = Harness::new();
         assert_eq!(
@@ -768,7 +874,10 @@ mod tests {
         );
         assert_eq!(
             h.run("ls | ;"),
-            (2, "relay-sh: unsupported syntax: ;\n".into())
+            (
+                2,
+                "relay-sh: syntax error near unexpected token `;'\n".into()
+            )
         );
         assert_eq!(
             h.run("ls |"),
