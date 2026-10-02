@@ -260,16 +260,19 @@ impl<'a> Shell<'a> {
         self.stopped || self.cancelled || self.abandoned
     }
 
-    /// An expansion that failed: the command fails with status 1. A bad
+    /// An expansion that failed: the command fails with status 1. In a
+    /// command the shell runs itself (`alone`, not one of a pipeline nor a
+    /// background job, which bash expands in shells of their own), a bad
     /// substitution, or a line that would expand past 64 KiB, abandons the
     /// rest of the line too, as interactive bash abandons it; a
     /// redirection target that is not one word, or a variable that does
     /// not fit, fails only its command.
-    fn not_expanded(&mut self, e: expand::Error) -> i32 {
-        self.abandoned = matches!(
-            e,
-            expand::Error::BadSubstitution(_) | expand::Error::TooLong
-        );
+    fn not_expanded(&mut self, e: expand::Error, alone: bool) -> i32 {
+        self.abandoned = alone
+            && matches!(
+                e,
+                expand::Error::BadSubstitution(_) | expand::Error::TooLong
+            );
         self.finish(1, format!("{NAME}: {e}\n"))
     }
 
@@ -317,7 +320,10 @@ impl<'a> Shell<'a> {
                 Some(text) => return self.background(&p.commands, text),
                 None => p.commands,
             },
-            Err(e) => return self.not_expanded(e),
+            Err(e) => {
+                let alone = typed.commands.len() == 1 && background.is_none();
+                return self.not_expanded(e, alone);
+            }
         };
         if pipeline.len() > 1 {
             return self.pipeline(&pipeline);
@@ -381,13 +387,13 @@ impl<'a> Shell<'a> {
             let set =
                 expand::value(&value, &self.vars, self.status).and_then(|v| self.vars.set(name, v));
             if let Err(e) = set {
-                return self.not_expanded(e);
+                return self.not_expanded(e, true);
             }
         }
         let redirect = match cmd.redirect.as_ref() {
             Some(r) => match expand::redirect(r, &self.vars, self.status) {
                 Ok(r) => Some(r),
-                Err(e) => return self.not_expanded(e),
+                Err(e) => return self.not_expanded(e, true),
             },
             None => None,
         };
@@ -1094,6 +1100,30 @@ mod tests {
         );
         assert_eq!(h.programs.spawned[1].args, ["t-args", "0"], "as bash's");
         assert!(out.contains("Done                    sleep 5\n"), "{out}");
+    }
+
+    #[test]
+    fn a_bad_substitution_in_a_pipeline_or_a_job_fails_only_it() {
+        // bash expands a pipeline's commands, and a job's, in shells of
+        // their own, so the error ends only them and the line goes on (the
+        // review found the rest of the line dropped). The pipeline's status
+        // is 1: it is expanded whole before any of it starts (user-space
+        // gate §16 item 10), where bash runs its other commands.
+        let mut h = Harness::new();
+        assert_eq!(
+            h.run("echo ${1A} | cat; echo after $?"),
+            (0, "relay-sh: ${1A}: bad substitution\nafter 1\n".into())
+        );
+        let mut h = with_jobs();
+        let out = typed(&mut h, &["sleep ${1A} & t-args after"]);
+        assert!(out.contains("relay-sh: ${1A}: bad substitution\n"), "{out}");
+        let args: Vec<String> = h
+            .programs
+            .spawned
+            .iter()
+            .map(|s| s.args.join(" "))
+            .collect();
+        assert_eq!(args, ["t-args after"], "no job started; t-args ran");
     }
 
     #[test]
