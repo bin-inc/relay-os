@@ -38,11 +38,12 @@
 //! its status. A newline ends an item as `;` does, but after `|`, `&&` or
 //! `||` the command goes on to the next line; text that ends there is
 //! [`ParseError::Incomplete`], and a reader asks for more. `if … then …
-//! [elif … then …] [else …] fi` is a compound command, its words keywords
-//! only unquoted, whole and where a command name would stand (after `fi`,
-//! only a keyword or an operator may follow); it cannot stand in a pipeline
-//! of several, before `&` or with a redirection. bash's other reserved
-//! words (`while`, `{`, …) are refused where a command name would stand.
+//! [elif … then …] [else …] fi`, `while … do … done` and `until … do …
+//! done` are compound commands, their words keywords only unquoted, whole
+//! and where a command name would stand (after `fi` or `done`, only a
+//! keyword or an operator may follow); one cannot stand in a pipeline of
+//! several, before `&` or with a redirection. bash's other reserved words
+//! (`for`, `{`, …) are refused where a command name would stand.
 //! Every other shell feature is refused: an unquoted `*`, `?`, `<`,
 //! `` ` ``, `(` or `)` is an error naming the character, instead of being
 //! passed on as if it were plain text; so are `|&` (the errors into the
@@ -122,6 +123,8 @@ pub enum Run<W = String> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Compound<W = String> {
     If(If<W>),
+    While(Loop<W>),
+    Until(Loop<W>),
 }
 
 /// `if`: each condition (the `if`'s, then each `elif`'s) with the body it
@@ -130,6 +133,14 @@ pub enum Compound<W = String> {
 pub struct If<W = String> {
     pub branches: Vec<(List<W>, List<W>)>,
     pub otherwise: Option<List<W>>,
+}
+
+/// `while` or `until`: the condition run before each pass, and the body
+/// run while its status is 0 (`while`) or not (`until`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Loop<W = String> {
+    pub condition: List<W>,
+    pub body: List<W>,
 }
 
 impl<W> List<W> {
@@ -152,6 +163,7 @@ impl<W> Compound<W> {
                 i.branches.iter().any(|(c, b)| c.has_job() || b.has_job())
                     || i.otherwise.as_ref().is_some_and(List::has_job)
             }
+            Compound::While(l) | Compound::Until(l) => l.condition.has_job() || l.body.has_job(),
         }
     }
 
@@ -159,6 +171,7 @@ impl<W> Compound<W> {
     fn end(&self) -> &'static str {
         match self {
             Compound::If(_) => "fi",
+            Compound::While(_) | Compound::Until(_) => "done",
         }
     }
 }
@@ -339,8 +352,8 @@ const UNSUPPORTED: &[char] = &['*', '?', '<', '`', '(', ')'];
 /// command name could stand (programmable shell gate §4.2); the loops'
 /// until they are implemented.
 const RESERVED: &[&str] = &[
-    "while", "until", "for", "in", "do", "done", "case", "esac", "select", "function", "time",
-    "coproc", "{", "}", "[[", "]]", "break", "continue",
+    "for", "in", "case", "esac", "select", "function", "time", "coproc", "{", "}", "[[", "]]",
+    "break", "continue",
 ];
 
 /// A compound command's word, where a command name would stand.
@@ -351,6 +364,10 @@ enum Keyword {
     Elif,
     Else,
     Fi,
+    While,
+    Until,
+    Do,
+    Done,
 }
 
 const KEYWORDS: &[(&str, Keyword)] = &[
@@ -359,6 +376,10 @@ const KEYWORDS: &[(&str, Keyword)] = &[
     ("elif", Keyword::Elif),
     ("else", Keyword::Else),
     ("fi", Keyword::Fi),
+    ("while", Keyword::While),
+    ("until", Keyword::Until),
+    ("do", Keyword::Do),
+    ("done", Keyword::Done),
 ];
 
 impl Keyword {
@@ -369,6 +390,24 @@ impl Keyword {
             .find(|&&(_, k)| k == self)
             .map_or("", |&(w, _)| w)
     }
+
+    /// The compound command it opens, if it opens one.
+    fn opens(self) -> Option<Kind> {
+        match self {
+            Keyword::If => Some(Kind::If),
+            Keyword::While => Some(Kind::While),
+            Keyword::Until => Some(Kind::Until),
+            _ => None,
+        }
+    }
+}
+
+/// What compound command is being read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    If,
+    While,
+    Until,
 }
 
 /// Where a compound command being read is.
@@ -380,6 +419,8 @@ enum Stage {
     Then,
     /// The body after `else`.
     Else,
+    /// A loop's body, after `do`.
+    Body,
 }
 
 /// A compound command being read, and what was being read around it.
@@ -390,6 +431,7 @@ struct Open {
     levels: usize,
     /// The `!`s before it.
     bangs: usize,
+    kind: Kind,
     stage: Stage,
     /// Its lists so far: each condition and the body after it.
     lists: Vec<List<Word>>,
@@ -715,7 +757,7 @@ impl Parts {
         // or goes on with the one around it may come (`fi fi`, `fi then`).
         if self.compound.is_some() {
             return match w.keyword() {
-                Some(k) if k != Keyword::If => Ok(Some(k)),
+                Some(k) if k.opens().is_none() => Ok(Some(k)),
                 _ => Err(ParseError::Unexpected(w.typed)),
             };
         }
@@ -1149,7 +1191,7 @@ impl Parser {
 
     /// A keyword, ending at `at`, where a command name would stand.
     fn keyword(&mut self, k: Keyword, at: usize) -> Result<(), ParseError> {
-        if k == Keyword::If {
+        if let Some(kind) = k.opens() {
             // bash runs it in a subshell.
             if !self.pipeline.is_empty() {
                 return Err(ParseError::Unsupported(format!("{} after |", k.token())));
@@ -1165,17 +1207,22 @@ impl Parser {
                 outer: core::mem::take(&mut self.items),
                 levels,
                 bangs,
+                kind,
                 stage: Stage::Condition,
                 lists: Vec::new(),
             });
             self.item_start = at;
             return Ok(());
         }
-        let next = match (self.open.last().map(|o| o.stage), k) {
-            (Some(Stage::Condition), Keyword::Then) => Stage::Then,
-            (Some(Stage::Then), Keyword::Elif) => Stage::Condition,
-            (Some(Stage::Then), Keyword::Else) => Stage::Else,
-            (Some(Stage::Then | Stage::Else), Keyword::Fi) => Stage::Else,
+        // The stage the keyword moves the innermost one on to, or none if
+        // it closes it.
+        let next = match self.open.last().map(|o| (o.kind, o.stage, k)) {
+            Some((Kind::If, Stage::Condition, Keyword::Then)) => Some(Stage::Then),
+            Some((Kind::If, Stage::Then, Keyword::Elif)) => Some(Stage::Condition),
+            Some((Kind::If, Stage::Then, Keyword::Else)) => Some(Stage::Else),
+            Some((Kind::If, Stage::Then | Stage::Else, Keyword::Fi)) => None,
+            Some((Kind::While | Kind::Until, Stage::Condition, Keyword::Do)) => Some(Stage::Body),
+            Some((Kind::While | Kind::Until, Stage::Body, Keyword::Done)) => None,
             _ => return Err(ParseError::MissingTarget(k.token())),
         };
         let list = self.end_list(k.token())?;
@@ -1183,7 +1230,7 @@ impl Parser {
         let Some(open) = self.open.last_mut() else {
             return Err(ParseError::MissingTarget(k.token()));
         };
-        if k != Keyword::Fi {
+        if let Some(next) = next {
             open.lists.push(list);
             open.stage = next;
             return Ok(());
@@ -1192,24 +1239,42 @@ impl Parser {
             return Err(ParseError::MissingTarget(k.token()));
         };
         let mut lists = open.lists;
-        let otherwise = match open.stage {
-            Stage::Else => Some(list),
-            _ => {
-                lists.push(list);
-                None
+        let compound = match open.kind {
+            Kind::If => {
+                let otherwise = match open.stage {
+                    Stage::Else => Some(list),
+                    _ => {
+                        lists.push(list);
+                        None
+                    }
+                };
+                let mut branches = Vec::new();
+                let mut lists = lists.into_iter();
+                while let (Some(condition), Some(body)) = (lists.next(), lists.next()) {
+                    branches.push((condition, body));
+                }
+                Compound::If(If {
+                    branches,
+                    otherwise,
+                })
+            }
+            Kind::While | Kind::Until => {
+                let Some(condition) = lists.pop() else {
+                    return Err(ParseError::MissingTarget(k.token()));
+                };
+                let l = Loop {
+                    condition,
+                    body: list,
+                };
+                match open.kind {
+                    Kind::Until => Compound::Until(l),
+                    _ => Compound::While(l),
+                }
             }
         };
-        let mut branches = Vec::new();
-        let mut lists = lists.into_iter();
-        while let (Some(condition), Some(body)) = (lists.next(), lists.next()) {
-            branches.push((condition, body));
-        }
         self.items = open.outer;
         self.parts.bangs = open.bangs;
-        self.parts.compound = Some(Compound::If(If {
-            branches,
-            otherwise,
-        }));
+        self.parts.compound = Some(compound);
         Ok(())
     }
 
@@ -1349,6 +1414,8 @@ mod tests {
                     Run::Commands(c) => c[0].words[0].typed.clone(),
                     Run::Compound(c) => match **c {
                         Compound::If(_) => String::from("if"),
+                        Compound::While(_) => String::from("while"),
+                        Compound::Until(_) => String::from("until"),
                     },
                 });
             }
@@ -1362,8 +1429,114 @@ mod tests {
         match p.run {
             Run::Compound(c) => match *c {
                 Compound::If(i) => (p.negated, i),
+                _ => panic!("{line}: no if"),
             },
             Run::Commands(_) => panic!("{line}: no compound command"),
+        }
+    }
+
+    /// The loop of `line`'s one item, `until` or not, its condition's and
+    /// body's command names.
+    fn loop_of(line: &str) -> (bool, Vec<String>, Vec<String>) {
+        let p = parse_line(line).unwrap().items.remove(0).and_or.first;
+        match p.run {
+            Run::Compound(c) => match *c {
+                Compound::While(l) => (false, names_of(&l.condition), names_of(&l.body)),
+                Compound::Until(l) => (true, names_of(&l.condition), names_of(&l.body)),
+                Compound::If(_) => panic!("{line}: an if"),
+            },
+            Run::Commands(_) => panic!("{line}: no compound command"),
+        }
+    }
+
+    #[test]
+    fn while_and_until_hold_a_condition_and_a_body() {
+        let s = |v: &[&str]| -> Vec<String> { v.iter().map(|x| String::from(*x)).collect() };
+        assert_eq!(
+            loop_of("while a; b; do c; d; done"),
+            (false, s(&["a", "b"]), s(&["c", "d"]))
+        );
+        assert_eq!(
+            loop_of("until a && b; do c | d; done"),
+            (true, s(&["a", "b"]), s(&["c"]))
+        );
+        // Across lines (l2, p5), nested with `if` (p8, p9), and after `done`
+        // a keyword with no `;`.
+        assert_eq!(
+            loop_of("while\na\n\n# c\ndo b\ndone"),
+            (false, s(&["a"]), s(&["b"]))
+        );
+        assert_eq!(
+            loop_of("while a; do if b; then c; fi done"),
+            (false, s(&["a"]), s(&["if"]))
+        );
+        assert_eq!(
+            loop_of("until while a; do b; done do c; done"),
+            (true, s(&["while"]), s(&["c"]))
+        );
+        let (_, i) = if_of("if a; then while b; do c; done fi");
+        assert_eq!(branches(&i), [["a"].as_slice(), &["while"]]);
+        // `!`, lists and and-or lists.
+        assert!(
+            parse_line("! while a; do b; done").unwrap().items[0]
+                .and_or
+                .first
+                .negated
+        );
+        let list = parse_line("a && while b; do c; done || d; until e; do f; done").unwrap();
+        assert_eq!(names_of(&list), ["a", "while", "d", "until"]);
+        // As words where no command name stands.
+        assert_eq!(
+            parse("echo while until do done").unwrap()[0].words,
+            ["echo", "while", "until", "do", "done"]
+        );
+        for text in [
+            "while",
+            "while a",
+            "while a;",
+            "while a; do",
+            "until a; do b",
+            "while a; do b; done &&",
+        ] {
+            assert_eq!(parse_line(text), Err(ParseError::Incomplete), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_loop_s_keyword_out_of_place_is_bash_s_syntax_error() {
+        for (line, token) in [
+            ("done", "done"),
+            ("do", "do"),
+            ("while true; done", "done"),
+            ("while do echo; done", "do"),
+            ("while false; do echo; done done", "done"),
+            ("while a; do; echo; done", ";"),
+            ("while a; then b; done", "then"),
+            ("until a; do b; fi", "fi"),
+            ("if a; then b; done", "done"),
+            ("if a; do b; fi", "do"),
+            ("while a; do b; done while", "while"),
+            ("while a; do b; done echo", "echo"),
+            ("while a; do b; else c; done", "else"),
+        ] {
+            assert_eq!(
+                parse_line(line).unwrap_err().to_string(),
+                alloc::format!("syntax error near unexpected token `{token}'"),
+                "{line}"
+            );
+        }
+        for (line, what) in [
+            ("while a; do b; done | cat", "| after done"),
+            ("echo x | while a; do b; done", "while after |"),
+            ("echo x | until a; do b; done", "until after |"),
+            ("until a; do b; done > f", "> after done"),
+            ("while a; do b; done &", "& after done"),
+        ] {
+            assert_eq!(
+                parse_line(line),
+                Err(ParseError::Unsupported(what.into())),
+                "{line}"
+            );
         }
     }
 
@@ -2241,8 +2414,8 @@ mod tests {
         // are not found; the loops' until they come.
         // The words of the spec's §4.2, written out apart from `RESERVED`.
         for word in [
-            "while", "until", "for", "in", "do", "done", "case", "esac", "select", "function",
-            "time", "coproc", "{", "}", "[[", "]]", "break", "continue",
+            "for", "in", "case", "esac", "select", "function", "time", "coproc", "{", "}", "[[",
+            "]]", "break", "continue",
         ] {
             for line in [
                 alloc::format!("{word} x"),
@@ -2262,7 +2435,7 @@ mod tests {
         // Anywhere else, quoted or escaped, or after a redirection (a
         // command's name in bash), it is a word.
         for (line, words) in [
-            ("echo while do done", &["echo", "while", "do", "done"][..]),
+            ("echo for in", &["echo", "for", "in"][..]),
             ("'for' x", &["for", "x"]),
             ("\\while x", &["while", "x"]),
             ("> f done", &["done"]),

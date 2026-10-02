@@ -16,6 +16,11 @@ use vfs::{DirEntry, Env, Errno, FileSystem, Ino, MemFs, MountTable, Node, Stat, 
 /// The time every test runs at: Sat Sep 26 12:00:00 UTC 2026.
 pub const NOW: u64 = 1_790_424_000;
 
+/// The most a test's shell may ask for a Ctrl-C, which it does before each
+/// command: past it a loop that never ends fails the test instead of
+/// hanging it.
+const ASKED_MAX: usize = 100_000;
+
 pub struct TestConsole {
     pub input: VecDeque<u8>,
     pub output: Vec<u8>,
@@ -25,6 +30,8 @@ pub struct TestConsole {
     /// Ctrl-C is pressed once `interrupted` has answered false this many
     /// times.
     pub interrupt_after: Option<usize>,
+    /// How many times `interrupted` was asked.
+    asked: usize,
 }
 
 impl TestConsole {
@@ -35,6 +42,7 @@ impl TestConsole {
             columns: 80,
             interrupt: false,
             interrupt_after: None,
+            asked: 0,
         }
     }
 
@@ -67,6 +75,11 @@ impl Console for TestConsole {
     }
     /// As the real console's, a Ctrl-C is taken by the call that sees it.
     fn interrupted(&mut self) -> bool {
+        self.asked += 1;
+        assert!(
+            self.asked <= ASKED_MAX,
+            "asked for a Ctrl-C {ASKED_MAX} times: a loop that does not end"
+        );
         match &mut self.interrupt_after {
             Some(0) => {
                 self.interrupt_after = None;

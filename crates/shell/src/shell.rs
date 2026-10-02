@@ -337,6 +337,29 @@ impl<'a> Shell<'a> {
     fn run_compound(&mut self, c: &parser::Compound<parser::Word>) -> i32 {
         match c {
             parser::Compound::If(i) => self.run_if(i),
+            parser::Compound::While(l) => self.run_loop(l, false),
+            parser::Compound::Until(l) => self.run_loop(l, true),
+        }
+    }
+
+    /// Runs a `while` loop, or an `until` one: the condition, then the
+    /// body while its status is 0 (or, `until`, not 0). The status is the
+    /// body's last, 0 if it never ran. A loop may run for ever: Ctrl-C
+    /// ends it, as the walker asks before each command (§5.2).
+    fn run_loop(&mut self, l: &parser::Loop<parser::Word>, until: bool) -> i32 {
+        let mut status = 0;
+        loop {
+            let condition = self.run_items(&l.condition);
+            if self.ends_line() {
+                return condition;
+            }
+            if (condition == 0) == until {
+                return status;
+            }
+            status = self.run_items(&l.body);
+            if self.ends_line() {
+                return status;
+            }
         }
     }
 
@@ -1015,7 +1038,7 @@ mod tests {
         // lines ran its body, each refused line dropped alone: the lines
         // of a construct with a refused line in it are dropped up to its
         // end, counting the constructs inside.
-        let text = b"if t-args a\nthen t-args b\nwhile t-args c\ndo t-args d\ndone\nt-args e\nfi\nt-args next\n";
+        let text = b"if t-args a\nthen t-args b\nwhile t-args c\ndo coproc d\ndone\nt-args e\nfi\nt-args next\n";
         assert_eq!(piped(text), ["next"]);
         // Opened by a line too long, or no text.
         let mut text = b"while t-args a; do ".to_vec();
@@ -1030,14 +1053,14 @@ mod tests {
         let mut h = Harness::new();
         h.put(
             "/tmp/s.sh",
-            b"if true\nthen echo a\nwhile true\ndo echo b\ndone\nfi\necho next\n",
+            b"if true\nthen echo a\nwhile true\ndo coproc b\ndone\nfi\necho next\n",
         );
         assert_eq!(
             h.run("sh /tmp/s.sh"),
             (
                 0,
-                "+ if true\n+ then echo a\n+ while true\nrelay-sh: unsupported syntax: while\n\
-                 + do echo b\n+ done\n+ fi\n+ echo next\nnext\n"
+                "+ if true\n+ then echo a\n+ while true\n+ do coproc b\n\
+                 relay-sh: unsupported syntax: coproc\n+ done\n+ fi\n+ echo next\nnext\n"
                     .into()
             )
         );
@@ -1045,7 +1068,7 @@ mod tests {
         let mut h = spawning();
         let out = typed(
             &mut h,
-            &["while t-args a", "do t-args b", "done", "t-args next"],
+            &["while t-args a", "do coproc b", "done", "t-args next"],
         );
         let args: Vec<&str> = h
             .programs
@@ -1745,6 +1768,102 @@ mod tests {
         ] {
             assert_eq!(h.run(line), (ran.0, ran.1.into()), "{line}");
         }
+    }
+
+    #[test]
+    fn while_and_until_run_their_body_while_the_condition_allows() {
+        // Each loop here ends by itself: on a file it removes or makes.
+        let mut h = Harness::new();
+        h.put("/tmp/f", b"f\n");
+        assert_eq!(
+            h.run("while cat /tmp/f; do rm /tmp/f; done"),
+            (0, "f\ncat: /tmp/f: No such file or directory\n".into())
+        );
+        assert_eq!(
+            h.run("until cat /tmp/g; do echo g > /tmp/g; done"),
+            (0, "cat: /tmp/g: No such file or directory\ng\n".into())
+        );
+        // The status is the body's last (r8), 0 when it never runs (g3,
+        // g7), whatever the condition's or `$?` before.
+        h.put("/tmp/f", b"f\n");
+        assert_eq!(
+            h.run("while cat /tmp/f; do rm /tmp/f; false; done; echo $?"),
+            (0, "f\ncat: /tmp/f: No such file or directory\n1\n".into())
+        );
+        for (line, ran) in [
+            ("while false; do echo no; done", (0, "")),
+            ("false; while false; do echo no; done; echo $?", (0, "0\n")),
+            ("until true; do echo no; done", (0, "")),
+            ("! while false; do echo no; done", (1, "")),
+            (
+                "true && until true; do echo no; done && echo yes",
+                (0, "yes\n"),
+            ),
+            // A condition's status is `$?` in the body.
+            ("until false; do echo $?; exit 7; done", (7, "1\n")),
+            // `exit` deep inside.
+            (
+                "while true; do if true; then exit 4; fi; echo no; done",
+                (4, ""),
+            ),
+        ] {
+            assert_eq!(h.run(line), (ran.0, ran.1.into()), "{line}");
+        }
+        // A bad substitution abandons the whole line, or `exit` ends it,
+        // in the body or the condition: no body runs after it.
+        assert_eq!(
+            h.run("while true; do echo ${1A}; echo no; done; echo no"),
+            (1, "relay-sh: ${1A}: bad substitution\n".into())
+        );
+        assert_eq!(
+            h.run("until echo ${1A}; do echo no; done"),
+            (1, "relay-sh: ${1A}: bad substitution\n".into())
+        );
+        assert_eq!(h.run("until exit 5; do echo no; done"), (5, "".into()));
+        // The in-process runner refuses a job in a loop too.
+        for line in [
+            "while false; do echo a & done",
+            "until echo a & do echo b; done",
+        ] {
+            assert_eq!(
+                h.run(line),
+                (2, "relay-sh: unsupported syntax: &\n".into()),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_c_ends_a_loop_of_built_ins_or_of_programs() {
+        // A loop a person writes may run forever; Ctrl-C ends it (§5.2).
+        let mut h = Harness::new();
+        h.console.interrupt_after = Some(50);
+        assert_eq!(
+            h.run("while true; do cd; done; echo no"),
+            (130, "^C\n".into())
+        );
+        h.console.interrupt_after = Some(50);
+        assert_eq!(
+            h.run("until false; do A=x; done; echo no"),
+            (130, "^C\n".into())
+        );
+        let mut h = spawning();
+        h.programs.known.push((
+            "/bin/t-spin",
+            WaitStatus::killed(relay_abi::wait::KILLED_CTRL_C),
+        ));
+        // `t-args` exits with 3 here; a Ctrl-C in the condition runs no
+        // body.
+        assert_eq!(
+            h.spawning("until t-args a; do t-spin; done; t-args no"),
+            (130, "^C\n".into())
+        );
+        assert_eq!(
+            h.spawning("until t-spin; do t-args no; done"),
+            (130, "^C\n".into())
+        );
+        let ran: Vec<&str> = h.programs.spawned.iter().map(|s| s.path.as_str()).collect();
+        assert_eq!(ran, ["/bin/t-args", "/bin/t-spin", "/bin/t-spin"]);
     }
 
     #[test]

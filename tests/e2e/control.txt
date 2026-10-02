@@ -2,7 +2,8 @@
 # || and ! under /bin/sh; a command typed across lines with bash's >
 # prompt, and Ctrl-C there; Ctrl-C in the middle of a list; & mid-line;
 # and a script whose command goes on across lines, with its transcript.
-# Compound commands (plan 2): the nesting bound under /bin/sh.
+# Compound commands (plan 2): Ctrl-C in a loop of built-ins and of
+# programs, and the nesting bound, under /bin/sh.
 timeout 30
 expect root@relay:~# $
 send echo a; false; echo $?
@@ -43,6 +44,20 @@ send sh s.sh
 expect \n\+ echo s1 &&\n\+ echo s2\ns1\ns2\nroot@relay:~# $
 send cat s.log
 expect \n\+ echo s1 &&\n\+ echo s2\ns1\ns2\nroot@relay:~# $
+# A loop of built-ins ends at a Ctrl-C (§5.2): /bin/sh asks the kernel
+# for one before each command. A loop of programs ends at one too.
+send while cd; do cd; done
+alive 1
+type {ctrl-c}
+expect \n\^C\nroot@relay:~# $
+send echo $?
+expect \n130\nroot@relay:~# $
+send while true; do sleep 1; done
+alive 2
+type {ctrl-c}
+expect \^C\nroot@relay:~# $
+send echo $?
+expect \n130\nroot@relay:~# $
 # Compound commands nest 32 levels deep, the most (§4.5): a script runs
 # them on /bin/sh's fixed stack, and a 33rd level is refused.
 send echo 'if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then echo deep; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi' > deep.sh

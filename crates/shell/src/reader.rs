@@ -299,12 +299,13 @@ mod tests {
         // written across lines ran its body (its final review's ruling):
         // its lines are dropped up to its `fi`, counting those inside.
         let mut r = Reader::new();
+        assert_eq!(r.add("while true; do"), Ok(None));
         assert_eq!(
-            r.add("while true"),
-            Err(ParseError::Unsupported("while".into()))
+            r.add("coproc a"),
+            Err(ParseError::Unsupported("coproc".into()))
         );
         assert!(r.reading());
-        for line in ["do echo a", "if b", "then c", "fi", "echo d"] {
+        for line in ["echo a", "if b", "then c", "fi", "echo d"] {
             assert_eq!(r.add(line), Ok(None), "{line}");
             assert!(r.reading(), "{line}");
         }
@@ -313,8 +314,8 @@ mod tests {
         assert_eq!(names(&r.add("echo e").unwrap().unwrap()), ["echo"]);
         // Opened on a later line of the command, and refused there.
         assert_eq!(r.add("a &&"), Ok(None));
-        assert!(r.add("for x in b; do").is_err());
-        assert_eq!(r.add("echo $x"), Ok(None));
+        assert!(r.add("until $(b); do").is_err());
+        assert_eq!(r.add("echo c"), Ok(None));
         assert_eq!(r.add("done"), Ok(None));
         assert!(!r.reading());
     }
