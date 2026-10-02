@@ -369,11 +369,14 @@ impl<'e> Eval<'e, '_> {
     /// read-only: no call says which filesystems are, and `open` for writing
     /// succeeds on them, so a root the kernel mounted read-only is not told
     /// (spec §10, §15 item 3).
+    /// Only when `/bin` is a mount of its own: `host-shell`'s `/bin` is a
+    /// directory of the image's root.
     fn on_bin(&mut self, node: vfs::Node) -> bool {
-        self.ctx
-            .vfs
-            .lookup(b"/bin")
-            .is_ok_and(|bin| bin.mount == node.mount)
+        let vfs = &mut self.ctx.vfs;
+        match (vfs.lookup(b"/bin"), vfs.lookup(b"/")) {
+            (Ok(bin), Ok(root)) => bin.mount != root.mount && bin.mount == node.mount,
+            _ => false,
+        }
     }
 
     /// GNU's `binary_operator`, at the left operand (or at the `-l`
@@ -1122,6 +1125,24 @@ mod tests {
         }
         let etc = h.vfs.lookup(b"/etc").unwrap();
         assert_eq!(etc.ino, h.vfs.lookup(b"/bin/ls").unwrap().ino);
+    }
+
+    #[test]
+    fn a_plain_bin_directory_is_not_read_only() {
+        // `host-shell` mounts only the image's root, whose `/bin` is a
+        // directory of it (the final review): every file is then writable,
+        // as GNU says for root.
+        let mut h = Harness::new();
+        h.vfs.mkdir(b"/bin").unwrap();
+        h.put("/bin/ls", b"");
+        for line in [
+            "test -w /etc/motd",
+            "test -w /bin",
+            "test -w /bin/ls",
+            "[ -w / ]",
+        ] {
+            assert_eq!(h.run(line), (0, String::new()), "{line}");
+        }
     }
 
     #[test]
