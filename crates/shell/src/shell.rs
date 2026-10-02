@@ -27,6 +27,9 @@ pub const CANNOT_RUN: i32 = 126;
 pub const SYNTAX: i32 = 2;
 /// Exit status after Ctrl-C.
 pub const CANCELLED: i32 = 130;
+/// How much of a line over 64 KiB `X | sh` keeps: its last bytes, between
+/// this and twice it.
+const LINE_TAIL: usize = 1024;
 /// The most of `/etc/motd` shown at start.
 const MOTD_MAX: usize = 16 * 1024;
 
@@ -598,6 +601,13 @@ impl<'a> Shell<'a> {
                     too_long = true;
                     line.clear();
                 }
+            } else {
+                // Only its last bytes, which say whether the command it is
+                // in goes on after it.
+                line.push(byte[0]);
+                if line.len() == 2 * LINE_TAIL {
+                    line.drain(..LINE_TAIL);
+                }
             }
         }
     }
@@ -608,14 +618,14 @@ impl<'a> Shell<'a> {
         self.collect_jobs();
         match core::str::from_utf8(line) {
             _ if too_long => {
-                reader.clear();
+                reader.drop_line(&String::from_utf8_lossy(line));
                 self.finish(1, String::from("sh: standard input: a line over 64 KiB\n"));
             }
             Ok(text) => {
                 self.read_line(reader, text);
             }
             Err(_) => {
-                reader.clear();
+                reader.drop_line(&String::from_utf8_lossy(line));
                 self.finish(1, String::from("sh: standard input: not a text line\n"));
             }
         }
@@ -895,12 +905,48 @@ mod tests {
         }
     }
 
+    /// The programs `X | sh` started for `text`, their arguments after
+    /// argument 0.
+    fn piped(text: &[u8]) -> Vec<String> {
+        let mut h = spawning();
+        let mut input = crate::Bytes::new(text.to_vec());
+        Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+            .run_input(&mut input);
+        h.programs
+            .spawned
+            .iter()
+            .map(|s| s.args[1..].join(" "))
+            .collect()
+    }
+
+    #[test]
+    fn a_dropped_command_runs_none_of_its_later_lines() {
+        // The review found the end of an `&&` chain run after its start
+        // was dropped: too long, or with a line that is no text.
+        let long = alloc::format!("t-args {} &&\n", "x".repeat(40_000));
+        let text = alloc::format!("t-args a &&\n{long}{long}t-args ran\nt-args next\n");
+        assert_eq!(piped(text.as_bytes()), ["next"]);
+        assert_eq!(
+            piped(b"t-args a &&\n\xff &&\nt-args ran\nt-args next\n"),
+            ["next"]
+        );
+        // A line over 64 KiB ending in `&&` too; one finishing its command
+        // drops nothing after it.
+        let mut text = b"t-args a\n".to_vec();
+        text.extend(alloc::vec![b'x'; 70_000]);
+        text.extend_from_slice(b" &&\nt-args ran\nt-args next\n");
+        assert_eq!(piped(&text), ["a", "next"]);
+        let mut text = alloc::vec![b'x'; 70_000];
+        text.extend_from_slice(b"\nt-args next\n");
+        assert_eq!(piped(&text), ["next"]);
+    }
+
     #[test]
     fn a_command_read_across_lines_holds_at_most_64_kib() {
         let mut h = spawning();
         let line = alloc::format!("t-args {} &&\n", "x".repeat(40_000));
         let mut text = line.repeat(2).into_bytes();
-        text.extend_from_slice(b"t-args after\n");
+        text.extend_from_slice(b"t-args after\nt-args next\n");
         let mut input = crate::Bytes::new(text);
         Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
             .run_input(&mut input);
@@ -914,7 +960,7 @@ mod tests {
             .iter()
             .map(|s| s.args[1].as_str())
             .collect();
-        assert_eq!(args, ["after"], "the rest of it read afresh");
+        assert_eq!(args, ["next"], "its end dropped with it");
     }
 
     /// Input that records how much each read asked for.

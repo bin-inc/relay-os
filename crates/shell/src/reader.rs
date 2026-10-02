@@ -10,6 +10,10 @@ use alloc::string::String;
 #[derive(Default)]
 pub(crate) struct Reader {
     text: String,
+    /// A command was dropped before its end: its later lines are dropped
+    /// too, up to one that finishes it, so that none of them runs without
+    /// what came before (the end of an `&&` chain without its guard).
+    dropping: bool,
     /// How many times all the text was parsed (the tests count them).
     #[cfg(test)]
     whole_parses: usize,
@@ -24,8 +28,12 @@ impl Reader {
     /// more lines, or why the lines do not parse, which drops them. A
     /// command longer than [`COMMAND_MAX`] is dropped too.
     pub fn add(&mut self, line: &str) -> Result<Option<List<Word>>, ParseError> {
+        if self.dropping {
+            self.dropping = matches!(alone(line), Alone::GoesOn | Alone::Nothing);
+            return Ok(None);
+        }
         if self.text.len() + line.len() + 1 > COMMAND_MAX {
-            self.text.clear();
+            self.drop_line(line);
             return Err(ParseError::TooLong);
         }
         // While a command goes on, a line that alone would leave it
@@ -33,15 +41,10 @@ impl Reader {
         // leaves it unfinished: so each line is parsed once alone, and all
         // the text only when a line may finish it, which keeps reading a
         // long command linear.
-        let goes_on = self.reading()
-            && match parser::parse_line(line) {
-                Err(ParseError::Incomplete) => true,
-                Ok(list) => list.items.is_empty(),
-                Err(_) => false,
-            };
+        let more = self.reading() && matches!(alone(line), Alone::GoesOn | Alone::Nothing);
         self.text.push_str(line);
         self.text.push('\n');
-        if goes_on {
+        if more {
             return Ok(None);
         }
         #[cfg(test)]
@@ -57,22 +60,60 @@ impl Reader {
         }
     }
 
-    /// Part of a command has been read.
+    /// Drops the command a line is part of that cannot be added (too
+    /// long, or no text: `line` is what can be read of it, or its last
+    /// bytes): its later lines are dropped too unless this one plainly
+    /// finishes it.
+    pub fn drop_line(&mut self, line: &str) {
+        let reading = self.reading();
+        self.text.clear();
+        // What does not parse alone might go on (a line's last bytes may
+        // start inside a quote): it is dropped to be safe.
+        self.dropping = match alone(line) {
+            Alone::GoesOn | Alone::Wrong => true,
+            Alone::Nothing => reading,
+            Alone::Ends => false,
+        };
+    }
+
+    /// Part of a command has been read, or is being dropped.
     pub fn reading(&self) -> bool {
-        !self.text.is_empty()
+        !self.text.is_empty() || self.dropping
     }
 
     /// The input ended: a command read only in part is bash's `unexpected
-    /// end of file`, and is dropped.
+    /// end of file`, and is dropped; one being dropped was already told.
     pub fn end(&mut self) -> Option<ParseError> {
-        let reading = self.reading();
-        self.text.clear();
+        let reading = !self.text.is_empty();
+        self.clear();
         reading.then_some(ParseError::Incomplete)
     }
 
     /// Drops what has been read (Ctrl-C at the `> ` prompt).
     pub fn clear(&mut self) {
         self.text.clear();
+        self.dropping = false;
+    }
+}
+
+/// What a line, read alone, does to an unfinished command before it.
+enum Alone {
+    /// It ends after `|`, `&&` or `||`: the command goes on after it.
+    GoesOn,
+    /// Blanks or a comment: the command goes on after it.
+    Nothing,
+    /// A command: it may finish the one before.
+    Ends,
+    /// It does not parse alone.
+    Wrong,
+}
+
+fn alone(line: &str) -> Alone {
+    match parser::parse_line(line) {
+        Err(ParseError::Incomplete) => Alone::GoesOn,
+        Ok(list) if list.items.is_empty() => Alone::Nothing,
+        Ok(_) => Alone::Ends,
+        Err(_) => Alone::Wrong,
     }
 }
 
@@ -131,7 +172,9 @@ mod tests {
         let half = alloc::format!("{} &&", "x".repeat(COMMAND_MAX / 2));
         assert_eq!(r.add(&half), Ok(None));
         assert_eq!(r.add(&half), Err(ParseError::TooLong));
-        assert!(!r.reading(), "dropped");
+        assert!(r.reading(), "dropped, up to its end");
+        assert_eq!(r.add("x"), Ok(None));
+        assert!(!r.reading());
         assert_eq!(
             ParseError::TooLong.to_string(),
             "the command would be longer than 64 KiB"
@@ -157,6 +200,61 @@ mod tests {
         // A line that might finish it, or be wrong, is parsed with the rest.
         assert_eq!(r.add("a &&"), Ok(None));
         assert_eq!(r.add("|| b"), Err(ParseError::MissingTarget("||")));
+    }
+
+    #[test]
+    fn a_command_too_long_is_dropped_to_its_end() {
+        // The review found the rest of a dropped `&&` chain run without
+        // its guard: the lines after the limit, up to one that finishes the
+        // command, are dropped too.
+        let mut r = Reader::new();
+        let half = alloc::format!("{} &&", "x".repeat(COMMAND_MAX / 2));
+        assert_eq!(r.add("false &&"), Ok(None));
+        assert_eq!(r.add(&half), Ok(None));
+        assert_eq!(r.add(&half), Err(ParseError::TooLong));
+        assert!(r.reading(), "still inside the dropped command");
+        assert_eq!(r.add("true &&"), Ok(None));
+        assert_eq!(r.add(""), Ok(None));
+        assert_eq!(r.add("echo ran"), Ok(None), "its last line, dropped");
+        assert!(!r.reading());
+        assert_eq!(names(&r.add("echo next").unwrap().unwrap()), ["echo"]);
+        // A line that finishes the command it makes too long ends it.
+        let long = "x".repeat(COMMAND_MAX / 2);
+        assert_eq!(r.add(&half), Ok(None));
+        assert_eq!(r.add(&long), Err(ParseError::TooLong));
+        assert!(!r.reading());
+        // The input's end, or Ctrl-C, while one is dropped says no more.
+        r.add(&half).unwrap();
+        r.add(&half).unwrap_err();
+        assert_eq!(r.end(), None);
+        r.add(&half).unwrap();
+        r.add(&half).unwrap_err();
+        r.clear();
+        assert!(!r.reading());
+    }
+
+    #[test]
+    fn a_line_that_cannot_be_read_drops_its_command_to_its_end() {
+        let mut r = Reader::new();
+        // Its text decides, or what is left of it: one that plainly
+        // finishes a command ends it; one that goes on, or might, does not.
+        r.add("a &&").unwrap();
+        r.drop_line("x");
+        assert!(!r.reading());
+        r.drop_line("x &&");
+        assert!(r.reading());
+        r.add("b").unwrap();
+        assert!(!r.reading());
+        r.drop_line("x' &&");
+        assert!(r.reading(), "a quote cut in two: it might go on");
+        r.clear();
+        // A blank one ends nothing, and starts nothing.
+        r.add("a ||").unwrap();
+        r.drop_line("   ");
+        assert!(r.reading());
+        r.clear();
+        r.drop_line("   ");
+        assert!(!r.reading());
     }
 
     #[test]
