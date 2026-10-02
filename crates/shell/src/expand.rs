@@ -7,7 +7,7 @@
 //! after it to the last, as bash's `"$@"` does; an empty argument is kept
 //! only in quotes.
 
-use crate::parser::{Command, Param, Piece, Pipeline, Redirect, Word};
+use crate::parser::{Command, Param, Piece, Redirect, Word};
 use alloc::borrow::Cow;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -95,19 +95,12 @@ impl fmt::Display for Error {
 /// The pipeline is expanded whole before any of it runs, and each one of
 /// a list just before it runs, so it reads the `$?` of the one before.
 pub(crate) fn expand(
-    pipeline: &Pipeline<Word>,
+    commands: &[Command<Word>],
     vars: &Vars,
     status: i32,
-) -> Result<Pipeline, Error> {
+) -> Result<Vec<Command>, Error> {
     let mut x = Expander::new(vars, status);
-    let mut commands = Vec::new();
-    for c in &pipeline.commands {
-        commands.push(x.command(c)?);
-    }
-    Ok(Pipeline {
-        negated: pipeline.negated,
-        commands,
-    })
+    commands.iter().map(|c| x.command(c)).collect()
 }
 
 /// An assignment's value: one string, however it expands (`$@` joined by
@@ -250,10 +243,10 @@ enum Value<'v> {
     Args(&'v [String]),
 }
 
-/// The words of `pipeline` with nothing set: for callers that run no
-/// shell (tests).
-pub(crate) fn plain(pipeline: &Pipeline<Word>) -> Result<Pipeline, Error> {
-    expand(pipeline, &Vars::new(crate::shell::NAME), 0)
+/// The words of a pipeline's `commands` with nothing set: for callers
+/// that run no shell (tests).
+pub(crate) fn plain(commands: &[Command<Word>]) -> Result<Vec<Command>, Error> {
+    expand(commands, &Vars::new(crate::shell::NAME), 0)
 }
 
 #[cfg(test)]
@@ -274,14 +267,15 @@ mod tests {
     use super::*;
     use crate::parser::parse_line;
 
-    /// The first pipeline of `line`, as typed.
-    fn typed(line: &str) -> Pipeline<Word> {
-        parse_line(line).unwrap().items.remove(0).and_or.first
+    /// The commands of the first pipeline of `line`, as typed.
+    fn typed(line: &str) -> Vec<Command<Word>> {
+        let first = parse_line(line).unwrap().items.remove(0).and_or.first;
+        first.commands().to_vec()
     }
 
     /// The words of `line`'s one command with `vars`, `$?` 3.
     fn words(line: &str, vars: &Vars) -> Result<Vec<String>, Error> {
-        expand(&typed(line), vars, 3).map(|mut p| p.commands.remove(0).words)
+        expand(&typed(line), vars, 3).map(|mut c| c.remove(0).words)
     }
 
     /// A script `s.sh` run as `sh s.sh one 'two three' '' four`, with `A`
@@ -381,7 +375,7 @@ mod tests {
         let v = script();
         let value = |line: &str| {
             let p = typed(line);
-            let (_, value) = p.commands[0].words[0].assignment().unwrap();
+            let (_, value) = p[0].words[0].assignment().unwrap();
             super::value(&value, &v, 0)
         };
         assert_eq!(value("A=$@").unwrap(), "one two three  four");
@@ -457,7 +451,7 @@ mod tests {
     fn a_redirection_target_must_expand_to_one_word() {
         let v = script();
         let target = |line: &str| {
-            expand(&typed(line), &v, 0).map(|mut p| p.commands.remove(0).redirect.unwrap().path)
+            expand(&typed(line), &v, 0).map(|mut c| c.remove(0).redirect.unwrap().path)
         };
         assert_eq!(target("echo > $1.txt").unwrap(), "one.txt");
         assert_eq!(target("echo > $A").unwrap(), "a  b");

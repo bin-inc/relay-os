@@ -37,13 +37,18 @@
 //! with `&` is refused. An unquoted `!` word at a pipeline's start negates
 //! its status. A newline ends an item as `;` does, but after `|`, `&&` or
 //! `||` the command goes on to the next line; text that ends there is
-//! [`ParseError::Incomplete`], and a reader asks for more. bash's reserved
-//! words (`if`, `while`, `{`, …) are refused where a command name would
-//! stand. Every other shell feature is refused: an unquoted `*`, `?`,
-//! `<`, `` ` ``, `(` or `)` is an error naming the character, instead of
-//! being passed on as if it were plain text; so are `|&` (the errors into
-//! the pipe too), `>&` and `2>` (another stream).
+//! [`ParseError::Incomplete`], and a reader asks for more. `if … then …
+//! [elif … then …] [else …] fi` is a compound command, its words keywords
+//! only unquoted, whole and where a command name would stand (after `fi`,
+//! only a keyword or an operator may follow); it cannot stand in a pipeline
+//! of several, before `&` or with a redirection. bash's other reserved
+//! words (`while`, `{`, …) are refused where a command name would stand.
+//! Every other shell feature is refused: an unquoted `*`, `?`, `<`,
+//! `` ` ``, `(` or `)` is an error naming the character, instead of being
+//! passed on as if it were plain text; so are `|&` (the errors into the
+//! pipe too), `>&` and `2>` (another stream).
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -54,6 +59,12 @@ use core::str::CharIndices;
 /// The most a command being read across lines holds (programmable shell
 /// gate §4.5), as a script does.
 pub const COMMAND_MAX: usize = 64 * 1024;
+
+/// How deep compound commands may nest (programmable shell gate §4.5):
+/// each counts a level, and one that follows `&&` or `||` one more, as the
+/// walker, which recurses on `/bin/sh`'s fixed stack, has the and-or list's
+/// frame under it.
+pub const NESTING_MAX: usize = 32;
 
 /// The home directory `~` stands for.
 pub const HOME: &str = "/root";
@@ -91,12 +102,65 @@ pub enum Connector {
     Or,
 }
 
-/// One command, or several joined by `|`, each one's output the next
-/// one's input; after a `!`, its status negated.
+/// What a pipeline runs and, after a `!`, its status negated.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pipeline<W = String> {
     pub negated: bool,
-    pub commands: Vec<Command<W>>,
+    pub run: Run<W>,
+}
+
+/// What a pipeline runs (programmable shell gate §4.1): one command, or
+/// several joined by `|`, each one's output the next one's input; or one
+/// compound command, which cannot stand in a pipeline of several.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Run<W = String> {
+    Commands(Vec<Command<W>>),
+    Compound(Box<Compound<W>>),
+}
+
+/// A compound command (programmable shell gate §4.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Compound<W = String> {
+    If(If<W>),
+}
+
+/// `if`: each condition (the `if`'s, then each `elif`'s) with the body it
+/// runs, and the `else` body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct If<W = String> {
+    pub branches: Vec<(List<W>, List<W>)>,
+    pub otherwise: Option<List<W>>,
+}
+
+impl<W> List<W> {
+    /// Whether a background job stands anywhere in it, in a compound
+    /// command too.
+    pub fn has_job(&self) -> bool {
+        self.items.iter().any(|item| {
+            item.background.is_some()
+                || core::iter::once(&item.and_or.first)
+                    .chain(item.and_or.rest.iter().map(|(_, p)| p))
+                    .any(|p| matches!(&p.run, Run::Compound(c) if c.has_job()))
+        })
+    }
+}
+
+impl<W> Compound<W> {
+    fn has_job(&self) -> bool {
+        match self {
+            Compound::If(i) => {
+                i.branches.iter().any(|(c, b)| c.has_job() || b.has_job())
+                    || i.otherwise.as_ref().is_some_and(List::has_job)
+            }
+        }
+    }
+
+    /// The word that ends it, which messages about it name.
+    fn end(&self) -> &'static str {
+        match self {
+            Compound::If(_) => "fi",
+        }
+    }
 }
 
 /// One command: its words and where its output goes. The parser gives
@@ -203,6 +267,14 @@ impl Word {
         matches!(&self.pieces[..], [Piece::Text(t, false)] if t == "!")
     }
 
+    /// The keyword the word is, unquoted and whole.
+    fn keyword(&self) -> Option<Keyword> {
+        let [Piece::Text(t, false)] = &self.pieces[..] else {
+            return None;
+        };
+        KEYWORDS.iter().find(|(w, _)| w == t).map(|&(_, k)| k)
+    }
+
     /// The word is one of bash's reserved words, unquoted.
     fn is_reserved(&self) -> bool {
         matches!(&self.pieces[..], [Piece::Text(t, false)] if RESERVED.contains(&t.as_str()))
@@ -229,6 +301,8 @@ pub enum ParseError {
     /// that has no file name yet, or an operator with no command before
     /// it. Holds the token, as bash's message names it.
     MissingTarget(&'static str),
+    /// A word where bash's grammar allows none (after `fi`), as typed.
+    Unexpected(String),
     /// The text is the start of a command that needs more lines: it ends
     /// after a `|`, `&&` or `||` (programmable shell gate §4.3). A reader
     /// asks for the next line; where none can come it is bash's error.
@@ -248,6 +322,7 @@ impl fmt::Display for ParseError {
             ParseError::UnterminatedQuote => f.write_str("syntax error: unterminated quote"),
             ParseError::TrailingBackslash => f.write_str("syntax error: nothing after \\"),
             ParseError::MissingTarget(t) => write!(f, "syntax error near unexpected token `{t}'"),
+            ParseError::Unexpected(t) => write!(f, "syntax error near unexpected token `{t}'"),
             ParseError::Incomplete => f.write_str("syntax error: unexpected end of file"),
             ParseError::TooLong => f.write_str("the command would be longer than 64 KiB"),
             ParseError::Expansion(why) => f.write_str(why),
@@ -260,25 +335,81 @@ impl fmt::Display for ParseError {
 
 const UNSUPPORTED: &[char] = &['*', '?', '<', '`', '(', ')'];
 
-/// bash's reserved words, and its loop built-ins, refused where a command
-/// name could stand (programmable shell gate §4.2) until the compound
-/// commands are implemented.
+/// bash's other reserved words, and its loop built-ins, refused where a
+/// command name could stand (programmable shell gate §4.2); the loops'
+/// until they are implemented.
 const RESERVED: &[&str] = &[
-    "if", "then", "elif", "else", "fi", "while", "until", "for", "in", "do", "done", "case",
-    "esac", "select", "function", "time", "coproc", "{", "}", "[[", "]]", "break", "continue",
+    "while", "until", "for", "in", "do", "done", "case", "esac", "select", "function", "time",
+    "coproc", "{", "}", "[[", "]]", "break", "continue",
 ];
+
+/// A compound command's word, where a command name would stand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Keyword {
+    If,
+    Then,
+    Elif,
+    Else,
+    Fi,
+}
+
+const KEYWORDS: &[(&str, Keyword)] = &[
+    ("if", Keyword::If),
+    ("then", Keyword::Then),
+    ("elif", Keyword::Elif),
+    ("else", Keyword::Else),
+    ("fi", Keyword::Fi),
+];
+
+impl Keyword {
+    /// As typed.
+    fn token(self) -> &'static str {
+        KEYWORDS
+            .iter()
+            .find(|&&(_, k)| k == self)
+            .map_or("", |&(w, _)| w)
+    }
+}
+
+/// Where a compound command being read is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stage {
+    /// An `if`'s or an `elif`'s condition, up to its `then`.
+    Condition,
+    /// The body after `then`.
+    Then,
+    /// The body after `else`.
+    Else,
+}
+
+/// A compound command being read, and what was being read around it.
+struct Open {
+    /// The list it stands in, put back when it closes.
+    outer: Items,
+    /// The levels of nesting it counts ([`NESTING_MAX`]).
+    levels: usize,
+    /// The `!`s before it.
+    bangs: usize,
+    stage: Stage,
+    /// Its lists so far: each condition and the body after it.
+    lists: Vec<List<Word>>,
+}
 
 /// The characters a line is read from, and where each is.
 struct Cursor<'l> {
     line: &'l str,
+    /// Where `chars` starts in `line`.
+    from: usize,
     chars: Peekable<CharIndices<'l>>,
 }
 
 impl<'l> Cursor<'l> {
-    fn new(line: &'l str) -> Cursor<'l> {
+    /// From byte `from` of `line` on.
+    fn starting(line: &'l str, from: usize) -> Cursor<'l> {
         Cursor {
             line,
-            chars: line.char_indices().peekable(),
+            from,
+            chars: line[from..].char_indices().peekable(),
         }
     }
 
@@ -297,7 +428,9 @@ impl<'l> Cursor<'l> {
 
     /// Where the next character is (the line's length at its end).
     fn pos(&mut self) -> usize {
-        self.chars.peek().map_or(self.line.len(), |&(i, _)| i)
+        self.chars
+            .peek()
+            .map_or(self.line.len(), |&(i, _)| self.from + i)
     }
 }
 
@@ -560,15 +693,32 @@ struct Parts {
     /// The command is not the pipeline's first, so a `!` cannot stand
     /// before it.
     later: bool,
+    /// The compound command just read, which only an operator or a
+    /// keyword may follow.
+    compound: Option<Compound<Word>>,
 }
 
 impl Parts {
+    /// Nothing of a command has been read (a `!` may have been).
+    fn is_empty(&self) -> bool {
+        self.words.is_empty() && self.redirect.is_none() && self.compound.is_none()
+    }
+
     /// Ends a word: it becomes the pending redirection's target or the next
-    /// word.
-    fn end_word(&mut self, word: &mut Building, line: &str) -> Result<(), ParseError> {
+    /// word, or it is the keyword it returns, standing where a command name
+    /// would.
+    fn end_word(&mut self, word: &mut Building, line: &str) -> Result<Option<Keyword>, ParseError> {
         let Some(w) = core::mem::take(word).finish(line) else {
-            return Ok(());
+            return Ok(None);
         };
+        // After a compound command, as in bash, only a keyword that closes
+        // or goes on with the one around it may come (`fi fi`, `fi then`).
+        if self.compound.is_some() {
+            return match w.keyword() {
+                Some(k) if k != Keyword::If => Ok(Some(k)),
+                _ => Err(ParseError::Unexpected(w.typed)),
+            };
+        }
         match self.pending.take() {
             Some(_) if self.redirect.is_some() => return Err(ParseError::Unsupported(">".into())),
             Some(append) => self.redirect = Some(Redirect { path: w, append }),
@@ -580,18 +730,28 @@ impl Parts {
                 }
                 self.bangs += 1;
             }
-            None if self.words.is_empty() && self.redirect.is_none() && w.is_reserved() => {
-                return Err(ParseError::Unsupported(w.typed));
+            None if self.words.is_empty() && self.redirect.is_none() => {
+                if let Some(k) = w.keyword() {
+                    return Ok(Some(k));
+                }
+                if w.is_reserved() {
+                    return Err(ParseError::Unsupported(w.typed));
+                }
+                self.words.push(w);
             }
             None => self.words.push(w),
         }
-        Ok(())
+        Ok(None)
     }
 
     /// The command so far, ended by a `|`, which needs one before it.
     /// Every command of a pipeline has a name: a redirection alone, which
     /// bash runs, is refused like one on a command before the last.
     fn take_before_pipe(&mut self) -> Result<Command<Word>, ParseError> {
+        // bash runs it in a subshell.
+        if let Some(c) = &self.compound {
+            return Err(ParseError::Unsupported(format!("| after {}", c.end())));
+        }
         if self.pending.is_some() || (self.words.is_empty() && self.redirect.is_none()) {
             return Err(ParseError::MissingTarget("|"));
         }
@@ -608,7 +768,8 @@ impl Parts {
 /// The commands of the first pipeline of `line`, whether or not it ends
 /// with `&`, their words expanded with no variables set (for callers that
 /// run no shell: tests); a line that does not expand is
-/// `ParseError::Expansion`. A blank line is one command without words.
+/// `ParseError::Expansion`. A blank line is one command without words; a
+/// compound command has none of its own.
 pub fn parse(line: &str) -> Result<Vec<Command>, ParseError> {
     let list = parse_line(line)?;
     let Some(item) = list.items.first() else {
@@ -617,10 +778,10 @@ pub fn parse(line: &str) -> Result<Vec<Command>, ParseError> {
             redirect: None,
         }]);
     };
-    match crate::expand::plain(&item.and_or.first) {
-        Ok(p) => Ok(p.commands),
-        Err(e) => Err(ParseError::Expansion(e.to_string())),
-    }
+    let Run::Commands(commands) = &item.and_or.first.run else {
+        return Ok(Vec::new());
+    };
+    crate::expand::plain(commands).map_err(|e| ParseError::Expansion(e.to_string()))
 }
 
 /// The pipeline the command so far ends, at `end` (`;` or `&`, as
@@ -630,6 +791,13 @@ fn end_pipeline(
     pipeline: &mut Vec<Command<Word>>,
     end: &'static str,
 ) -> Result<Option<Pipeline<Word>>, ParseError> {
+    if let Some(c) = parts.compound.take() {
+        let p = core::mem::take(parts);
+        return Ok(Some(Pipeline {
+            negated: p.bangs % 2 == 1,
+            run: Run::Compound(Box::new(c)),
+        }));
+    }
     if parts.pending.is_some() {
         return Err(ParseError::MissingTarget(end));
     }
@@ -647,7 +815,7 @@ fn end_pipeline(
     pipeline.push(command(p.words, p.redirect)?);
     Ok(Some(Pipeline {
         negated: p.bangs % 2 == 1,
-        commands: core::mem::take(pipeline),
+        run: Run::Commands(core::mem::take(pipeline)),
     }))
 }
 
@@ -695,241 +863,417 @@ impl Items {
     }
 }
 
-/// `line`'s list, its words as typed. `;` ends an item, and `&&` and `||`
-/// join pipelines, as bash's do; one with nothing typed before it is
-/// bash's syntax error naming it.
-pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
-    let mut items = Items::default();
-    // Where the item being read starts in the line.
-    let mut item_start = 0;
-    // Where each comment starts and ends in the line.
-    let mut comments = Vec::new();
-    let mut pipeline = Vec::new();
-    let mut parts = Parts::default();
-    let mut word = Building::default();
-    let mut cur = Cursor::new(line);
-    loop {
-        let at = cur.pos();
-        let Some(c) = cur.next() else {
-            break;
-        };
-        match c {
-            ' ' | '\t' => parts.end_word(&mut word, line)?,
-            '>' => {
-                // `2>` redirects another stream in a real shell.
-                if word.started
-                    && let Some(digits) = word.word.digits()
-                {
-                    return Err(ParseError::Unsupported(format!("{digits}>")));
-                }
-                parts.end_word(&mut word, line)?;
-                if parts.pending.is_some() {
-                    return Err(ParseError::MissingTarget(">"));
-                }
-                let append = cur.next_if_eq('>');
-                // `>&2` and `>& f` send output elsewhere in bash; `>>&` and
-                // `> &` are its syntax errors.
-                if !append && cur.peek() == Some('&') {
-                    return Err(ParseError::Unsupported(">&".into()));
-                }
-                parts.pending = Some(append);
-            }
-            '|' if cur.next_if_eq('|') => {
-                parts.end_word(&mut word, line)?;
-                join(&mut items, &mut parts, &mut pipeline, Connector::Or)?;
-            }
-            '|' => {
-                // bash's `|&` pipes the errors too.
-                if cur.next_if_eq('&') {
-                    return Err(ParseError::Unsupported("|&".into()));
-                }
-                parts.end_word(&mut word, line)?;
-                pipeline.push(parts.take_before_pipe()?);
-            }
-            ';' => {
-                // bash's `;;`, `;&` and `;;&` end a `case` branch.
-                if cur.next_if_eq(';') {
-                    let token = if cur.next_if_eq('&') { ";;&" } else { ";;" };
-                    return Err(ParseError::MissingTarget(token));
-                }
-                if cur.next_if_eq('&') {
-                    return Err(ParseError::MissingTarget(";&"));
-                }
-                parts.end_word(&mut word, line)?;
-                match end_pipeline(&mut parts, &mut pipeline, ";")? {
-                    Some(p) => items.pipeline(p),
-                    None => return Err(ParseError::MissingTarget(";")),
-                }
-                items.end(None);
-                item_start = cur.pos();
-            }
-            '&' if cur.next_if_eq('&') => {
-                parts.end_word(&mut word, line)?;
-                join(&mut items, &mut parts, &mut pipeline, Connector::And)?;
-            }
-            '&' => {
-                parts.end_word(&mut word, line)?;
-                if parts.pending.is_some() || parts.words.is_empty() && parts.redirect.is_none() {
-                    return Err(ParseError::MissingTarget("&"));
-                }
-                if parts.words.is_empty() {
-                    // `> f &`: a background job is a program.
-                    return Err(ParseError::Unsupported("> &".into()));
-                }
-                // bash runs the whole and-or list in the background, in a
-                // shell of its own.
-                if let Some(c) = items.connector {
-                    return Err(ParseError::Unsupported(format!("& after {}", c.token())));
-                }
-                // Without its `!`, as bash's `jobs` shows it.
-                let typed = job_text(line, item_start, at, &comments);
-                let mut text = typed.as_str();
-                for _ in 0..parts.bangs {
-                    text = text[1..].trim_start_matches([' ', '\t']);
-                }
-                let text = String::from(text);
-                if let Some(p) = end_pipeline(&mut parts, &mut pipeline, "&")? {
-                    items.pipeline(p);
-                }
-                // The line goes on after it, as bash's does (`a & b`).
-                items.end(Some(text));
-                item_start = cur.pos();
-            }
-            '\'' => {
-                let before = word.open_quote();
-                loop {
-                    match cur.next() {
-                        Some('\'') => break,
-                        Some(c) => word.quoted(c),
-                        None => return Err(ParseError::UnterminatedQuote),
-                    }
-                }
-                word.close_quote(before);
-            }
-            '"' => {
-                let before = word.open_quote();
-                loop {
-                    match cur.next() {
-                        Some('"') => break,
-                        Some('\\') if matches!(cur.peek(), Some('"' | '\\' | '$' | '`')) => {
-                            word.quoted(cur.next().expect("peeked"));
-                        }
-                        Some('$') => match parameter(&mut cur, true)? {
-                            Some(p) => word.param(p, true),
-                            None => word.quoted('$'),
-                        },
-                        Some('`') => return Err(ParseError::Unsupported('`'.into())),
-                        Some(c) => word.quoted(c),
-                        None => return Err(ParseError::UnterminatedQuote),
-                    }
-                }
-                word.close_quote(before);
-            }
-            // bash joins a line ending in `\` to the next; here, as before
-            // a command could go on to another line, it is an error.
-            '\\' => match cur.next() {
-                Some('\n') | None => return Err(ParseError::TrailingBackslash),
-                Some(c) => word.quoted(c),
-            },
-            '$' => match parameter(&mut cur, false)? {
-                Some(p) => word.param(p, false),
-                None => {
-                    word.started = true;
-                    word.added += 1;
-                    word.word.push('$', false);
-                }
-            },
-            // A comment runs to the end of the line.
-            '#' if !word.started => {
-                while cur.peek().is_some_and(|c| c != '\n') {
-                    cur.next();
-                }
-                comments.push((at, cur.pos()));
-            }
-            '\n' => {
-                parts.end_word(&mut word, line)?;
-                if parts.pending.is_some() {
-                    return Err(ParseError::MissingTarget("newline"));
-                }
-                // After `|`, `&&` or `||` the command goes on, past blank
-                // and comment lines, as bash's does.
-                // (A `!` counts only before a pipeline's first command.)
-                let nothing = parts.words.is_empty()
-                    && parts.redirect.is_none()
-                    && (parts.bangs == 0 || !pipeline.is_empty());
-                if nothing && (!pipeline.is_empty() || items.connector.is_some()) {
-                    continue;
-                }
-                if let Some(p) = end_pipeline(&mut parts, &mut pipeline, "newline")? {
-                    items.pipeline(p);
-                }
-                items.end(None);
-                item_start = cur.pos();
-            }
-            c if UNSUPPORTED.contains(&c) => return Err(ParseError::Unsupported(c.into())),
-            c => {
-                if !word.started && c == '~' {
-                    word.tilde = true;
-                }
-                word.started = true;
-                word.added += 1;
-                word.word.push(c, false);
-            }
-        }
-        if word.started {
-            if word.end == 0 {
-                word.start = at;
-            }
-            word.end = cur.pos();
-        }
-    }
-    parts.end_word(&mut word, line)?;
-    if parts.pending.is_some() {
-        return Err(ParseError::MissingTarget("newline"));
-    }
-    if !pipeline.is_empty() && parts.words.is_empty() && parts.redirect.is_none() {
-        return Err(ParseError::Incomplete);
-    }
-    // Nothing after the last `;` (or at all) is no item.
-    match end_pipeline(&mut parts, &mut pipeline, "newline")? {
-        Some(p) => items.pipeline(p),
-        None if items.connector.is_some() => return Err(ParseError::Incomplete),
-        None => {}
-    }
-    items.end(None);
-    Ok(List { items: items.items })
+/// A command's text being parsed (programmable shell gate §4.3): what has
+/// been read of it, kept from one call to the next, so that a reader can
+/// give it a command's lines one at a time and each one is read once, in
+/// its context.
+#[derive(Default)]
+pub struct Parser {
+    /// The text read so far, which words and a background job's text are
+    /// cut from.
+    text: String,
+    items: Items,
+    /// Where the item being read starts in the text.
+    item_start: usize,
+    /// Where each comment starts and ends in the text.
+    comments: Vec<(usize, usize)>,
+    pipeline: Vec<Command<Word>>,
+    parts: Parts,
+    word: Building,
+    /// The compound commands being read, the innermost last.
+    open: Vec<Open>,
+    /// How many bytes it has read (the tests count them).
+    #[cfg(test)]
+    pub(crate) read: usize,
 }
 
-/// Whether `line`, read as the parser reads quotes, escapes and comments,
-/// ends after `|`, `&&` or `||`: the command it is in goes on after it, even
-/// when the line does not parse (a reader drops a refused command to its
-/// end). What is quoted counts as a word's characters, so a quote left
-/// open, the line's own error, ends nothing open.
-pub fn ends_open(line: &str) -> bool {
-    let mut seen = String::new();
-    let mut quote = None;
-    let mut chars = line.chars();
-    while let Some(c) = chars.next() {
-        match (quote, c) {
-            (Some(q), c) if c == q => quote = None,
-            (Some('"'), '\\') => {
-                chars.next();
-            }
-            (Some(_), _) => {}
-            (None, '\'' | '"') => quote = Some(c),
-            (None, '\\') => {
-                chars.next();
-                seen.push('x');
-            }
-            (None, '#') if seen.chars().last().is_none_or(|p| " \t;&|<>()".contains(p)) => break,
-            (None, c) => seen.push(c),
+impl Parser {
+    pub fn new() -> Parser {
+        Parser::default()
+    }
+
+    /// How long the text read so far is.
+    pub fn len(&self) -> usize {
+        self.text.len()
+    }
+
+    /// Nothing has been read.
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    /// The text read so far, with the newline of each line.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Reads `line` and its newline: the list the text makes if the line
+    /// finishes it, none while it needs more lines (it ends after `|`,
+    /// `&&` or `||`), or why it does not parse. Once it gives a list the
+    /// parser starts afresh.
+    pub fn line(&mut self, line: &str) -> Result<Option<List<Word>>, ParseError> {
+        let from = self.text.len();
+        self.text.push_str(line);
+        self.text.push('\n');
+        self.read(from)?;
+        if !self.pipeline.is_empty() || self.items.connector.is_some() || !self.open.is_empty() {
+            return Ok(None);
         }
-        if quote.is_some() {
-            seen.push('x');
+        let items = core::mem::take(&mut self.items.items);
+        *self = Parser::new();
+        Ok(Some(List { items }))
+    }
+
+    /// Reads the text from `from` on.
+    fn read(&mut self, from: usize) -> Result<(), ParseError> {
+        let text = core::mem::take(&mut self.text);
+        #[cfg(test)]
+        {
+            self.read += text.len() - from;
+        }
+        let read = self.read_text(&text, from);
+        self.text = text;
+        read
+    }
+
+    /// `;` ends an item, and `&&` and `||` join pipelines, as bash's do;
+    /// one with nothing typed before it is bash's syntax error naming it.
+    fn read_text(&mut self, line: &str, from: usize) -> Result<(), ParseError> {
+        let mut cur = Cursor::starting(line, from);
+        loop {
+            let at = cur.pos();
+            let Some(c) = cur.next() else {
+                break;
+            };
+            match c {
+                ' ' | '\t' => self.end_word(line, at)?,
+                '>' => {
+                    // `2>` redirects another stream in a real shell.
+                    if self.word.started
+                        && let Some(digits) = self.word.word.digits()
+                    {
+                        return Err(ParseError::Unsupported(format!("{digits}>")));
+                    }
+                    self.end_word(line, at)?;
+                    if self.parts.pending.is_some() {
+                        return Err(ParseError::MissingTarget(">"));
+                    }
+                    let append = cur.next_if_eq('>');
+                    // Until compound commands can be redirected.
+                    if let Some(c) = &self.parts.compound {
+                        let op = if append { ">>" } else { ">" };
+                        return Err(ParseError::Unsupported(format!("{op} after {}", c.end())));
+                    }
+                    // `>&2` and `>& f` send output elsewhere in bash; `>>&` and
+                    // `> &` are its syntax errors.
+                    if !append && cur.peek() == Some('&') {
+                        return Err(ParseError::Unsupported(">&".into()));
+                    }
+                    self.parts.pending = Some(append);
+                }
+                '|' if cur.next_if_eq('|') => {
+                    self.end_word(line, at)?;
+                    join(
+                        &mut self.items,
+                        &mut self.parts,
+                        &mut self.pipeline,
+                        Connector::Or,
+                    )?;
+                }
+                '|' => {
+                    // bash's `|&` pipes the errors too.
+                    if cur.next_if_eq('&') {
+                        return Err(ParseError::Unsupported("|&".into()));
+                    }
+                    self.end_word(line, at)?;
+                    self.pipeline.push(self.parts.take_before_pipe()?);
+                }
+                ';' => {
+                    // bash's `;;`, `;&` and `;;&` end a `case` branch.
+                    if cur.next_if_eq(';') {
+                        let token = if cur.next_if_eq('&') { ";;&" } else { ";;" };
+                        return Err(ParseError::MissingTarget(token));
+                    }
+                    if cur.next_if_eq('&') {
+                        return Err(ParseError::MissingTarget(";&"));
+                    }
+                    self.end_word(line, at)?;
+                    match end_pipeline(&mut self.parts, &mut self.pipeline, ";")? {
+                        Some(p) => self.items.pipeline(p),
+                        None => return Err(ParseError::MissingTarget(";")),
+                    }
+                    self.items.end(None);
+                    self.item_start = cur.pos();
+                }
+                '&' if cur.next_if_eq('&') => {
+                    self.end_word(line, at)?;
+                    join(
+                        &mut self.items,
+                        &mut self.parts,
+                        &mut self.pipeline,
+                        Connector::And,
+                    )?;
+                }
+                '&' => {
+                    self.end_word(line, at)?;
+                    // bash runs it in a subshell of its own.
+                    if let Some(c) = &self.parts.compound {
+                        return Err(ParseError::Unsupported(format!("& after {}", c.end())));
+                    }
+                    if self.parts.pending.is_some()
+                        || self.parts.words.is_empty() && self.parts.redirect.is_none()
+                    {
+                        return Err(ParseError::MissingTarget("&"));
+                    }
+                    if self.parts.words.is_empty() {
+                        // `> f &`: a background job is a program.
+                        return Err(ParseError::Unsupported("> &".into()));
+                    }
+                    // bash runs the whole and-or list in the background, in a
+                    // shell of its own.
+                    if let Some(c) = self.items.connector {
+                        return Err(ParseError::Unsupported(format!("& after {}", c.token())));
+                    }
+                    // Without its `!`, as bash's `jobs` shows it.
+                    let typed = job_text(line, self.item_start, at, &self.comments);
+                    let mut text = typed.as_str();
+                    for _ in 0..self.parts.bangs {
+                        text = text[1..].trim_start_matches([' ', '\t']);
+                    }
+                    let text = String::from(text);
+                    if let Some(p) = end_pipeline(&mut self.parts, &mut self.pipeline, "&")? {
+                        self.items.pipeline(p);
+                    }
+                    // The line goes on after it, as bash's does (`a & b`).
+                    self.items.end(Some(text));
+                    self.item_start = cur.pos();
+                }
+                '\'' => {
+                    let before = self.word.open_quote();
+                    loop {
+                        match cur.next() {
+                            Some('\'') => break,
+                            Some(c) => self.word.quoted(c),
+                            None => return Err(ParseError::UnterminatedQuote),
+                        }
+                    }
+                    self.word.close_quote(before);
+                }
+                '"' => {
+                    let before = self.word.open_quote();
+                    loop {
+                        match cur.next() {
+                            Some('"') => break,
+                            Some('\\') if matches!(cur.peek(), Some('"' | '\\' | '$' | '`')) => {
+                                self.word.quoted(cur.next().expect("peeked"));
+                            }
+                            Some('$') => match parameter(&mut cur, true)? {
+                                Some(p) => self.word.param(p, true),
+                                None => self.word.quoted('$'),
+                            },
+                            Some('`') => return Err(ParseError::Unsupported('`'.into())),
+                            Some(c) => self.word.quoted(c),
+                            None => return Err(ParseError::UnterminatedQuote),
+                        }
+                    }
+                    self.word.close_quote(before);
+                }
+                // bash joins a line ending in `\` to the next; here, as before
+                // a command could go on to another line, it is an error.
+                '\\' => match cur.next() {
+                    Some('\n') | None => return Err(ParseError::TrailingBackslash),
+                    Some(c) => self.word.quoted(c),
+                },
+                '$' => match parameter(&mut cur, false)? {
+                    Some(p) => self.word.param(p, false),
+                    None => {
+                        self.word.started = true;
+                        self.word.added += 1;
+                        self.word.word.push('$', false);
+                    }
+                },
+                // A comment runs to the end of the line.
+                '#' if !self.word.started => {
+                    while cur.peek().is_some_and(|c| c != '\n') {
+                        cur.next();
+                    }
+                    self.comments.push((at, cur.pos()));
+                }
+                '\n' => {
+                    self.end_word(line, at)?;
+                    if self.parts.pending.is_some() {
+                        return Err(ParseError::MissingTarget("newline"));
+                    }
+                    // After `|`, `&&` or `||` the command goes on, past blank
+                    // and comment lines, as bash's does.
+                    // (A `!` counts only before a pipeline's first command.)
+                    let nothing = self.parts.is_empty()
+                        && (self.parts.bangs == 0 || !self.pipeline.is_empty());
+                    if nothing && (!self.pipeline.is_empty() || self.items.connector.is_some()) {
+                        continue;
+                    }
+                    if let Some(p) = end_pipeline(&mut self.parts, &mut self.pipeline, "newline")? {
+                        self.items.pipeline(p);
+                    }
+                    self.items.end(None);
+                    self.item_start = cur.pos();
+                }
+                c if UNSUPPORTED.contains(&c) => return Err(ParseError::Unsupported(c.into())),
+                c => {
+                    if !self.word.started && c == '~' {
+                        self.word.tilde = true;
+                    }
+                    self.word.started = true;
+                    self.word.added += 1;
+                    self.word.word.push(c, false);
+                }
+            }
+            if self.word.started {
+                if self.word.end == 0 {
+                    self.word.start = at;
+                }
+                self.word.end = cur.pos();
+            }
+        }
+        Ok(())
+    }
+
+    /// Ends the word being read, which ends at `at`; a keyword where one
+    /// may stand opens, goes on with or closes a compound command.
+    fn end_word(&mut self, line: &str, at: usize) -> Result<(), ParseError> {
+        match self.parts.end_word(&mut self.word, line)? {
+            Some(k) => self.keyword(k, at),
+            None => Ok(()),
         }
     }
-    let seen = seen.trim_end_matches([' ', '\t']);
-    seen.ends_with('|') || seen.ends_with("&&")
+
+    /// A keyword, ending at `at`, where a command name would stand.
+    fn keyword(&mut self, k: Keyword, at: usize) -> Result<(), ParseError> {
+        if k == Keyword::If {
+            // bash runs it in a subshell.
+            if !self.pipeline.is_empty() {
+                return Err(ParseError::Unsupported(format!("{} after |", k.token())));
+            }
+            let levels = 1 + usize::from(self.items.connector.is_some());
+            if self.open.iter().map(|o| o.levels).sum::<usize>() + levels > NESTING_MAX {
+                return Err(ParseError::Unsupported(format!(
+                    "more than {NESTING_MAX} levels of nesting"
+                )));
+            }
+            let bangs = core::mem::take(&mut self.parts).bangs;
+            self.open.push(Open {
+                outer: core::mem::take(&mut self.items),
+                levels,
+                bangs,
+                stage: Stage::Condition,
+                lists: Vec::new(),
+            });
+            self.item_start = at;
+            return Ok(());
+        }
+        let next = match (self.open.last().map(|o| o.stage), k) {
+            (Some(Stage::Condition), Keyword::Then) => Stage::Then,
+            (Some(Stage::Then), Keyword::Elif) => Stage::Condition,
+            (Some(Stage::Then), Keyword::Else) => Stage::Else,
+            (Some(Stage::Then | Stage::Else), Keyword::Fi) => Stage::Else,
+            _ => return Err(ParseError::MissingTarget(k.token())),
+        };
+        let list = self.end_list(k.token())?;
+        self.item_start = at;
+        let Some(open) = self.open.last_mut() else {
+            return Err(ParseError::MissingTarget(k.token()));
+        };
+        if k != Keyword::Fi {
+            open.lists.push(list);
+            open.stage = next;
+            return Ok(());
+        }
+        let Some(open) = self.open.pop() else {
+            return Err(ParseError::MissingTarget(k.token()));
+        };
+        let mut lists = open.lists;
+        let otherwise = match open.stage {
+            Stage::Else => Some(list),
+            _ => {
+                lists.push(list);
+                None
+            }
+        };
+        let mut branches = Vec::new();
+        let mut lists = lists.into_iter();
+        while let (Some(condition), Some(body)) = (lists.next(), lists.next()) {
+            branches.push((condition, body));
+        }
+        self.items = open.outer;
+        self.parts.bangs = open.bangs;
+        self.parts.compound = Some(Compound::If(If {
+            branches,
+            otherwise,
+        }));
+        Ok(())
+    }
+
+    /// The list a keyword (`token`) ends: it must hold something, and
+    /// leave nothing open (bash's error names the keyword).
+    fn end_list(&mut self, token: &'static str) -> Result<List<Word>, ParseError> {
+        if self.parts.bangs > 0 && self.parts.is_empty() {
+            return Err(ParseError::MissingTarget(token));
+        }
+        match end_pipeline(&mut self.parts, &mut self.pipeline, token)? {
+            Some(p) => self.items.pipeline(p),
+            None if self.items.connector.is_some() => return Err(ParseError::MissingTarget(token)),
+            None => {}
+        }
+        self.items.end(None);
+        let items = core::mem::take(&mut self.items).items;
+        if items.is_empty() {
+            return Err(ParseError::MissingTarget(token));
+        }
+        Ok(List { items })
+    }
+
+    /// The text ends: its list, or why it does not parse (a command that
+    /// needs more lines is `ParseError::Incomplete`).
+    fn end(mut self) -> Result<List<Word>, ParseError> {
+        let text = core::mem::take(&mut self.text);
+        self.end_word(&text, text.len())?;
+        if !self.open.is_empty() {
+            return Err(ParseError::Incomplete);
+        }
+        let Parser {
+            items,
+            pipeline,
+            parts,
+            ..
+        } = &mut self;
+        if parts.pending.is_some() {
+            return Err(ParseError::MissingTarget("newline"));
+        }
+        if !pipeline.is_empty() && parts.words.is_empty() && parts.redirect.is_none() {
+            return Err(ParseError::Incomplete);
+        }
+        // Nothing after the last `;` (or at all) is no item.
+        match end_pipeline(parts, pipeline, "newline")? {
+            Some(p) => items.pipeline(p),
+            None if items.connector.is_some() => return Err(ParseError::Incomplete),
+            None => {}
+        }
+        items.end(None);
+        Ok(List {
+            items: core::mem::take(&mut items.items),
+        })
+    }
+}
+
+/// `line`'s list, its words as typed: the text read whole by a
+/// [`Parser`].
+pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
+    let mut parser = Parser {
+        text: String::from(line),
+        ..Parser::default()
+    };
+    parser.read(0)?;
+    parser.end()
 }
 
 /// What was typed of a background job from `start` to `end` (its `&`), as
@@ -960,7 +1304,7 @@ fn join(
     connector: Connector,
 ) -> Result<(), ParseError> {
     // Not even after a `!`, as bash's grammar has it.
-    if parts.words.is_empty() && parts.redirect.is_none() && pipeline.is_empty() {
+    if parts.is_empty() && pipeline.is_empty() {
         return Err(ParseError::MissingTarget(connector.token()));
     }
     match end_pipeline(parts, pipeline, connector.token())? {
@@ -983,6 +1327,247 @@ mod tests {
         })
     }
 
+    impl<W> Pipeline<W> {
+        /// The commands of a pipeline that runs commands.
+        pub fn commands(&self) -> &[Command<W>] {
+            match &self.run {
+                Run::Commands(c) => c,
+                Run::Compound(_) => panic!("a compound command"),
+            }
+        }
+    }
+
+    /// The command name of each pipeline of each item of `list`, a compound
+    /// command's as its first word (`if`).
+    fn names_of(list: &List<Word>) -> Vec<String> {
+        let mut names = Vec::new();
+        for item in &list.items {
+            for p in
+                core::iter::once(&item.and_or.first).chain(item.and_or.rest.iter().map(|(_, p)| p))
+            {
+                names.push(match &p.run {
+                    Run::Commands(c) => c[0].words[0].typed.clone(),
+                    Run::Compound(c) => match **c {
+                        Compound::If(_) => String::from("if"),
+                    },
+                });
+            }
+        }
+        names
+    }
+
+    /// The `if` of `line`'s one item, and whether it is negated.
+    fn if_of(line: &str) -> (bool, If<Word>) {
+        let p = parse_line(line).unwrap().items.remove(0).and_or.first;
+        match p.run {
+            Run::Compound(c) => match *c {
+                Compound::If(i) => (p.negated, i),
+            },
+            Run::Commands(_) => panic!("{line}: no compound command"),
+        }
+    }
+
+    /// Each of an `if`'s lists, its command names.
+    fn branches(i: &If<Word>) -> Vec<Vec<String>> {
+        let mut lists: Vec<Vec<String>> = Vec::new();
+        for (c, b) in &i.branches {
+            lists.push(names_of(c));
+            lists.push(names_of(b));
+        }
+        lists.extend(i.otherwise.iter().map(names_of));
+        lists
+    }
+
+    #[test]
+    fn an_if_holds_its_conditions_and_bodies() {
+        let (negated, i) = if_of("if a; then b; c; elif d; then e; else f; fi");
+        assert!(!negated);
+        assert_eq!(
+            branches(&i),
+            [["a"].as_slice(), &["b", "c"], &["d"], &["e"], &["f"]]
+        );
+        assert!(i.otherwise.is_some());
+        let (_, i) = if_of("if a && b; then c | d; fi");
+        assert_eq!(branches(&i), [["a", "b"].as_slice(), &["c"]]);
+        assert!(i.otherwise.is_none());
+        // f3: `!` negates it.
+        assert!(if_of("! if a; then b; fi").0);
+        // Across lines (p1, l1), blank and comment lines among them (p5).
+        let (_, i) = if_of("if\na\n\n# c\nthen b\nelse\nc\nfi");
+        assert_eq!(branches(&i), [["a"].as_slice(), &["b"], &["c"]]);
+        // Nested, and after `fi` a keyword with no `;` (k1, k2).
+        let (_, i) = if_of("if a; then if b; then c; fi fi");
+        assert_eq!(branches(&i), [["a"].as_slice(), &["if"]]);
+        let (_, i) = if_of("if if a; then b; fi then c; fi");
+        assert_eq!(branches(&i), [["if"].as_slice(), &["c"]]);
+        // In a list and an and-or list (f2, g11, k4).
+        let list = parse_line("if a; then b; fi; c && if d; then e; fi || f").unwrap();
+        assert_eq!(names_of(&list), ["if", "c", "if", "f"]);
+        let list = parse_line("a && if b; then c; fi\nd").unwrap();
+        assert_eq!(names_of(&list), ["a", "if", "d"]);
+        // h11: a background job in a body.
+        let (_, i) = if_of("if a; then b & fi");
+        assert_eq!(i.branches[0].1.items[0].background.as_deref(), Some("b"));
+        let (_, i) = if_of("if a & then b; fi");
+        assert_eq!(i.branches[0].0.items[0].background.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn if_words_are_keywords_only_where_a_command_name_stands() {
+        // f8, h8: as an argument, quoted or a redirection's target they
+        // are words.
+        for (line, words) in [
+            (
+                "echo if then elif else fi",
+                &["echo", "if", "then", "elif", "else", "fi"][..],
+            ),
+            ("\"if\" x", &["if", "x"]),
+            ("'then' x", &["then", "x"]),
+            ("\\fi x", &["fi", "x"]),
+            ("> then fi", &["fi"]),
+            ("iffy", &["iffy"]),
+        ] {
+            assert_eq!(parse(line).unwrap()[0].words, words, "{line}");
+        }
+        let (_, i) = if_of("if a > then; then b; fi");
+        assert_eq!(
+            i.branches[0].0.items[0].and_or.first.commands()[0]
+                .redirect
+                .as_ref()
+                .unwrap()
+                .path
+                .typed,
+            "then"
+        );
+    }
+
+    #[test]
+    fn an_if_not_finished_needs_more_lines() {
+        for text in [
+            "if",
+            "if a",
+            "if a;",
+            "if a; then",
+            "if a; then b",
+            "if a; then b; elif c",
+            "if a; then b; else",
+            "if a; then b; else c",
+            "if a; then if b; then c; fi",
+            "if a; then b; fi &&",
+            "a && if b; then c; fi |",
+        ] {
+            let e = parse_line(text);
+            if text.ends_with('|') {
+                assert_eq!(
+                    e,
+                    Err(ParseError::Unsupported("| after fi".into())),
+                    "{text}"
+                );
+            } else {
+                assert_eq!(e, Err(ParseError::Incomplete), "{text}");
+            }
+        }
+        // A reader's lines: each line once, the `if` given at its `fi`.
+        let mut p = Parser::new();
+        assert_eq!(p.line("if a"), Ok(None));
+        assert_eq!(p.line("then b"), Ok(None));
+        assert_eq!(names_of(&p.line("fi; c").unwrap().unwrap()), ["if", "c"]);
+        assert!(p.is_empty());
+    }
+
+    #[test]
+    fn a_keyword_out_of_place_is_bash_s_syntax_error() {
+        for (line, token) in [
+            ("if then echo a; fi", "then"),
+            ("if true; then fi", "fi"),
+            ("if true; fi", "fi"),
+            ("fi", "fi"),
+            ("then", "then"),
+            ("elif", "elif"),
+            ("if true; then echo a; else fi", "fi"),
+            ("if true; then echo a; elif then echo b; fi", "then"),
+            ("if true; then echo a; fi; then", "then"),
+            ("echo; else", "else"),
+            ("if true; then echo a; fi if", "if"),
+            ("if true; then echo a; fi ! true", "!"),
+            ("if ! then echo a; fi", "then"),
+            ("if true; then ! fi", "fi"),
+            (
+                "if true; then echo a; else echo b; elif true; then echo c; fi",
+                "elif",
+            ),
+            ("if true; then echo a; else echo b; else echo c; fi", "else"),
+            ("if true && then echo; fi", "then"),
+            ("if true |\nthen echo; fi", "then"),
+            ("if true; then echo a; fi; fi", "fi"),
+            ("if true\nthen\nfi", "fi"),
+            ("if a; then b; fi echo b", "echo"),
+            ("if a; then b; fi 'x y'", "'x y'"),
+            ("if a; then b; fi \"$x\"", "\"$x\""),
+            ("if a; then b; fi ${x}y", "${x}y"),
+        ] {
+            assert_eq!(
+                parse_line(line).unwrap_err().to_string(),
+                alloc::format!("syntax error near unexpected token `{token}'"),
+                "{line}"
+            );
+        }
+        // Told on the line that has it.
+        let mut p = Parser::new();
+        assert_eq!(p.line("if true"), Ok(None));
+        assert_eq!(p.line("then"), Ok(None));
+        assert_eq!(p.line("fi"), Err(ParseError::MissingTarget("fi")));
+    }
+
+    /// `n` `if`s nested, each after `a &&` if `chained`.
+    fn nested(n: usize, chained: bool) -> String {
+        let open = if chained {
+            "a && if b; then "
+        } else {
+            "if b; then "
+        };
+        alloc::format!("{}c{}", open.repeat(n), "; fi".repeat(n))
+    }
+
+    #[test]
+    fn compound_commands_nest_at_most_32_levels_deep() {
+        // The walker recurses on a fixed stack (§4.5): each one counts a
+        // level, and one after `&&` or `||` one more.
+        let too_deep = ParseError::Unsupported("more than 32 levels of nesting".into());
+        let refused = Err(too_deep.clone());
+        assert!(parse_line(&nested(32, false)).is_ok());
+        assert_eq!(parse_line(&nested(33, false)), refused);
+        assert!(parse_line(&nested(16, true)).is_ok());
+        assert_eq!(parse_line(&nested(17, true)), refused);
+        let mixed = alloc::format!("{}a || {}", "if b; then ".repeat(31), nested(1, false));
+        assert_eq!(parse_line(&(mixed + &"; fi".repeat(31))), refused);
+        // Levels close with their constructs: one after another is none.
+        assert!(parse_line(&"if b; then c; fi; ".repeat(100)).is_ok());
+        assert_eq!(
+            too_deep.to_string(),
+            "unsupported syntax: more than 32 levels of nesting"
+        );
+    }
+
+    #[test]
+    fn an_if_in_a_pipeline_with_ampersand_or_redirected_is_refused() {
+        // bash runs them in a subshell, or redirects all of it (f4–f7).
+        for (line, what) in [
+            ("if true; then echo a; fi | cat", "| after fi"),
+            ("echo x | if true; then cat; fi", "if after |"),
+            ("if true; then echo a; fi > f", "> after fi"),
+            ("if true; then echo a; fi >> f", ">> after fi"),
+            ("if true; then echo a; fi &", "& after fi"),
+            ("if true; then echo a; fi & b", "& after fi"),
+            ("if a; then if b; then c; fi | d; fi", "| after fi"),
+        ] {
+            assert_eq!(
+                parse_line(line),
+                Err(ParseError::Unsupported(what.into())),
+                "{line}"
+            );
+        }
+    }
     /// The commands of `line`'s one pipeline, as typed.
     fn typed(line: &str) -> Vec<Command<Word>> {
         parse_line(line)
@@ -991,7 +1576,8 @@ mod tests {
             .remove(0)
             .and_or
             .first
-            .commands
+            .commands()
+            .to_vec()
     }
 
     /// The background text of `line`'s one item.
@@ -1018,7 +1604,7 @@ mod tests {
         let names: Vec<&str> = item
             .and_or
             .first
-            .commands
+            .commands()
             .iter()
             .map(|c| c.words[0].typed.as_str())
             .collect();
@@ -1473,7 +2059,7 @@ mod tests {
         let firsts: Vec<&str> = list
             .items
             .iter()
-            .map(|i| i.and_or.first.commands[0].words[0].typed.as_str())
+            .map(|i| i.and_or.first.commands()[0].words[0].typed.as_str())
             .collect();
         assert_eq!(firsts, ["echo", "echo", "cat"]);
         assert!(list.items.iter().all(|i| i.background.is_none()));
@@ -1520,7 +2106,7 @@ mod tests {
     /// list, and what joins each to the one before.
     fn and_or(line: &str) -> (Vec<String>, Vec<Connector>) {
         let ao = parse_line(line).unwrap().items.remove(0).and_or;
-        let name = |p: &Pipeline<Word>| p.commands[0].words[0].typed.clone();
+        let name = |p: &Pipeline<Word>| p.commands()[0].words[0].typed.clone();
         let mut names = alloc::vec![name(&ao.first)];
         names.extend(ao.rest.iter().map(|(_, p)| name(p)));
         (names, ao.rest.iter().map(|&(c, _)| c).collect())
@@ -1591,7 +2177,7 @@ mod tests {
     fn a_bang_before_a_pipeline_negates_it() {
         let p = first("! a | b");
         assert!(p.negated);
-        assert_eq!(p.commands.len(), 2);
+        assert_eq!(p.commands().len(), 2);
         // Each `!` turns it again, as bash's does.
         assert!(!first("! ! a").negated && first("! ! ! a").negated);
         assert!(!first("a").negated);
@@ -1600,7 +2186,7 @@ mod tests {
         assert_eq!(list.items.len(), 2);
         for item in &list.items {
             let p = &item.and_or.first;
-            assert!(p.negated && p.commands[0].words.is_empty());
+            assert!(p.negated && p.commands()[0].words.is_empty());
         }
         // Each pipeline of an and-or list has its own.
         let ao = parse_line("! a && ! b || c")
@@ -1650,14 +2236,13 @@ mod tests {
 
     #[test]
     fn a_reserved_word_where_a_command_name_stands_is_unsupported() {
-        // Until compound commands come (programmable shell gate §4.2),
-        // bash's reserved words are refused where they would be one, rather
-        // than run as commands that are not found.
+        // bash's other reserved words are refused where they would be one
+        // (programmable shell gate §4.2), rather than run as commands that
+        // are not found; the loops' until they come.
         // The words of the spec's §4.2, written out apart from `RESERVED`.
         for word in [
-            "if", "then", "elif", "else", "fi", "while", "until", "for", "in", "do", "done",
-            "case", "esac", "select", "function", "time", "coproc", "{", "}", "[[", "]]", "break",
-            "continue",
+            "while", "until", "for", "in", "do", "done", "case", "esac", "select", "function",
+            "time", "coproc", "{", "}", "[[", "]]", "break", "continue",
         ] {
             for line in [
                 alloc::format!("{word} x"),
@@ -1677,8 +2262,8 @@ mod tests {
         // Anywhere else, quoted or escaped, or after a redirection (a
         // command's name in bash), it is a word.
         for (line, words) in [
-            ("echo if then fi", &["echo", "if", "then", "fi"][..]),
-            ("'if' x", &["if", "x"]),
+            ("echo while do done", &["echo", "while", "do", "done"][..]),
+            ("'for' x", &["for", "x"]),
             ("\\while x", &["while", "x"]),
             ("> f done", &["done"]),
             ("iffy", &["iffy"]),
@@ -1699,7 +2284,7 @@ mod tests {
                     let mut ps = alloc::vec![&i.and_or.first];
                     ps.extend(i.and_or.rest.iter().map(|(_, p)| p));
                     ps.iter()
-                        .flat_map(|p| p.commands.iter().map(|c| c.words[0].typed.clone()))
+                        .flat_map(|p| p.commands().iter().map(|c| c.words[0].typed.clone()))
                         .collect()
                 })
                 .collect()

@@ -29,9 +29,6 @@ pub const SYNTAX: i32 = 2;
 pub const CANCELLED: i32 = 130;
 /// The prompt while a command needs more lines, bash's `PS2`.
 const CONTINUE: &str = "> ";
-/// How much of a line over 64 KiB `X | sh` keeps: its last bytes, between
-/// this and twice it.
-const LINE_TAIL: usize = 1024;
 /// The most of `/etc/motd` shown at start.
 const MOTD_MAX: usize = 16 * 1024;
 
@@ -224,19 +221,23 @@ impl<'a> Shell<'a> {
         self.run_list(&list)
     }
 
-    /// Runs a list's items one after another (programmable shell gate
-    /// §5.1); its status is the last one's. An empty list keeps the last
-    /// status.
-    /// `exit`, Ctrl-C (status 130, spec §6.4) and an expansion that
-    /// abandons the line stop the rest.
+    /// Runs a command line's list (programmable shell gate §5.1).
     fn run_list(&mut self, list: &parser::List<parser::Word>) -> i32 {
         self.abandoned = false;
         self.cancelled = false;
         // A background job needs programs: the in-process runner refuses
-        // a line that holds one, before any of it runs.
-        if self.runner.programs().is_none() && list.items.iter().any(|i| i.background.is_some()) {
+        // a line that holds one, anywhere, before any of it runs.
+        if self.runner.programs().is_none() && list.has_job() {
             return self.finish(SYNTAX, format!("{NAME}: unsupported syntax: &\n"));
         }
+        self.run_items(list)
+    }
+
+    /// Runs a list's items one after another; its status is the last
+    /// one's. An empty list keeps the last status.
+    /// `exit`, Ctrl-C (status 130, spec §6.4) and an expansion that
+    /// abandons the line stop the rest.
+    fn run_items(&mut self, list: &parser::List<parser::Word>) -> i32 {
         let mut status = self.status;
         for item in &list.items {
             status = match &item.background {
@@ -304,7 +305,13 @@ impl<'a> Shell<'a> {
         typed: &parser::Pipeline<parser::Word>,
         background: Option<&str>,
     ) -> i32 {
-        let status = self.run_commands(typed, background);
+        let status = match &typed.run {
+            parser::Run::Commands(commands) => self.run_commands(commands, background),
+            parser::Run::Compound(c) => {
+                self.status = self.run_compound(c);
+                self.status
+            }
+        };
         if !typed.negated || background.is_some() || self.stopped || self.abandoned {
             return status;
         }
@@ -312,34 +319,59 @@ impl<'a> Shell<'a> {
         self.status
     }
 
+    /// Runs a compound command (programmable shell gate §5.1).
+    fn run_compound(&mut self, c: &parser::Compound<parser::Word>) -> i32 {
+        match c {
+            parser::Compound::If(i) => self.run_if(i),
+        }
+    }
+
+    /// Runs an `if`: each condition in turn, up to one whose status is 0,
+    /// then its body; or, if none is, the `else` body. Its status is the
+    /// body's, 0 when none runs.
+    fn run_if(&mut self, i: &parser::If<parser::Word>) -> i32 {
+        for (condition, body) in &i.branches {
+            let status = self.run_items(condition);
+            if self.ends_line() {
+                return status;
+            }
+            if status == 0 {
+                return self.run_items(body);
+            }
+        }
+        match &i.otherwise {
+            Some(body) => self.run_items(body),
+            None => 0,
+        }
+    }
+
     /// Runs a pipeline's commands, or starts them in the background, their
     /// words expanded just before.
     fn run_commands(
         &mut self,
-        typed: &parser::Pipeline<parser::Word>,
+        commands: &[parser::Command<parser::Word>],
         background: Option<&str>,
     ) -> i32 {
-        let assigns = typed
-            .commands
+        let assigns = commands
             .iter()
             .find_map(|c| c.words.first().filter(|w| w.assignment().is_some()));
         if let Some(first) = assigns {
             // Alone on its line; bash's changes nothing elsewhere.
-            let place = match (background, typed.commands.len()) {
+            let place = match (background, commands.len()) {
                 (Some(_), _) => "the background",
-                (None, 1) => return self.assign(&typed.commands[0]),
+                (None, 1) => return self.assign(&commands[0]),
                 (None, _) => "a pipeline",
             };
             let message = format!("{NAME}: {}: cannot be used in {place}\n", first.typed);
             return self.finish(1, message);
         }
-        let mut pipeline = match expand::expand(typed, &self.vars, self.status) {
+        let mut pipeline = match expand::expand(commands, &self.vars, self.status) {
             Ok(p) => match background {
-                Some(text) => return self.background(&p.commands, text),
-                None => p.commands,
+                Some(text) => return self.background(&p, text),
+                None => p,
             },
             Err(e) => {
-                let alone = typed.commands.len() == 1 && background.is_none();
+                let alone = commands.len() == 1 && background.is_none();
                 return self.not_expanded(e, alone);
             }
         };
@@ -612,16 +644,14 @@ impl<'a> Shell<'a> {
             } else if !too_long {
                 line.push(byte[0]);
                 if line.len() as u64 > SCRIPT_MAX {
+                    // Not kept, but counted whole: it says how much of what
+                    // follows is dropped with it.
                     too_long = true;
+                    reader.drop_bytes(&line);
                     line.clear();
                 }
             } else {
-                // Only its last bytes, which say whether the command it is
-                // in goes on after it.
-                line.push(byte[0]);
-                if line.len() == 2 * LINE_TAIL {
-                    line.drain(..LINE_TAIL);
-                }
+                reader.drop_bytes(&byte);
             }
         }
     }
@@ -632,14 +662,14 @@ impl<'a> Shell<'a> {
         self.collect_jobs();
         match core::str::from_utf8(line) {
             _ if too_long => {
-                reader.drop_line(&String::from_utf8_lossy(line));
+                reader.drop_end();
                 self.finish(1, String::from("sh: standard input: a line over 64 KiB\n"));
             }
             Ok(text) => {
                 self.read_line(reader, text);
             }
             Err(_) => {
-                reader.drop_line(&String::from_utf8_lossy(line));
+                reader.drop_line(line);
                 self.finish(1, String::from("sh: standard input: not a text line\n"));
             }
         }
@@ -953,6 +983,273 @@ mod tests {
         let mut text = alloc::vec![b'x'; 70_000];
         text.extend_from_slice(b"\nt-args next\n");
         assert_eq!(piped(&text), ["next"]);
+    }
+
+    #[test]
+    fn a_refused_construct_runs_none_of_its_lines() {
+        // Plan 1's final review ruled that a script's `if` written across
+        // lines ran its body, each refused line dropped alone: the lines
+        // of a construct with a refused line in it are dropped up to its
+        // end, counting the constructs inside.
+        let text = b"if t-args a\nthen t-args b\nwhile t-args c\ndo t-args d\ndone\nt-args e\nfi\nt-args next\n";
+        assert_eq!(piped(text), ["next"]);
+        // Opened by a line too long, or no text.
+        let mut text = b"while t-args a; do ".to_vec();
+        text.extend(alloc::vec![b'x'; 70_000]);
+        text.extend_from_slice(b"\nt-args b\ndone\nt-args next\n");
+        assert_eq!(piped(&text), ["next"]);
+        assert_eq!(
+            piped(b"for x in \xff; do\nt-args b\ndone\nt-args next\n"),
+            ["next"]
+        );
+        // In a script, each line traced as it is read.
+        let mut h = Harness::new();
+        h.put(
+            "/tmp/s.sh",
+            b"if true\nthen echo a\nwhile true\ndo echo b\ndone\nfi\necho next\n",
+        );
+        assert_eq!(
+            h.run("sh /tmp/s.sh"),
+            (
+                0,
+                "+ if true\n+ then echo a\n+ while true\nrelay-sh: unsupported syntax: while\n\
+                 + do echo b\n+ done\n+ fi\n+ echo next\nnext\n"
+                    .into()
+            )
+        );
+        // At the prompt, with `> ` until its end.
+        let mut h = spawning();
+        let out = typed(
+            &mut h,
+            &["while t-args a", "do t-args b", "done", "t-args next"],
+        );
+        let args: Vec<&str> = h
+            .programs
+            .spawned
+            .iter()
+            .map(|s| s.args[1].as_str())
+            .collect();
+        assert_eq!(args, ["next"]);
+        assert_eq!(out.matches("\n> ").count(), 2, "{out}");
+    }
+
+    #[test]
+    fn a_dropped_construct_s_refused_syntax_hides_none_of_its_end() {
+        // The prototype's review ran each tail without its loop: a `fi` or
+        // `done` that the refused syntax around it hides from bash was
+        // counted, or an opener it shows to bash was not.
+        let head = b"while t-args a; do\n";
+        for inner in [
+            &b"time for f in b\ndo t-args c\ndone\n"[..],
+            b"select x in a b; do\nt-args c\ndone\n",
+            b"{ if t-args b\nthen t-args c\nfi\n}\n",
+            b"t-args ` if t-args b; then t-args c; fi `\n",
+            b"t-args copy of $(hostname) done\n",
+            b"case b in\ndone) t-args c;;\nesac\n",
+            // The final review: a string, a `case` in `$(…)` and a `(` in
+            // `${…}`, each read as bash reads them.
+            b"t-args \"a\nfi b\"\n",
+            b"v=$(case b in b) t-args 1;; esac; t-args 2)\n",
+            b"v=$(case b in\nb) t-args 1;;\nesac\n)\n",
+            b"t-args ${s//(/x}; if t-args b; then\nt-args c\nfi\n",
+        ] {
+            let mut text = head.to_vec();
+            text.extend_from_slice(inner);
+            text.extend_from_slice(b"t-args tail\ndone\nt-args next\n");
+            assert_eq!(piped(&text), ["next"], "{}", String::from_utf8_lossy(inner));
+        }
+    }
+
+    #[test]
+    fn a_line_bash_ends_in_error_drops_no_more() {
+        // The prototype's review: bash runs `next` after each.
+        for text in [
+            &b"t-args a && >\nt-args next\n"[..],
+            b"if t-args a; then t-args b; fi if t-args c\nt-args next\n",
+        ] {
+            assert_eq!(piped(text), ["next"], "{}", String::from_utf8_lossy(text));
+        }
+    }
+
+    #[test]
+    fn a_here_document_s_body_does_not_run() {
+        // The prototype's review: `cat > x <<EOF`, refused, then ran each
+        // line of its body as a command.
+        for text in [
+            &b"t-args a <<EOF\nt-args body\nEOF\nt-args next\n"[..],
+            b"while t-args a; do\nt-args <<EOF\ndone\nEOF\nt-args tail\ndone\nt-args next\n",
+        ] {
+            assert_eq!(piped(text), ["next"], "{}", String::from_utf8_lossy(text));
+        }
+        let mut h = Harness::new();
+        h.run("mkdir /tmp/d");
+        h.put(
+            "/tmp/s.sh",
+            b"cat > /tmp/x <<EOF\nrm -r /tmp/d\nEOF\necho next\n",
+        );
+        let (_, out) = h.run("sh /tmp/s.sh");
+        assert!(out.ends_with("+ EOF\n+ echo next\nnext\n"), "{out}");
+        assert!(h.exists("/tmp/d"));
+    }
+
+    #[test]
+    fn an_if_dropped_any_way_runs_none_of_it() {
+        // Plan 1's lesson: its worst defects ran part of a command without
+        // its guard. However an `if` is dropped, none of it runs, the line
+        // after its end does.
+        let tail = b"fi\nt-args next\n";
+        let with = |head: &[u8], body: &[u8]| -> Vec<u8> {
+            let mut text = b"if t-args a; then\n".to_vec();
+            text.extend_from_slice(head);
+            text.extend_from_slice(body);
+            text.extend_from_slice(tail);
+            text
+        };
+        let mut long = alloc::vec![b'x'; 70_000];
+        long.push(b'\n');
+        let deep: Vec<u8> = b"if t-args a; then\n".repeat(33);
+        for (text, said) in [
+            // A syntax error in an `if` inside it.
+            (
+                with(
+                    b"if t-args b; then t-args c\nt-args d; then\nt-args e\nfi\n",
+                    b"",
+                ),
+                "relay-sh: syntax error near unexpected token `then'\n",
+            ),
+            // Too long, a line that is no text, a line over 64 KiB.
+            (
+                with(&b"t-args b\n".repeat(8000), b""),
+                "relay-sh: the command would be longer than 64 KiB\n",
+            ),
+            (
+                with(b"\xff\n", b"t-args b\n"),
+                "sh: standard input: not a text line\n",
+            ),
+            (
+                with(&long, b"t-args b\n"),
+                "sh: standard input: a line over 64 KiB\n",
+            ),
+            // Refused syntax, and nesting past the bound.
+            (
+                with(b"t-args $(b)\n", b"t-args c\n"),
+                "relay-sh: unsupported syntax: $(\n",
+            ),
+            (
+                with(&deep, &b"fi\n".repeat(33)),
+                "relay-sh: unsupported syntax: more than 32 levels of nesting\n",
+            ),
+        ] {
+            let mut h = spawning();
+            let mut input = crate::Bytes::new(text.clone());
+            Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+                .run_input(&mut input);
+            let ran: Vec<String> = h
+                .programs
+                .spawned
+                .iter()
+                .map(|s| s.args[1..].join(" "))
+                .collect();
+            assert_eq!(
+                (ran, h.console.take()),
+                (alloc::vec![String::from("next")], String::from(said)),
+                "{said}"
+            );
+        }
+        // The input's end inside it.
+        let mut h = spawning();
+        let mut input = crate::Bytes::new(b"if t-args a; then\nt-args b\n".to_vec());
+        let status = Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+            .run_input(&mut input);
+        assert_eq!(
+            (status, h.console.take(), h.programs.spawned.len()),
+            (
+                2,
+                "relay-sh: syntax error: unexpected end of file\n".into(),
+                0
+            )
+        );
+    }
+
+    #[test]
+    fn a_script_s_if_is_traced_whole_before_it_runs_or_is_dropped() {
+        // §5.4: each line once, as read; blank and comment lines not.
+        let mut h = Harness::new();
+        for (script, out, status) in [
+            (
+                &b"if true\nthen echo a\n\n  # c\nfi\necho b\n"[..],
+                "+ if true\n+ then echo a\n+ fi\na\n+ echo b\nb\n",
+                0,
+            ),
+            (
+                b"if true; then\necho a; then\necho b\nfi\necho next\n",
+                "+ if true; then\n+ echo a; then\n\
+                 relay-sh: syntax error near unexpected token `then'\n\
+                 + echo b\n+ fi\n+ echo next\nnext\n",
+                0,
+            ),
+            (
+                b"if true; then\necho a\n",
+                "+ if true; then\n+ echo a\nrelay-sh: syntax error: unexpected end of file\n",
+                2,
+            ),
+        ] {
+            h.put("/tmp/s.sh", script);
+            assert_eq!(h.run("sh /tmp/s.sh"), (status, String::from(out)));
+        }
+        // Ctrl-C between its lines ends the script and runs none of it.
+        h.put("/tmp/s.sh", b"if true; then\necho a\nfi\necho b\n");
+        h.console.interrupt_after = Some(1);
+        assert_eq!(h.run("sh /tmp/s.sh"), (130, "+ if true; then\n^C\n".into()));
+    }
+
+    #[test]
+    fn an_if_typed_at_the_prompt_runs_only_whole() {
+        // Ctrl-C at `> ` drops it; a `fi` after it is bash's syntax error.
+        let mut h = spawning();
+        let out = typed(
+            &mut h,
+            &["if t-args a; then", "t-args b", "\x03", "fi", "t-args next"],
+        );
+        let ran: Vec<&str> = h
+            .programs
+            .spawned
+            .iter()
+            .map(|s| s.args[1].as_str())
+            .collect();
+        assert_eq!(ran, ["next"]);
+        assert!(
+            out.contains("^C") && out.contains("syntax error near unexpected token `fi'"),
+            "{out}"
+        );
+        // A syntax error inside it drops it to its `fi`, with `> ` until then.
+        let mut h = spawning();
+        let out = typed(
+            &mut h,
+            &[
+                "if t-args a; then",
+                "t-args b; then",
+                "t-args c",
+                "fi",
+                "t-args next",
+            ],
+        );
+        let ran: Vec<&str> = h
+            .programs
+            .spawned
+            .iter()
+            .map(|s| s.args[1].as_str())
+            .collect();
+        assert_eq!(ran, ["next"]);
+        assert_eq!(out.matches("\n> ").count(), 3, "{out}");
+        // The input's end at `> `.
+        let mut h = spawning();
+        let out = typed(&mut h, &["if t-args a; then", "t-args b"]);
+        assert!(h.programs.spawned.is_empty());
+        assert!(
+            out.ends_with("relay-sh: syntax error: unexpected end of file\n"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -1329,12 +1626,112 @@ mod tests {
     }
 
     #[test]
-    fn a_compound_command_runs_none_of_its_parts() {
+    fn an_if_runs_the_body_of_the_first_condition_that_succeeds() {
         let mut h = Harness::new();
-        assert_eq!(
-            h.run("echo a; if true; then echo b; fi"),
-            (2, "relay-sh: unsupported syntax: if\n".into())
+        for (line, ran) in [
+            ("if true; then echo a; fi", (0, "a\n")),
+            (
+                "if false; then echo a; elif true; then echo b; else echo c; fi",
+                (0, "b\n"),
+            ),
+            (
+                "if false; then echo a; elif false; then echo b; else echo c; fi",
+                (0, "c\n"),
+            ),
+            (
+                "if true; then echo a; if false; then echo b; else echo c; fi fi",
+                (0, "a\nc\n"),
+            ),
+            // Its status is the body's (g6), 0 when none runs (g4, g5,
+            // g13), and a condition's status is `$?` in the body.
+            ("if true; then false; fi", (1, "")),
+            ("if false; then true; fi", (0, "")),
+            ("false; if false; then true; fi; echo $?", (0, "0\n")),
+            ("if true && false; then echo a; fi", (0, "")),
+            ("if false; then true; else echo $?; fi", (0, "1\n")),
+            ("if ! true; then echo a; else echo b; fi", (0, "b\n")),
+            (
+                "if nosuch; then echo a; else echo b; fi",
+                (0, "relay-sh: nosuch: command not found\nb\n"),
+            ),
+            // f3: negated, and in an and-or list (g11).
+            ("! if false; then true; fi", (1, "")),
+            (
+                "echo a && if true; then echo b; fi || echo c",
+                (0, "a\nb\n"),
+            ),
+        ] {
+            assert_eq!(h.run(line), (ran.0, ran.1.into()), "{line}");
+        }
+    }
+
+    #[test]
+    fn an_if_32_levels_deep_runs() {
+        let mut h = Harness::new();
+        let line = alloc::format!(
+            "{}echo deep{}",
+            "if true; then ".repeat(32),
+            "; fi".repeat(32)
         );
+        assert_eq!(h.run(&line), (0, "deep\n".into()));
+    }
+
+    #[test]
+    fn exit_ctrl_c_and_a_bad_substitution_end_an_if_and_its_line() {
+        let mut h = Harness::new();
+        // r7: `exit` deep inside stops the shell at once.
+        assert_eq!(
+            h.run("if true; then if true; then exit 3; fi; echo no; fi; echo no"),
+            (3, "".into())
+        );
+        // A bad substitution abandons the whole line (§5.1).
+        assert_eq!(
+            h.run("if true; then echo ${1A}; echo no; fi; echo no"),
+            (1, "relay-sh: ${1A}: bad substitution\n".into())
+        );
+        assert_eq!(
+            h.run("if echo ${1A}; then echo no; else echo no; fi"),
+            (1, "relay-sh: ${1A}: bad substitution\n".into())
+        );
+        // Ctrl-C ends it, in its condition or its body.
+        h.programs.known.push((
+            "/bin/t-spin",
+            WaitStatus::killed(relay_abi::wait::KILLED_CTRL_C),
+        ));
+        h.programs
+            .known
+            .push(("/bin/t-args", WaitStatus::exited(0)));
+        for (line, ran) in [
+            (
+                "if t-spin; then t-args no; else t-args no; fi; t-args no",
+                &["t-spin"][..],
+            ),
+            (
+                "if t-args a; then t-spin; t-args no; fi; t-args no",
+                &["t-args a", "t-spin"],
+            ),
+        ] {
+            let before = h.programs.spawned.len();
+            assert_eq!(h.spawning(line).1, "^C\n", "{line}");
+            let args: Vec<String> = h.programs.spawned[before..]
+                .iter()
+                .map(|s| s.args.join(" "))
+                .collect();
+            assert_eq!(args, ran, "{line}");
+        }
+        // The in-process runner refuses a job at any depth, before any of
+        // the line runs.
+        for line in [
+            "echo a; if true; then echo b & fi",
+            "echo a; if echo b & then echo c; fi",
+            "echo a; if false; then echo b; else echo c & fi",
+        ] {
+            assert_eq!(
+                h.run(line),
+                (2, "relay-sh: unsupported syntax: &\n".into()),
+                "{line}"
+            );
+        }
     }
 
     #[test]
