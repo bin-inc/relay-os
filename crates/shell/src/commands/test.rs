@@ -993,6 +993,28 @@ mod tests {
     }
 
     #[test]
+    fn a_socket_is_made_however_deep_its_directory_is() {
+        // A Unix socket's address holds 108 bytes: the review found the
+        // harness's sockets failing in a checkout 57 characters deep.
+        let deep = "d".repeat(60);
+        let socket = alloc::format!("{deep}/s");
+        let files = [TestFile::dir(&deep), TestFile::socket(&socket)];
+        for line in [
+            ["test", "-S", socket.as_str()],
+            ["test", "-e", deep.as_str()],
+        ] {
+            assert_eq!(
+                like_host_files(&line, &files),
+                (0, String::new(), String::new())
+            );
+            assert_eq!(
+                host_files(&line, &files, true),
+                (0, String::new(), String::new())
+            );
+        }
+    }
+
+    #[test]
     fn devices_answer_as_gnu_s_do() {
         // The host's /dev/null and a block device of its own stand for
         // the harness's.

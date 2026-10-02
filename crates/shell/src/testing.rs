@@ -962,8 +962,17 @@ pub fn host_files(args: &[&str], files: &[TestFile<'_>], root: bool) -> (i32, St
                     .success();
                 assert!(ok, "mkfifo {}", f.name);
             }
-            // The socket's file stays when the listener goes.
-            Made::Socket => drop(std::os::unix::net::UnixListener::bind(&path).unwrap()),
+            // The socket's file stays when the listener goes. It is bound
+            // through the `/proc/self/fd` entry of its open directory, so
+            // that the address fits a Unix socket's 108 bytes however deep
+            // the checkout is (as xtask's `qmp::reachable`).
+            Made::Socket => {
+                use std::os::fd::AsRawFd;
+                let parent = std::fs::File::open(path.parent().unwrap()).unwrap();
+                let name = path.file_name().unwrap().to_str().unwrap();
+                let short = std::format!("/proc/self/fd/{}/{name}", parent.as_raw_fd());
+                drop(std::os::unix::net::UnixListener::bind(short).unwrap());
+            }
         }
     }
     for f in files {
