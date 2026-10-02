@@ -267,14 +267,16 @@ pub const CHECKS_DIR: &str = "/root/checks";
 /// the lines to print and whether every script ran and its transcript
 /// passed. Each line gives the time the transcript was last written:
 /// `flash --kernel` leaves the transcripts of an earlier run on the stick,
-/// so one older than the `system.img` built at `system_built` (seconds
-/// since 1970, if known) fails; `flash --full` erases them.
+/// so one older than the stick's `system.img`, built at `system` (seconds
+/// since 1970), fails; `flash --full` erases them. A `system.img` that
+/// cannot be read (`system` says why) fails the check, since no transcript
+/// can then be compared with it.
 pub fn check_transcripts(
     target: &Path,
     root: Partition,
     machine: Machine,
     scratch: &Path,
-    system_built: Option<u64>,
+    system: &Result<u64, String>,
 ) -> Result<(Vec<String>, bool)> {
     let mut scripts: Vec<String> = list_dir(&e2fs_target(target, root), CHECKS_DIR)?
         .into_iter()
@@ -282,7 +284,14 @@ pub fn check_transcripts(
         .filter(|n| n.ends_with(".sh"))
         .collect();
     scripts.sort();
-    let (mut out, mut ok) = (Vec::new(), true);
+    let (mut out, mut ok) = match system {
+        Ok(built) => (
+            vec![format!("system.img: built {}", shell::time::date(*built))],
+            true,
+        ),
+        Err(why) => (vec![format!("system.img: FAILED, {why}")], false),
+    };
+    let system_built = system.as_ref().ok().copied();
     for name in scripts {
         let path = format!("{CHECKS_DIR}/{name}");
         let log = shell::commands::transcript_name(&path);
@@ -299,13 +308,15 @@ pub fn check_transcripts(
         let report = checks::check(&checks::parse(&script, machine)?, &transcript);
         // A transcript from before the system on the stick (a later
         // `flash --kernel`) shows what an older kernel and programs did.
-        let (run, run_text) = modified(target, root, &log)?;
+        let run = modified(target, root, &log)?;
         let stale = system_built.filter(|&built| run < built);
         let passed = report.ok() && stale.is_none();
         let verdict = if passed { "ok" } else { "FAILED" };
         out.push(format!(
-            "{path}: {verdict}, {} of {} commands as expected (run {run_text})",
-            report.passed, report.commands,
+            "{path}: {verdict}, {} of {} commands as expected (run {})",
+            report.passed,
+            report.commands,
+            shell::time::date(run),
         ));
         if let Some(built) = stale {
             out.push(format!(
@@ -316,18 +327,17 @@ pub fn check_transcripts(
         out.extend(report.failures.iter().map(|f| format!("  {f}")));
         ok &= passed;
     }
-    if out.is_empty() {
+    if out.len() == 1 {
         out.push(format!("no check scripts in {CHECKS_DIR}"));
     }
     Ok((out, ok))
 }
 
-/// When the file at `path` was last changed: in seconds since 1970, and
-/// in UTC as debugfs shows it (`Mon Sep 28 14:09:17 2026 UTC`).
-fn modified(target: &Path, root: Partition, path: &str) -> Result<(u64, String)> {
+/// When the file at `path` was last changed, in seconds since 1970 (shown
+/// as `date` shows a time, as `system.img`'s build time is).
+fn modified(target: &Path, root: Partition, path: &str) -> Result<u64> {
     let text = run_stdout(
         Command::new("debugfs")
-            .env("TZ", "UTC")
             .arg("-R")
             .arg(format!("stat \"{path}\""))
             .arg(e2fs_target(target, root)),
@@ -337,18 +347,21 @@ fn modified(target: &Path, root: Partition, path: &str) -> Result<(u64, String)>
     text.lines()
         .find_map(|l| l.trim_start().strip_prefix("mtime: 0x"))
         .and_then(|l| {
-            let (number, when) = l.split_once(" -- ")?;
-            let secs = u64::from_str_radix(number.split(':').next()?, 16).ok()?;
-            Some((secs, format!("{when} UTC")))
+            let number = l.split([' ', ':']).next()?;
+            u64::from_str_radix(number, 16).ok()
         })
         .with_context(|| format!("{path}: debugfs shows no mtime"))
 }
 
 /// When the `system.img` on the ESP `esp` of `target` was built (seconds
-/// since 1970), if it can be read.
-fn system_built(target: &Path, esp: Partition, scratch: &Path) -> Option<u64> {
-    let image = image::esp_read(target, esp, "/EFI/RELAY/system.img", scratch).ok()?;
-    sysimg::Archive::parse(&image).ok().map(|a| a.build_time())
+/// since 1970), or why that cannot be read.
+fn system_built(target: &Path, esp: Partition, scratch: &Path) -> Result<u64, String> {
+    let path = "/EFI/RELAY/system.img";
+    let image = image::esp_read(target, esp, path, scratch)
+        .map_err(|_| format!("cannot read {path} on the ESP"))?;
+    sysimg::Archive::parse(&image)
+        .map(|a| a.build_time())
+        .map_err(|e| e.to_string())
 }
 
 /// `verify-usb`: e2fsck the stick's root, print its file tree, and check
@@ -366,11 +379,7 @@ pub fn verify_usb() -> Result<()> {
     }
     let scratch = out_dir().join("verify-usb");
     let built = system_built(Stick::target(), esp, &scratch);
-    match built {
-        Some(secs) => println!("system.img: built {}", shell::time::date(secs)),
-        None => println!("system.img: not readable on the stick; transcripts not compared with it"),
-    }
-    let (report, ok) = check_transcripts(Stick::target(), root, Machine::Nuc, &scratch, built)?;
+    let (report, ok) = check_transcripts(Stick::target(), root, Machine::Nuc, &scratch, &built)?;
     for l in report {
         println!("{l}");
     }
@@ -406,6 +415,9 @@ pub fn setup_udev() -> Result<()> {
 mod tests {
     use super::*;
     use crate::image::Partition;
+
+    /// A system built before every transcript of these tests.
+    const BUILT: u64 = 1_790_000_000;
 
     /// An ext2 image holding `files` (path, contents) under its root.
     fn ext2_with(dir: &Path, files: &[(&str, &str)]) -> (PathBuf, Partition) {
@@ -461,21 +473,22 @@ mod tests {
                 ("/root/checks/notes.txt", "not a script"),
             ],
         );
-        let (lines, ok) = check_transcripts(&img, root, Machine::Nuc, &dir, None).unwrap();
+        let (lines, ok) = check_transcripts(&img, root, Machine::Nuc, &dir, &Ok(BUILT)).unwrap();
         assert!(!ok);
         assert_eq!(
             lines,
             [
-                "/root/checks/a.sh: ok, 2 of 2 commands as expected (run Mon Sep 28 14:09:17 2026 UTC)",
-                "/root/checks/b.sh: FAILED, 0 of 1 commands as expected (run Mon Sep 28 14:09:17 2026 UTC)",
+                "system.img: built Mon Sep 21 14:13:20 UTC 2026",
+                "/root/checks/a.sh: ok, 2 of 2 commands as expected (run Mon Sep 28 14:09:17 UTC 2026)",
+                "/root/checks/b.sh: FAILED, 0 of 1 commands as expected (run Mon Sep 28 14:09:17 UTC 2026)",
                 "  line 1: `cat /root/notes/a`: expected /remember me/, printed `forgotten` (line 1)",
                 "/root/checks/c.sh: FAILED, not run (no /root/checks/c.log)",
             ]
         );
-        let (lines, ok) = check_transcripts(&img, root, Machine::Qemu, &dir, None).unwrap();
+        let (lines, ok) = check_transcripts(&img, root, Machine::Qemu, &dir, &Ok(BUILT)).unwrap();
         assert!(!ok);
         assert!(
-            lines[0].starts_with("/root/checks/a.sh: FAILED, 1 of 2"),
+            lines[1].starts_with("/root/checks/a.sh: FAILED, 1 of 2"),
             "{lines:?}"
         );
     }
@@ -492,12 +505,13 @@ mod tests {
                 ("/root/checks/b.sh", "ls\n"),
             ],
         );
-        let (lines, ok) = check_transcripts(&img, root, Machine::Nuc, &dir, None).unwrap();
+        let (lines, ok) = check_transcripts(&img, root, Machine::Nuc, &dir, &Ok(BUILT)).unwrap();
         assert!(!ok);
         assert_eq!(
             lines,
             [
-                "/root/checks/a.sh: ok, 1 of 1 commands as expected (run Mon Sep 28 14:09:17 2026 UTC)",
+                "system.img: built Mon Sep 21 14:13:20 UTC 2026",
+                "/root/checks/a.sh: ok, 1 of 1 commands as expected (run Mon Sep 28 14:09:17 UTC 2026)",
                 "/root/checks/b.sh: FAILED, not run (no /root/checks/b.log)",
             ]
         );
@@ -535,27 +549,71 @@ mod tests {
                 ),
             ],
         );
-        let (lines, ok) = check_transcripts(&img, root, Machine::Nuc, &dir, Some(built)).unwrap();
+        let (lines, ok) = check_transcripts(&img, root, Machine::Nuc, &dir, &Ok(built)).unwrap();
         assert!(!ok);
         assert_eq!(
             lines,
             [
-                "/root/checks/a.sh: FAILED, 1 of 1 commands as expected (run Mon Sep 28 14:09:17 2026 UTC)",
+                "system.img: built Tue Sep 29 10:00:00 UTC 2026",
+                "/root/checks/a.sh: FAILED, 1 of 1 commands as expected (run Mon Sep 28 14:09:17 UTC 2026)",
                 "  the transcript is older than the system on the stick (system.img built Tue Sep 29 10:00:00 UTC 2026): run the script again",
-                "/root/checks/b.sh: ok, 1 of 1 commands as expected (run Tue Sep 29 10:00:00 2026 UTC)",
+                "/root/checks/b.sh: ok, 1 of 1 commands as expected (run Tue Sep 29 10:00:00 UTC 2026)",
             ]
         );
-        let (_, ok) = check_transcripts(&img, root, Machine::Nuc, &dir, None).unwrap();
-        assert!(ok, "no system to compare with");
+    }
+
+    #[test]
+    fn a_system_img_that_cannot_be_read_fails_the_check() {
+        // Without its build time no transcript can be shown to be older
+        // than the system on the stick: the check fails, rather than
+        // passing them unchecked.
+        let dir = out_dir().join("verify-usb-selftest-system");
+        let (esp_img, esp) = image::blank_esp(&dir.join("esp"));
+        assert_eq!(
+            system_built(&esp_img, esp, &dir),
+            Err("cannot read /EFI/RELAY/system.img on the ESP".into())
+        );
+        image::esp_write(&esp_img, esp, "/EFI/RELAY/system.img", b"damaged", &dir).unwrap();
+        assert_eq!(
+            system_built(&esp_img, esp, &dir),
+            Err("only 7 bytes".into())
+        );
+        let archive = sysimg::write(relay_abi::VERSION, BUILT, &[]).unwrap();
+        image::esp_write(&esp_img, esp, "/EFI/RELAY/system.img", &archive, &dir).unwrap();
+        assert_eq!(system_built(&esp_img, esp, &dir), Ok(BUILT));
+
+        let (img, root) = ext2_with(
+            &dir.join("root"),
+            &[
+                ("/root/checks/a.sh", "uname\n#> Relay\n"),
+                ("/root/checks/a.log", "+ uname\nRelay\n"),
+            ],
+        );
+        let unread = Err(String::from("only 7 bytes"));
+        let (lines, ok) = check_transcripts(&img, root, Machine::Nuc, &dir, &unread).unwrap();
+        assert!(!ok);
+        assert_eq!(
+            lines,
+            [
+                "system.img: FAILED, only 7 bytes",
+                "/root/checks/a.sh: ok, 1 of 1 commands as expected (run Mon Sep 28 14:09:17 UTC 2026)",
+            ]
+        );
     }
 
     #[test]
     fn a_stick_without_check_scripts_passes() {
         let dir = out_dir().join("verify-usb-selftest-empty");
         let (img, root) = ext2_with(&dir, &[("/root/README", "hi")]);
-        let (lines, ok) = check_transcripts(&img, root, Machine::Nuc, &dir, None).unwrap();
+        let (lines, ok) = check_transcripts(&img, root, Machine::Nuc, &dir, &Ok(BUILT)).unwrap();
         assert!(ok);
-        assert_eq!(lines, ["no check scripts in /root/checks"]);
+        assert_eq!(
+            lines,
+            [
+                "system.img: built Mon Sep 21 14:13:20 UTC 2026",
+                "no check scripts in /root/checks"
+            ]
+        );
     }
 
     fn ok_facts() -> DeviceFacts<'static> {

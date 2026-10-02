@@ -22,9 +22,9 @@ mod tests {
     ];
 
     /// The code of a source file without its `//` comments, which may
-    /// explain a banned feature. A `//` in a string literal is code, and
-    /// so is a `"` in a character literal (`'"'`); a lifetime (`'a`) is
-    /// neither. The loader has no raw strings.
+    /// explain a banned feature. A `//` in a string literal is code, raw
+    /// (`r#"…"#`) or not, and so is a `"` in a character literal (`'"'`); a
+    /// lifetime (`'a`) is neither.
     fn code(src: &str) -> String {
         let mut out = String::new();
         let mut chars = src.chars().peekable();
@@ -42,6 +42,37 @@ mod tests {
             match c {
                 '/' if chars.peek() == Some(&'/') => {
                     while chars.next_if(|&n| n != '\n').is_some() {}
+                }
+                'r' if {
+                    let mut ahead = chars.clone();
+                    while ahead.next_if_eq(&'#').is_some() {}
+                    ahead.next() == Some('"')
+                } =>
+                {
+                    // To the `"` followed by as many `#` as began it.
+                    out.push(c);
+                    let mut hashes = 0;
+                    while let Some(h) = chars.next_if_eq(&'#') {
+                        out.push(h);
+                        hashes += 1;
+                    }
+                    out.extend(chars.next());
+                    while let Some(n) = chars.next() {
+                        out.push(n);
+                        if n == '"' {
+                            let mut seen = 0;
+                            while seen < hashes {
+                                let Some(h) = chars.next_if_eq(&'#') else {
+                                    break;
+                                };
+                                out.push(h);
+                                seen += 1;
+                            }
+                            if seen == hashes {
+                                break;
+                            }
+                        }
+                    }
                 }
                 '"' => {
                     in_string = true;
@@ -117,6 +148,23 @@ mod tests {
         );
         let two_lines = "let s = \"a\n//b\"; // c\nd";
         assert_eq!(code(two_lines), "let s = \"a\n//b\"; \nd");
+    }
+
+    #[test]
+    fn a_raw_string_is_code_whatever_it_holds() {
+        // Milestone 2's plan 5's deferred finding: the scanner assumed the
+        // loader had no raw strings. A raw string has no escapes and ends
+        // at a `"` followed by as many `#` as it began with.
+        let raw = r##"let a = r"\"; f(); // x"##;
+        assert_eq!(code(raw), r##"let a = r"\"; f(); "##);
+        let hashes = r###"let b = r#"a"//"#; g(); // y"###;
+        assert_eq!(code(hashes), r###"let b = r#"a"//"#; g(); "###);
+        let bytes = r###"let c = br##"x"#//"##; h(); // z"###;
+        assert_eq!(code(bytes), r###"let c = br##"x"#//"##; h(); "###);
+        // Not raw strings: a name ending in `r`, a raw identifier, and
+        // `r"` inside a string.
+        let others = r#"let d = (bar, r#type, "r\"//"); // w"#;
+        assert_eq!(code(others), r#"let d = (bar, r#type, "r\"//"); "#);
     }
 
     /// On the NUC 12 firmware, exclusive opens stop the firmware's own

@@ -375,6 +375,27 @@ pub fn build_image_as(art: &Artifacts, cmdline: &str, name: &str, bytes: u64) ->
     Ok(img)
 }
 
+/// An empty FAT32 ESP of 64 MiB with `/EFI/RELAY`, in a new file under
+/// `dir` (tests).
+#[cfg(test)]
+pub fn blank_esp(dir: &Path) -> (PathBuf, Partition) {
+    let _ = fs::remove_dir_all(dir);
+    fs::create_dir_all(dir).unwrap();
+    let img = dir.join("esp.img");
+    let esp = Partition {
+        start_lba: 0,
+        sectors: 131072,
+    };
+    fs::File::create(&img)
+        .unwrap()
+        .set_len(esp.sectors * 512)
+        .unwrap();
+    let fat = mtools_target(&img, esp);
+    run(mtools("mformat").args(["-i", &fat, "-F", "-T", "131072", "::"])).unwrap();
+    run(mtools("mmd").args(["-i", &fat, "::/EFI", "::/EFI/RELAY"])).unwrap();
+    (img, esp)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,20 +403,7 @@ mod tests {
     #[test]
     fn a_file_of_the_esp_reads_back() {
         let dir = out_dir().join("esp-read-selftest");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let img = dir.join("esp.img");
-        let esp = Partition {
-            start_lba: 0,
-            sectors: 131072,
-        };
-        fs::File::create(&img)
-            .unwrap()
-            .set_len(esp.sectors * 512)
-            .unwrap();
-        let fat = mtools_target(&img, esp);
-        run(mtools("mformat").args(["-i", &fat, "-F", "-T", "131072", "::"])).unwrap();
-        run(mtools("mmd").args(["-i", &fat, "::/EFI", "::/EFI/RELAY"])).unwrap();
+        let (img, esp) = blank_esp(&dir);
         esp_write(&img, esp, "/EFI/RELAY/system.img", b"archive", &dir).unwrap();
         assert_eq!(
             esp_read(&img, esp, "/EFI/RELAY/system.img", &dir).unwrap(),
