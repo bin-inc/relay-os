@@ -132,9 +132,9 @@ mod tests {
     fn names(list: &List<Word>) -> alloc::vec::Vec<&str> {
         let mut names = alloc::vec::Vec::new();
         for item in &list.items {
-            names.push(item.and_or.first.commands[0].words[0].typed.as_str());
+            names.push(item.and_or.first.commands()[0].words[0].typed.as_str());
             for (_, p) in &item.and_or.rest {
-                names.push(p.commands[0].words[0].typed.as_str());
+                names.push(p.commands()[0].words[0].typed.as_str());
             }
         }
         names

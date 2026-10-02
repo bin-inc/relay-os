@@ -91,12 +91,18 @@ pub enum Connector {
     Or,
 }
 
-/// One command, or several joined by `|`, each one's output the next
-/// one's input; after a `!`, its status negated.
+/// What a pipeline runs and, after a `!`, its status negated.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pipeline<W = String> {
     pub negated: bool,
-    pub commands: Vec<Command<W>>,
+    pub run: Run<W>,
+}
+
+/// What a pipeline runs (programmable shell gate §4.1): one command, or
+/// several joined by `|`, each one's output the next one's input.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Run<W = String> {
+    Commands(Vec<Command<W>>),
 }
 
 /// One command: its words and where its output goes. The parser gives
@@ -617,10 +623,8 @@ pub fn parse(line: &str) -> Result<Vec<Command>, ParseError> {
             redirect: None,
         }]);
     };
-    match crate::expand::plain(&item.and_or.first) {
-        Ok(p) => Ok(p.commands),
-        Err(e) => Err(ParseError::Expansion(e.to_string())),
-    }
+    let Run::Commands(commands) = &item.and_or.first.run;
+    crate::expand::plain(commands).map_err(|e| ParseError::Expansion(e.to_string()))
 }
 
 /// The pipeline the command so far ends, at `end` (`;` or `&`, as
@@ -647,7 +651,7 @@ fn end_pipeline(
     pipeline.push(command(p.words, p.redirect)?);
     Ok(Some(Pipeline {
         negated: p.bangs % 2 == 1,
-        commands: core::mem::take(pipeline),
+        run: Run::Commands(core::mem::take(pipeline)),
     }))
 }
 
@@ -983,6 +987,15 @@ mod tests {
         })
     }
 
+    impl<W> Pipeline<W> {
+        /// The commands of a pipeline that runs commands.
+        pub fn commands(&self) -> &[Command<W>] {
+            match &self.run {
+                Run::Commands(c) => c,
+            }
+        }
+    }
+
     /// The commands of `line`'s one pipeline, as typed.
     fn typed(line: &str) -> Vec<Command<Word>> {
         parse_line(line)
@@ -991,7 +1004,8 @@ mod tests {
             .remove(0)
             .and_or
             .first
-            .commands
+            .commands()
+            .to_vec()
     }
 
     /// The background text of `line`'s one item.
@@ -1018,7 +1032,7 @@ mod tests {
         let names: Vec<&str> = item
             .and_or
             .first
-            .commands
+            .commands()
             .iter()
             .map(|c| c.words[0].typed.as_str())
             .collect();
@@ -1473,7 +1487,7 @@ mod tests {
         let firsts: Vec<&str> = list
             .items
             .iter()
-            .map(|i| i.and_or.first.commands[0].words[0].typed.as_str())
+            .map(|i| i.and_or.first.commands()[0].words[0].typed.as_str())
             .collect();
         assert_eq!(firsts, ["echo", "echo", "cat"]);
         assert!(list.items.iter().all(|i| i.background.is_none()));
@@ -1520,7 +1534,7 @@ mod tests {
     /// list, and what joins each to the one before.
     fn and_or(line: &str) -> (Vec<String>, Vec<Connector>) {
         let ao = parse_line(line).unwrap().items.remove(0).and_or;
-        let name = |p: &Pipeline<Word>| p.commands[0].words[0].typed.clone();
+        let name = |p: &Pipeline<Word>| p.commands()[0].words[0].typed.clone();
         let mut names = alloc::vec![name(&ao.first)];
         names.extend(ao.rest.iter().map(|(_, p)| name(p)));
         (names, ao.rest.iter().map(|&(c, _)| c).collect())
@@ -1591,7 +1605,7 @@ mod tests {
     fn a_bang_before_a_pipeline_negates_it() {
         let p = first("! a | b");
         assert!(p.negated);
-        assert_eq!(p.commands.len(), 2);
+        assert_eq!(p.commands().len(), 2);
         // Each `!` turns it again, as bash's does.
         assert!(!first("! ! a").negated && first("! ! ! a").negated);
         assert!(!first("a").negated);
@@ -1600,7 +1614,7 @@ mod tests {
         assert_eq!(list.items.len(), 2);
         for item in &list.items {
             let p = &item.and_or.first;
-            assert!(p.negated && p.commands[0].words.is_empty());
+            assert!(p.negated && p.commands()[0].words.is_empty());
         }
         // Each pipeline of an and-or list has its own.
         let ao = parse_line("! a && ! b || c")
@@ -1699,7 +1713,7 @@ mod tests {
                     let mut ps = alloc::vec![&i.and_or.first];
                     ps.extend(i.and_or.rest.iter().map(|(_, p)| p));
                     ps.iter()
-                        .flat_map(|p| p.commands.iter().map(|c| c.words[0].typed.clone()))
+                        .flat_map(|p| p.commands().iter().map(|c| c.words[0].typed.clone()))
                         .collect()
                 })
                 .collect()

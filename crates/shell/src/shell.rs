@@ -304,7 +304,9 @@ impl<'a> Shell<'a> {
         typed: &parser::Pipeline<parser::Word>,
         background: Option<&str>,
     ) -> i32 {
-        let status = self.run_commands(typed, background);
+        let status = match &typed.run {
+            parser::Run::Commands(commands) => self.run_commands(commands, background),
+        };
         if !typed.negated || background.is_some() || self.stopped || self.abandoned {
             return status;
         }
@@ -316,30 +318,29 @@ impl<'a> Shell<'a> {
     /// words expanded just before.
     fn run_commands(
         &mut self,
-        typed: &parser::Pipeline<parser::Word>,
+        commands: &[parser::Command<parser::Word>],
         background: Option<&str>,
     ) -> i32 {
-        let assigns = typed
-            .commands
+        let assigns = commands
             .iter()
             .find_map(|c| c.words.first().filter(|w| w.assignment().is_some()));
         if let Some(first) = assigns {
             // Alone on its line; bash's changes nothing elsewhere.
-            let place = match (background, typed.commands.len()) {
+            let place = match (background, commands.len()) {
                 (Some(_), _) => "the background",
-                (None, 1) => return self.assign(&typed.commands[0]),
+                (None, 1) => return self.assign(&commands[0]),
                 (None, _) => "a pipeline",
             };
             let message = format!("{NAME}: {}: cannot be used in {place}\n", first.typed);
             return self.finish(1, message);
         }
-        let mut pipeline = match expand::expand(typed, &self.vars, self.status) {
+        let mut pipeline = match expand::expand(commands, &self.vars, self.status) {
             Ok(p) => match background {
-                Some(text) => return self.background(&p.commands, text),
-                None => p.commands,
+                Some(text) => return self.background(&p, text),
+                None => p,
             },
             Err(e) => {
-                let alone = typed.commands.len() == 1 && background.is_none();
+                let alone = commands.len() == 1 && background.is_none();
                 return self.not_expanded(e, alone);
             }
         };
