@@ -214,6 +214,11 @@ impl<'a> Shell<'a> {
     fn run_list(&mut self, list: &parser::List<parser::Word>) -> i32 {
         self.abandoned = false;
         self.cancelled = false;
+        // A background job needs programs: the in-process runner refuses
+        // a line that holds one, before any of it runs.
+        if self.runner.programs().is_none() && list.items.iter().any(|i| i.background.is_some()) {
+            return self.finish(SYNTAX, format!("{NAME}: unsupported syntax: &\n"));
+        }
         let mut status = self.status;
         for item in &list.items {
             status = match &item.background {
@@ -1299,6 +1304,37 @@ mod tests {
         assert_eq!(
             h.run("echo hi &"),
             (2, "relay-sh: unsupported syntax: &\n".into())
+        );
+        // Nothing of a line that holds one runs.
+        assert_eq!(
+            h.run("echo a; echo b & echo c"),
+            (2, "relay-sh: unsupported syntax: &\n".into())
+        );
+    }
+
+    #[test]
+    fn an_ampersand_mid_line_starts_a_job_and_goes_on() {
+        let mut h = with_jobs();
+        let out = typed(&mut h, &["sleep 5 & t-args a", "sleep 6 & sleep 7 &", ""]);
+        assert!(
+            out.starts_with(
+                "root@relay:/# sleep 5 & t-args a\n[1] 101\n\
+                 root@relay:/# sleep 6 & sleep 7 &\n[2] 103\n[3] 104\n"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("Done                    sleep 6\n"), "{out}");
+        assert!(out.contains("Done                    sleep 7\n"), "{out}");
+        let groups: Vec<crate::Group> = h.programs.spawned.iter().map(|s| s.group).collect();
+        assert_eq!(
+            groups,
+            [
+                crate::Group::Background,
+                crate::Group::New,
+                crate::Group::Background,
+                crate::Group::Background
+            ],
+            "t-args has the console"
         );
     }
 

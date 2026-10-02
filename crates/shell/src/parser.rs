@@ -29,13 +29,13 @@
 //! the line. An unquoted `|` joins commands into a pipeline (user-space
 //! gate §9.1); each has a name, only the last may redirect its output, and
 //! bash's syntax errors name a `|` with no command before it or none after.
-//! An unquoted `&` at the end of the line (a comment may follow) runs it in
-//! the background (§9.2). A line is a [`List`] (programmable shell gate
-//! §4.1): an unquoted `;` ends one of its items, and `&&` and `||` join
-//! pipelines into an and-or list; bash's syntax errors name one with no
-//! command before it, and an and-or list ending with `&` is refused. An
-//! unquoted `!` word at a pipeline's start negates its status. Every
-//! other shell feature is refused: an unquoted `&` before more, `*`, `?`,
+//! A line is a [`List`] (programmable shell gate §4.1): an unquoted `;`
+//! ends one of its items, and an unquoted `&` ends one that runs in the
+//! background (user-space gate §9.2), the line going on after either;
+//! `&&` and `||` join pipelines into an and-or list. bash's syntax errors
+//! name any of them with no command before it, and an and-or list ending
+//! with `&` is refused. An unquoted `!` word at a pipeline's start negates
+//! its status. Every other shell feature is refused: an unquoted `*`, `?`,
 //! `<`, `` ` ``, `(` or `)` is an error naming the character, instead of
 //! being passed on as if it were plain text; so are `|&` (the errors into
 //! the pipe too), `>&` and `2>` (another stream).
@@ -272,12 +272,6 @@ impl<'l> Cursor<'l> {
     /// Where the next character is (the line's length at its end).
     fn pos(&mut self) -> usize {
         self.chars.peek().map_or(self.line.len(), |&(i, _)| i)
-    }
-
-    /// What is left of the line.
-    fn rest(&mut self) -> &'l str {
-        let at = self.pos();
-        &self.line[at..]
     }
 }
 
@@ -679,7 +673,6 @@ pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
     let mut items = Items::default();
     // Where the item being read starts in the line.
     let mut item_start = 0;
-    let mut background = None;
     let mut pipeline = Vec::new();
     let mut parts = Parts::default();
     let mut word = Building::default();
@@ -757,21 +750,18 @@ pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
                 if let Some(c) = items.connector {
                     return Err(ParseError::Unsupported(format!("& after {}", c.token())));
                 }
-                let after = cur.rest().trim_start_matches([' ', '\t']);
-                if after.starts_with('&') {
-                    return Err(ParseError::MissingTarget("&"));
-                }
-                if !after.is_empty() && !after.starts_with('#') {
-                    // `a & b` runs both in bash.
-                    return Err(ParseError::Unsupported("&".into()));
-                }
                 // Without its `!`, as bash's `jobs` shows it.
                 let mut text = line[item_start..at].trim_matches([' ', '\t']);
                 for _ in 0..parts.bangs {
                     text = text[1..].trim_start_matches([' ', '\t']);
                 }
-                background = Some(String::from(text));
-                break;
+                let text = String::from(text);
+                if let Some(p) = end_pipeline(&mut parts, &mut pipeline, "&")? {
+                    items.pipeline(p);
+                }
+                // The line goes on after it, as bash's does (`a & b`).
+                items.end(Some(text));
+                item_start = cur.pos();
             }
             '\'' => {
                 let before = word.open_quote();
@@ -847,7 +837,7 @@ pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
         None if items.connector.is_some() => return Err(ParseError::UnexpectedEnd),
         None => {}
     }
-    items.end(background);
+    items.end(None);
     Ok(List { items: items.items })
 }
 
@@ -1653,6 +1643,41 @@ mod tests {
     }
 
     #[test]
+    fn an_ampersand_ends_an_item_that_runs_in_the_background() {
+        let backgrounds = |line: &str| -> Vec<Option<String>> {
+            parse_line(line)
+                .unwrap()
+                .items
+                .into_iter()
+                .map(|i| i.background)
+                .collect()
+        };
+        let some = |t: &str| Some(String::from(t));
+        assert_eq!(
+            backgrounds("sleep 5 & echo a &t-spin&"),
+            [some("sleep 5"), some("echo a"), some("t-spin")]
+        );
+        assert_eq!(backgrounds("a & b"), [some("a"), None]);
+        assert_eq!(
+            backgrounds("a | b & c; d & # e"),
+            [some("a | b"), None, some("d")]
+        );
+        // bash's messages (an interactive bash 5.2, for each line).
+        for (line, token) in [
+            ("a & &", "&"),
+            ("a & && b", "&&"),
+            ("a & ;", ";"),
+            ("a & | b", "|"),
+        ] {
+            assert_eq!(
+                parse_line(line).unwrap_err().to_string(),
+                alloc::format!("syntax error near unexpected token `{token}'"),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
     fn an_ampersand_anywhere_else_is_bash_s_error_or_unsupported() {
         // bash's messages (`bash -c '&'`, `bash -c 'a | &'`, …).
         for line in [
@@ -1670,11 +1695,8 @@ mod tests {
                 "{line}"
             );
         }
-        // bash runs `a & b` and `> f &`; they are not supported.
+        // bash runs `> f &`; it is not supported.
         for (line, what) in [
-            ("a & b", "&"),
-            ("a &b", "&"),
-            ("a & | b", "&"),
             ("> f &", "> &"),
             // bash runs these (the review found them called its syntax
             // error).
