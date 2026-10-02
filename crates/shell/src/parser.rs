@@ -1123,7 +1123,10 @@ impl Parser {
                     let typed = job_text(line, self.item_start, at, &self.comments);
                     let mut text = typed.as_str();
                     for _ in 0..self.parts.bangs {
-                        text = text[1..].trim_start_matches([' ', '\t']);
+                        text = text
+                            .strip_prefix('!')
+                            .unwrap_or(text)
+                            .trim_start_matches([' ', '\t']);
                     }
                     let text = String::from(text);
                     if let Some(p) = end_pipeline(&mut self.parts, &mut self.pipeline, "&")? {
@@ -1233,9 +1236,10 @@ impl Parser {
         })
     }
 
-    /// A word of a `for`'s header (stage `stage`): its name, `in`, a word
-    /// of its list or `do`; anything else is bash's error naming it.
-    fn for_word(&mut self, stage: Stage, w: Word) -> Result<(), ParseError> {
+    /// A word of a `for`'s header (stage `stage`), which ends at `at`: its
+    /// name, `in`, a word of its list or `do`; anything else is bash's
+    /// error naming it.
+    fn for_word(&mut self, stage: Stage, w: Word, at: usize) -> Result<(), ParseError> {
         let Some(open) = self.open.last_mut() else {
             return Err(ParseError::Unexpected(w.typed));
         };
@@ -1251,6 +1255,8 @@ impl Parser {
             (Stage::ForWords, _) => open.words.get_or_insert_with(Vec::new).push(w),
             (Stage::ForAfterName | Stage::ForBeforeDo, Some(Keyword::Do)) => {
                 open.stage = Stage::Body;
+                // A job's text starts after it, as after other keywords.
+                self.item_start = at;
             }
             _ => return Err(ParseError::Unexpected(w.typed)),
         }
@@ -1301,7 +1307,7 @@ impl Parser {
     fn end_word(&mut self, line: &str, at: usize) -> Result<(), ParseError> {
         if let Some(stage) = self.for_header() {
             return match core::mem::take(&mut self.word).finish(line) {
-                Some(w) => self.for_word(stage, w),
+                Some(w) => self.for_word(stage, w, at),
                 None => Ok(()),
             };
         }
@@ -1651,6 +1657,29 @@ mod tests {
             "for x in a; do b",
         ] {
             assert_eq!(parse_line(text), Err(ParseError::Incomplete), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_job_in_a_for_s_body_has_its_own_text() {
+        // The prototype's review: the header went into the job's text, and
+        // taking a `!` off it a byte at a time panicked past a non-ASCII
+        // name.
+        for (line, text) in [
+            ("for x in a; do sleep 5 & done", "sleep 5"),
+            ("for x do sleep 1 & done", "sleep 1"),
+            ("for x in a; do ! sleep 1 & done", "sleep 1"),
+            ("for \u{e9} do ! sleep 1 & done", "sleep 1"),
+            ("for x in a b\ndo sleep 2 &\ndone", "sleep 2"),
+        ] {
+            let p = parse_line(line).unwrap().items.remove(0).and_or.first;
+            let Run::Compound(c) = p.run else {
+                panic!("{line}");
+            };
+            let Compound::For(f) = *c else {
+                panic!("{line}");
+            };
+            assert_eq!(f.body.items[0].background.as_deref(), Some(text), "{line}");
         }
     }
 
