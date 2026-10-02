@@ -117,9 +117,10 @@ expect \n\[1\] \d+\n
 alive 1
 type {ctrl-c}
 expect \^C\nroot@relay:~# $
-send kill %1
-send wait %1
-expect \n\[1\]\+  Killed                  sleep 30\nroot@relay:~# $
+# On one line, so that the kernel's line for the killed sleep comes
+# before wait's and never inside a command's echo.
+send kill %1; wait %1
+expect \npid \d+ \(/bin/sleep\): killed: kill\n\[1\]\+  Killed                  sleep 30\nroot@relay:~# $
 # Compound commands nest 32 levels deep, the most (§4.5): a script runs
 # them on /bin/sh's fixed stack, and a 33rd level is refused.
 send echo 'if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then echo deep; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi' > deep.sh
