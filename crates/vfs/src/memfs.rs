@@ -30,11 +30,15 @@ enum Body {
         entries: BTreeMap<Vec<u8>, Ino>,
     },
     Symlink(Vec<u8>),
+    /// A FIFO, a socket or a device (tests only), which holds no data.
+    Special(FileType),
 }
 
 struct Node {
     perm: u16,
     nlink: u32,
+    uid: u32,
+    gid: u32,
     atime: u64,
     mtime: u64,
     ctime: u64,
@@ -81,6 +85,41 @@ impl MemFs {
     /// Creates a symbolic link (tests only: the shell cannot make one).
     pub fn symlink(&mut self, dir: Ino, name: &[u8], target: &[u8]) -> Result<Ino, Errno> {
         self.new_node(dir, name, 0o777, Body::Symlink(target.to_vec()))
+    }
+
+    /// Creates a FIFO, a socket or a device, mode `0644` (tests only:
+    /// nothing else makes one).
+    pub fn special(&mut self, dir: Ino, name: &[u8], kind: FileType) -> Result<Ino, Errno> {
+        match kind {
+            FileType::Fifo | FileType::Socket | FileType::CharDev | FileType::BlockDev => {
+                self.new_node(dir, name, 0o644, Body::Special(kind))
+            }
+            _ => Err(Errno::EINVAL),
+        }
+    }
+
+    /// Sets a node's permission bits, set-user-ID, set-group-ID and sticky
+    /// included (tests only).
+    pub fn set_mode(&mut self, ino: Ino, perm: u16) -> Result<(), Errno> {
+        if perm > 0o7777 {
+            return Err(Errno::EINVAL);
+        }
+        self.node_mut(ino)?.perm = perm;
+        Ok(())
+    }
+
+    /// Sets a node's access and modification times (tests only).
+    pub fn set_times(&mut self, ino: Ino, atime: u64, mtime: u64) -> Result<(), Errno> {
+        let node = self.node_mut(ino)?;
+        (node.atime, node.mtime) = (atime, mtime);
+        Ok(())
+    }
+
+    /// Sets a node's owner and group (tests only; every node is root's).
+    pub fn set_owner(&mut self, ino: Ino, uid: u32, gid: u32) -> Result<(), Errno> {
+        let node = self.node_mut(ino)?;
+        (node.uid, node.gid) = (uid, gid);
+        Ok(())
     }
 
     /// Enters inode `target` in `dir` once more (tests only). Unlike a
@@ -142,7 +181,7 @@ impl MemFs {
         match node.body {
             Body::File { .. } => Ok(()),
             Body::Dir { .. } => Err(Errno::EISDIR),
-            Body::Symlink(_) => Err(Errno::EINVAL),
+            Body::Symlink(_) | Body::Special(_) => Err(Errno::EINVAL),
         }
     }
 
@@ -223,6 +262,8 @@ impl Node {
         Node {
             perm,
             nlink,
+            uid: 0,
+            gid: 0,
             atime: now,
             mtime: now,
             ctime: now,
@@ -253,14 +294,15 @@ impl FileSystem for MemFs {
             }
             Body::Dir { .. } => (FileType::Directory, CHUNK, CHUNK / 512),
             Body::Symlink(t) => (FileType::Symlink, t.len() as u64, 0),
+            Body::Special(kind) => (*kind, 0, 0),
         };
         Ok(Stat {
             ino,
             kind,
             perm: n.perm,
             nlink: n.nlink,
-            uid: 0,
-            gid: 0,
+            uid: n.uid,
+            gid: n.gid,
             size,
             blocks,
             block_size: CHUNK as u32,
@@ -314,7 +356,7 @@ impl FileSystem for MemFs {
         let (size, chunks) = match &self.node(ino)?.body {
             Body::File { size, chunks } => (*size, chunks),
             Body::Dir { .. } => return Err(Errno::EISDIR),
-            Body::Symlink(_) => return Err(Errno::EINVAL),
+            Body::Symlink(_) | Body::Special(_) => return Err(Errno::EINVAL),
         };
         if offset >= size {
             return Ok(0);
@@ -549,6 +591,50 @@ mod tests {
 
     fn fs() -> MemFs {
         MemFs::new(Box::new(Clock(Cell::new(1_000))))
+    }
+
+    #[test]
+    fn a_test_sets_a_node_s_mode_times_and_owner() {
+        let mut fs = fs();
+        let f = fs.create(ROOT, b"f").unwrap();
+        fs.set_mode(f, 0o4711).unwrap();
+        fs.set_times(f, 5, 7).unwrap();
+        fs.set_owner(f, 1000, 100).unwrap();
+        let st = fs.stat(f).unwrap();
+        assert_eq!((st.perm, st.atime, st.mtime), (0o4711, 5, 7));
+        assert_eq!((st.uid, st.gid, st.ctime), (1000, 100, 1_000));
+        // Only the permission bits and set-user-ID, set-group-ID, sticky.
+        assert_eq!(fs.set_mode(f, 0o10_000), Err(Errno::EINVAL));
+        assert_eq!(fs.set_times(99, 0, 0), Err(Errno::ENOENT));
+        assert_eq!(fs.set_owner(99, 0, 0), Err(Errno::ENOENT));
+    }
+
+    #[test]
+    fn a_test_makes_fifos_sockets_and_devices() {
+        let mut fs = fs();
+        for (name, kind) in [
+            (&b"p"[..], FileType::Fifo),
+            (b"s", FileType::Socket),
+            (b"c", FileType::CharDev),
+            (b"b", FileType::BlockDev),
+        ] {
+            let ino = fs.special(ROOT, name, kind).unwrap();
+            let st = fs.stat(ino).unwrap();
+            assert_eq!((st.kind, st.perm, st.size, st.nlink), (kind, 0o644, 0, 1));
+            // Their data is not the filesystem's.
+            let mut buf = [0; 4];
+            assert_eq!(fs.read_at(ino, 0, &mut buf), Err(Errno::EINVAL));
+            assert_eq!(fs.write_at(ino, 0, b"x"), Err(Errno::EINVAL));
+            assert_eq!(fs.truncate(ino, 0), Err(Errno::EINVAL));
+            assert_eq!(fs.read_link(ino), Err(Errno::EINVAL));
+            fs.unlink(ROOT, name).unwrap();
+        }
+        for kind in [FileType::Regular, FileType::Directory, FileType::Symlink] {
+            assert_eq!(fs.special(ROOT, b"x", kind), Err(Errno::EINVAL));
+        }
+        assert_eq!(fs.special(ROOT, b"", FileType::Fifo), Err(Errno::ENOENT));
+        let mut ro = MemFs::new(Box::new(Clock(Cell::new(1)))).read_only();
+        assert_eq!(ro.special(ROOT, b"p", FileType::Fifo), Err(Errno::EROFS));
     }
 
     fn names(fs: &mut MemFs, dir: Ino) -> Vec<Vec<u8>> {

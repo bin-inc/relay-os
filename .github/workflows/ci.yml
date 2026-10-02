@@ -38,6 +38,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends mtools
+      # The tests of `test` run GNU's test as root through `unshare -r`;
+      # Ubuntu 24.04 lets AppArmor refuse an unprivileged user namespace.
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Install the pinned toolchain
         run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt,clippy --target x86_64-unknown-uefi,x86_64-unknown-none
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2

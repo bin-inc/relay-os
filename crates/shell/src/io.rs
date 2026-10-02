@@ -53,6 +53,11 @@ pub trait System {
     /// Every process, by pid, for `ps`; `None` where there are none to
     /// show (on the host).
     fn processes(&self) -> Option<Vec<relay_abi::ProcInfo>>;
+    /// Whether the command's fd `fd` is open on the console (`test -t`);
+    /// never where there is no console (on the host).
+    fn is_terminal(&self, _fd: u32) -> bool {
+        false
+    }
     /// Waits `ms` milliseconds (`sleep`).
     fn sleep(&mut self, ms: u64);
     /// Restarts the machine, going ahead with `force` when the filesystems

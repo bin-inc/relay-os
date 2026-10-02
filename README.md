@@ -63,7 +63,11 @@ Linux with `rustup`, a C toolchain (the host tools link with `cc`),
 `qemu-system-x86_64`, OVMF (`/usr/share/OVMF/OVMF_CODE_4M.fd` and
 `OVMF_VARS_4M.fd`), `mtools`, `e2fsprogs`, `sfdisk`, `udisks2`, `binutils`
 (`readelf` checks every user program) and `linux-libc-dev` (the tests
-check the error numbers against Linux's headers). On Ubuntu or Linux Mint:
+check the error numbers against Linux's headers). The tests of `test` run
+GNU's as root through `unshare -r`, which needs unprivileged user
+namespaces: Ubuntu 24.04 restricts them unless
+`kernel.apparmor_restrict_unprivileged_userns` is 0 (Linux Mint allows
+them). On Ubuntu or Linux Mint:
 
 ```sh
 sudo apt install build-essential qemu-system-x86 ovmf mtools e2fsprogs fdisk udisks2 binutils linux-libc-dev
