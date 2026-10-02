@@ -211,12 +211,43 @@ impl<'a> Shell<'a> {
         self.abandoned = false;
         let mut status = self.status;
         for item in &list.items {
-            status = self.run_pipeline(&item.and_or.first, item.background.as_deref());
-            if self.stopped || status == CANCELLED || self.abandoned {
+            status = match &item.background {
+                // The parser makes sure a background item is one pipeline.
+                Some(text) => self.run_pipeline(&item.and_or.first, Some(text)),
+                None => self.run_and_or(&item.and_or),
+            };
+            if self.ends_line(status) {
                 break;
             }
         }
         status
+    }
+
+    /// Runs an and-or list's first pipeline, then each one whose `&&` or
+    /// `||` the status so far allows (programmable shell gate §5.1); the
+    /// status is the last one's that ran, and one that does not run leaves
+    /// `$?` alone.
+    fn run_and_or(&mut self, and_or: &parser::AndOr<parser::Word>) -> i32 {
+        let mut status = self.run_pipeline(&and_or.first, None);
+        for (connector, pipeline) in &and_or.rest {
+            if self.ends_line(status) {
+                break;
+            }
+            let runs = match connector {
+                parser::Connector::And => status == 0,
+                parser::Connector::Or => status != 0,
+            };
+            if runs {
+                status = self.run_pipeline(pipeline, None);
+            }
+        }
+        status
+    }
+
+    /// The command that ended with `status` ends the rest of the line:
+    /// `exit`, Ctrl-C or an expansion that abandons it.
+    fn ends_line(&self, status: i32) -> bool {
+        self.stopped || status == CANCELLED || self.abandoned
     }
 
     /// An expansion that failed: the command fails with status 1. A bad
@@ -856,6 +887,64 @@ mod tests {
                 "+ echo ${1A}\nrelay-sh: ${1A}: bad substitution\nafter\n".into()
             )
         );
+    }
+
+    #[test]
+    fn and_and_or_run_a_pipeline_on_the_status_so_far() {
+        let mut h = Harness::new();
+        // What bash prints for each (an interactive bash 5.2).
+        assert_eq!(h.run("true && echo a"), (0, "a\n".into()));
+        assert_eq!(h.run("false && echo a"), (1, "".into()));
+        assert_eq!(h.run("false || echo b"), (0, "b\n".into()));
+        assert_eq!(h.run("true || echo b"), (0, "".into()));
+        assert_eq!(
+            h.run("false || echo or && echo and"),
+            (0, "or\nand\n".into())
+        );
+        assert_eq!(h.run("true || false && echo d"), (0, "d\n".into()));
+        // A pipeline that does not run leaves `$?` as it was.
+        assert_eq!(
+            h.lines(&[
+                "false && echo x; echo $?",
+                "true && false || echo c; echo $?"
+            ]),
+            (0, "1\nc\n0\n".into())
+        );
+        assert_eq!(
+            h.run("nope || echo $?"),
+            (0, "relay-sh: nope: command not found\n127\n".into())
+        );
+        assert_eq!(h.run("exit 4 || echo no"), (4, "".into()));
+    }
+
+    #[test]
+    fn ctrl_c_and_a_bad_substitution_stop_an_and_or_list() {
+        let mut h = Harness::new();
+        assert_eq!(
+            h.run("true && echo ${1A} || echo no; echo no"),
+            (1, "relay-sh: ${1A}: bad substitution\n".into())
+        );
+        h.put("/tmp/big", &alloc::vec![b'x'; 300_000]);
+        h.console.interrupt = true;
+        // 130 is no success, but `||` does not run after Ctrl-C.
+        assert_eq!(
+            h.run("cat /tmp/big | wc -c || echo no"),
+            (130, "^C\n".into())
+        );
+    }
+
+    #[test]
+    fn a_pipeline_that_does_not_run_starts_no_program() {
+        let mut h = spawning();
+        assert_eq!(h.spawning("t-args a && t-args b"), (3, "".into()));
+        assert_eq!(h.spawning("t-args c || t-args d"), (3, "".into()));
+        let args: Vec<&str> = h
+            .programs
+            .spawned
+            .iter()
+            .map(|s| s.args[1].as_str())
+            .collect();
+        assert_eq!(args, ["a", "c", "d"]);
     }
 
     #[test]

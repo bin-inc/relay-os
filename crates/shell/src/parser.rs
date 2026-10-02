@@ -31,12 +31,13 @@
 //! bash's syntax errors name a `|` with no command before it or none after.
 //! An unquoted `&` at the end of the line (a comment may follow) runs it in
 //! the background (§9.2). A line is a [`List`] (programmable shell gate
-//! §4.1): an unquoted `;` ends one of its items, and bash's syntax errors
-//! name a `;` with no command before it. Every other shell feature is
-//! refused: an unquoted `&` before more, `*`, `?`, `<`, `` ` ``, `(` or
-//! `)` is an error naming the character, instead of being passed on as if
-//! it were plain text; so are `||`, `&&`, `|&` (the errors into the pipe
-//! too), `>&` and `2>` (another stream).
+//! §4.1): an unquoted `;` ends one of its items, and `&&` and `||` join
+//! pipelines into an and-or list; bash's syntax errors name one with no
+//! command before it, and an and-or list ending with `&` is refused. Every
+//! other shell feature is refused: an unquoted `&` before more, `*`, `?`,
+//! `<`, `` ` ``, `(` or `)` is an error naming the character, instead of
+//! being passed on as if it were plain text; so are `|&` (the errors into
+//! the pipe too), `>&` and `2>` (another stream).
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -602,21 +603,55 @@ fn end_pipeline(
     }))
 }
 
-/// An item of one pipeline.
-fn item(first: Pipeline<Word>, background: Option<String>) -> Item<Word> {
-    Item {
-        and_or: AndOr {
-            first,
-            rest: Vec::new(),
-        },
-        background,
+impl Connector {
+    /// As typed.
+    fn token(self) -> &'static str {
+        match self {
+            Connector::And => "&&",
+            Connector::Or => "||",
+        }
     }
 }
 
-/// `line`'s list, its words as typed. `;` ends an item, as bash's does;
-/// one ending in nothing typed is bash's syntax error at the `;`.
+/// The items read so far, and the and-or list being read.
+#[derive(Default)]
+struct Items {
+    items: Vec<Item<Word>>,
+    and_or: Option<AndOr<Word>>,
+    /// The `&&` or `||` after the and-or list, waiting for its next
+    /// pipeline.
+    connector: Option<Connector>,
+}
+
+impl Items {
+    /// A pipeline that ended: the start of an and-or list, or the one the
+    /// waiting connector joins to it.
+    fn pipeline(&mut self, p: Pipeline<Word>) {
+        match (&mut self.and_or, self.connector.take()) {
+            (Some(and_or), Some(c)) => and_or.rest.push((c, p)),
+            _ => {
+                self.and_or = Some(AndOr {
+                    first: p,
+                    rest: Vec::new(),
+                })
+            }
+        }
+    }
+
+    /// The and-or list ends an item; `background` is its text if it
+    /// ended with `&`.
+    fn end(&mut self, background: Option<String>) {
+        if let Some(and_or) = self.and_or.take() {
+            self.items.push(Item { and_or, background });
+        }
+    }
+}
+
+/// `line`'s list, its words as typed. `;` ends an item, and `&&` and `||`
+/// join pipelines, as bash's do; one with nothing typed before it is
+/// bash's syntax error naming it.
 pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
-    let mut items = Vec::new();
+    let mut items = Items::default();
     // Where the item being read starts in the line.
     let mut item_start = 0;
     let mut background = None;
@@ -650,10 +685,11 @@ pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
                 }
                 parts.pending = Some(append);
             }
+            '|' if cur.next_if_eq('|') => {
+                parts.end_word(&mut word, line)?;
+                join(&mut items, &mut parts, &mut pipeline, Connector::Or)?;
+            }
             '|' => {
-                if cur.next_if_eq('|') {
-                    return Err(ParseError::Unsupported("||".into()));
-                }
                 // bash's `|&` pipes the errors too.
                 if cur.next_if_eq('&') {
                     return Err(ParseError::Unsupported("|&".into()));
@@ -672,15 +708,17 @@ pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
                 }
                 parts.end_word(&mut word, line)?;
                 match end_pipeline(&mut parts, &mut pipeline, ";")? {
-                    Some(p) => items.push(item(p, None)),
+                    Some(p) => items.pipeline(p),
                     None => return Err(ParseError::MissingTarget(";")),
                 }
+                items.end(None);
                 item_start = cur.pos();
             }
+            '&' if cur.next_if_eq('&') => {
+                parts.end_word(&mut word, line)?;
+                join(&mut items, &mut parts, &mut pipeline, Connector::And)?;
+            }
             '&' => {
-                if cur.next_if_eq('&') {
-                    return Err(ParseError::Unsupported("&&".into()));
-                }
                 parts.end_word(&mut word, line)?;
                 if parts.pending.is_some() || parts.words.is_empty() && parts.redirect.is_none() {
                     return Err(ParseError::MissingTarget("&"));
@@ -688,6 +726,11 @@ pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
                 if parts.words.is_empty() {
                     // `> f &`: a background job is a program.
                     return Err(ParseError::Unsupported("> &".into()));
+                }
+                // bash runs the whole and-or list in the background, in a
+                // shell of its own.
+                if let Some(c) = items.connector {
+                    return Err(ParseError::Unsupported(format!("& after {}", c.token())));
                 }
                 let after = cur.rest().trim_start_matches([' ', '\t']);
                 if after.starts_with('&') {
@@ -769,10 +812,29 @@ pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
         return Err(ParseError::UnexpectedEnd);
     }
     // Nothing after the last `;` (or at all) is no item.
-    if let Some(p) = end_pipeline(&mut parts, &mut pipeline, "newline")? {
-        items.push(item(p, background));
+    match end_pipeline(&mut parts, &mut pipeline, "newline")? {
+        Some(p) => items.pipeline(p),
+        None if items.connector.is_some() => return Err(ParseError::UnexpectedEnd),
+        None => {}
     }
-    Ok(List { items })
+    items.end(background);
+    Ok(List { items: items.items })
+}
+
+/// A `&&` or `||` (`connector`) ends the pipeline before it, which must
+/// hold something, and waits for the next one.
+fn join(
+    items: &mut Items,
+    parts: &mut Parts,
+    pipeline: &mut Vec<Command<Word>>,
+    connector: Connector,
+) -> Result<(), ParseError> {
+    match end_pipeline(parts, pipeline, connector.token())? {
+        Some(p) => items.pipeline(p),
+        None => return Err(ParseError::MissingTarget(connector.token())),
+    }
+    items.connector = Some(connector);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1320,6 +1382,72 @@ mod tests {
         );
     }
 
+    /// The first command's name of each pipeline of `line`'s one and-or
+    /// list, and what joins each to the one before.
+    fn and_or(line: &str) -> (Vec<String>, Vec<Connector>) {
+        let ao = parse_line(line).unwrap().items.remove(0).and_or;
+        let name = |p: &Pipeline<Word>| p.commands[0].words[0].typed.clone();
+        let mut names = alloc::vec![name(&ao.first)];
+        names.extend(ao.rest.iter().map(|(_, p)| name(p)));
+        (names, ao.rest.iter().map(|&(c, _)| c).collect())
+    }
+
+    #[test]
+    fn double_ampersands_and_bars_join_pipelines() {
+        use Connector::{And, Or};
+        assert_eq!(
+            and_or("a && b|c || d&&e"),
+            (
+                alloc::vec!["a".into(), "b".into(), "d".into(), "e".into()],
+                alloc::vec![And, Or, And]
+            )
+        );
+        let list = parse_line("a && b; c || d").unwrap();
+        assert_eq!(list.items.len(), 2);
+        // Quoted, escaped or in a comment they are characters.
+        assert_eq!(
+            parse(r"echo '&&' \|\| # && x").unwrap()[0].words,
+            ["echo", "&&", "||"]
+        );
+    }
+
+    #[test]
+    fn a_double_ampersand_or_bar_needs_a_pipeline_on_each_side() {
+        // bash's messages (an interactive bash 5.2, for each line).
+        for (line, token) in [
+            ("&& a", "&&"),
+            ("|| a", "||"),
+            ("a && && b", "&&"),
+            ("a || && b", "&&"),
+            ("a | && b", "&&"),
+            ("echo > && b", "&&"),
+            ("a && | b", "|"),
+            ("a && ; b", ";"),
+            ("a ||; b", ";"),
+            ("a && &", "&"),
+        ] {
+            assert_eq!(
+                parse_line(line).unwrap_err().to_string(),
+                alloc::format!("syntax error near unexpected token `{token}'"),
+                "{line}"
+            );
+        }
+        // `bash -c 'a &&'`.
+        for line in ["a &&", "a || ", "a && # b"] {
+            assert_eq!(parse_line(line), Err(ParseError::UnexpectedEnd), "{line}");
+        }
+        // bash runs the whole and-or list in the background, in a shell
+        // of its own (programmable shell gate §4.1).
+        assert_eq!(
+            parse_line("a && b &"),
+            Err(ParseError::Unsupported("& after &&".into()))
+        );
+        assert_eq!(
+            parse_line("a && b || c &"),
+            Err(ParseError::Unsupported("& after ||".into()))
+        );
+    }
+
     #[test]
     fn a_bar_joins_commands_into_a_pipeline() {
         let p = parse("cat f | grep -c 'a | b' |wc -l>out").unwrap();
@@ -1347,17 +1475,12 @@ mod tests {
     #[test]
     fn a_bar_needs_a_command_on_each_side() {
         // bash's messages (`bash -c '| a'`, `bash -c 'a |'`).
-        for line in ["| a", "a | | b", "a || | b", "echo > | b", " |"] {
-            let e = parse(line).unwrap_err();
-            if line.contains("||") {
-                assert_eq!(e, ParseError::Unsupported("||".into()), "{line}");
-            } else {
-                assert_eq!(
-                    e.to_string(),
-                    "syntax error near unexpected token `|'",
-                    "{line}"
-                );
-            }
+        for line in ["| a", "a | | b", "a || | b", "a ||| b", "echo > | b", " |"] {
+            assert_eq!(
+                parse(line).unwrap_err().to_string(),
+                "syntax error near unexpected token `|'",
+                "{line}"
+            );
         }
         for line in ["a |", "a | b |  ", "a | # b"] {
             assert_eq!(
@@ -1366,7 +1489,6 @@ mod tests {
                 "{line}"
             );
         }
-        assert_eq!(parse("a || b"), Err(ParseError::Unsupported("||".into())));
         // bash's `|&` sends the errors into the pipe too; `| &` is its
         // syntax error.
         assert_eq!(
@@ -1442,24 +1564,17 @@ mod tests {
             "a & &",
             "a &&&",
         ] {
-            let e = parse_line(line).unwrap_err();
-            if line.contains("&&") {
-                assert_eq!(e, ParseError::Unsupported("&&".into()), "{line}");
-            } else {
-                assert_eq!(
-                    e.to_string(),
-                    "syntax error near unexpected token `&'",
-                    "{line}"
-                );
-            }
+            assert_eq!(
+                parse_line(line).unwrap_err().to_string(),
+                "syntax error near unexpected token `&'",
+                "{line}"
+            );
         }
-        // bash runs `a & b`, `a && b` and `> f &`; they are not supported.
+        // bash runs `a & b` and `> f &`; they are not supported.
         for (line, what) in [
             ("a & b", "&"),
             ("a &b", "&"),
             ("a & | b", "&"),
-            ("a && b", "&&"),
-            ("a &&", "&&"),
             ("> f &", "> &"),
             // bash runs these (the review found them called its syntax
             // error).
