@@ -1087,6 +1087,166 @@ mod tests {
     }
 
     #[test]
+    fn an_if_dropped_any_way_runs_none_of_it() {
+        // Plan 1's lesson: its worst defects ran part of a command without
+        // its guard. However an `if` is dropped, none of it runs, the line
+        // after its end does.
+        let tail = b"fi\nt-args next\n";
+        let with = |head: &[u8], body: &[u8]| -> Vec<u8> {
+            let mut text = b"if t-args a; then\n".to_vec();
+            text.extend_from_slice(head);
+            text.extend_from_slice(body);
+            text.extend_from_slice(tail);
+            text
+        };
+        let mut long = alloc::vec![b'x'; 70_000];
+        long.push(b'\n');
+        let deep: Vec<u8> = b"if t-args a; then\n".repeat(33);
+        for (text, said) in [
+            // A syntax error in an `if` inside it.
+            (
+                with(
+                    b"if t-args b; then t-args c\nt-args d; then\nt-args e\nfi\n",
+                    b"",
+                ),
+                "relay-sh: syntax error near unexpected token `then'\n",
+            ),
+            // Too long, a line that is no text, a line over 64 KiB.
+            (
+                with(&b"t-args b\n".repeat(8000), b""),
+                "relay-sh: the command would be longer than 64 KiB\n",
+            ),
+            (
+                with(b"\xff\n", b"t-args b\n"),
+                "sh: standard input: not a text line\n",
+            ),
+            (
+                with(&long, b"t-args b\n"),
+                "sh: standard input: a line over 64 KiB\n",
+            ),
+            // Refused syntax, and nesting past the bound.
+            (
+                with(b"t-args $(b)\n", b"t-args c\n"),
+                "relay-sh: unsupported syntax: $(\n",
+            ),
+            (
+                with(&deep, &b"fi\n".repeat(33)),
+                "relay-sh: unsupported syntax: more than 32 levels of nesting\n",
+            ),
+        ] {
+            let mut h = spawning();
+            let mut input = crate::Bytes::new(text.clone());
+            Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+                .run_input(&mut input);
+            let ran: Vec<String> = h
+                .programs
+                .spawned
+                .iter()
+                .map(|s| s.args[1..].join(" "))
+                .collect();
+            assert_eq!(
+                (ran, h.console.take()),
+                (alloc::vec![String::from("next")], String::from(said)),
+                "{said}"
+            );
+        }
+        // The input's end inside it.
+        let mut h = spawning();
+        let mut input = crate::Bytes::new(b"if t-args a; then\nt-args b\n".to_vec());
+        let status = Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+            .run_input(&mut input);
+        assert_eq!(
+            (status, h.console.take(), h.programs.spawned.len()),
+            (
+                2,
+                "relay-sh: syntax error: unexpected end of file\n".into(),
+                0
+            )
+        );
+    }
+
+    #[test]
+    fn a_script_s_if_is_traced_whole_before_it_runs_or_is_dropped() {
+        // §5.4: each line once, as read; blank and comment lines not.
+        let mut h = Harness::new();
+        for (script, out, status) in [
+            (
+                &b"if true\nthen echo a\n\n  # c\nfi\necho b\n"[..],
+                "+ if true\n+ then echo a\n+ fi\na\n+ echo b\nb\n",
+                0,
+            ),
+            (
+                b"if true; then\necho a; then\necho b\nfi\necho next\n",
+                "+ if true; then\n+ echo a; then\n\
+                 relay-sh: syntax error near unexpected token `then'\n\
+                 + echo b\n+ fi\n+ echo next\nnext\n",
+                0,
+            ),
+            (
+                b"if true; then\necho a\n",
+                "+ if true; then\n+ echo a\nrelay-sh: syntax error: unexpected end of file\n",
+                2,
+            ),
+        ] {
+            h.put("/tmp/s.sh", script);
+            assert_eq!(h.run("sh /tmp/s.sh"), (status, String::from(out)));
+        }
+        // Ctrl-C between its lines ends the script and runs none of it.
+        h.put("/tmp/s.sh", b"if true; then\necho a\nfi\necho b\n");
+        h.console.interrupt_after = Some(1);
+        assert_eq!(h.run("sh /tmp/s.sh"), (130, "+ if true; then\n^C\n".into()));
+    }
+
+    #[test]
+    fn an_if_typed_at_the_prompt_runs_only_whole() {
+        // Ctrl-C at `> ` drops it; a `fi` after it is bash's syntax error.
+        let mut h = spawning();
+        let out = typed(
+            &mut h,
+            &["if t-args a; then", "t-args b", "\x03", "fi", "t-args next"],
+        );
+        let ran: Vec<&str> = h
+            .programs
+            .spawned
+            .iter()
+            .map(|s| s.args[1].as_str())
+            .collect();
+        assert_eq!(ran, ["next"]);
+        assert!(
+            out.contains("^C") && out.contains("syntax error near unexpected token `fi'"),
+            "{out}"
+        );
+        // A syntax error inside it drops it to its `fi`, with `> ` until then.
+        let mut h = spawning();
+        let out = typed(
+            &mut h,
+            &[
+                "if t-args a; then",
+                "t-args b; then",
+                "t-args c",
+                "fi",
+                "t-args next",
+            ],
+        );
+        let ran: Vec<&str> = h
+            .programs
+            .spawned
+            .iter()
+            .map(|s| s.args[1].as_str())
+            .collect();
+        assert_eq!(ran, ["next"]);
+        assert_eq!(out.matches("\n> ").count(), 3, "{out}");
+        // The input's end at `> `.
+        let mut h = spawning();
+        let out = typed(&mut h, &["if t-args a; then", "t-args b"]);
+        assert!(h.programs.spawned.is_empty());
+        assert!(
+            out.ends_with("relay-sh: syntax error: unexpected end of file\n"),
+            "{out}"
+        );
+    }
+
+    #[test]
     fn jobs_shows_a_job_typed_across_lines_on_one_line() {
         let mut h = with_jobs();
         let mut input = crate::Bytes::new(b"sleep 5 |\n# c\ncat &\njobs\n".to_vec());
