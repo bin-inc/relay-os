@@ -2,7 +2,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-02-programmable-shell-gate-design.md` (the programmable shell gate; milestone 4 is its first half, "Control flow", version 0.5.0)
 
-**Status:** Plan 1 is planned and lands with this roadmap; plans 2–4 are written just before each runs.
+**Status:** Plan 1 is done (#99–#101); plan 2 is planned and lands with these notes; plans 3 and 4 are written just before each runs.
 
 Milestone 4 makes `/bin/sh` a shell one can program in: lists (`;`, `&&`, `||`, `!`, `&` mid-line), commands read across lines with bash's `> ` prompt, the compound commands `if`, `while`, `until` and `for`, and `test` and `[` as programs (spec §4–§6). It is split into the four plans of spec §12, named `m4-plan-1` to `m4-plan-4` (their files `docs/superpowers/plans/<date>-m4-plan-<n>-<name>.md`, their branches `m4p<n>/…`). Each one ends with software that can be tested by itself. Each plan is written just before it is executed, so it builds on the code that actually exists and on what the previous plan's checks showed.
 
@@ -25,5 +25,10 @@ Plan 1 ──► Plan 2 ──► Plan 3 ──► Plan 4
 - **ABI 3 through milestone 4.** Nothing in milestone 4 changes the ABI; ABI 4 (the environment in `SpawnArgs`) is milestone 5's.
 - **No NUC check before plan 4.** Plans 1–3 change only the shell and add programs; the stick keeps 0.4.0 until plan 4's `flash --full`, and plan 4's `check6.sh` runs lists, compound commands and `test` there.
 - **Milestone 3's deferred minors** (`tmp/m3p4/plan-ledger-final.md`), for plan 4: `verify-usb` drops mcopy's reason for an unreadable `system.img`; the fixtures test lists every file of `rootfs/root/checks`, not only `*.sh`; the TLB scan reads comments, so one naming `INVPCID` outside `arch/` would fail it. The fourth, two commits of `docs/hardware-test.md` without the `checks` scope, is history and is ruled out.
-- **Out of the plans:** the xtask test `qmp::tests::an_event_cut_at_the_deadline_is_read_whole_later` fails in a checkout whose path is long (its fake QEMU's socket path passes the 107-byte limit); a fix was offered as a task of its own on 2026-10-02.
+- **Plan 1's deferred minors** (`tmp/m4p1/plan-ledger-final.md`), settled by plan 2 (spec §15 item 2): an error the whole text has but a line alone does not (`a |` then `! b |`), told a line late, goes with the parser that reads each line in its context; `$?` after Ctrl-C ends a line of several pipelines becomes bash's 130; `echo ${1A} | cat` giving 1, where bash gives 0, is a decided difference (§10). The fourth, six commit body lines of 73–74 columns, is history and is ruled out; plan 2's generator checks the width of every commit body line.
+- **Plan 1's rulings that reach later plans:** a script's `if` written across lines ran its body, each refused line dropped and the next read afresh, until plan 2 makes those lines one construct; quotes do not continue across lines (`echo 'a` is an unterminated quote where bash shows `> `), which plan 4 adds to §10.
+- **Plan 2 has no NUC check** (spec §15 item 2): the stick keeps 0.4.0, and plan 4's `check6.sh` runs compound commands on the NUC.
+- **Plan 2 changes the kernel and `relay-rt`** (spec §15 item 2): `wait(0, WAIT_NOHANG | WAIT_CTRL_C)` asks for a raw Ctrl-C between the shell's own commands, and a line-mode Ctrl-C that reaches an ended group is kept for the next holder; the ABI stays at 3.
+- **Plan 3 adds `grep -q`** (the maintainer, 2026-10-02): a condition's usual command, which `grep` (`-i`, `-v`, `-n`, `-c`) lacks.
+- **Fixed outside the plans:** the xtask test `qmp::tests::an_event_cut_at_the_deadline_is_read_whole_later`, which failed in a checkout whose path is long, binds its fake QEMU's socket through a short path since #102.
 - **Still out of the gate** (spec §14): command substitution, arithmetic, globbing, word splitting, functions, `case`, `break`, `continue`, `read`, here-documents, subshells; `PATH`, `CDPATH`; users, an editor, interrupts, floating point, networking, other architectures.
