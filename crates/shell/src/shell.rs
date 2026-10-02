@@ -58,8 +58,8 @@ pub struct Shell<'a> {
     /// An expansion failed in a way that abandons the rest of the line
     /// (programmable shell gate §5.1).
     abandoned: bool,
-    /// A command of the line ended with Ctrl-C (status 130, spec §6.4),
-    /// whatever a `!` made of its status.
+    /// A command of the line ended with Ctrl-C (spec §6.4), whatever a
+    /// `!` made of its status; a status of 130 alone is none.
     cancelled: bool,
 }
 
@@ -279,9 +279,6 @@ impl<'a> Shell<'a> {
         background: Option<&str>,
     ) -> i32 {
         let status = self.run_commands(typed, background);
-        if status == CANCELLED {
-            self.cancelled = true;
-        }
         if !typed.negated || background.is_some() || self.stopped || self.abandoned {
             return status;
         }
@@ -363,6 +360,7 @@ impl<'a> Shell<'a> {
         };
         self.stopped = ran.stop;
         self.exited = ran.exited;
+        self.cancelled |= ran.cancelled;
         let mut status = ran.status;
         if let Some(script) = ran.script {
             status = self.run_script(*script);
@@ -414,6 +412,7 @@ impl<'a> Shell<'a> {
             },
         };
         let ran = self.runner.get().pipeline(parts, stages);
+        self.cancelled |= ran.cancelled;
         self.finish(ran.status, ran.message)
     }
 
@@ -990,6 +989,56 @@ mod tests {
         assert_eq!(h.run("! A=1; echo $? $A"), (0, "1 1\n".into()));
         // `exit` stops the shell with its own status.
         assert_eq!(h.run("! exit 3"), (3, "".into()));
+    }
+
+    #[test]
+    fn only_ctrl_c_ends_a_line_not_a_status_of_130() {
+        // A script or program that exits with 130 by itself was not
+        // interrupted: bash goes on (the review found the line ended).
+        let mut h = Harness::new();
+        h.programs.known.push(("/bin/sh", WaitStatus::exited(130)));
+        h.programs.known.push(("/bin/t-x", WaitStatus::exited(130)));
+        h.programs
+            .known
+            .push(("/bin/t-args", WaitStatus::exited(0)));
+        h.programs.known.push((
+            "/bin/t-spin",
+            WaitStatus::killed(relay_abi::wait::KILLED_CTRL_C),
+        ));
+        assert_eq!(h.spawning("sh s.sh; t-args after"), (0, "".into()));
+        assert_eq!(h.spawning("t-x || t-args or"), (0, "".into()));
+        let args: Vec<String> = h
+            .programs
+            .spawned
+            .iter()
+            .map(|s| s.args.join(" "))
+            .collect();
+        assert_eq!(args, ["sh s.sh", "t-args after", "t-x", "t-args or"]);
+        // Killed by Ctrl-C, it ends the line, whatever its status says.
+        assert_eq!(h.spawning("t-spin; t-args no"), (130, "^C\n".into()));
+        assert_eq!(h.programs.spawned.len(), 5);
+        // A pipeline a stage of which Ctrl-C killed, too.
+        assert_eq!(
+            h.spawning("t-spin | t-args x; t-args no"),
+            (0, "^C\n".into())
+        );
+        assert_eq!(h.programs.spawned.len(), 7);
+        // So in a script: a program's 130 goes on, a Ctrl-C ends it.
+        h.put("/tmp/s.sh", b"t-x\nt-args b\nt-spin\nt-args c\n");
+        let mut out = FakeStdout::console();
+        h.sh(&["/tmp/s.sh"], &mut out);
+        let args: Vec<&str> = h.programs.spawned[7..]
+            .iter()
+            .map(|s| s.path.as_str())
+            .collect();
+        assert_eq!(args, ["/bin/t-x", "/bin/t-args", "/bin/t-spin"]);
+        // The in-process runner's `exit 130` in a script likewise.
+        let mut h = Harness::new();
+        h.put("/tmp/e.sh", b"exit 130\n");
+        assert_eq!(
+            h.run("sh /tmp/e.sh; echo after $?"),
+            (0, "+ exit 130\nafter 130\n".into())
+        );
     }
 
     #[test]
