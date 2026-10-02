@@ -116,7 +116,8 @@ them.
 
 Commit messages and pull-request titles follow Conventional Commits
 (`feat(kernel): …`, `fix(usb): …`); the types, scopes and rules are in
-`CONTRIBUTING.md`.
+`CONTRIBUTING.md`. AI coding agents start from `AGENTS.md`: the rules the
+code keeps, how tests are written and how plans are made and executed.
 
 ## Layout
 
@@ -146,3 +147,4 @@ Commit messages and pull-request titles follow Conventional Commits
 | `.github/` | CI workflow, Dependabot configuration and pull-request template |
 | `.cargo/config.toml`, `rust-toolchain.toml` | The `cargo xtask` alias and static relocation for everything built for `x86_64-unknown-none` (the kernel and the programs); the pinned Rust toolchain and targets |
 | `CONTRIBUTING.md` | Commit-message and pull-request rules |
+| `AGENTS.md` | Context and working rules for AI coding agents (`CLAUDE.md` points Claude Code at it) |
