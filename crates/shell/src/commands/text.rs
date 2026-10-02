@@ -664,9 +664,8 @@ mod tests {
     fn ctrl_c_stops_a_long_cat() {
         let mut h = Harness::new();
         h.put("/tmp/big", numbered(20_000).as_bytes());
-        h.console.interrupt = true;
+        h.console.interrupt_after = Some(1);
         assert_eq!(h.run("cat /tmp/big /etc/motd"), (130, "^C\n".into()));
-        h.console.interrupt = false;
         assert_eq!(h.run("cat /etc/hostname"), (0, "relay\n".into()));
     }
 

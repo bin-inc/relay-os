@@ -270,7 +270,8 @@ mod tests {
     #[test]
     fn ctrl_c_and_a_write_error_stop_seq() {
         let mut h = Harness::new();
-        h.console.interrupt_after = Some(3);
+        // Asked once before the command, then before each number.
+        h.console.interrupt_after = Some(4);
         assert_eq!(
             h.run("seq 9223372036854775807"),
             (130, "1\n2\n3\n^C\n".into())

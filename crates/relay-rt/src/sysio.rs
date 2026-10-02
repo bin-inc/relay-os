@@ -78,6 +78,13 @@ impl Console for SysConsole {
     fn columns(&self) -> usize {
         sys::console_size().0 as usize
     }
+
+    /// Only an interactive shell keeps the console in raw mode while its
+    /// own commands run, a Ctrl-C there being input to ask the kernel for;
+    /// another program's group has it in line mode, where Ctrl-C kills it.
+    fn interrupted(&mut self) -> bool {
+        self.interactive && sys::take_ctrl_c()
+    }
 }
 
 /// The clock, memory figures, kernel log and `power`.

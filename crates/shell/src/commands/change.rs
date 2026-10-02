@@ -776,8 +776,10 @@ mod tests {
         let mut h = Harness::new();
         h.put("/tmp/big", &[1u8; 200_000]);
         h.run("mkdir -p /tmp/tree/a/b");
-        h.console.interrupt = true;
+        // Typed once the shell's check before the command has passed.
+        h.console.interrupt_after = Some(1);
         assert_eq!(h.run("cp /tmp/big /tmp/copy"), (130, "^C\n".into()));
+        h.console.interrupt_after = Some(1);
         assert_eq!(h.run("rm -r /tmp/tree"), (130, "^C\n".into()));
         assert!(h.exists("/tmp/tree/a/b"));
     }

@@ -230,7 +230,15 @@ impl<'a> Shell<'a> {
         if self.runner.programs().is_none() && list.has_job() {
             return self.finish(SYNTAX, format!("{NAME}: unsupported syntax: &\n"));
         }
-        self.run_items(list)
+        let status = self.run_items(list);
+        // bash's `$?` after Ctrl-C ends a command line is 130, but for a
+        // lone pipeline of simple commands, which keeps its own (`! sleep
+        // 5` gives 0).
+        if self.cancelled && !lone_pipeline(list) {
+            self.status = CANCELLED;
+            return CANCELLED;
+        }
+        status
     }
 
     /// Runs a list's items one after another; its status is the last
@@ -305,6 +313,12 @@ impl<'a> Shell<'a> {
         typed: &parser::Pipeline<parser::Word>,
         background: Option<&str>,
     ) -> i32 {
+        // A Ctrl-C typed while the shell runs its own commands, which no
+        // program's end reports: a loop of them ends too (§5.2).
+        if self.console.interrupted() {
+            self.cancelled = true;
+            return self.finish(CANCELLED, String::from("^C\n"));
+        }
         let status = match &typed.run {
             parser::Run::Commands(commands) => self.run_commands(commands, background),
             parser::Run::Compound(c) => {
@@ -749,6 +763,16 @@ impl<'a> Shell<'a> {
         if let Err(e) = self.vfs.sync() {
             self.say(format!("{NAME}: sync failed: {e}\n").as_bytes());
         }
+    }
+}
+
+/// Whether `list` is one pipeline of simple commands, and nothing else.
+fn lone_pipeline(list: &parser::List<parser::Word>) -> bool {
+    match &list.items[..] {
+        [item] => {
+            item.and_or.rest.is_empty() && matches!(item.and_or.first.run, parser::Run::Commands(_))
+        }
+        _ => false,
     }
 }
 
@@ -1199,7 +1223,7 @@ mod tests {
         }
         // Ctrl-C between its lines ends the script and runs none of it.
         h.put("/tmp/s.sh", b"if true; then\necho a\nfi\necho b\n");
-        h.console.interrupt_after = Some(1);
+        h.console.interrupt_after = Some(2);
         assert_eq!(h.run("sh /tmp/s.sh"), (130, "+ if true; then\n^C\n".into()));
     }
 
@@ -1344,9 +1368,11 @@ mod tests {
     fn ctrl_c_stops_a_pipeline() {
         let mut h = Harness::new();
         h.put("/tmp/big", &alloc::vec![b'x'; 300_000]);
-        h.console.interrupt = true;
+        // Typed once the shell's check before the pipeline has passed.
+        h.console.interrupt_after = Some(1);
         assert_eq!(h.run("cat /tmp/big | wc -c"), (130, "^C\n".into()));
         // The rest does not run, even what would not have asked.
+        h.console.interrupt_after = Some(1);
         assert_eq!(h.run("cat /tmp/big | echo after"), (130, "^C\n".into()));
     }
 
@@ -1371,7 +1397,7 @@ mod tests {
         let mut h = Harness::new();
         assert_eq!(h.run("exit 3; echo no"), (3, "".into()));
         h.put("/tmp/big", &alloc::vec![b'x'; 300_000]);
-        h.console.interrupt = true;
+        h.console.interrupt_after = Some(1);
         assert_eq!(h.run("cat /tmp/big | wc -c; echo no"), (130, "^C\n".into()));
     }
 
@@ -1460,7 +1486,7 @@ mod tests {
             (1, "relay-sh: ${1A}: bad substitution\n".into())
         );
         h.put("/tmp/big", &alloc::vec![b'x'; 300_000]);
-        h.console.interrupt = true;
+        h.console.interrupt_after = Some(1);
         // 130 is no success, but `||` does not run after Ctrl-C.
         assert_eq!(
             h.run("cat /tmp/big | wc -c || echo no"),
@@ -1527,10 +1553,11 @@ mod tests {
         // Killed by Ctrl-C, it ends the line, whatever its status says.
         assert_eq!(h.spawning("t-spin; t-args no"), (130, "^C\n".into()));
         assert_eq!(h.programs.spawned.len(), 5);
-        // A pipeline a stage of which Ctrl-C killed, too.
+        // A pipeline a stage of which Ctrl-C killed, too; the line's `$?`
+        // is then bash's 130.
         assert_eq!(
             h.spawning("t-spin | t-args x; t-args no"),
-            (0, "^C\n".into())
+            (130, "^C\n".into())
         );
         assert_eq!(h.programs.spawned.len(), 7);
         // So in a script: a program's 130 goes on, a Ctrl-C ends it.
@@ -1571,22 +1598,77 @@ mod tests {
     fn ctrl_c_ends_a_negated_pipeline_s_line_and_script() {
         let mut h = Harness::new();
         h.put("/tmp/big", &alloc::vec![b'x'; 300_000]);
-        // `$?` is the negated 130, as in bash, and the rest does not run.
-        h.console.interrupt = true;
-        assert_eq!(h.run("! cat /tmp/big | wc -c; echo no"), (0, "^C\n".into()));
+        // `$?` is 130, as in bash, and the rest does not run.
+        h.console.interrupt_after = Some(2);
+        assert_eq!(
+            h.run("! cat /tmp/big | wc -c; echo no"),
+            (130, "^C\n".into())
+        );
+        h.console.interrupt_after = Some(2);
+        assert_eq!(h.run("! cat /tmp/big | wc -c"), (0, "^C\n".into()), "alone");
         // Only that line: the next one runs whole.
+        h.console.interrupt_after = Some(2);
         let mut shell = Shell::new(&mut h.vfs, &mut h.console, &mut h.system);
         shell.execute("cat /tmp/big");
         assert_eq!(shell.execute("echo a; echo b"), 0);
         assert_eq!(h.console.take(), "^C\na\nb\n");
         h.console.interrupt = false;
         h.put("/tmp/s.sh", b"! cat /tmp/big | wc -c\necho no\n");
-        h.console.interrupt_after = Some(1);
+        h.console.interrupt_after = Some(3);
         assert_eq!(
             h.run("sh /tmp/s.sh").1,
             "+ ! cat /tmp/big | wc -c\n^C\n",
             "the script ends there"
         );
+    }
+
+    #[test]
+    fn ctrl_c_ends_the_shell_s_own_commands_between_them() {
+        // §5.2: the walker asks before each command, so a list or a
+        // loop of built-ins ends too, with `^C` and 130.
+        let mut h = Harness::new();
+        h.console.interrupt_after = Some(1);
+        assert_eq!(h.run("cd; cd; cd; echo no"), (130, "^C\n".into()));
+        h.console.interrupt_after = Some(1);
+        assert_eq!(
+            h.run("if cd; then cd; echo no; fi; echo no"),
+            (130, "^C\n".into())
+        );
+        // Taken by the shell: the next line runs whole.
+        h.console.interrupt_after = None;
+        assert_eq!(h.run("cd; echo a"), (0, "a\n".into()));
+    }
+
+    #[test]
+    fn after_ctrl_c_ends_a_command_line_its_status_is_130() {
+        // Plan 1's deferred minor: bash's `$?` is 130 after Ctrl-C ends a
+        // list, an and-or list (c1, c3, c8, c9, c17, c18) or a compound
+        // command (c4, c7, c10–c16), and a lone pipeline's own (c2:
+        // `! sleep 5` is 0). bash's lone `if` goes on to its `else` (c6);
+        // §5.2 ends it.
+        let mut h = Harness::new();
+        h.programs.known.push((
+            "/bin/t-spin",
+            WaitStatus::killed(relay_abi::wait::KILLED_CTRL_C),
+        ));
+        h.programs
+            .known
+            .push(("/bin/t-args", WaitStatus::exited(0)));
+        for (line, status) in [
+            ("t-spin; t-args no", 130),
+            ("! t-spin; t-args no", 130),
+            ("t-spin && t-args no", 130),
+            ("t-spin || t-args no", 130),
+            ("! t-spin && t-args no", 130),
+            ("! t-spin || t-args no", 130),
+            ("if t-spin; then t-args no; else t-args no; fi", 130),
+            ("! if t-spin; then t-args no; fi", 130),
+            ("t-spin", 130),
+            ("! t-spin", 0),
+        ] {
+            assert_eq!(h.spawning(line), (status, "^C\n".into()), "{line}");
+        }
+        assert!(h.programs.spawned.iter().all(|s| s.path == "/bin/t-spin"));
     }
 
     #[test]

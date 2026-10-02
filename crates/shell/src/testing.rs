@@ -65,13 +65,17 @@ impl Console for TestConsole {
     fn columns(&self) -> usize {
         self.columns
     }
+    /// As the real console's, a Ctrl-C is taken by the call that sees it.
     fn interrupted(&mut self) -> bool {
         match &mut self.interrupt_after {
-            Some(0) => self.interrupt = true,
+            Some(0) => {
+                self.interrupt_after = None;
+                self.interrupt = true;
+            }
             Some(n) => *n -= 1,
             None => {}
         }
-        self.interrupt
+        core::mem::take(&mut self.interrupt)
     }
 }
 
