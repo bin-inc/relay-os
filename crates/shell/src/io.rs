@@ -25,6 +25,12 @@ pub trait Console {
     fn interrupted(&mut self) -> bool {
         false
     }
+    /// The interactive shell takes the console back (its own group, raw
+    /// mode) as it does before it reads, once a command it gave the
+    /// console to has ended, so that a Ctrl-C typed before its next prompt
+    /// is its own (programmable shell gate §15 item 2). The default does
+    /// nothing.
+    fn take_back(&mut self) {}
 }
 
 /// Memory figures for `free`, in bytes.

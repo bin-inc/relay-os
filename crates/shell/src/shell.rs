@@ -445,10 +445,14 @@ impl<'a> Shell<'a> {
                         Err(ran) => ran,
                     }
                 }
-                None => self
-                    .runner
-                    .get()
-                    .run(parts, name, args, cmd.redirect.as_ref()),
+                None => {
+                    let ran = self
+                        .runner
+                        .get()
+                        .run(parts, name, args, cmd.redirect.as_ref());
+                    self.console.take_back();
+                    ran
+                }
             },
             // A bare `> file` just creates or empties the file.
             None => match runner::redirect_to(&mut *parts.vfs, cmd.redirect.as_ref()) {
@@ -510,6 +514,7 @@ impl<'a> Shell<'a> {
             },
         };
         let ran = self.runner.get().pipeline(parts, stages);
+        self.console.take_back();
         self.cancelled |= ran.cancelled;
         self.finish(ran.status, ran.message)
     }
@@ -1660,6 +1665,19 @@ mod tests {
         // Taken by the shell: the next line runs whole.
         h.console.interrupt_after = None;
         assert_eq!(h.run("cd; echo a"), (0, "a\n".into()));
+    }
+
+    #[test]
+    fn the_shell_takes_the_console_back_after_each_program() {
+        // The prototype's review: once a program had ended, its group kept
+        // the console until the next prompt, so a Ctrl-C was lost for the
+        // rest of the line. Built-ins never give it away.
+        let mut h = spawning();
+        h.spawning("t-args a; cd; t-args b | t-args c; cd");
+        assert_eq!(h.console.taken_back, 2);
+        h.console.taken_back = 0;
+        h.spawning("cd; cd");
+        assert_eq!(h.console.taken_back, 0);
     }
 
     #[test]

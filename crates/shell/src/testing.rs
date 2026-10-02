@@ -32,6 +32,8 @@ pub struct TestConsole {
     pub interrupt_after: Option<usize>,
     /// How many times `interrupted` was asked.
     asked: usize,
+    /// How many times the shell took the console back.
+    pub taken_back: usize,
 }
 
 impl TestConsole {
@@ -43,6 +45,7 @@ impl TestConsole {
             interrupt: false,
             interrupt_after: None,
             asked: 0,
+            taken_back: 0,
         }
     }
 
@@ -73,6 +76,10 @@ impl Console for TestConsole {
     fn columns(&self) -> usize {
         self.columns
     }
+    fn take_back(&mut self) {
+        self.taken_back += 1;
+    }
+
     /// As the real console's, a Ctrl-C is taken by the call that sees it.
     fn interrupted(&mut self) -> bool {
         self.asked += 1;
