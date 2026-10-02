@@ -2,8 +2,10 @@
 # || and ! under /bin/sh; a command typed across lines with bash's >
 # prompt, and Ctrl-C there; Ctrl-C in the middle of a list; & mid-line;
 # and a script whose command goes on across lines, with its transcript.
-# Compound commands (plan 2): Ctrl-C in a loop of built-ins and of
-# programs, and the nesting bound, under /bin/sh.
+# Compound commands (plan 2): if and for typed across lines, Ctrl-C and
+# a syntax error at >, a script with nested loops and its transcript,
+# Ctrl-C in a loop of built-ins and of programs, and the nesting bound,
+# under /bin/sh.
 timeout 30
 expect root@relay:~# $
 send echo a; false; echo $?
@@ -44,6 +46,49 @@ send sh s.sh
 expect \n\+ echo s1 &&\n\+ echo s2\ns1\ns2\nroot@relay:~# $
 send cat s.log
 expect \n\+ echo s1 &&\n\+ echo s2\ns1\ns2\nroot@relay:~# $
+# An if and a for typed across lines, with > for each line after the
+# first; Ctrl-C at > drops one, status 130; a syntax error inside one
+# drops it to its fi, with > until then.
+send if true
+expect \n> $
+send then echo yes
+expect \n> $
+send fi
+expect \nyes\nroot@relay:~# $
+send for x in a b
+expect \n> $
+send do echo $x
+expect \n> $
+send done
+expect \na\nb\nroot@relay:~# $
+send if true; then
+expect \n> $
+type {ctrl-c}
+expect \^C\nroot@relay:~# $
+send echo $?
+expect \n130\nroot@relay:~# $
+send if true; then
+expect \n> $
+send echo no; then
+expect \nrelay-sh: syntax error near unexpected token `then'\n> $
+send echo no
+expect \n> $
+send fi
+expect \nroot@relay:~# $
+# A script with nested loops: each line traced once as it is read, all
+# before the loops run, and the same in its transcript.
+send echo 'for x in a b' > loops.sh
+expect \nroot@relay:~# $
+send echo do >> loops.sh
+expect \nroot@relay:~# $
+send echo '  for y in 1 2; do echo $x$y; done' >> loops.sh
+expect \nroot@relay:~# $
+send echo done >> loops.sh
+expect \nroot@relay:~# $
+send sh loops.sh
+expect \n\+ for x in a b\n\+ do\n\+ for y in 1 2; do echo \$x\$y; done\n\+ done\na1\na2\nb1\nb2\nroot@relay:~# $
+send cat loops.log
+expect \n\+ for x in a b\n\+ do\n\+ for y in 1 2; do echo \$x\$y; done\n\+ done\na1\na2\nb1\nb2\nroot@relay:~# $
 # A loop of built-ins ends at a Ctrl-C (§5.2): /bin/sh asks the kernel
 # for one before each command. A loop of programs ends at one too.
 send while cd; do cd; done
