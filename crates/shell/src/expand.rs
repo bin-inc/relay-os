@@ -48,6 +48,11 @@ impl Vars {
         vars
     }
 
+    /// The arguments after `$0`, which `"$@"` gives.
+    pub fn positional(&self) -> &[String] {
+        self.args.get(1..).unwrap_or(&[])
+    }
+
     /// The variable `name`'s value; an unset one is empty.
     pub fn get(&self, name: &str) -> &str {
         self.names.get(name).map_or("", String::as_str)
@@ -101,6 +106,16 @@ pub(crate) fn expand(
 ) -> Result<Vec<Command>, Error> {
     let mut x = Expander::new(vars, status);
     commands.iter().map(|c| x.command(c)).collect()
+}
+
+/// `words` expanded as a command's arguments are (a `for`'s list).
+pub(crate) fn words(words: &[Word], vars: &Vars, status: i32) -> Result<Vec<String>, Error> {
+    let mut x = Expander::new(vars, status);
+    let mut out = Vec::new();
+    for w in words {
+        out.extend(x.word(w)?);
+    }
+    Ok(out)
 }
 
 /// An assignment's value: one string, however it expands (`$@` joined by

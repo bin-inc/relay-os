@@ -38,12 +38,15 @@
 //! its status. A newline ends an item as `;` does, but after `|`, `&&` or
 //! `||` the command goes on to the next line; text that ends there is
 //! [`ParseError::Incomplete`], and a reader asks for more. `if … then …
-//! [elif … then …] [else …] fi`, `while … do … done` and `until … do …
-//! done` are compound commands, their words keywords only unquoted, whole
-//! and where a command name would stand (after `fi` or `done`, only a
+//! [elif … then …] [else …] fi`, `while … do … done`, `until … do … done`
+//! and `for NAME [in WORD…] do … done` are compound commands, their words
+//! keywords only unquoted, whole and where a command name would stand (and
+//! `in` and `do` where a `for` takes them; after `fi` or `done`, only a
 //! keyword or an operator may follow); one cannot stand in a pipeline of
-//! several, before `&` or with a redirection. bash's other reserved words
-//! (`for`, `{`, …) are refused where a command name would stand.
+//! several, before `&` or with a redirection. A `for`'s header takes no
+//! operator but the `;` or newline that ends its words. bash's other
+//! reserved words (`case`, `{`, …) are refused where a command name would
+//! stand.
 //! Every other shell feature is refused: an unquoted `*`, `?`, `<`,
 //! `` ` ``, `(` or `)` is an error naming the character, instead of being
 //! passed on as if it were plain text; so are `|&` (the errors into the
@@ -125,6 +128,7 @@ pub enum Compound<W = String> {
     If(If<W>),
     While(Loop<W>),
     Until(Loop<W>),
+    For(For<W>),
 }
 
 /// `if`: each condition (the `if`'s, then each `elif`'s) with the body it
@@ -140,6 +144,15 @@ pub struct If<W = String> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Loop<W = String> {
     pub condition: List<W>,
+    pub body: List<W>,
+}
+
+/// `for`: its variable's name as typed, the words it takes in turn (none
+/// for `"$@"`), and its body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct For<W = String> {
+    pub name: W,
+    pub words: Option<Vec<W>>,
     pub body: List<W>,
 }
 
@@ -164,6 +177,7 @@ impl<W> Compound<W> {
                     || i.otherwise.as_ref().is_some_and(List::has_job)
             }
             Compound::While(l) | Compound::Until(l) => l.condition.has_job() || l.body.has_job(),
+            Compound::For(f) => f.body.has_job(),
         }
     }
 
@@ -171,7 +185,7 @@ impl<W> Compound<W> {
     fn end(&self) -> &'static str {
         match self {
             Compound::If(_) => "fi",
-            Compound::While(_) | Compound::Until(_) => "done",
+            Compound::While(_) | Compound::Until(_) | Compound::For(_) => "done",
         }
     }
 }
@@ -352,8 +366,8 @@ const UNSUPPORTED: &[char] = &['*', '?', '<', '`', '(', ')'];
 /// command name could stand (programmable shell gate §4.2); the loops'
 /// until they are implemented.
 const RESERVED: &[&str] = &[
-    "for", "in", "case", "esac", "select", "function", "time", "coproc", "{", "}", "[[", "]]",
-    "break", "continue",
+    "case", "esac", "select", "function", "time", "coproc", "{", "}", "[[", "]]", "break",
+    "continue",
 ];
 
 /// A compound command's word, where a command name would stand.
@@ -368,6 +382,8 @@ enum Keyword {
     Until,
     Do,
     Done,
+    For,
+    In,
 }
 
 const KEYWORDS: &[(&str, Keyword)] = &[
@@ -380,6 +396,8 @@ const KEYWORDS: &[(&str, Keyword)] = &[
     ("until", Keyword::Until),
     ("do", Keyword::Do),
     ("done", Keyword::Done),
+    ("for", Keyword::For),
+    ("in", Keyword::In),
 ];
 
 impl Keyword {
@@ -397,6 +415,7 @@ impl Keyword {
             Keyword::If => Some(Kind::If),
             Keyword::While => Some(Kind::While),
             Keyword::Until => Some(Kind::Until),
+            Keyword::For => Some(Kind::For),
             _ => None,
         }
     }
@@ -408,6 +427,7 @@ enum Kind {
     If,
     While,
     Until,
+    For,
 }
 
 /// Where a compound command being read is.
@@ -421,6 +441,13 @@ enum Stage {
     Else,
     /// A loop's body, after `do`.
     Body,
+    /// A `for`'s header: the next word is its name; then `in` or `do` may
+    /// come, on a later line too; then its words, to a `;` or a newline;
+    /// then, past blank lines, its `do`.
+    ForName,
+    ForAfterName,
+    ForWords,
+    ForBeforeDo,
 }
 
 /// A compound command being read, and what was being read around it.
@@ -435,6 +462,9 @@ struct Open {
     stage: Stage,
     /// Its lists so far: each condition and the body after it.
     lists: Vec<List<Word>>,
+    /// A `for`'s name and words.
+    name: Option<Word>,
+    words: Option<Vec<Word>>,
 }
 
 /// The characters a line is read from, and where each is.
@@ -987,6 +1017,19 @@ impl Parser {
             let Some(c) = cur.next() else {
                 break;
             };
+            // The word before an operator ends at it (the `>` arm first
+            // looks for an fd, as in `2>`); in a `for`'s header, which that
+            // word may open or end, the operator is the header's.
+            if matches!(c, '>' | '|' | ';' | '&' | '\n') {
+                if c != '>' || !(self.word.started && self.word.word.digits().is_some()) {
+                    self.end_word(line, at)?;
+                }
+                if let Some(stage) = self.for_header() {
+                    self.for_operator(stage, c, &mut cur)?;
+                    self.item_start = cur.pos();
+                    continue;
+                }
+            }
             match c {
                 ' ' | '\t' => self.end_word(line, at)?,
                 '>' => {
@@ -1180,9 +1223,88 @@ impl Parser {
         Ok(())
     }
 
+    /// The stage of the `for` whose header is being read.
+    fn for_header(&self) -> Option<Stage> {
+        self.open.last().map(|o| o.stage).filter(|s| {
+            matches!(
+                s,
+                Stage::ForName | Stage::ForAfterName | Stage::ForWords | Stage::ForBeforeDo
+            )
+        })
+    }
+
+    /// A word of a `for`'s header (stage `stage`): its name, `in`, a word
+    /// of its list or `do`; anything else is bash's error naming it.
+    fn for_word(&mut self, stage: Stage, w: Word) -> Result<(), ParseError> {
+        let Some(open) = self.open.last_mut() else {
+            return Err(ParseError::Unexpected(w.typed));
+        };
+        match (stage, w.keyword()) {
+            (Stage::ForName, _) => {
+                open.name = Some(w);
+                open.stage = Stage::ForAfterName;
+            }
+            (Stage::ForAfterName, Some(Keyword::In)) => {
+                open.words = Some(Vec::new());
+                open.stage = Stage::ForWords;
+            }
+            (Stage::ForWords, _) => open.words.get_or_insert_with(Vec::new).push(w),
+            (Stage::ForAfterName | Stage::ForBeforeDo, Some(Keyword::Do)) => {
+                open.stage = Stage::Body;
+            }
+            _ => return Err(ParseError::Unexpected(w.typed)),
+        }
+        Ok(())
+    }
+
+    /// An operator, `c` and what follows it in `cur`, in a `for`'s header
+    /// (stage `stage`): a `;` or a newline ends its words, a newline right
+    /// after `for` is bash's error, and every other one is.
+    fn for_operator(
+        &mut self,
+        stage: Stage,
+        c: char,
+        cur: &mut Cursor<'_>,
+    ) -> Result<(), ParseError> {
+        let token = match c {
+            '\n' => "newline",
+            ';' if cur.next_if_eq(';') => {
+                if cur.next_if_eq('&') {
+                    ";;&"
+                } else {
+                    ";;"
+                }
+            }
+            ';' if cur.next_if_eq('&') => ";&",
+            ';' => ";",
+            '|' if cur.next_if_eq('|') => "||",
+            '&' if cur.next_if_eq('&') => "&&",
+            '>' if cur.next_if_eq('>') => ">>",
+            '|' => "|",
+            '&' => "&",
+            _ => ">",
+        };
+        let next = match (stage, token) {
+            (Stage::ForAfterName | Stage::ForBeforeDo, "newline") => stage,
+            (Stage::ForWords, "newline") => Stage::ForBeforeDo,
+            (Stage::ForAfterName | Stage::ForWords, ";") => Stage::ForBeforeDo,
+            _ => return Err(ParseError::MissingTarget(token)),
+        };
+        if let Some(open) = self.open.last_mut() {
+            open.stage = next;
+        }
+        Ok(())
+    }
+
     /// Ends the word being read, which ends at `at`; a keyword where one
     /// may stand opens, goes on with or closes a compound command.
     fn end_word(&mut self, line: &str, at: usize) -> Result<(), ParseError> {
+        if let Some(stage) = self.for_header() {
+            return match core::mem::take(&mut self.word).finish(line) {
+                Some(w) => self.for_word(stage, w),
+                None => Ok(()),
+            };
+        }
         match self.parts.end_word(&mut self.word, line)? {
             Some(k) => self.keyword(k, at),
             None => Ok(()),
@@ -1208,8 +1330,13 @@ impl Parser {
                 levels,
                 bangs,
                 kind,
-                stage: Stage::Condition,
+                stage: match kind {
+                    Kind::For => Stage::ForName,
+                    _ => Stage::Condition,
+                },
                 lists: Vec::new(),
+                name: None,
+                words: None,
             });
             self.item_start = at;
             return Ok(());
@@ -1222,7 +1349,7 @@ impl Parser {
             Some((Kind::If, Stage::Then, Keyword::Else)) => Some(Stage::Else),
             Some((Kind::If, Stage::Then | Stage::Else, Keyword::Fi)) => None,
             Some((Kind::While | Kind::Until, Stage::Condition, Keyword::Do)) => Some(Stage::Body),
-            Some((Kind::While | Kind::Until, Stage::Body, Keyword::Done)) => None,
+            Some((Kind::While | Kind::Until | Kind::For, Stage::Body, Keyword::Done)) => None,
             _ => return Err(ParseError::MissingTarget(k.token())),
         };
         let list = self.end_list(k.token())?;
@@ -1270,6 +1397,16 @@ impl Parser {
                     Kind::Until => Compound::Until(l),
                     _ => Compound::While(l),
                 }
+            }
+            Kind::For => {
+                let Some(name) = open.name else {
+                    return Err(ParseError::MissingTarget(k.token()));
+                };
+                Compound::For(For {
+                    name,
+                    words: open.words,
+                    body: list,
+                })
             }
         };
         self.items = open.outer;
@@ -1416,6 +1553,7 @@ mod tests {
                         Compound::If(_) => String::from("if"),
                         Compound::While(_) => String::from("while"),
                         Compound::Until(_) => String::from("until"),
+                        Compound::For(_) => String::from("for"),
                     },
                 });
             }
@@ -1443,9 +1581,126 @@ mod tests {
             Run::Compound(c) => match *c {
                 Compound::While(l) => (false, names_of(&l.condition), names_of(&l.body)),
                 Compound::Until(l) => (true, names_of(&l.condition), names_of(&l.body)),
-                Compound::If(_) => panic!("{line}: an if"),
+                _ => panic!("{line}: no while or until"),
             },
             Run::Commands(_) => panic!("{line}: no compound command"),
+        }
+    }
+
+    /// The `for` of `line`'s one item: its name and words as typed (none
+    /// for `"$@"`), and its body's command names.
+    fn for_of(line: &str) -> (String, Option<Vec<String>>, Vec<String>) {
+        let p = parse_line(line).unwrap().items.remove(0).and_or.first;
+        let Run::Compound(c) = p.run else {
+            panic!("{line}: no compound command");
+        };
+        let Compound::For(f) = *c else {
+            panic!("{line}: no for");
+        };
+        let words = f.words.map(|w| w.into_iter().map(|w| w.typed).collect());
+        (f.name.typed, words, names_of(&f.body))
+    }
+
+    #[test]
+    fn a_for_holds_its_name_its_words_and_its_body() {
+        let s = |v: &[&str]| -> Vec<String> { v.iter().map(|x| String::from(*x)).collect() };
+        let c = s(&["c"]);
+        for (line, name, words) in [
+            ("for x in a b; do c; done", "x", Some(s(&["a", "b"]))),
+            // f11, l3: none; f10, r9, l10: over "$@".
+            ("for x in; do c; done", "x", Some(s(&[]))),
+            ("for x in\ndo c; done", "x", Some(s(&[]))),
+            ("for x; do c; done", "x", None),
+            ("for x do c; done", "x", None),
+            ("for x\ndo c\ndone", "x", None),
+            ("for x;\ndo c; done", "x", None),
+            // p4, l4, l9: across lines.
+            ("for x\nin a b\ndo c\ndone", "x", Some(s(&["a", "b"]))),
+            ("for x in a\n\n# d\ndo c; done", "x", Some(s(&["a"]))),
+            ("for x in a b;\ndo c; done", "x", Some(s(&["a", "b"]))),
+            ("for x in a # d\ndo c; done", "x", Some(s(&["a"]))),
+            // r6, f11: keywords among the words; f15: any word a name.
+            (
+                "for x in if then do; do c; done",
+                "x",
+                Some(s(&["if", "then", "do"])),
+            ),
+            ("for in in in; do c; done", "in", Some(s(&["in"]))),
+            ("for done in a; do c; done", "done", Some(s(&["a"]))),
+            (
+                "for \"x\" in \"$@\" ${a}b; do c; done",
+                "\"x\"",
+                Some(s(&["\"$@\"", "${a}b"])),
+            ),
+        ] {
+            assert_eq!(
+                for_of(line),
+                (String::from(name), words, c.clone()),
+                "{line}"
+            );
+        }
+        assert_eq!(
+            for_of("for x in a; do for y in b; do c; done done").2,
+            ["for"]
+        );
+        for text in [
+            "for x",
+            "for x in a b",
+            "for x in a b;",
+            "for x; do",
+            "for x in a; do b",
+        ] {
+            assert_eq!(parse_line(text), Err(ParseError::Incomplete), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_for_s_header_takes_no_operator() {
+        for (line, token) in [
+            ("for\n", "newline"),
+            ("for\nx in a; do echo; done", "newline"),
+            ("for x a; do echo; done", "a"),
+            ("for in a; do echo; done", "a"),
+            ("for x in a b do echo $x; done", "done"),
+            ("for x in a\nb", "b"),
+            ("for x in a # c\necho", "echo"),
+            ("for x in a | b; do echo; done", "|"),
+            ("for x in a || b; do echo; done", "||"),
+            ("for x in a > f; do echo; done", ">"),
+            ("for x > f; do echo; done", ">"),
+            ("for x in a && b; do echo; done", "&&"),
+            ("for x in a & do echo; done", "&"),
+            ("for x |", "|"),
+            ("for ; do echo; done", ";"),
+            ("for x; ; do echo; done", ";"),
+            ("for x; in a; do echo; done", "in"),
+            ("for x;; do echo; done", ";;"),
+            ("for x in a;; do echo; done", ";;"),
+            ("for x in a; do; echo; done", ";"),
+            ("for x in a; then echo; done", "then"),
+            ("for x in a; do echo; fi", "fi"),
+            // g16, g10, k10: `in` where a command name stands.
+            ("in", "in"),
+            ("if true; then echo in; in; fi", "in"),
+            ("if a; then b; fi in", "in"),
+        ] {
+            assert_eq!(
+                parse_line(line).unwrap_err().to_string(),
+                alloc::format!("syntax error near unexpected token `{token}'"),
+                "{line}"
+            );
+        }
+        for (line, what) in [
+            ("for x in a; do b; done | cat", "| after done"),
+            ("echo x | for x in a; do b; done", "for after |"),
+            ("for x in a; do b; done &", "& after done"),
+            ("for x in a; do b; done > f", "> after done"),
+        ] {
+            assert_eq!(
+                parse_line(line),
+                Err(ParseError::Unsupported(what.into())),
+                "{line}"
+            );
         }
     }
 
@@ -2414,8 +2669,8 @@ mod tests {
         // are not found; the loops' until they come.
         // The words of the spec's §4.2, written out apart from `RESERVED`.
         for word in [
-            "for", "in", "case", "esac", "select", "function", "time", "coproc", "{", "}", "[[",
-            "]]", "break", "continue",
+            "case", "esac", "select", "function", "time", "coproc", "{", "}", "[[", "]]", "break",
+            "continue",
         ] {
             for line in [
                 alloc::format!("{word} x"),
@@ -2435,7 +2690,7 @@ mod tests {
         // Anywhere else, quoted or escaped, or after a redirection (a
         // command's name in bash), it is a word.
         for (line, words) in [
-            ("echo for in", &["echo", "for", "in"][..]),
+            ("echo case esac", &["echo", "case", "esac"][..]),
             ("'for' x", &["for", "x"]),
             ("\\while x", &["while", "x"]),
             ("> f done", &["done"]),

@@ -339,7 +339,38 @@ impl<'a> Shell<'a> {
             parser::Compound::If(i) => self.run_if(i),
             parser::Compound::While(l) => self.run_loop(l, false),
             parser::Compound::Until(l) => self.run_loop(l, true),
+            parser::Compound::For(f) => self.run_for(f),
         }
+    }
+
+    /// Runs a `for`: its body once for each of its words, expanded as
+    /// arguments are (or `"$@"`'s), its variable set to the word first
+    /// (programmable shell gate §5.1). Its status is the body's last, 0
+    /// if it never ran. A name that is not one is bash's error, as it is
+    /// typed; a value the variables cannot hold fails the loop.
+    fn run_for(&mut self, f: &parser::For<parser::Word>) -> i32 {
+        let name = f.name.typed.as_str();
+        if !parser::is_name(name) {
+            return self.finish(1, format!("{NAME}: `{name}': not a valid identifier\n"));
+        }
+        let words = match &f.words {
+            Some(words) => match expand::words(words, &self.vars, self.status) {
+                Ok(words) => words,
+                Err(e) => return self.not_expanded(e, true),
+            },
+            None => self.vars.positional().to_vec(),
+        };
+        let mut status = 0;
+        for word in words {
+            if let Err(e) = self.vars.set(name, word) {
+                return self.not_expanded(e, false);
+            }
+            status = self.run_items(&f.body);
+            if self.ends_line() {
+                return status;
+            }
+        }
+        status
     }
 
     /// Runs a `while` loop, or an `until` one: the condition, then the
@@ -1882,6 +1913,89 @@ mod tests {
         );
         let ran: Vec<&str> = h.programs.spawned.iter().map(|s| s.path.as_str()).collect();
         assert_eq!(ran, ["/bin/t-args", "/bin/t-spin", "/bin/t-spin"]);
+    }
+
+    #[test]
+    fn a_for_runs_its_body_once_for_each_word() {
+        let mut h = Harness::new();
+        for (line, ran) in [
+            ("for x in a b c; do echo $x; done", (0, "a\nb\nc\n")),
+            // f9, r4, r5: a shell variable, its last value kept, none set
+            // when there is no pass.
+            ("for x in a b; do echo $x; done; echo $x", (0, "a\nb\nb\n")),
+            ("for x in a; do x=z; done; echo $x", (0, "z\n")),
+            ("x=y; for x in; do echo no; done; echo $x", (0, "y\n")),
+            // r3: words expand as arguments do.
+            (
+                "for x in $E a '' \"$E\"; do echo [$x]; done",
+                (0, "[a]\n[]\n[]\n"),
+            ),
+            // r8, r11: the body's last status, 0 with no pass.
+            ("for x in a b; do false; done", (1, "")),
+            ("false; for x in; do true; done; echo $?", (0, "0\n")),
+            (
+                "for x in a b; do echo $x; exit 6; done; echo no",
+                (6, "a\n"),
+            ),
+            // g1, r1, r2: a name checked when it runs, as typed.
+            (
+                "echo a; for 1x in a; do echo no; done; echo b",
+                (0, "a\nrelay-sh: `1x': not a valid identifier\nb\n"),
+            ),
+            (
+                "for \"x\" in a; do echo no; done",
+                (1, "relay-sh: `\"x\"': not a valid identifier\n"),
+            ),
+            (
+                "for $E in a; do echo no; done",
+                (1, "relay-sh: `$E': not a valid identifier\n"),
+            ),
+            // A bad substitution in its words abandons the line.
+            (
+                "for x in ${1A}; do echo no; done; echo no",
+                (1, "relay-sh: ${1A}: bad substitution\n"),
+            ),
+            (
+                "for x in a; do echo a & done",
+                (2, "relay-sh: unsupported syntax: &\n"),
+            ),
+        ] {
+            assert_eq!(h.run(line), (ran.0, ran.1.into()), "{line}");
+        }
+        // A value the variables cannot hold fails the loop; the line goes on.
+        let line = alloc::format!(
+            "A={}; for x in $A; do echo no; done; echo next",
+            "a".repeat(40_000)
+        );
+        assert_eq!(
+            h.run(&line),
+            (
+                0,
+                "relay-sh: x: the variables would hold more than 64 KiB\nnext\n".into()
+            )
+        );
+        // Ctrl-C ends it, before the first `echo` here.
+        h.console.interrupt_after = Some(1);
+        assert_eq!(
+            h.run("for x in a b c; do echo $x; done"),
+            (130, "^C\n".into())
+        );
+    }
+
+    #[test]
+    fn a_for_without_words_loops_over_the_script_s_arguments() {
+        // f10: `for NAME; do`, `for NAME do` and `in "$@"` alike.
+        let mut h = Harness::new();
+        h.put(
+            "/tmp/s.sh",
+            b"for x; do echo [$x]; done\nfor y do echo [$y]; done\nfor z in \"$@\"; do echo [$z]; done\n",
+        );
+        let (status, out) = h.run("sh /tmp/s.sh p 'q r' ''");
+        let printed: Vec<&str> = out.lines().filter(|l| !l.starts_with('+')).collect();
+        assert_eq!(status, 0);
+        assert_eq!(printed, ["[p]", "[q r]", "[]"].repeat(3));
+        // With none, no pass.
+        assert_eq!(h.run("for x; do echo no; done"), (0, "".into()));
     }
 
     #[test]
