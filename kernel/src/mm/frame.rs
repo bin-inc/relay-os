@@ -3,7 +3,8 @@
 //!
 //! Only `Usable` frames are ever handed out. `Bootloader` memory (which holds
 //! the kernel image, its stack, the loader's page tables and `BootInfo`),
-//! ACPI memory and everything else stay reserved for the whole milestone.
+//! ACPI memory and everything else stay reserved for as long as the kernel
+//! runs.
 
 use boot_info::{MemoryKind, MemoryRegion};
 
