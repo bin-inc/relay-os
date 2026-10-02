@@ -420,6 +420,10 @@ impl<'a> Shell<'a> {
         commands: &[parser::Command<parser::Word>],
         background: Option<&str>,
     ) -> i32 {
+        // What ended frees its slot in the process table before anything
+        // starts, so a loop that starts jobs never fills it; they are
+        // reported at the next prompt.
+        self.collect_jobs();
         let assigns = commands
             .iter()
             .find_map(|c| c.words.first().filter(|w| w.assignment().is_some()));
@@ -1999,6 +2003,21 @@ mod tests {
     }
 
     #[test]
+    fn a_loop_that_starts_jobs_collects_those_that_ended() {
+        // The final review: jobs started in a loop were collected only at
+        // the next prompt, so after about 62 passes the process table was
+        // full and every program failed. Each start collects first.
+        let mut h = spawning();
+        h.spawning("for x in 1 2 3 4 5 6; do t-args a & t-args b; done");
+        assert_eq!(h.programs.spawned.len(), 12);
+        assert!(
+            h.programs.alive_at_spawn.iter().all(|&n| n <= 1),
+            "{:?}",
+            h.programs.alive_at_spawn
+        );
+    }
+
+    #[test]
     fn an_if_32_levels_deep_runs() {
         let mut h = Harness::new();
         let line = alloc::format!(
@@ -2286,7 +2305,15 @@ mod tests {
     #[test]
     fn an_ampersand_mid_line_starts_a_job_and_goes_on() {
         let mut h = with_jobs();
-        let out = typed(&mut h, &["sleep 5 & t-args a", "sleep 6 & sleep 7 &", ""]);
+        // Each start collects what ended: `sleep` runs on through more
+        // rounds here, so the first job is still running at the second
+        // prompt.
+        h.programs.lives.retain(|&(p, _)| p != "/bin/sleep");
+        h.programs.lives.push(("/bin/sleep", 3));
+        let out = typed(
+            &mut h,
+            &["sleep 5 & t-args a", "sleep 6 & sleep 7 &", "", ""],
+        );
         assert!(
             out.starts_with(
                 "root@relay:/# sleep 5 & t-args a\n[1] 101\n\
