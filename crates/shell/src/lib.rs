@@ -13,6 +13,7 @@
 extern crate alloc;
 
 pub mod commands;
+mod corpus;
 mod ctx;
 pub mod editor;
 mod expand;

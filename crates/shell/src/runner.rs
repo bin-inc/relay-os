@@ -48,6 +48,9 @@ pub(crate) struct Ran {
     /// Set by `sh`: the script the shell runs next (boxed, so that a `Ran`
     /// stays small as an error).
     pub script: Option<Box<Script>>,
+    /// Ctrl-C ended it: a program killed by it, or a command that saw it.
+    /// A status of 130 alone is no Ctrl-C (a program may exit with it).
+    pub cancelled: bool,
 }
 
 impl Ran {
@@ -58,6 +61,15 @@ impl Ran {
             stop: false,
             exited: false,
             script: None,
+            cancelled: false,
+        }
+    }
+
+    /// A command Ctrl-C ended: status 130 and `^C`.
+    pub fn cancelled() -> Ran {
+        Ran {
+            cancelled: true,
+            ..Ran::said(CANCELLED, String::from("^C\n"))
         }
     }
 }
@@ -182,7 +194,7 @@ impl Runner for InProcess {
                 let cancelled = ctx.cancelled;
                 *transcript = ctx.transcript.take();
                 if cancelled {
-                    return Ran::said(CANCELLED, String::from("^C\n"));
+                    return Ran::cancelled();
                 }
             } else {
                 let message = not_found(name).message;
@@ -320,7 +332,7 @@ impl Runner for Spawning<'_> {
             if Some(*pid) == started.last {
                 ran.status = ended.status;
             }
-            if ended.status == CANCELLED {
+            if ended.cancelled {
                 cancelled = true;
             } else {
                 ran.message.push_str(&ended.message);
@@ -328,6 +340,7 @@ impl Runner for Spawning<'_> {
         }
         if cancelled {
             ran.message.push_str("^C\n");
+            ran.cancelled = true;
         }
         ran
     }
@@ -517,6 +530,7 @@ pub(crate) fn run_function<'s>(
         stop: ctx.exit,
         exited: ctx.exited,
         script: ctx.script.take().map(Box::new),
+        cancelled: ctx.cancelled,
     }
 }
 
@@ -560,12 +574,10 @@ pub(crate) fn ended(name: &str, w: &relay_abi::WaitStatus) -> Ran {
         return Ran::said(w.code as i32, String::new());
     }
     let (what, status) = killed::killed(w);
-    let message = if status == CANCELLED {
-        String::from("^C\n")
-    } else {
-        format!("{NAME}: {name}: {what}\n")
-    };
-    Ran::said(status, message)
+    if w.how == relay_abi::wait::KILLED && w.code == relay_abi::wait::KILLED_CTRL_C {
+        return Ran::cancelled();
+    }
+    Ran::said(status, format!("{NAME}: {name}: {what}\n"))
 }
 
 #[cfg(test)]

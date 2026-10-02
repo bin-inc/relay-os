@@ -55,6 +55,12 @@ pub struct Shell<'a> {
     prompting: bool,
     /// Its variables and arguments (spec §9.4).
     vars: Vars,
+    /// An expansion failed in a way that abandons the rest of the line
+    /// (programmable shell gate §5.1).
+    abandoned: bool,
+    /// A command of the line ended with Ctrl-C (spec §6.4), whatever a
+    /// `!` made of its status; a status of 130 alone is none.
+    cancelled: bool,
 }
 
 impl<'a> Shell<'a> {
@@ -102,6 +108,8 @@ impl<'a> Shell<'a> {
             jobs: Jobs::new(),
             prompting: false,
             vars: Vars::new(NAME),
+            abandoned: false,
+            cancelled: false,
         }
     }
 
@@ -191,34 +199,131 @@ impl<'a> Shell<'a> {
     /// status. Every command is followed by a sync, so its changes are on
     /// the disk when the prompt comes back.
     pub fn execute(&mut self, line: &str) -> i32 {
-        let typed = match parser::parse_line(line) {
-            Ok(typed) => typed,
+        let list = match parser::parse_line(line) {
+            Ok(list) => list,
             Err(e) => return self.finish(SYNTAX, format!("{NAME}: {e}\n")),
         };
-        if typed.is_blank() {
-            return self.status;
+        self.run_list(&list)
+    }
+
+    /// Runs a list's items one after another (programmable shell gate
+    /// §5.1); its status is the last one's. An empty list keeps the last
+    /// status.
+    /// `exit`, Ctrl-C (status 130, spec §6.4) and an expansion that
+    /// abandons the line stop the rest.
+    fn run_list(&mut self, list: &parser::List<parser::Word>) -> i32 {
+        self.abandoned = false;
+        self.cancelled = false;
+        // A background job needs programs: the in-process runner refuses
+        // a line that holds one, before any of it runs.
+        if self.runner.programs().is_none() && list.items.iter().any(|i| i.background.is_some()) {
+            return self.finish(SYNTAX, format!("{NAME}: unsupported syntax: &\n"));
         }
+        let mut status = self.status;
+        for item in &list.items {
+            status = match &item.background {
+                // The parser makes sure a background item is one pipeline.
+                Some(text) => self.run_pipeline(&item.and_or.first, Some(text)),
+                None => self.run_and_or(&item.and_or),
+            };
+            if self.ends_line() {
+                break;
+            }
+        }
+        status
+    }
+
+    /// Runs an and-or list's first pipeline, then each one whose `&&` or
+    /// `||` the status so far allows (programmable shell gate §5.1); the
+    /// status is the last one's that ran, and one that does not run leaves
+    /// `$?` alone.
+    fn run_and_or(&mut self, and_or: &parser::AndOr<parser::Word>) -> i32 {
+        let mut status = self.run_pipeline(&and_or.first, None);
+        for (connector, pipeline) in &and_or.rest {
+            if self.ends_line() {
+                break;
+            }
+            let runs = match connector {
+                parser::Connector::And => status == 0,
+                parser::Connector::Or => status != 0,
+            };
+            if runs {
+                status = self.run_pipeline(pipeline, None);
+            }
+        }
+        status
+    }
+
+    /// The command that ran last ends the rest of the line: `exit`,
+    /// Ctrl-C or an expansion that abandons it.
+    fn ends_line(&self) -> bool {
+        self.stopped || self.cancelled || self.abandoned
+    }
+
+    /// An expansion that failed: the command fails with status 1. In a
+    /// command the shell runs itself (`alone`, not one of a pipeline nor a
+    /// background job, which bash expands in shells of their own), a bad
+    /// substitution, or a line that would expand past 64 KiB, abandons the
+    /// rest of the line too, as interactive bash abandons it; a
+    /// redirection target that is not one word, or a variable that does
+    /// not fit, fails only its command.
+    fn not_expanded(&mut self, e: expand::Error, alone: bool) -> i32 {
+        self.abandoned = alone
+            && matches!(
+                e,
+                expand::Error::BadSubstitution(_) | expand::Error::TooLong
+            );
+        self.finish(1, format!("{NAME}: {e}\n"))
+    }
+
+    /// Runs one pipeline, or starts it in the background with the job's
+    /// text `background`. After a `!` its status is negated, as bash's is:
+    /// 0 becomes 1 and anything else 0, even 130 after Ctrl-C, which still
+    /// ends the line. Neither a background job's start nor `exit` is, nor
+    /// a command whose expansion abandoned the line, which never ran.
+    fn run_pipeline(
+        &mut self,
+        typed: &parser::Pipeline<parser::Word>,
+        background: Option<&str>,
+    ) -> i32 {
+        let status = self.run_commands(typed, background);
+        if !typed.negated || background.is_some() || self.stopped || self.abandoned {
+            return status;
+        }
+        self.status = i32::from(status == 0);
+        self.status
+    }
+
+    /// Runs a pipeline's commands, or starts them in the background, their
+    /// words expanded just before.
+    fn run_commands(
+        &mut self,
+        typed: &parser::Pipeline<parser::Word>,
+        background: Option<&str>,
+    ) -> i32 {
         let assigns = typed
-            .pipeline
+            .commands
             .iter()
             .find_map(|c| c.words.first().filter(|w| w.assignment().is_some()));
         if let Some(first) = assigns {
             // Alone on its line; bash's changes nothing elsewhere.
-            let place = match (&typed.background, typed.pipeline.len()) {
+            let place = match (background, typed.commands.len()) {
                 (Some(_), _) => "the background",
-                (None, 1) => return self.assign(&typed.pipeline[0]),
+                (None, 1) => return self.assign(&typed.commands[0]),
                 (None, _) => "a pipeline",
             };
             let message = format!("{NAME}: {}: cannot be used in {place}\n", first.typed);
             return self.finish(1, message);
         }
-        let mut pipeline = match expand::expand(&typed, &self.vars, self.status) {
-            Ok(parser::Line {
-                pipeline,
-                background: Some(text),
-            }) => return self.background(&pipeline, &text),
-            Ok(line) => line.pipeline,
-            Err(e) => return self.finish(1, format!("{NAME}: {e}\n")),
+        let mut pipeline = match expand::expand(typed, &self.vars, self.status) {
+            Ok(p) => match background {
+                Some(text) => return self.background(&p.commands, text),
+                None => p.commands,
+            },
+            Err(e) => {
+                let alone = typed.commands.len() == 1 && background.is_none();
+                return self.not_expanded(e, alone);
+            }
         };
         if pipeline.len() > 1 {
             return self.pipeline(&pipeline);
@@ -266,6 +371,7 @@ impl<'a> Shell<'a> {
         };
         self.stopped = ran.stop;
         self.exited = ran.exited;
+        self.cancelled |= ran.cancelled;
         let mut status = ran.status;
         if let Some(script) = ran.script {
             status = self.run_script(*script);
@@ -281,13 +387,13 @@ impl<'a> Shell<'a> {
             let set =
                 expand::value(&value, &self.vars, self.status).and_then(|v| self.vars.set(name, v));
             if let Err(e) = set {
-                return self.finish(1, format!("{NAME}: {e}\n"));
+                return self.not_expanded(e, true);
             }
         }
         let redirect = match cmd.redirect.as_ref() {
             Some(r) => match expand::redirect(r, &self.vars, self.status) {
                 Ok(r) => Some(r),
-                Err(e) => return self.finish(1, format!("{NAME}: {e}\n")),
+                Err(e) => return self.not_expanded(e, true),
             },
             None => None,
         };
@@ -317,6 +423,7 @@ impl<'a> Shell<'a> {
             },
         };
         let ran = self.runner.get().pipeline(parts, stages);
+        self.cancelled |= ran.cancelled;
         self.finish(ran.status, ran.message)
     }
 
@@ -396,6 +503,8 @@ impl<'a> Shell<'a> {
         if self.exited {
             self.stopped = false;
         }
+        // What abandoned a line of the script leaves the line that ran it.
+        self.abandoned = false;
         self.write_transcript();
         self.transcript = None;
         status
@@ -512,7 +621,7 @@ impl<'a> Shell<'a> {
         for line in text.lines() {
             // Blank as typed: one whose words expand to nothing is traced
             // and runs.
-            if parser::parse_line(line).is_ok_and(|l| l.is_blank()) {
+            if parser::parse_line(line).is_ok_and(|l| l.items.is_empty()) {
                 continue;
             }
             if self.console.interrupted() {
@@ -528,7 +637,7 @@ impl<'a> Shell<'a> {
             self.write_transcript();
             self.sync();
             status = self.execute(line);
-            if status == CANCELLED || self.stopped {
+            if self.cancelled || self.stopped {
                 break;
             }
         }
@@ -743,6 +852,297 @@ mod tests {
     }
 
     #[test]
+    fn a_list_runs_its_items_one_after_another() {
+        let mut h = Harness::new();
+        // What bash prints for each (an interactive bash 5.2).
+        assert_eq!(h.run("echo a;echo b;"), (0, "a\nb\n".into()));
+        // Each item reads the status of the one before.
+        assert_eq!(
+            h.run("false; echo $?; nope; echo $?"),
+            (0, "1\nrelay-sh: nope: command not found\n127\n".into())
+        );
+        assert_eq!(h.run("echo a; false"), (1, "a\n".into()));
+        // An assignment is an item too, and the next one reads it.
+        assert_eq!(h.run("A=1; echo $A"), (0, "1\n".into()));
+        assert_eq!(h.run("cd /etc; pwd"), (0, "/etc\n".into()));
+    }
+
+    #[test]
+    fn exit_and_ctrl_c_stop_the_rest_of_a_list() {
+        let mut h = Harness::new();
+        assert_eq!(h.run("exit 3; echo no"), (3, "".into()));
+        h.put("/tmp/big", &alloc::vec![b'x'; 300_000]);
+        h.console.interrupt = true;
+        assert_eq!(h.run("cat /tmp/big | wc -c; echo no"), (130, "^C\n".into()));
+    }
+
+    #[test]
+    fn a_bad_substitution_abandons_the_rest_of_the_line() {
+        // As interactive bash: the rest of the line does not run. A
+        // redirection that cannot be made fails only its own command.
+        let mut h = Harness::new();
+        assert_eq!(
+            h.run("echo ${1A}; echo after"),
+            (1, "relay-sh: ${1A}: bad substitution\n".into())
+        );
+        assert_eq!(
+            h.run("echo x > $E; echo after"),
+            (0, "relay-sh: $E: ambiguous redirect\nafter\n".into())
+        );
+        // So in an assignment.
+        assert_eq!(
+            h.run("A=${1A}; echo after"),
+            (1, "relay-sh: ${1A}: bad substitution\n".into())
+        );
+        assert_eq!(
+            h.run("A=1 > $E; echo after"),
+            (0, "relay-sh: $E: ambiguous redirect\nafter\n".into())
+        );
+        let big = "x".repeat(40_000);
+        let mut shell = Shell::new(&mut h.vfs, &mut h.console, &mut h.system);
+        shell.execute(&alloc::format!("A={big}"));
+        assert_eq!(shell.execute("echo $A $A; echo after"), 1);
+        // Only that line: the next one runs whole.
+        assert_eq!(shell.execute("echo a; echo b"), 0);
+        assert_eq!(
+            h.console.take(),
+            "relay-sh: the line would expand to more than 64 KiB\na\nb\n"
+        );
+    }
+
+    #[test]
+    fn a_line_a_script_abandons_leaves_the_line_that_ran_it() {
+        // bash's script is a shell of its own; so is the in-process
+        // runner's, as far as the lines after it go.
+        let mut h = Harness::new();
+        h.put("/tmp/s.sh", b"echo ${1A}\n");
+        assert_eq!(
+            h.run("sh /tmp/s.sh; echo after"),
+            (
+                0,
+                "+ echo ${1A}\nrelay-sh: ${1A}: bad substitution\nafter\n".into()
+            )
+        );
+    }
+
+    #[test]
+    fn and_and_or_run_a_pipeline_on_the_status_so_far() {
+        let mut h = Harness::new();
+        // What bash prints for each (an interactive bash 5.2).
+        assert_eq!(h.run("true && echo a"), (0, "a\n".into()));
+        assert_eq!(h.run("false && echo a"), (1, "".into()));
+        assert_eq!(h.run("false || echo b"), (0, "b\n".into()));
+        assert_eq!(h.run("true || echo b"), (0, "".into()));
+        assert_eq!(
+            h.run("false || echo or && echo and"),
+            (0, "or\nand\n".into())
+        );
+        assert_eq!(h.run("true || false && echo d"), (0, "d\n".into()));
+        // A pipeline that does not run leaves `$?` as it was.
+        assert_eq!(
+            h.lines(&[
+                "false && echo x; echo $?",
+                "true && false || echo c; echo $?"
+            ]),
+            (0, "1\nc\n0\n".into())
+        );
+        assert_eq!(
+            h.run("nope || echo $?"),
+            (0, "relay-sh: nope: command not found\n127\n".into())
+        );
+        assert_eq!(h.run("exit 4 || echo no"), (4, "".into()));
+    }
+
+    #[test]
+    fn ctrl_c_and_a_bad_substitution_stop_an_and_or_list() {
+        let mut h = Harness::new();
+        assert_eq!(
+            h.run("true && echo ${1A} || echo no; echo no"),
+            (1, "relay-sh: ${1A}: bad substitution\n".into())
+        );
+        h.put("/tmp/big", &alloc::vec![b'x'; 300_000]);
+        h.console.interrupt = true;
+        // 130 is no success, but `||` does not run after Ctrl-C.
+        assert_eq!(
+            h.run("cat /tmp/big | wc -c || echo no"),
+            (130, "^C\n".into())
+        );
+    }
+
+    #[test]
+    fn a_pipeline_that_does_not_run_starts_no_program() {
+        let mut h = spawning();
+        assert_eq!(h.spawning("t-args a && t-args b"), (3, "".into()));
+        assert_eq!(h.spawning("t-args c || t-args d"), (3, "".into()));
+        let args: Vec<&str> = h
+            .programs
+            .spawned
+            .iter()
+            .map(|s| s.args[1].as_str())
+            .collect();
+        assert_eq!(args, ["a", "c", "d"]);
+    }
+
+    #[test]
+    fn a_bang_negates_a_pipeline_s_status() {
+        let mut h = Harness::new();
+        // What bash prints for each (an interactive bash 5.2).
+        assert_eq!(h.run("! true"), (1, "".into()));
+        assert_eq!(h.run("! false"), (0, "".into()));
+        assert_eq!(
+            h.run("! nope"),
+            (0, "relay-sh: nope: command not found\n".into())
+        );
+        assert_eq!(h.run("! ! false; echo $?"), (0, "1\n".into()));
+        assert_eq!(h.run("! ; echo $?"), (0, "1\n".into()));
+        assert_eq!(h.run("! false && echo t"), (0, "t\n".into()));
+        assert_eq!(h.run("! true | false; echo $?"), (0, "0\n".into()));
+        assert_eq!(h.run("! A=1; echo $? $A"), (0, "1 1\n".into()));
+        // `exit` stops the shell with its own status.
+        assert_eq!(h.run("! exit 3"), (3, "".into()));
+    }
+
+    #[test]
+    fn only_ctrl_c_ends_a_line_not_a_status_of_130() {
+        // A script or program that exits with 130 by itself was not
+        // interrupted: bash goes on (the review found the line ended).
+        let mut h = Harness::new();
+        h.programs.known.push(("/bin/sh", WaitStatus::exited(130)));
+        h.programs.known.push(("/bin/t-x", WaitStatus::exited(130)));
+        h.programs
+            .known
+            .push(("/bin/t-args", WaitStatus::exited(0)));
+        h.programs.known.push((
+            "/bin/t-spin",
+            WaitStatus::killed(relay_abi::wait::KILLED_CTRL_C),
+        ));
+        assert_eq!(h.spawning("sh s.sh; t-args after"), (0, "".into()));
+        assert_eq!(h.spawning("t-x || t-args or"), (0, "".into()));
+        let args: Vec<String> = h
+            .programs
+            .spawned
+            .iter()
+            .map(|s| s.args.join(" "))
+            .collect();
+        assert_eq!(args, ["sh s.sh", "t-args after", "t-x", "t-args or"]);
+        // Killed by Ctrl-C, it ends the line, whatever its status says.
+        assert_eq!(h.spawning("t-spin; t-args no"), (130, "^C\n".into()));
+        assert_eq!(h.programs.spawned.len(), 5);
+        // A pipeline a stage of which Ctrl-C killed, too.
+        assert_eq!(
+            h.spawning("t-spin | t-args x; t-args no"),
+            (0, "^C\n".into())
+        );
+        assert_eq!(h.programs.spawned.len(), 7);
+        // So in a script: a program's 130 goes on, a Ctrl-C ends it.
+        h.put("/tmp/s.sh", b"t-x\nt-args b\nt-spin\nt-args c\n");
+        let mut out = FakeStdout::console();
+        h.sh(&["/tmp/s.sh"], &mut out);
+        let args: Vec<&str> = h.programs.spawned[7..]
+            .iter()
+            .map(|s| s.path.as_str())
+            .collect();
+        assert_eq!(args, ["/bin/t-x", "/bin/t-args", "/bin/t-spin"]);
+        // The in-process runner's `exit 130` in a script likewise.
+        let mut h = Harness::new();
+        h.put("/tmp/e.sh", b"exit 130\n");
+        assert_eq!(
+            h.run("sh /tmp/e.sh; echo after $?"),
+            (0, "+ exit 130\nafter 130\n".into())
+        );
+    }
+
+    #[test]
+    fn a_negated_command_that_does_not_expand_fails() {
+        // bash's `$?` is 1: the command never ran, so there is nothing to
+        // negate (the review found 0).
+        let mut h = Harness::new();
+        assert_eq!(
+            h.lines(&["! echo ${1A}", "echo $?", "! A=${1A}", "echo $?"]),
+            (
+                0,
+                "relay-sh: ${1A}: bad substitution\n1\n\
+                 relay-sh: ${1A}: bad substitution\n1\n"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn ctrl_c_ends_a_negated_pipeline_s_line_and_script() {
+        let mut h = Harness::new();
+        h.put("/tmp/big", &alloc::vec![b'x'; 300_000]);
+        // `$?` is the negated 130, as in bash, and the rest does not run.
+        h.console.interrupt = true;
+        assert_eq!(h.run("! cat /tmp/big | wc -c; echo no"), (0, "^C\n".into()));
+        // Only that line: the next one runs whole.
+        let mut shell = Shell::new(&mut h.vfs, &mut h.console, &mut h.system);
+        shell.execute("cat /tmp/big");
+        assert_eq!(shell.execute("echo a; echo b"), 0);
+        assert_eq!(h.console.take(), "^C\na\nb\n");
+        h.console.interrupt = false;
+        h.put("/tmp/s.sh", b"! cat /tmp/big | wc -c\necho no\n");
+        h.console.interrupt_after = Some(1);
+        assert_eq!(
+            h.run("sh /tmp/s.sh").1,
+            "+ ! cat /tmp/big | wc -c\n^C\n",
+            "the script ends there"
+        );
+    }
+
+    #[test]
+    fn a_negated_background_job_starts_with_status_0() {
+        let mut h = with_jobs();
+        let out = typed(&mut h, &["! sleep 5 &", "t-args $?", ""]);
+        assert!(
+            out.starts_with("root@relay:/# ! sleep 5 &\n[1] 101\n"),
+            "{out}"
+        );
+        assert_eq!(h.programs.spawned[1].args, ["t-args", "0"], "as bash's");
+        assert!(out.contains("Done                    sleep 5\n"), "{out}");
+    }
+
+    #[test]
+    fn a_bad_substitution_in_a_pipeline_or_a_job_fails_only_it() {
+        // bash expands a pipeline's commands, and a job's, in shells of
+        // their own, so the error ends only them and the line goes on (the
+        // review found the rest of the line dropped). The pipeline's status
+        // is 1: it is expanded whole before any of it starts (user-space
+        // gate §16 item 10), where bash runs its other commands.
+        let mut h = Harness::new();
+        assert_eq!(
+            h.run("echo ${1A} | cat; echo after $?"),
+            (0, "relay-sh: ${1A}: bad substitution\nafter 1\n".into())
+        );
+        let mut h = with_jobs();
+        let out = typed(&mut h, &["sleep ${1A} & t-args after"]);
+        assert!(out.contains("relay-sh: ${1A}: bad substitution\n"), "{out}");
+        let args: Vec<String> = h
+            .programs
+            .spawned
+            .iter()
+            .map(|s| s.args.join(" "))
+            .collect();
+        assert_eq!(args, ["t-args after"], "no job started; t-args ran");
+    }
+
+    #[test]
+    fn a_compound_command_runs_none_of_its_parts() {
+        let mut h = Harness::new();
+        assert_eq!(
+            h.run("echo a; if true; then echo b; fi"),
+            (2, "relay-sh: unsupported syntax: if\n".into())
+        );
+    }
+
+    #[test]
+    fn each_item_of_a_list_is_synced() {
+        let mut h = Harness::new();
+        h.run("pwd; pwd; pwd");
+        assert_eq!(h.spy.syncs.get(), 3);
+    }
+
+    #[test]
     fn unknown_commands_and_syntax_errors() {
         let mut h = Harness::new();
         assert_eq!(
@@ -751,7 +1151,10 @@ mod tests {
         );
         assert_eq!(
             h.run("ls | ;"),
-            (2, "relay-sh: unsupported syntax: ;\n".into())
+            (
+                2,
+                "relay-sh: syntax error near unexpected token `;'\n".into()
+            )
         );
         assert_eq!(
             h.run("ls |"),
@@ -940,6 +1343,37 @@ mod tests {
         assert_eq!(
             h.run("echo hi &"),
             (2, "relay-sh: unsupported syntax: &\n".into())
+        );
+        // Nothing of a line that holds one runs.
+        assert_eq!(
+            h.run("echo a; echo b & echo c"),
+            (2, "relay-sh: unsupported syntax: &\n".into())
+        );
+    }
+
+    #[test]
+    fn an_ampersand_mid_line_starts_a_job_and_goes_on() {
+        let mut h = with_jobs();
+        let out = typed(&mut h, &["sleep 5 & t-args a", "sleep 6 & sleep 7 &", ""]);
+        assert!(
+            out.starts_with(
+                "root@relay:/# sleep 5 & t-args a\n[1] 101\n\
+                 root@relay:/# sleep 6 & sleep 7 &\n[2] 103\n[3] 104\n"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("Done                    sleep 6\n"), "{out}");
+        assert!(out.contains("Done                    sleep 7\n"), "{out}");
+        let groups: Vec<crate::Group> = h.programs.spawned.iter().map(|s| s.group).collect();
+        assert_eq!(
+            groups,
+            [
+                crate::Group::Background,
+                crate::Group::New,
+                crate::Group::Background,
+                crate::Group::Background
+            ],
+            "t-args has the console"
         );
     }
 

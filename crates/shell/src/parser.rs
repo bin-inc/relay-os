@@ -29,12 +29,18 @@
 //! the line. An unquoted `|` joins commands into a pipeline (user-space
 //! gate §9.1); each has a name, only the last may redirect its output, and
 //! bash's syntax errors name a `|` with no command before it or none after.
-//! An unquoted `&` at the end of the line (a comment may follow) runs it in
-//! the background (§9.2). Every other shell feature is refused: an unquoted
-//! `;`, `&` before more, `*`, `?`, `<`, `` ` ``, `(` or `)` is an error
-//! naming the character, instead of being passed on as if it were plain
-//! text; so are `||`, `&&`, `|&` (the errors into the pipe too), `>&` and
-//! `2>` (another stream).
+//! A line is a [`List`] (programmable shell gate §4.1): an unquoted `;`
+//! ends one of its items, and an unquoted `&` ends one that runs in the
+//! background (user-space gate §9.2), the line going on after either;
+//! `&&` and `||` join pipelines into an and-or list. bash's syntax errors
+//! name any of them with no command before it, and an and-or list ending
+//! with `&` is refused. An unquoted `!` word at a pipeline's start negates
+//! its status. bash's reserved words (`if`, `while`, `{`, …) are refused
+//! where a command name would stand. Every other shell feature is refused:
+//! an unquoted `*`, `?`,
+//! `<`, `` ` ``, `(` or `)` is an error naming the character, instead of
+//! being passed on as if it were plain text; so are `|&` (the errors into
+//! the pipe too), `>&` and `2>` (another stream).
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -46,24 +52,45 @@ use core::str::CharIndices;
 /// The home directory `~` stands for.
 pub const HOME: &str = "/root";
 
-/// A line's commands: one, or several joined by `|`, each one's output the
-/// next one's input. A blank line is one command without words.
-pub type Pipeline<W = String> = Vec<Command<W>>;
-
-/// A command line: its pipeline, and, if it ends with `&`, what was typed
-/// before the `&` (a background job's text, spec §9.2).
+/// What a command line holds (programmable shell gate §4.1): its items,
+/// run one after another. A line of nothing but blanks or a comment holds
+/// none.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Line<W = String> {
-    pub pipeline: Pipeline<W>,
+pub struct List<W = String> {
+    pub items: Vec<Item<W>>,
+}
+
+/// One item of a list: an and-or list, and, if it ends with `&`, what was
+/// typed of it (a background job's text, user-space gate §9.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Item<W = String> {
+    pub and_or: AndOr<W>,
     pub background: Option<String>,
 }
 
-impl<W> Line<W> {
-    /// Nothing but blanks or a comment was typed.
-    pub fn is_blank(&self) -> bool {
-        matches!(&self.pipeline[..], [c] if c.words.is_empty() && c.redirect.is_none())
-            && self.background.is_none()
-    }
+/// Pipelines joined by `&&` and `||`: the first, then each one with what
+/// joins it to the ones before.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AndOr<W = String> {
+    pub first: Pipeline<W>,
+    pub rest: Vec<(Connector, Pipeline<W>)>,
+}
+
+/// What joins a pipeline to the ones before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Connector {
+    /// `&&`: it runs if the status so far is 0.
+    And,
+    /// `||`: it runs if the status so far is not 0.
+    Or,
+}
+
+/// One command, or several joined by `|`, each one's output the next
+/// one's input; after a `!`, its status negated.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pipeline<W = String> {
+    pub negated: bool,
+    pub commands: Vec<Command<W>>,
 }
 
 /// One command: its words and where its output goes. The parser gives
@@ -165,6 +192,16 @@ impl Word {
             .is_some_and(is_name)
     }
 
+    /// The word is `!`, unquoted.
+    fn is_bang(&self) -> bool {
+        matches!(&self.pieces[..], [Piece::Text(t, false)] if t == "!")
+    }
+
+    /// The word is one of bash's reserved words, unquoted.
+    fn is_reserved(&self) -> bool {
+        matches!(&self.pieces[..], [Piece::Text(t, false)] if RESERVED.contains(&t.as_str()))
+    }
+
     /// The word if it is one unquoted piece of text, all ASCII digits (`2`
     /// in `2>`).
     fn digits(&self) -> Option<&str> {
@@ -182,8 +219,9 @@ pub enum ParseError {
     UnterminatedQuote,
     /// A `\` with nothing after it.
     TrailingBackslash,
-    /// A redirection without a file name, or a `|` without a command
-    /// before it; holds what came instead.
+    /// A token where bash's grammar allows none: after a redirection
+    /// that has no file name yet, or an operator with no command before
+    /// it. Holds the token, as bash's message names it.
     MissingTarget(&'static str),
     /// A `|` without a command after it.
     UnexpectedEnd,
@@ -209,7 +247,15 @@ impl fmt::Display for ParseError {
     }
 }
 
-const UNSUPPORTED: &[char] = &[';', '*', '?', '<', '`', '(', ')'];
+const UNSUPPORTED: &[char] = &['*', '?', '<', '`', '(', ')'];
+
+/// bash's reserved words, and its loop built-ins, refused where a command
+/// name could stand (programmable shell gate §4.2) until the compound
+/// commands are implemented.
+const RESERVED: &[&str] = &[
+    "if", "then", "elif", "else", "fi", "while", "until", "for", "in", "do", "done", "case",
+    "esac", "select", "function", "time", "coproc", "{", "}", "[[", "]]", "break", "continue",
+];
 
 /// The characters a line is read from, and where each is.
 struct Cursor<'l> {
@@ -241,12 +287,6 @@ impl<'l> Cursor<'l> {
     /// Where the next character is (the line's length at its end).
     fn pos(&mut self) -> usize {
         self.chars.peek().map_or(self.line.len(), |&(i, _)| i)
-    }
-
-    /// What is left of the line.
-    fn rest(&mut self) -> &'l str {
-        let at = self.pos();
-        &self.line[at..]
     }
 }
 
@@ -504,6 +544,11 @@ struct Parts {
     redirect: Option<Redirect<Word>>,
     /// A `>` (false) or `>>` (true) seen, waiting for its file name.
     pending: Option<bool>,
+    /// How many `!` stood before the pipeline's first command.
+    bangs: usize,
+    /// The command is not the pipeline's first, so a `!` cannot stand
+    /// before it.
+    later: bool,
 }
 
 impl Parts {
@@ -516,6 +561,17 @@ impl Parts {
         match self.pending.take() {
             Some(_) if self.redirect.is_some() => return Err(ParseError::Unsupported(">".into())),
             Some(append) => self.redirect = Some(Redirect { path: w, append }),
+            // A `!` before anything of the command negates the pipeline
+            // (programmable shell gate §4.1), only the first command's.
+            None if w.is_bang() && self.words.is_empty() && self.redirect.is_none() => {
+                if self.later {
+                    return Err(ParseError::MissingTarget("!"));
+                }
+                self.bangs += 1;
+            }
+            None if self.words.is_empty() && self.redirect.is_none() && w.is_reserved() => {
+                return Err(ParseError::Unsupported(w.typed));
+            }
             None => self.words.push(w),
         }
         Ok(())
@@ -532,25 +588,109 @@ impl Parts {
             return Err(ParseError::Unsupported("> before |".into()));
         }
         let p = core::mem::take(self);
+        self.bangs = p.bangs;
+        self.later = true;
         command(p.words, None)
     }
 }
 
-/// The commands of `line`, whether or not it ends with `&`, their words
-/// expanded with no variables set (for callers that run no shell: tests);
-/// a line that does not expand is `ParseError::Expansion`.
-pub fn parse(line: &str) -> Result<Pipeline, ParseError> {
-    let typed = parse_line(line)?;
-    match crate::expand::plain(&typed) {
-        Ok(l) => Ok(l.pipeline),
+/// The commands of the first pipeline of `line`, whether or not it ends
+/// with `&`, their words expanded with no variables set (for callers that
+/// run no shell: tests); a line that does not expand is
+/// `ParseError::Expansion`. A blank line is one command without words.
+pub fn parse(line: &str) -> Result<Vec<Command>, ParseError> {
+    let list = parse_line(line)?;
+    let Some(item) = list.items.first() else {
+        return Ok(alloc::vec![Command {
+            words: Vec::new(),
+            redirect: None,
+        }]);
+    };
+    match crate::expand::plain(&item.and_or.first) {
+        Ok(p) => Ok(p.commands),
         Err(e) => Err(ParseError::Expansion(e.to_string())),
     }
 }
 
-/// `line`'s commands, their words as typed, and whether it runs in the
-/// background.
-pub fn parse_line(line: &str) -> Result<Line<Word>, ParseError> {
-    let mut background = None;
+/// The pipeline the command so far ends, at `end` (`;` or `&`, as
+/// bash's error names it); none if nothing was typed since the last item.
+fn end_pipeline(
+    parts: &mut Parts,
+    pipeline: &mut Vec<Command<Word>>,
+    end: &'static str,
+) -> Result<Option<Pipeline<Word>>, ParseError> {
+    if parts.pending.is_some() {
+        return Err(ParseError::MissingTarget(end));
+    }
+    if parts.words.is_empty() {
+        match (pipeline.is_empty(), &parts.redirect) {
+            // `!` alone is a command that does nothing, negated.
+            (true, None) if parts.bangs == 0 => return Ok(None),
+            (true, None) => {}
+            (true, Some(_)) => {}
+            (false, None) => return Err(ParseError::MissingTarget(end)),
+            (false, Some(_)) => return Err(ParseError::Unsupported("| >".into())),
+        }
+    }
+    let p = core::mem::take(parts);
+    pipeline.push(command(p.words, p.redirect)?);
+    Ok(Some(Pipeline {
+        negated: p.bangs % 2 == 1,
+        commands: core::mem::take(pipeline),
+    }))
+}
+
+impl Connector {
+    /// As typed.
+    fn token(self) -> &'static str {
+        match self {
+            Connector::And => "&&",
+            Connector::Or => "||",
+        }
+    }
+}
+
+/// The items read so far, and the and-or list being read.
+#[derive(Default)]
+struct Items {
+    items: Vec<Item<Word>>,
+    and_or: Option<AndOr<Word>>,
+    /// The `&&` or `||` after the and-or list, waiting for its next
+    /// pipeline.
+    connector: Option<Connector>,
+}
+
+impl Items {
+    /// A pipeline that ended: the start of an and-or list, or the one the
+    /// waiting connector joins to it.
+    fn pipeline(&mut self, p: Pipeline<Word>) {
+        match (&mut self.and_or, self.connector.take()) {
+            (Some(and_or), Some(c)) => and_or.rest.push((c, p)),
+            _ => {
+                self.and_or = Some(AndOr {
+                    first: p,
+                    rest: Vec::new(),
+                })
+            }
+        }
+    }
+
+    /// The and-or list ends an item; `background` is its text if it
+    /// ended with `&`.
+    fn end(&mut self, background: Option<String>) {
+        if let Some(and_or) = self.and_or.take() {
+            self.items.push(Item { and_or, background });
+        }
+    }
+}
+
+/// `line`'s list, its words as typed. `;` ends an item, and `&&` and `||`
+/// join pipelines, as bash's do; one with nothing typed before it is
+/// bash's syntax error naming it.
+pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
+    let mut items = Items::default();
+    // Where the item being read starts in the line.
+    let mut item_start = 0;
     let mut pipeline = Vec::new();
     let mut parts = Parts::default();
     let mut word = Building::default();
@@ -581,10 +721,11 @@ pub fn parse_line(line: &str) -> Result<Line<Word>, ParseError> {
                 }
                 parts.pending = Some(append);
             }
+            '|' if cur.next_if_eq('|') => {
+                parts.end_word(&mut word, line)?;
+                join(&mut items, &mut parts, &mut pipeline, Connector::Or)?;
+            }
             '|' => {
-                if cur.next_if_eq('|') {
-                    return Err(ParseError::Unsupported("||".into()));
-                }
                 // bash's `|&` pipes the errors too.
                 if cur.next_if_eq('&') {
                     return Err(ParseError::Unsupported("|&".into()));
@@ -592,10 +733,28 @@ pub fn parse_line(line: &str) -> Result<Line<Word>, ParseError> {
                 parts.end_word(&mut word, line)?;
                 pipeline.push(parts.take_before_pipe()?);
             }
-            '&' => {
-                if cur.next_if_eq('&') {
-                    return Err(ParseError::Unsupported("&&".into()));
+            ';' => {
+                // bash's `;;`, `;&` and `;;&` end a `case` branch.
+                if cur.next_if_eq(';') {
+                    let token = if cur.next_if_eq('&') { ";;&" } else { ";;" };
+                    return Err(ParseError::MissingTarget(token));
                 }
+                if cur.next_if_eq('&') {
+                    return Err(ParseError::MissingTarget(";&"));
+                }
+                parts.end_word(&mut word, line)?;
+                match end_pipeline(&mut parts, &mut pipeline, ";")? {
+                    Some(p) => items.pipeline(p),
+                    None => return Err(ParseError::MissingTarget(";")),
+                }
+                items.end(None);
+                item_start = cur.pos();
+            }
+            '&' if cur.next_if_eq('&') => {
+                parts.end_word(&mut word, line)?;
+                join(&mut items, &mut parts, &mut pipeline, Connector::And)?;
+            }
+            '&' => {
                 parts.end_word(&mut word, line)?;
                 if parts.pending.is_some() || parts.words.is_empty() && parts.redirect.is_none() {
                     return Err(ParseError::MissingTarget("&"));
@@ -604,16 +763,23 @@ pub fn parse_line(line: &str) -> Result<Line<Word>, ParseError> {
                     // `> f &`: a background job is a program.
                     return Err(ParseError::Unsupported("> &".into()));
                 }
-                let after = cur.rest().trim_start_matches([' ', '\t']);
-                if after.starts_with('&') {
-                    return Err(ParseError::MissingTarget("&"));
+                // bash runs the whole and-or list in the background, in a
+                // shell of its own.
+                if let Some(c) = items.connector {
+                    return Err(ParseError::Unsupported(format!("& after {}", c.token())));
                 }
-                if !after.is_empty() && !after.starts_with('#') {
-                    // `a & b` runs both in bash.
-                    return Err(ParseError::Unsupported("&".into()));
+                // Without its `!`, as bash's `jobs` shows it.
+                let mut text = line[item_start..at].trim_matches([' ', '\t']);
+                for _ in 0..parts.bangs {
+                    text = text[1..].trim_start_matches([' ', '\t']);
                 }
-                background = Some(String::from(line[..at].trim_matches([' ', '\t'])));
-                break;
+                let text = String::from(text);
+                if let Some(p) = end_pipeline(&mut parts, &mut pipeline, "&")? {
+                    items.pipeline(p);
+                }
+                // The line goes on after it, as bash's does (`a & b`).
+                items.end(Some(text));
+                item_start = cur.pos();
             }
             '\'' => {
                 let before = word.open_quote();
@@ -680,17 +846,37 @@ pub fn parse_line(line: &str) -> Result<Line<Word>, ParseError> {
     if parts.pending.is_some() {
         return Err(ParseError::MissingTarget("newline"));
     }
-    if !pipeline.is_empty() && parts.words.is_empty() {
-        return Err(match parts.redirect {
-            None => ParseError::UnexpectedEnd,
-            Some(_) => ParseError::Unsupported("| >".into()),
-        });
+    if !pipeline.is_empty() && parts.words.is_empty() && parts.redirect.is_none() {
+        return Err(ParseError::UnexpectedEnd);
     }
-    pipeline.push(command(parts.words, parts.redirect)?);
-    Ok(Line {
-        pipeline,
-        background,
-    })
+    // Nothing after the last `;` (or at all) is no item.
+    match end_pipeline(&mut parts, &mut pipeline, "newline")? {
+        Some(p) => items.pipeline(p),
+        None if items.connector.is_some() => return Err(ParseError::UnexpectedEnd),
+        None => {}
+    }
+    items.end(None);
+    Ok(List { items: items.items })
+}
+
+/// A `&&` or `||` (`connector`) ends the pipeline before it, which must
+/// hold something, and waits for the next one.
+fn join(
+    items: &mut Items,
+    parts: &mut Parts,
+    pipeline: &mut Vec<Command<Word>>,
+    connector: Connector,
+) -> Result<(), ParseError> {
+    // Not even after a `!`, as bash's grammar has it.
+    if parts.words.is_empty() && parts.redirect.is_none() && pipeline.is_empty() {
+        return Err(ParseError::MissingTarget(connector.token()));
+    }
+    match end_pipeline(parts, pipeline, connector.token())? {
+        Some(p) => items.pipeline(p),
+        None => return Err(ParseError::MissingTarget(connector.token())),
+    }
+    items.connector = Some(connector);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -705,17 +891,46 @@ mod tests {
         })
     }
 
-    /// `line` as `Shell::execute` runs it: parsed, then expanded.
-    fn expanded(line: &str) -> Result<Line, ParseError> {
-        parse_line(line).and_then(|l| {
-            crate::expand::plain(&l).map_err(|e| ParseError::Expansion(e.to_string()))
-        })
+    /// The commands of `line`'s one pipeline, as typed.
+    fn typed(line: &str) -> Vec<Command<Word>> {
+        parse_line(line)
+            .unwrap()
+            .items
+            .remove(0)
+            .and_or
+            .first
+            .commands
+    }
+
+    /// The background text of `line`'s one item.
+    fn background(line: &str) -> Option<String> {
+        parse_line(line).unwrap().items.remove(0).background
     }
 
     fn words(line: &str) -> Vec<String> {
         let c = one(line).unwrap();
         assert_eq!(c.redirect, None);
         c.words
+    }
+
+    #[test]
+    fn a_line_is_a_list_of_items() {
+        // Blanks or a comment hold none; a pipeline is one item, with the
+        // text of a background job.
+        assert_eq!(parse_line(" \t# x").unwrap().items, []);
+        let list = parse_line("cat f | wc &").unwrap();
+        assert_eq!(list.items.len(), 1);
+        let item = &list.items[0];
+        assert_eq!(item.background.as_deref(), Some("cat f | wc"));
+        assert_eq!(item.and_or.rest, []);
+        let names: Vec<&str> = item
+            .and_or
+            .first
+            .commands
+            .iter()
+            .map(|c| c.words[0].typed.as_str())
+            .collect();
+        assert_eq!(names, ["cat", "wc"]);
     }
 
     #[test]
@@ -757,8 +972,8 @@ mod tests {
     #[test]
     fn a_word_keeps_which_of_its_pieces_were_quoted() {
         let text = |t: &str, quoted| Piece::Text(t.into(), quoted);
-        let l = parse_line(r#"a'b c'\d"e" '' "" ~/x"#).unwrap();
-        let pieces: Vec<&[Piece]> = l.pipeline[0].words.iter().map(|w| &w.pieces[..]).collect();
+        let c = typed(r#"a'b c'\d"e" '' "" ~/x"#);
+        let pieces: Vec<&[Piece]> = c[0].words.iter().map(|w| &w.pieces[..]).collect();
         assert_eq!(
             pieces,
             [
@@ -768,7 +983,7 @@ mod tests {
                 &[text("/root/x", false)],
             ]
         );
-        let c = &parse_line("echo >'o'ut").unwrap().pipeline[0];
+        let c = &typed("echo >'o'ut")[0];
         assert_eq!(
             c.redirect.as_ref().unwrap().path.pieces,
             [text("o", true), text("ut", false)]
@@ -800,7 +1015,7 @@ mod tests {
 
     /// The pieces of `line`'s words.
     fn pieces(line: &str) -> Vec<Vec<Piece>> {
-        parse_line(line).unwrap().pipeline[0]
+        typed(line)[0]
             .words
             .iter()
             .map(|w| w.pieces.clone())
@@ -979,8 +1194,8 @@ mod tests {
 
     /// `word`'s assignment, the value's pieces joined.
     fn assignment(word: &str) -> Option<(String, String)> {
-        let l = parse_line(word).unwrap();
-        let (name, value) = l.pipeline[0].words[0].assignment()?;
+        let c = typed(word);
+        let (name, value) = c[0].words[0].assignment()?;
         let text = value
             .pieces
             .iter()
@@ -1077,8 +1292,7 @@ mod tests {
 
     #[test]
     fn a_word_is_kept_as_typed() {
-        let l = parse_line(r#"echo  a"b c"$D  > '$f'x# 2"#).unwrap();
-        let c = &l.pipeline[0];
+        let c = &typed(r#"echo  a"b c"$D  > '$f'x# 2"#)[0];
         let typed: Vec<&str> = c.words.iter().map(|w| w.typed.as_str()).collect();
         assert_eq!(typed, ["echo", r#"a"b c"$D"#, "2"]);
         assert_eq!(c.redirect.as_ref().unwrap().path.typed, "'$f'x#");
@@ -1147,7 +1361,6 @@ mod tests {
     #[test]
     fn unsupported_syntax_names_the_character() {
         for (line, c) in [
-            ("a; b", ';'),
             ("ls *.txt", '*'),
             ("ls file?", '?'),
             ("cat < f", '<'),
@@ -1160,6 +1373,226 @@ mod tests {
             one("echo a 2>f").unwrap_err().to_string(),
             "unsupported syntax: 2>"
         );
+    }
+
+    #[test]
+    fn a_semicolon_ends_an_item() {
+        let list = parse_line("echo a;echo b ; cat f | wc;").unwrap();
+        let firsts: Vec<&str> = list
+            .items
+            .iter()
+            .map(|i| i.and_or.first.commands[0].words[0].typed.as_str())
+            .collect();
+        assert_eq!(firsts, ["echo", "echo", "cat"]);
+        assert!(list.items.iter().all(|i| i.background.is_none()));
+        // Quoted, escaped or in a comment it is a character.
+        assert_eq!(
+            parse(r#"echo ';' ";" \; # ; x"#).unwrap()[0].words,
+            ["echo", ";", ";", ";"]
+        );
+        // A background job's text is its own item's.
+        let list = parse_line("echo a; sleep 5 &").unwrap();
+        assert_eq!(list.items[1].background.as_deref(), Some("sleep 5"));
+    }
+
+    #[test]
+    fn a_semicolon_needs_a_command_before_it() {
+        // bash's messages (an interactive bash 5.2, for each line).
+        for (line, token) in [
+            (";", ";"),
+            ("; echo a", ";"),
+            ("echo a; ;", ";"),
+            ("echo a;;", ";;"),
+            ("echo a ;; echo b", ";;"),
+            // bash's other `case` terminators (the review found them
+            // named `&` and `;;`).
+            ("echo a ;& echo b", ";&"),
+            ("echo a;&", ";&"),
+            ("echo a ;;& echo b", ";;&"),
+            ("echo > ;", ";"),
+            ("ls | ;", ";"),
+        ] {
+            assert_eq!(
+                parse_line(line).unwrap_err().to_string(),
+                alloc::format!("syntax error near unexpected token `{token}'"),
+                "{line}"
+            );
+        }
+        assert_eq!(
+            parse_line("a | > f; b"),
+            Err(ParseError::Unsupported("| >".into()))
+        );
+    }
+
+    /// The first command's name of each pipeline of `line`'s one and-or
+    /// list, and what joins each to the one before.
+    fn and_or(line: &str) -> (Vec<String>, Vec<Connector>) {
+        let ao = parse_line(line).unwrap().items.remove(0).and_or;
+        let name = |p: &Pipeline<Word>| p.commands[0].words[0].typed.clone();
+        let mut names = alloc::vec![name(&ao.first)];
+        names.extend(ao.rest.iter().map(|(_, p)| name(p)));
+        (names, ao.rest.iter().map(|&(c, _)| c).collect())
+    }
+
+    #[test]
+    fn double_ampersands_and_bars_join_pipelines() {
+        use Connector::{And, Or};
+        assert_eq!(
+            and_or("a && b|c || d&&e"),
+            (
+                alloc::vec!["a".into(), "b".into(), "d".into(), "e".into()],
+                alloc::vec![And, Or, And]
+            )
+        );
+        let list = parse_line("a && b; c || d").unwrap();
+        assert_eq!(list.items.len(), 2);
+        // Quoted, escaped or in a comment they are characters.
+        assert_eq!(
+            parse(r"echo '&&' \|\| # && x").unwrap()[0].words,
+            ["echo", "&&", "||"]
+        );
+    }
+
+    #[test]
+    fn a_double_ampersand_or_bar_needs_a_pipeline_on_each_side() {
+        // bash's messages (an interactive bash 5.2, for each line).
+        for (line, token) in [
+            ("&& a", "&&"),
+            ("|| a", "||"),
+            ("a && && b", "&&"),
+            ("a || && b", "&&"),
+            ("a | && b", "&&"),
+            ("echo > && b", "&&"),
+            ("a && | b", "|"),
+            ("a && ; b", ";"),
+            ("a ||; b", ";"),
+            ("a && &", "&"),
+        ] {
+            assert_eq!(
+                parse_line(line).unwrap_err().to_string(),
+                alloc::format!("syntax error near unexpected token `{token}'"),
+                "{line}"
+            );
+        }
+        // `bash -c 'a &&'`.
+        for line in ["a &&", "a || ", "a && # b"] {
+            assert_eq!(parse_line(line), Err(ParseError::UnexpectedEnd), "{line}");
+        }
+        // bash runs the whole and-or list in the background, in a shell
+        // of its own (programmable shell gate §4.1).
+        assert_eq!(
+            parse_line("a && b &"),
+            Err(ParseError::Unsupported("& after &&".into()))
+        );
+        assert_eq!(
+            parse_line("a && b || c &"),
+            Err(ParseError::Unsupported("& after ||".into()))
+        );
+    }
+
+    /// The first pipeline of `line`, as typed.
+    fn first(line: &str) -> Pipeline<Word> {
+        parse_line(line).unwrap().items.remove(0).and_or.first
+    }
+
+    #[test]
+    fn a_bang_before_a_pipeline_negates_it() {
+        let p = first("! a | b");
+        assert!(p.negated);
+        assert_eq!(p.commands.len(), 2);
+        // Each `!` turns it again, as bash's does.
+        assert!(!first("! ! a").negated && first("! ! ! a").negated);
+        assert!(!first("a").negated);
+        // Alone before `;` or the line's end, it negates nothing.
+        let list = parse_line("! ; !").unwrap();
+        assert_eq!(list.items.len(), 2);
+        for item in &list.items {
+            let p = &item.and_or.first;
+            assert!(p.negated && p.commands[0].words.is_empty());
+        }
+        // Each pipeline of an and-or list has its own.
+        let ao = parse_line("! a && ! b || c")
+            .unwrap()
+            .items
+            .remove(0)
+            .and_or;
+        let negated: Vec<bool> = core::iter::once(&ao.first)
+            .chain(ao.rest.iter().map(|(_, p)| p))
+            .map(|p| p.negated)
+            .collect();
+        assert_eq!(negated, [true, true, false]);
+        // Only a whole unquoted word at a pipeline's start: elsewhere, as
+        // bash's, it is a word (after a redirection, a command's name).
+        for (line, words) in [
+            ("echo !", &["echo", "!"][..]),
+            ("'!' a", &["!", "a"]),
+            ("\\! a", &["!", "a"]),
+            ("!a b", &["!a", "b"]),
+            ("> f ! a", &["!", "a"]),
+        ] {
+            assert!(!first(line).negated, "{line}");
+            assert_eq!(parse(line).unwrap()[0].words, words, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_bang_stands_only_at_a_pipeline_s_start() {
+        // bash's messages (an interactive bash 5.2, for each line).
+        for (line, token) in [
+            ("a | ! b", "!"),
+            ("! | a", "|"),
+            ("! && a", "&&"),
+            ("! || a", "||"),
+            ("! &", "&"),
+        ] {
+            assert_eq!(
+                parse_line(line).unwrap_err().to_string(),
+                alloc::format!("syntax error near unexpected token `{token}'"),
+                "{line}"
+            );
+        }
+        // A background job's text leaves it out, as bash's `jobs` does.
+        assert_eq!(background("! sleep 5 &").as_deref(), Some("sleep 5"));
+        assert_eq!(background("! ! sleep 5 &").as_deref(), Some("sleep 5"));
+    }
+
+    #[test]
+    fn a_reserved_word_where_a_command_name_stands_is_unsupported() {
+        // Until compound commands come (programmable shell gate §4.2),
+        // bash's reserved words are refused where they would be one, rather
+        // than run as commands that are not found.
+        // The words of the spec's §4.2, written out apart from `RESERVED`.
+        for word in [
+            "if", "then", "elif", "else", "fi", "while", "until", "for", "in", "do", "done",
+            "case", "esac", "select", "function", "time", "coproc", "{", "}", "[[", "]]", "break",
+            "continue",
+        ] {
+            for line in [
+                alloc::format!("{word} x"),
+                alloc::format!("a; {word}"),
+                alloc::format!("a && {word} b"),
+                alloc::format!("a | {word}"),
+                alloc::format!("! {word}"),
+            ] {
+                assert_eq!(
+                    parse_line(&line),
+                    Err(ParseError::Unsupported(String::from(word))),
+                    "{line:?}"
+                );
+            }
+        }
+        // Anywhere else, quoted or escaped, or after a redirection (a
+        // command's name in bash), it is a word.
+        for (line, words) in [
+            ("echo if then fi", &["echo", "if", "then", "fi"][..]),
+            ("'if' x", &["if", "x"]),
+            ("\\while x", &["while", "x"]),
+            ("> f done", &["done"]),
+            ("iffy", &["iffy"]),
+        ] {
+            assert_eq!(parse(line).unwrap()[0].words, words, "{line}");
+        }
+        assert!(parse_line("if=1").is_ok(), "an assignment");
     }
 
     #[test]
@@ -1189,17 +1622,12 @@ mod tests {
     #[test]
     fn a_bar_needs_a_command_on_each_side() {
         // bash's messages (`bash -c '| a'`, `bash -c 'a |'`).
-        for line in ["| a", "a | | b", "a || | b", "echo > | b", " |"] {
-            let e = parse(line).unwrap_err();
-            if line.contains("||") {
-                assert_eq!(e, ParseError::Unsupported("||".into()), "{line}");
-            } else {
-                assert_eq!(
-                    e.to_string(),
-                    "syntax error near unexpected token `|'",
-                    "{line}"
-                );
-            }
+        for line in ["| a", "a | | b", "a || | b", "a ||| b", "echo > | b", " |"] {
+            assert_eq!(
+                parse(line).unwrap_err().to_string(),
+                "syntax error near unexpected token `|'",
+                "{line}"
+            );
         }
         for line in ["a |", "a | b |  ", "a | # b"] {
             assert_eq!(
@@ -1208,7 +1636,6 @@ mod tests {
                 "{line}"
             );
         }
-        assert_eq!(parse("a || b"), Err(ParseError::Unsupported("||".into())));
         // bash's `|&` sends the errors into the pipe too; `| &` is its
         // syntax error.
         assert_eq!(
@@ -1250,9 +1677,8 @@ mod tests {
 
     #[test]
     fn a_line_ending_with_an_ampersand_runs_in_the_background() {
-        let l = expanded("sleep 5 &").unwrap();
-        assert_eq!(l.pipeline[0].words, ["sleep", "5"]);
-        assert_eq!(l.background.as_deref(), Some("sleep 5"));
+        assert_eq!(parse("sleep 5 &").unwrap()[0].words, ["sleep", "5"]);
+        assert_eq!(background("sleep 5 &").as_deref(), Some("sleep 5"));
         // The text is what was typed before the `&`, without the blanks
         // around it; a comment may follow.
         for (line, text) in [
@@ -1261,17 +1687,51 @@ mod tests {
             ("t-spin&", "t-spin"),
             ("grep x f | head -n 1 & # one", "grep x f | head -n 1"),
         ] {
-            let l = parse_line(line).unwrap();
-            assert_eq!(l.background.as_deref(), Some(text), "{line}");
+            assert_eq!(background(line).as_deref(), Some(text), "{line}");
         }
-        let l = expanded("cat f | wc -l > out &").unwrap();
-        assert_eq!(l.pipeline.len(), 2);
-        assert_eq!(l.pipeline[1].redirect.as_ref().unwrap().path, "out");
+        let p = parse("cat f | wc -l > out &").unwrap();
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[1].redirect.as_ref().unwrap().path, "out");
         // Quoted, escaped or in a comment it is a character.
         for line in ["echo '&' \"&\" \\&", "echo a # &", "echo a"] {
-            assert_eq!(parse_line(line).unwrap().background, None, "{line}");
+            assert_eq!(background(line), None, "{line}");
         }
         assert_eq!(words("echo '&' \\& # &"), ["echo", "&", "&"]);
+    }
+
+    #[test]
+    fn an_ampersand_ends_an_item_that_runs_in_the_background() {
+        let backgrounds = |line: &str| -> Vec<Option<String>> {
+            parse_line(line)
+                .unwrap()
+                .items
+                .into_iter()
+                .map(|i| i.background)
+                .collect()
+        };
+        let some = |t: &str| Some(String::from(t));
+        assert_eq!(
+            backgrounds("sleep 5 & echo a &t-spin&"),
+            [some("sleep 5"), some("echo a"), some("t-spin")]
+        );
+        assert_eq!(backgrounds("a & b"), [some("a"), None]);
+        assert_eq!(
+            backgrounds("a | b & c; d & # e"),
+            [some("a | b"), None, some("d")]
+        );
+        // bash's messages (an interactive bash 5.2, for each line).
+        for (line, token) in [
+            ("a & &", "&"),
+            ("a & && b", "&&"),
+            ("a & ;", ";"),
+            ("a & | b", "|"),
+        ] {
+            assert_eq!(
+                parse_line(line).unwrap_err().to_string(),
+                alloc::format!("syntax error near unexpected token `{token}'"),
+                "{line}"
+            );
+        }
     }
 
     #[test]
@@ -1286,24 +1746,14 @@ mod tests {
             "a & &",
             "a &&&",
         ] {
-            let e = parse_line(line).unwrap_err();
-            if line.contains("&&") {
-                assert_eq!(e, ParseError::Unsupported("&&".into()), "{line}");
-            } else {
-                assert_eq!(
-                    e.to_string(),
-                    "syntax error near unexpected token `&'",
-                    "{line}"
-                );
-            }
+            assert_eq!(
+                parse_line(line).unwrap_err().to_string(),
+                "syntax error near unexpected token `&'",
+                "{line}"
+            );
         }
-        // bash runs `a & b`, `a && b` and `> f &`; they are not supported.
+        // bash runs `> f &`; it is not supported.
         for (line, what) in [
-            ("a & b", "&"),
-            ("a &b", "&"),
-            ("a & | b", "&"),
-            ("a && b", "&&"),
-            ("a &&", "&&"),
             ("> f &", "> &"),
             // bash runs these (the review found them called its syntax
             // error).
