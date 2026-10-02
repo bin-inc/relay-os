@@ -9,6 +9,7 @@ use crate::expand::{self, Vars};
 use crate::io::{Console, Programs, Stdin, Stdout, System};
 use crate::jobs::Jobs;
 use crate::parser::{self, HOME};
+use crate::reader::Reader;
 use crate::runner::{self, Parts, Ran, Runners};
 use crate::transcript::{self, Transcript};
 use alloc::format;
@@ -550,10 +551,11 @@ impl<'a> Shell<'a> {
     }
 
     /// `X | sh`: a shell whose standard input is no console runs the
-    /// commands it reads there (user-space gate §9.1, §16 item 8), a line
-    /// at a time as they come, without a prompt, a trace or the line
+    /// commands it reads there (user-space gate §9.1, §16 item 8), each as
+    /// soon as a line finishes it, without a prompt, a trace or the line
     /// editor, so it never takes the console; it ends at the input's end or
-    /// `exit`. It reads a byte at a time, as bash reads a pipe, so that a
+    /// `exit`. Input that ends inside a command is bash's `unexpected end
+    /// of file`. It reads a byte at a time, as bash reads a pipe, so that a
     /// command it runs reads what follows its line (`printf 'cat\nx\n' |
     /// sh` gives `cat` the `x`). A line over 64 KiB, or not UTF-8, is
     /// skipped with a message, as `sh` refuses such a script. Returns the
@@ -561,13 +563,19 @@ impl<'a> Shell<'a> {
     pub fn run_input(&mut self, input: &mut dyn Stdin) -> i32 {
         let mut line: Vec<u8> = Vec::new();
         let mut too_long = false;
+        let mut reader = Reader::new();
         self.stopped = false;
         loop {
             let mut byte = [0];
             match input.read(&mut byte) {
                 Ok(0) => {
                     if !line.is_empty() || too_long {
-                        self.input_line(&line, too_long);
+                        self.input_line(&mut reader, &line, too_long);
+                    }
+                    if !self.stopped
+                        && let Some(e) = reader.end()
+                    {
+                        return self.finish(SYNTAX, format!("{NAME}: {e}\n"));
                     }
                     return self.status;
                 }
@@ -578,7 +586,7 @@ impl<'a> Shell<'a> {
                 }
             }
             if byte[0] == b'\n' {
-                self.input_line(&line, too_long);
+                self.input_line(&mut reader, &line, too_long);
                 line.clear();
                 too_long = false;
                 if self.stopped {
@@ -594,30 +602,49 @@ impl<'a> Shell<'a> {
         }
     }
 
-    /// One line `run_input` read: run, or said why not.
-    fn input_line(&mut self, line: &[u8], too_long: bool) {
+    /// One line `run_input` read: the command it finishes run, or said
+    /// why not. A line that cannot be read drops the command it was in.
+    fn input_line(&mut self, reader: &mut Reader, line: &[u8], too_long: bool) {
         self.collect_jobs();
         match core::str::from_utf8(line) {
             _ if too_long => {
+                reader.clear();
                 self.finish(1, String::from("sh: standard input: a line over 64 KiB\n"));
             }
             Ok(text) => {
-                self.execute(text);
+                self.read_line(reader, text);
             }
             Err(_) => {
+                reader.clear();
                 self.finish(1, String::from("sh: standard input: not a text line\n"));
             }
         }
     }
 
-    /// Runs a script's lines (spec §15 item 12): each command is shown as
-    /// `+ <line>`, then runs and is synced as if typed. Blank and comment
-    /// lines are skipped. Ctrl-C, `exit`, or `reboot`/`poweroff`
-    /// returning, ends the script; failing commands do not. Returns the
+    /// Adds a line to the command `reader` holds, and runs the command
+    /// once the line finishes it (programmable shell gate §4.3); a line
+    /// that does not parse drops it, with bash's message and status 2.
+    /// Returns the status, or `None` while the command needs more lines.
+    fn read_line(&mut self, reader: &mut Reader, line: &str) -> Option<i32> {
+        match reader.add(line) {
+            Ok(Some(list)) => Some(self.run_list(&list)),
+            Ok(None) => None,
+            Err(e) => Some(self.finish(SYNTAX, format!("{NAME}: {e}\n"))),
+        }
+    }
+
+    /// Runs a script's lines (spec §15 item 12): each line is shown as
+    /// `+ <line>` as it is read, and a command runs, and is synced, as if
+    /// typed once a line finishes it (programmable shell gate §5.4). Blank
+    /// and comment lines are skipped. Ctrl-C, `exit`, or
+    /// `reboot`/`poweroff` returning, ends the script; failing commands
+    /// do not, nor does a line that does not parse. A script that ends
+    /// inside a command is bash's `unexpected end of file`. Returns the
     /// last status.
     fn run_lines(&mut self, text: &str) -> i32 {
         self.in_script = true;
         let mut status = 0;
+        let mut reader = Reader::new();
         for line in text.lines() {
             // Blank as typed: one whose words expand to nothing is traced
             // and runs.
@@ -627,6 +654,7 @@ impl<'a> Shell<'a> {
             if self.console.interrupted() {
                 self.say(b"^C\n");
                 status = CANCELLED;
+                self.cancelled = true;
                 break;
             }
             self.collect_jobs();
@@ -636,10 +664,18 @@ impl<'a> Shell<'a> {
             // leaves at least its name.
             self.write_transcript();
             self.sync();
-            status = self.execute(line);
+            let Some(ran) = self.read_line(&mut reader, line) else {
+                continue;
+            };
+            status = ran;
             if self.cancelled || self.stopped {
                 break;
             }
+        }
+        if !(self.cancelled || self.stopped)
+            && let Some(e) = reader.end()
+        {
+            status = self.finish(SYNTAX, format!("{NAME}: {e}\n"));
         }
         self.in_script = false;
         status
@@ -810,6 +846,75 @@ mod tests {
             (0, "sh: standard input: a line over 64 KiB\n".into())
         );
         assert_eq!(h.programs.spawned.last().unwrap().args, ["t-args", "c"]);
+    }
+
+    #[test]
+    fn a_shell_reading_its_input_reads_a_command_across_lines() {
+        let mut h = spawning();
+        let mut input =
+            crate::Bytes::new(b"t-args a &&\nt-args b\nt-args c |\n\nt-args d\n".to_vec());
+        let status = Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+            .run_input(&mut input);
+        assert_eq!(status, 3);
+        let args: Vec<&str> = h
+            .programs
+            .spawned
+            .iter()
+            .map(|s| s.args[1].as_str())
+            .collect();
+        assert_eq!(args, ["a", "c", "d"], "t-args a failed, so b did not run");
+        assert_eq!(h.console.take(), "");
+        // The end of input inside a command runs none of it.
+        let mut input = crate::Bytes::new(b"t-args e ||".to_vec());
+        let status = Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+            .run_input(&mut input);
+        assert_eq!(
+            (status, h.console.take()),
+            (2, "relay-sh: syntax error: unexpected end of file\n".into())
+        );
+        assert_eq!(h.programs.spawned.len(), 3);
+    }
+
+    #[test]
+    fn a_line_that_cannot_be_read_drops_the_command_it_was_in() {
+        for bad in [alloc::vec![b'x'; 70_000], b"\xff".to_vec()] {
+            let mut h = spawning();
+            let mut text = b"t-args a ||\n".to_vec();
+            text.extend_from_slice(&bad);
+            text.extend_from_slice(b"\nt-args b\n");
+            let mut input = crate::Bytes::new(text);
+            Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+                .run_input(&mut input);
+            let args: Vec<&str> = h
+                .programs
+                .spawned
+                .iter()
+                .map(|s| s.args[1].as_str())
+                .collect();
+            assert_eq!(args, ["b"], "t-args a || never ran");
+        }
+    }
+
+    #[test]
+    fn a_command_read_across_lines_holds_at_most_64_kib() {
+        let mut h = spawning();
+        let line = alloc::format!("t-args {} &&\n", "x".repeat(40_000));
+        let mut text = line.repeat(2).into_bytes();
+        text.extend_from_slice(b"t-args after\n");
+        let mut input = crate::Bytes::new(text);
+        Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+            .run_input(&mut input);
+        assert_eq!(
+            h.console.take(),
+            "relay-sh: the command would be longer than 64 KiB\n"
+        );
+        let args: Vec<&str> = h
+            .programs
+            .spawned
+            .iter()
+            .map(|s| s.args[1].as_str())
+            .collect();
+        assert_eq!(args, ["after"], "the rest of it read afresh");
     }
 
     /// Input that records how much each read asked for.
