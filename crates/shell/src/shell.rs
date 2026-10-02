@@ -1031,6 +1031,27 @@ mod tests {
     }
 
     #[test]
+    fn a_here_document_s_body_does_not_run() {
+        // The prototype's review: `cat > x <<EOF`, refused, then ran each
+        // line of its body as a command.
+        for text in [
+            &b"t-args a <<EOF\nt-args body\nEOF\nt-args next\n"[..],
+            b"while t-args a; do\nt-args <<EOF\ndone\nEOF\nt-args tail\ndone\nt-args next\n",
+        ] {
+            assert_eq!(piped(text), ["next"], "{}", String::from_utf8_lossy(text));
+        }
+        let mut h = Harness::new();
+        h.run("mkdir /tmp/d");
+        h.put(
+            "/tmp/s.sh",
+            b"cat > /tmp/x <<EOF\nrm -r /tmp/d\nEOF\necho next\n",
+        );
+        let (_, out) = h.run("sh /tmp/s.sh");
+        assert!(out.ends_with("+ EOF\n+ echo next\nnext\n"), "{out}");
+        assert!(h.exists("/tmp/d"));
+    }
+
+    #[test]
     fn jobs_shows_a_job_typed_across_lines_on_one_line() {
         let mut h = with_jobs();
         let mut input = crate::Bytes::new(b"sleep 5 |\n# c\ncat &\njobs\n".to_vec());

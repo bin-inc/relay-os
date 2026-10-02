@@ -7,7 +7,8 @@
 //! too long to keep, or not text, still counts whole. It runs after a
 //! refusal, so it reads what the parser refuses as bash reads it: `$(…)`
 //! and backquotes whole, a command name's place after `time`, `{` and `}`,
-//! `select` and `case` opening constructs, a `case` pattern before `)`.
+//! `select` and `case` opening constructs, a `case` pattern before `)`,
+//! and a here-document's body, data up to its delimiter's line.
 
 /// Where a `for` is, while its name and words are read.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -22,6 +23,56 @@ enum For {
 
 /// The longest keyword the scan looks for, `select`.
 const KEYWORD_MAX: usize = 6;
+
+/// The most here-documents the scan keeps that one line starts; the
+/// bodies of any more are read as lines.
+const HEREDOCS_MAX: usize = 8;
+
+/// How much of a here-document's delimiter, or of a line of its body, the
+/// scan keeps: a line as long, starting with those bytes, ends the body.
+const DELIM_MAX: usize = 64;
+
+/// A here-document's delimiter, or a line of its body: its first bytes,
+/// its length, and (a delimiter's) whether the body's leading tabs are
+/// stripped (`<<-`).
+#[derive(Clone, Copy)]
+struct Delim {
+    bytes: [u8; DELIM_MAX],
+    len: usize,
+    tabs: bool,
+}
+
+impl Delim {
+    const fn new(tabs: bool) -> Delim {
+        Delim {
+            bytes: [0; DELIM_MAX],
+            len: 0,
+            tabs,
+        }
+    }
+
+    fn push(&mut self, b: u8) {
+        if let Some(slot) = self.bytes.get_mut(self.len) {
+            *slot = b;
+        }
+        self.len = self.len.saturating_add(1);
+    }
+
+    fn same(&self, other: &Delim) -> bool {
+        let n = self.len.min(DELIM_MAX);
+        self.len == other.len && self.bytes[..n] == other.bytes[..n]
+    }
+}
+
+/// A here-document's delimiter being read after `<<`: its quotes are
+/// removed, as bash removes them.
+#[derive(Clone, Copy)]
+struct Reading {
+    delim: Delim,
+    quote: Option<u8>,
+    escaped: bool,
+    started: bool,
+}
 
 /// The words that open a construct.
 const OPENERS: &[&[u8]] = &[b"if", b"while", b"until", b"for", b"select", b"case"];
@@ -57,6 +108,17 @@ pub(crate) struct Scan {
     /// The word before was a closer (`fi`, `done`, `esac`, `}`), after
     /// which an opener is bash's error, no construct.
     closed: bool,
+    /// How many unquoted `<` came last.
+    lt: usize,
+    /// The delimiter being read after `<<`.
+    reading: Option<Reading>,
+    /// The here-documents the line started, and the one whose body is
+    /// being read, if one is.
+    heredocs: [Delim; HEREDOCS_MAX],
+    pending: usize,
+    body: Option<usize>,
+    /// The body's line being read.
+    body_line: Delim,
     for_: For,
 }
 
@@ -76,6 +138,12 @@ impl Scan {
             command: true,
             target: false,
             closed: false,
+            lt: 0,
+            reading: None,
+            heredocs: [Delim::new(false); HEREDOCS_MAX],
+            pending: 0,
+            body: None,
+            body_line: Delim::new(false),
             for_: For::No,
         }
     }
@@ -88,6 +156,13 @@ impl Scan {
     }
 
     fn byte(&mut self, b: u8) {
+        if self.body.is_some() {
+            self.body_byte(b);
+            return;
+        }
+        if self.reading.is_some() && self.delim_byte(b) {
+            return;
+        }
         if b == b'\n' {
             // Nothing goes on past a line's end: a quote, an escape or a
             // `${` left open there is the line's error.
@@ -110,6 +185,20 @@ impl Scan {
                 _ => {}
             }
             return;
+        }
+        // `<<` and `<<-` start a here-document, whose delimiter follows;
+        // `<<<` does not.
+        if self.lt > 0 && b != b'<' && core::mem::take(&mut self.lt) == 2 {
+            self.target = false;
+            self.reading = Some(Reading {
+                delim: Delim::new(b == b'-'),
+                quote: None,
+                escaped: false,
+                started: false,
+            });
+            if b == b'-' || self.delim_byte(b) {
+                return;
+            }
         }
         let last = core::mem::replace(&mut self.last, b);
         if self.nested > 0 {
@@ -150,12 +239,85 @@ impl Scan {
                 self.operator();
             }
             b';' | b'&' | b'(' => self.operator(),
-            b'>' | b'<' => {
+            b'>' => {
                 self.end_word();
                 self.target = true;
             }
+            b'<' => {
+                self.end_word();
+                self.target = true;
+                self.lt += 1;
+            }
             _ => self.add(b),
         }
+    }
+
+    /// A byte of a here-document's delimiter, after `<<`: whether it was
+    /// one, or ended the delimiter and is the line's again.
+    fn delim_byte(&mut self, b: u8) -> bool {
+        let Some(r) = &mut self.reading else {
+            return false;
+        };
+        if core::mem::take(&mut r.escaped) {
+            r.delim.push(b);
+            return true;
+        }
+        if let Some(q) = r.quote {
+            match b {
+                b'\n' => {}
+                _ if b == q => r.quote = None,
+                b'\\' if q == b'"' => r.escaped = true,
+                _ => r.delim.push(b),
+            }
+            if b != b'\n' {
+                return true;
+            }
+        }
+        match b {
+            b' ' | b'\t' if !r.started => return true,
+            b'\'' | b'"' => r.quote = Some(b),
+            b'\\' => r.escaped = true,
+            b' ' | b'\t' | b'\n' | b';' | b'&' | b'|' | b'<' | b'>' | b'(' | b')' => {
+                let delim = r.delim;
+                let started = r.started;
+                self.reading = None;
+                if started && let Some(slot) = self.heredocs.get_mut(self.pending) {
+                    *slot = delim;
+                    self.pending += 1;
+                }
+                return false;
+            }
+            _ => r.delim.push(b),
+        }
+        r.started = true;
+        true
+    }
+
+    /// A byte of a here-document's body: a line equal to its delimiter
+    /// (its leading tabs stripped after `<<-`) ends it, and the next one's
+    /// starts.
+    fn body_byte(&mut self, b: u8) {
+        let Some(i) = self.body else {
+            return;
+        };
+        let Some(delim) = self.heredocs.get(i).copied() else {
+            self.body = None;
+            return;
+        };
+        if b == b'\n' {
+            if self.body_line.same(&delim) {
+                self.body = Some(i + 1).filter(|&n| n < self.pending);
+                if self.body.is_none() {
+                    self.pending = 0;
+                }
+            }
+            self.body_line = Delim::new(false);
+            return;
+        }
+        if self.body_line.len == 0 && delim.tabs && b == b'\t' {
+            return;
+        }
+        self.body_line.push(b);
     }
 
     /// Adds a byte to the word being read.
@@ -187,7 +349,13 @@ impl Scan {
         self.comment = false;
         self.nested = 0;
         self.last = b'\n';
+        self.lt = 0;
         self.command = true;
+        // The here-documents the line started take the next lines.
+        if self.pending > 0 {
+            self.body = Some(0);
+            self.body_line = Delim::new(false);
+        }
         // A redirection with no target is the line's error: its command
         // goes on no further, as bash's does not.
         if core::mem::take(&mut self.target) {
@@ -264,7 +432,7 @@ impl Scan {
     /// Everything read is closed: no construct is open and the last line
     /// does not end after `|`, `&&` or `||`.
     pub fn done(&self) -> bool {
-        self.depth == 0 && !self.open
+        self.depth == 0 && !self.open && self.body.is_none()
     }
 }
 
@@ -459,6 +627,83 @@ mod tests {
             assert_eq!(after(&[line]), (0, false), "{line}");
         }
         assert_eq!(after(&["if a; then if b; then c; fi fi"]), (0, false));
+    }
+
+    /// Whether the scan is done after each of `lines`.
+    fn done_after(lines: &[&str]) -> Vec<bool> {
+        let mut s = Scan::new();
+        lines
+            .iter()
+            .map(|l| {
+                s.line(l.as_bytes());
+                s.done()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_here_document_s_body_is_read_to_its_delimiter() {
+        // The prototype's review: `<<` is refused, and its body ran as
+        // commands. The body is data up to its delimiter's line.
+        assert_eq!(
+            done_after(&["cat <<EOF", "if a", "fi", "done", "EOF", "b"]),
+            [false, false, false, false, true, true]
+        );
+        // `<<-` strips leading tabs; the word's quotes are removed; a blank
+        // before the word is allowed, before the delimiter's line not.
+        assert_eq!(
+            done_after(&["cat <<-EOF", "\tif a", "\tEOF"]),
+            [false, false, true]
+        );
+        for (head, end) in [
+            ("cat <<'E F'", "E F"),
+            ("cat <<E\"O\"F", "EOF"),
+            ("cat <<\\EOF", "EOF"),
+            ("cat << EOF", "EOF"),
+            ("a<<EOF", "EOF"),
+        ] {
+            assert_eq!(
+                done_after(&[head, "x", end]),
+                [false, false, true],
+                "{head}"
+            );
+        }
+        assert_eq!(
+            done_after(&["cat <<EOF", " EOF", "EOF"]),
+            [false, false, true]
+        );
+        assert_eq!(
+            done_after(&["cat <<EOF", "\tEOF", "EOF"]),
+            [false, false, true]
+        );
+        assert_eq!(
+            done_after(&["cat <<E\\ F", "E", "E F"]),
+            [false, false, true]
+        );
+        // No word after it, or a `<` on the next line, is no here-document.
+        assert_eq!(done_after(&["a <<", "b"]), [true, true]);
+        assert_eq!(done_after(&["a << ;", "b"]), [true, true]);
+        assert_eq!(done_after(&["a <", "<b", "c"]), [true, true, true]);
+        // Several on one line take their bodies in turn.
+        assert_eq!(
+            done_after(&["cat <<A <<B", "B", "A", "A", "B"]),
+            [false, false, false, false, true]
+        );
+        // `<<<` has no body, nor a quoted `<<`.
+        assert_eq!(
+            done_after(&["cat <<< if", "echo '<<EOF'", "a \\<<EOF"]),
+            [true, true, true]
+        );
+        // Inside a construct, its `done` in the body closes nothing.
+        assert_eq!(
+            done_after(&["while a; do", "cat <<EOF", "done", "EOF", "done"]),
+            [false, false, false, false, true]
+        );
+        // A delimiter longer than the scan keeps whole still ends it.
+        let long = "x".repeat(100);
+        let head = alloc::format!("cat <<{long}");
+        let other = alloc::format!("{long}y");
+        assert_eq!(done_after(&[&head, &other, &long]), [false, false, true]);
     }
 
     #[test]
