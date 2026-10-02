@@ -259,13 +259,15 @@ mod tests {
     #[test]
     fn a_line_that_does_not_parse_does_not_stop_the_script() {
         let mut h = Harness::new();
-        h.put("/tmp/s.sh", b"echo 'open\nls; ;\necho after\n");
+        // A quote left open drops the lines up to the one that closes it,
+        // as bash reads them all as its string.
+        h.put("/tmp/s.sh", b"echo 'open\nstill' open\nls; ;\necho after\n");
         assert_eq!(
             h.run("sh /tmp/s.sh"),
             (
                 0,
                 "+ echo 'open\nrelay-sh: syntax error: unterminated quote\n\
-                 + ls; ;\nrelay-sh: syntax error near unexpected token `;'\n\
+                 + still' open\n+ ls; ;\nrelay-sh: syntax error near unexpected token `;'\n\
                  + echo after\nafter\n"
                     .into()
             )

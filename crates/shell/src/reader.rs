@@ -248,8 +248,11 @@ mod tests {
         assert!(r.reading());
         r.add("b").unwrap();
         assert!(!r.reading());
+        // A quote goes on to the line that closes it, as bash reads it.
         r.drop_line(b"x' &&");
-        assert!(!r.reading(), "the quote is the line's, left open");
+        assert!(r.reading());
+        assert_eq!(r.add("y'"), Ok(None));
+        assert!(!r.reading());
         // A blank one ends nothing, and starts nothing.
         r.add("a ||").unwrap();
         r.drop_line(b"   ");
@@ -276,7 +279,6 @@ mod tests {
         for _ in 0..100 {
             r.drop_bytes(&[b'x'; 1024]);
         }
-        r.drop_bytes(b" '");
         assert!(r.reading());
         r.drop_end();
         assert!(r.reading(), "inside its `if`");
@@ -285,7 +287,9 @@ mod tests {
         r.drop_bytes(&[b'x'; 70 * 1024]);
         r.drop_bytes(b" '");
         r.drop_end();
-        assert!(!r.reading(), "a quote left open ends with its line");
+        assert!(r.reading(), "a quote goes on to the next line");
+        assert_eq!(r.add("'"), Ok(None));
+        assert!(!r.reading());
         assert_eq!(names(&r.add("b").unwrap().unwrap()), ["b"]);
     }
 

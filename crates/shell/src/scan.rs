@@ -74,6 +74,10 @@ struct Reading {
     started: bool,
 }
 
+/// How many levels of `${…}` and `$(…)` the scan tells apart; deeper
+/// ones are taken for `$(…)`.
+const LEVELS_KEPT: usize = 64;
+
 /// The words that open a construct.
 const OPENERS: &[&[u8]] = &[b"if", b"while", b"until", b"for", b"select", b"case"];
 
@@ -94,6 +98,16 @@ pub(crate) struct Scan {
     /// How many `${`, `$(` and `(` inside them are open: what is in them
     /// is part of a word.
     nested: usize,
+    /// Which of the open levels are `${` (a bit each, the first
+    /// [`LEVELS_KEPT`]), the others `$(` or `(`.
+    braces: u64,
+    /// A word inside a `$(…)`: its first bytes, how many it has, whether
+    /// it stands where a command name would, and how many `case`s it has
+    /// opened.
+    inner: [u8; 4],
+    inner_len: usize,
+    inner_command: bool,
+    cases: usize,
     /// The byte before, outside quotes.
     last: u8,
     /// The word being read: its first bytes, and how many it has. A quote
@@ -131,6 +145,11 @@ impl Scan {
             escaped: false,
             comment: false,
             nested: 0,
+            braces: 0,
+            inner: [0; 4],
+            inner_len: 0,
+            inner_command: true,
+            cases: 0,
             last: b'\n',
             word: [0; KEYWORD_MAX],
             len: 0,
@@ -164,8 +183,16 @@ impl Scan {
             return;
         }
         if b == b'\n' {
-            // Nothing goes on past a line's end: a quote, an escape or a
-            // `${` left open there is the line's error.
+            // As bash reads on (the final review): a `\` before it joins
+            // the lines, a quote and a `$(…)` or `${…}` go on past it.
+            if core::mem::take(&mut self.escaped) || self.quote.is_some() {
+                return;
+            }
+            if self.nested > 0 {
+                self.inner_end();
+                self.inner_command = true;
+                return;
+            }
             self.end_word();
             self.newline();
             return;
@@ -202,14 +229,7 @@ impl Scan {
         }
         let last = core::mem::replace(&mut self.last, b);
         if self.nested > 0 {
-            match b {
-                b'}' | b')' => self.nested -= 1,
-                b'{' if last == b'$' => self.nested += 1,
-                b'(' => self.nested += 1,
-                b'\'' | b'"' | b'`' => self.quote = Some(b),
-                b'\\' => self.escaped = true,
-                _ => {}
-            }
+            self.nested_byte(b, last);
             return;
         }
         match b {
@@ -224,7 +244,7 @@ impl Scan {
             }
             b'{' | b'(' if last == b'$' && self.in_word => {
                 self.add(b);
-                self.nested = 1;
+                self.open_level(b == b'{');
             }
             b'#' if !self.in_word => self.comment = true,
             // `&&` and `||` go on to the next line, as `|` does.
@@ -344,10 +364,7 @@ impl Scan {
     }
 
     fn newline(&mut self) {
-        self.quote = None;
-        self.escaped = false;
         self.comment = false;
-        self.nested = 0;
         self.last = b'\n';
         self.lt = 0;
         self.command = true;
@@ -432,7 +449,96 @@ impl Scan {
     /// Everything read is closed: no construct is open and the last line
     /// does not end after `|`, `&&` or `||`.
     pub fn done(&self) -> bool {
-        self.depth == 0 && !self.open && self.body.is_none()
+        self.depth == 0
+            && !self.open
+            && self.body.is_none()
+            && self.quote.is_none()
+            && !self.escaped
+            && self.nested == 0
+    }
+
+    /// A `${` (`brace`) or a `$(` or `(` inside a `$(…)` opens a level of
+    /// a word's expansion.
+    fn open_level(&mut self, brace: bool) {
+        if self.nested < LEVELS_KEPT {
+            let bit = 1u64 << self.nested;
+            self.braces = if brace {
+                self.braces | bit
+            } else {
+                self.braces & !bit
+            };
+        }
+        self.nested = self.nested.saturating_add(1);
+        self.inner_end();
+        self.inner_command = true;
+    }
+
+    /// Whether the innermost open level is a `${`.
+    fn in_braces(&self) -> bool {
+        self.nested <= LEVELS_KEPT && self.braces >> (self.nested - 1) & 1 == 1
+    }
+
+    /// A byte inside a `${…}` or `$(…)`, part of a word: only the levels
+    /// count, and in a `$(…)` a `case`, whose patterns' `)` close nothing.
+    fn nested_byte(&mut self, b: u8, last: u8) {
+        match b {
+            b'\'' | b'"' | b'`' => {
+                self.inner_dirty();
+                self.quote = Some(b);
+            }
+            b'\\' => {
+                self.inner_dirty();
+                self.escaped = true;
+            }
+            b'{' if last == b'$' => self.open_level(true),
+            b'}' if self.in_braces() => {
+                self.inner_end();
+                self.nested -= 1;
+            }
+            _ if self.in_braces() => {}
+            b'(' => self.open_level(false),
+            b')' => {
+                self.inner_end();
+                if self.cases > 0 {
+                    // A pattern's: the commands of its branch follow.
+                    self.inner_command = true;
+                } else {
+                    self.nested -= 1;
+                }
+            }
+            b' ' | b'\t' => self.inner_end(),
+            b';' | b'&' | b'|' => {
+                self.inner_end();
+                self.inner_command = true;
+            }
+            _ => {
+                if let Some(slot) = self.inner.get_mut(self.inner_len) {
+                    *slot = b;
+                }
+                self.inner_len = self.inner_len.saturating_add(1);
+            }
+        }
+    }
+
+    /// The word inside a `$(…)` has a quote or an escape: it is no keyword.
+    fn inner_dirty(&mut self) {
+        self.inner_len = usize::MAX;
+    }
+
+    /// A word inside a `$(…)` ends: a `case` or an `esac` where a command
+    /// name would stand counts.
+    fn inner_end(&mut self) {
+        let len = core::mem::take(&mut self.inner_len);
+        if len == 0 {
+            return;
+        }
+        let word = self.inner.get(..len).unwrap_or(b"");
+        if self.inner_command && word == b"case" {
+            self.cases = self.cases.saturating_add(1);
+        } else if self.inner_command && word == b"esac" {
+            self.cases = self.cases.saturating_sub(1);
+        }
+        self.inner_command = false;
     }
 }
 
@@ -559,13 +665,21 @@ mod tests {
     }
 
     #[test]
-    fn quotes_and_escapes_end_with_their_line() {
-        // As the parser reads them: a quote left open is that line's error,
-        // and the next line starts afresh.
-        assert_eq!(after(&["echo 'a", "if b"]), (1, false));
-        assert_eq!(after(&["echo \"a", "while b"]), (1, false));
-        assert_eq!(after(&["a \\", "until b"]), (1, false));
-        assert_eq!(after(&["echo ${a", "if b"]), (1, false));
+    fn quotes_and_escapes_go_on_across_lines_as_bash_s_do() {
+        // The final review: the parser refuses a quote left open at a
+        // line's end, but bash reads on, so a `fi` in the string's next
+        // line is no closer; nor is one after a `\` that joins the lines.
+        assert_eq!(done_after(&["echo 'a", "if b'", "c"]), [false, true, true]);
+        assert_eq!(
+            done_after(&["echo \"a", "while b\"", "c"]),
+            [false, true, true]
+        );
+        assert_eq!(done_after(&["echo `a", "fi`"]), [false, true]);
+        assert_eq!(after(&["a \\", "until b"]), (0, false));
+        assert_eq!(after(&["echo x \\", " if y"]), (0, false));
+        assert_eq!(after(&["echo \"a", "b\" if c"]), (0, false));
+        assert_eq!(done_after(&["echo ${a", "if b}"]), [false, true]);
+        assert_eq!(after(&["if a; then", "echo \"x", "fi y\""]), (1, false));
         // Inside a quote, a `"`'s `\` takes the next character.
         assert_eq!(after(&["echo \"a\\\" if\" b; if c"]), (1, false));
         // `${…}` is read whole, its quotes, escapes and `${…}` too.
@@ -604,9 +718,31 @@ mod tests {
         ] {
             assert_eq!(after(lines), (depth, false), "{lines:?}");
         }
-        // Left open at a line's end, they end with it as quotes do.
-        assert_eq!(after(&["echo $(a", "if b"]), (1, false));
-        assert_eq!(after(&["echo `a", "if b"]), (1, false));
+        // `$(…)` goes on across lines too; a `case` in it has patterns
+        // whose `)` closes nothing, and a `(` in `${…}` opens nothing.
+        assert_eq!(done_after(&["echo $(a", "if b)"]), [false, true]);
+        assert_eq!(done_after(&["echo $(echo case x in x) y)"]), [true]);
+        assert_eq!(done_after(&["echo $(a }", "b)"]), [false, true]);
+        for (lines, depth) in [
+            (&["if a; then", "v=$(case x in x) a;; esac; b)"][..], 1),
+            (&["if a; then", "v=$(case x in", "x) a;;", "esac", ")"], 1),
+            (&["if a; then", "v=$(echo case x in x) y)"], 1),
+            (
+                &[
+                    "if a; then",
+                    "v=$(echo a",
+                    "case x in",
+                    "x) b;;",
+                    "esac",
+                    ")",
+                ],
+                1,
+            ),
+            (&["echo ${s//(/x}; if b"], 1),
+            (&["echo ${s//)/x}; if b"], 1),
+        ] {
+            assert_eq!(after(lines), (depth, false), "{lines:?}");
+        }
     }
 
     #[test]

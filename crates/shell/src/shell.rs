@@ -1046,6 +1046,12 @@ mod tests {
             b"t-args ` if t-args b; then t-args c; fi `\n",
             b"t-args copy of $(hostname) done\n",
             b"case b in\ndone) t-args c;;\nesac\n",
+            // The final review: a string, a `case` in `$(…)` and a `(` in
+            // `${…}`, each read as bash reads them.
+            b"t-args \"a\nfi b\"\n",
+            b"v=$(case b in b) t-args 1;; esac; t-args 2)\n",
+            b"v=$(case b in\nb) t-args 1;;\nesac\n)\n",
+            b"t-args ${s//(/x}; if t-args b; then\nt-args c\nfi\n",
         ] {
             let mut text = head.to_vec();
             text.extend_from_slice(inner);
