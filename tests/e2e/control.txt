@@ -58,6 +58,23 @@ type {ctrl-c}
 expect \^C\nroot@relay:~# $
 send echo $?
 expect \n130\nroot@relay:~# $
+# The same after a program ran on the line (the prototype's review): the
+# shell takes the console back once a program has ended, and a Ctrl-C
+# typed meanwhile is kept for it; plan 1's `wait` too.
+send true; while cd; do cd; done
+alive 1
+type {ctrl-c}
+expect \n\^C\nroot@relay:~# $
+send echo $?
+expect \n130\nroot@relay:~# $
+send sleep 30 & true; wait
+expect \n\[1\] \d+\n
+alive 1
+type {ctrl-c}
+expect \^C\nroot@relay:~# $
+send kill %1
+send wait %1
+expect \n\[1\]\+  Killed                  sleep 30\nroot@relay:~# $
 # Compound commands nest 32 levels deep, the most (§4.5): a script runs
 # them on /bin/sh's fixed stack, and a 33rd level is refused.
 send echo 'if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then echo deep; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi' > deep.sh
