@@ -52,6 +52,9 @@ enum Cmd {
         /// Skip the host unit tests.
         #[arg(long)]
         e2e_only: bool,
+        /// Scenarios run at once (default: one per core, at most 4).
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+        jobs: Option<u16>,
     },
     /// Run the shell on this machine over an image's ext2 root partition.
     HostShell {
@@ -106,11 +109,16 @@ fn main() -> Result<()> {
             let img = image::build_image(&a, &cmdline)?;
             qemu::run_interactive(&img, &util::out_dir().join("qemu"), serial_only)?;
         }
-        Cmd::Test { scenario, e2e_only } => {
+        Cmd::Test {
+            scenario,
+            e2e_only,
+            jobs,
+        } => {
             if !e2e_only {
                 ci::unit_tests()?;
             }
-            e2e::run_all(scenario.as_deref())?;
+            let jobs = jobs.map_or_else(e2e::default_jobs, usize::from);
+            e2e::run_all(scenario.as_deref(), jobs)?;
         }
         Cmd::HostShell { img } => host_shell::run(&img)?,
         Cmd::Flash {
@@ -133,7 +141,7 @@ fn main() -> Result<()> {
         Cmd::Ci => {
             ci::lint()?;
             ci::unit_tests()?;
-            e2e::run_all(None)?;
+            e2e::run_all(None, e2e::default_jobs())?;
         }
         Cmd::GenFont { bdf } => font::gen_font(&bdf)?,
     }
