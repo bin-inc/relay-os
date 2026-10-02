@@ -662,9 +662,13 @@ pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
                 pipeline.push(parts.take_before_pipe()?);
             }
             ';' => {
-                // bash's `;;` ends a `case` branch.
+                // bash's `;;`, `;&` and `;;&` end a `case` branch.
                 if cur.next_if_eq(';') {
-                    return Err(ParseError::MissingTarget(";;"));
+                    let token = if cur.next_if_eq('&') { ";;&" } else { ";;" };
+                    return Err(ParseError::MissingTarget(token));
+                }
+                if cur.next_if_eq('&') {
+                    return Err(ParseError::MissingTarget(";&"));
                 }
                 parts.end_word(&mut word, line)?;
                 match end_pipeline(&mut parts, &mut pipeline, ";")? {
@@ -1296,6 +1300,11 @@ mod tests {
             ("echo a; ;", ";"),
             ("echo a;;", ";;"),
             ("echo a ;; echo b", ";;"),
+            // bash's other `case` terminators (the review found them
+            // named `&` and `;;`).
+            ("echo a ;& echo b", ";&"),
+            ("echo a;&", ";&"),
+            ("echo a ;;& echo b", ";;&"),
             ("echo > ;", ";"),
             ("ls | ;", ";"),
         ] {
