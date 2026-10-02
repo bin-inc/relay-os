@@ -295,13 +295,16 @@ mod tests {
         // written across lines ran its body (its final review's ruling):
         // its lines are dropped up to its `fi`, counting those inside.
         let mut r = Reader::new();
-        assert_eq!(r.add("if true"), Err(ParseError::Unsupported("if".into())));
+        assert_eq!(
+            r.add("while true"),
+            Err(ParseError::Unsupported("while".into()))
+        );
         assert!(r.reading());
-        for line in ["then echo a", "while b", "do c", "done", "echo d"] {
+        for line in ["do echo a", "if b", "then c", "fi", "echo d"] {
             assert_eq!(r.add(line), Ok(None), "{line}");
             assert!(r.reading(), "{line}");
         }
-        assert_eq!(r.add("fi"), Ok(None));
+        assert_eq!(r.add("done"), Ok(None));
         assert!(!r.reading());
         assert_eq!(names(&r.add("echo e").unwrap().unwrap()), ["echo"]);
         // Opened on a later line of the command, and refused there.
@@ -310,6 +313,28 @@ mod tests {
         assert_eq!(r.add("echo $x"), Ok(None));
         assert_eq!(r.add("done"), Ok(None));
         assert!(!r.reading());
+    }
+
+    #[test]
+    fn an_if_with_an_error_inside_is_dropped_to_its_fi() {
+        // Nothing of it runs, the lines after the error included; the line
+        // after its `fi` starts afresh (programmable shell gate §15 item 2).
+        let mut r = Reader::new();
+        assert_eq!(r.add("if a; then"), Ok(None));
+        assert_eq!(r.add("if b; then c"), Ok(None));
+        assert_eq!(r.add("d; then"), Err(ParseError::MissingTarget("then")));
+        for line in ["e", "fi", "f"] {
+            assert_eq!(r.add(line), Ok(None), "{line}");
+            assert!(r.reading(), "{line}");
+        }
+        assert_eq!(r.add("fi"), Ok(None));
+        assert!(!r.reading());
+        // p2: the error at its `fi` drops nothing after it, as in bash.
+        assert_eq!(r.add("if true"), Ok(None));
+        assert_eq!(r.add("then"), Ok(None));
+        assert_eq!(r.add("fi"), Err(ParseError::MissingTarget("fi")));
+        assert!(!r.reading());
+        assert_eq!(names(&r.add("echo b").unwrap().unwrap()), ["echo"]);
     }
 
     #[test]

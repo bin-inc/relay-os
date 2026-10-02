@@ -221,19 +221,23 @@ impl<'a> Shell<'a> {
         self.run_list(&list)
     }
 
-    /// Runs a list's items one after another (programmable shell gate
-    /// §5.1); its status is the last one's. An empty list keeps the last
-    /// status.
-    /// `exit`, Ctrl-C (status 130, spec §6.4) and an expansion that
-    /// abandons the line stop the rest.
+    /// Runs a command line's list (programmable shell gate §5.1).
     fn run_list(&mut self, list: &parser::List<parser::Word>) -> i32 {
         self.abandoned = false;
         self.cancelled = false;
         // A background job needs programs: the in-process runner refuses
-        // a line that holds one, before any of it runs.
-        if self.runner.programs().is_none() && list.items.iter().any(|i| i.background.is_some()) {
+        // a line that holds one, anywhere, before any of it runs.
+        if self.runner.programs().is_none() && list.has_job() {
             return self.finish(SYNTAX, format!("{NAME}: unsupported syntax: &\n"));
         }
+        self.run_items(list)
+    }
+
+    /// Runs a list's items one after another; its status is the last
+    /// one's. An empty list keeps the last status.
+    /// `exit`, Ctrl-C (status 130, spec §6.4) and an expansion that
+    /// abandons the line stop the rest.
+    fn run_items(&mut self, list: &parser::List<parser::Word>) -> i32 {
         let mut status = self.status;
         for item in &list.items {
             status = match &item.background {
@@ -303,12 +307,42 @@ impl<'a> Shell<'a> {
     ) -> i32 {
         let status = match &typed.run {
             parser::Run::Commands(commands) => self.run_commands(commands, background),
+            parser::Run::Compound(c) => {
+                self.status = self.run_compound(c);
+                self.status
+            }
         };
         if !typed.negated || background.is_some() || self.stopped || self.abandoned {
             return status;
         }
         self.status = i32::from(status == 0);
         self.status
+    }
+
+    /// Runs a compound command (programmable shell gate §5.1).
+    fn run_compound(&mut self, c: &parser::Compound<parser::Word>) -> i32 {
+        match c {
+            parser::Compound::If(i) => self.run_if(i),
+        }
+    }
+
+    /// Runs an `if`: each condition in turn, up to one whose status is 0,
+    /// then its body; or, if none is, the `else` body. Its status is the
+    /// body's, 0 when none runs.
+    fn run_if(&mut self, i: &parser::If<parser::Word>) -> i32 {
+        for (condition, body) in &i.branches {
+            let status = self.run_items(condition);
+            if self.ends_line() {
+                return status;
+            }
+            if status == 0 {
+                return self.run_items(body);
+            }
+        }
+        match &i.otherwise {
+            Some(body) => self.run_items(body),
+            None => 0,
+        }
     }
 
     /// Runs a pipeline's commands, or starts them in the background, their
@@ -955,7 +989,8 @@ mod tests {
     fn a_refused_construct_runs_none_of_its_lines() {
         // Plan 1's final review ruled that a script's `if` written across
         // lines ran its body, each refused line dropped alone: the lines
-        // are dropped up to its `fi`, counting the constructs inside.
+        // of a construct with a refused line in it are dropped up to its
+        // end, counting the constructs inside.
         let text = b"if t-args a\nthen t-args b\nwhile t-args c\ndo t-args d\ndone\nt-args e\nfi\nt-args next\n";
         assert_eq!(piped(text), ["next"]);
         // Opened by a line too long, or no text.
@@ -977,7 +1012,7 @@ mod tests {
             h.run("sh /tmp/s.sh"),
             (
                 0,
-                "+ if true\nrelay-sh: unsupported syntax: if\n+ then echo a\n+ while true\n\
+                "+ if true\n+ then echo a\n+ while true\nrelay-sh: unsupported syntax: while\n\
                  + do echo b\n+ done\n+ fi\n+ echo next\nnext\n"
                     .into()
             )
@@ -986,7 +1021,7 @@ mod tests {
         let mut h = spawning();
         let out = typed(
             &mut h,
-            &["if t-args a", "then t-args b", "fi", "t-args next"],
+            &["while t-args a", "do t-args b", "done", "t-args next"],
         );
         let args: Vec<&str> = h
             .programs
@@ -1425,12 +1460,101 @@ mod tests {
     }
 
     #[test]
-    fn a_compound_command_runs_none_of_its_parts() {
+    fn an_if_runs_the_body_of_the_first_condition_that_succeeds() {
         let mut h = Harness::new();
+        for (line, ran) in [
+            ("if true; then echo a; fi", (0, "a\n")),
+            (
+                "if false; then echo a; elif true; then echo b; else echo c; fi",
+                (0, "b\n"),
+            ),
+            (
+                "if false; then echo a; elif false; then echo b; else echo c; fi",
+                (0, "c\n"),
+            ),
+            (
+                "if true; then echo a; if false; then echo b; else echo c; fi fi",
+                (0, "a\nc\n"),
+            ),
+            // Its status is the body's (g6), 0 when none runs (g4, g5,
+            // g13), and a condition's status is `$?` in the body.
+            ("if true; then false; fi", (1, "")),
+            ("if false; then true; fi", (0, "")),
+            ("false; if false; then true; fi; echo $?", (0, "0\n")),
+            ("if true && false; then echo a; fi", (0, "")),
+            ("if false; then true; else echo $?; fi", (0, "1\n")),
+            ("if ! true; then echo a; else echo b; fi", (0, "b\n")),
+            (
+                "if nosuch; then echo a; else echo b; fi",
+                (0, "relay-sh: nosuch: command not found\nb\n"),
+            ),
+            // f3: negated, and in an and-or list (g11).
+            ("! if false; then true; fi", (1, "")),
+            (
+                "echo a && if true; then echo b; fi || echo c",
+                (0, "a\nb\n"),
+            ),
+        ] {
+            assert_eq!(h.run(line), (ran.0, ran.1.into()), "{line}");
+        }
+    }
+
+    #[test]
+    fn exit_ctrl_c_and_a_bad_substitution_end_an_if_and_its_line() {
+        let mut h = Harness::new();
+        // r7: `exit` deep inside stops the shell at once.
         assert_eq!(
-            h.run("echo a; if true; then echo b; fi"),
-            (2, "relay-sh: unsupported syntax: if\n".into())
+            h.run("if true; then if true; then exit 3; fi; echo no; fi; echo no"),
+            (3, "".into())
         );
+        // A bad substitution abandons the whole line (§5.1).
+        assert_eq!(
+            h.run("if true; then echo ${1A}; echo no; fi; echo no"),
+            (1, "relay-sh: ${1A}: bad substitution\n".into())
+        );
+        assert_eq!(
+            h.run("if echo ${1A}; then echo no; else echo no; fi"),
+            (1, "relay-sh: ${1A}: bad substitution\n".into())
+        );
+        // Ctrl-C ends it, in its condition or its body.
+        h.programs.known.push((
+            "/bin/t-spin",
+            WaitStatus::killed(relay_abi::wait::KILLED_CTRL_C),
+        ));
+        h.programs
+            .known
+            .push(("/bin/t-args", WaitStatus::exited(0)));
+        for (line, ran) in [
+            (
+                "if t-spin; then t-args no; else t-args no; fi; t-args no",
+                &["t-spin"][..],
+            ),
+            (
+                "if t-args a; then t-spin; t-args no; fi; t-args no",
+                &["t-args a", "t-spin"],
+            ),
+        ] {
+            let before = h.programs.spawned.len();
+            assert_eq!(h.spawning(line).1, "^C\n", "{line}");
+            let args: Vec<String> = h.programs.spawned[before..]
+                .iter()
+                .map(|s| s.args.join(" "))
+                .collect();
+            assert_eq!(args, ran, "{line}");
+        }
+        // The in-process runner refuses a job at any depth, before any of
+        // the line runs.
+        for line in [
+            "echo a; if true; then echo b & fi",
+            "echo a; if echo b & then echo c; fi",
+            "echo a; if false; then echo b; else echo c & fi",
+        ] {
+            assert_eq!(
+                h.run(line),
+                (2, "relay-sh: unsupported syntax: &\n".into()),
+                "{line}"
+            );
+        }
     }
 
     #[test]
