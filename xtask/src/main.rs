@@ -28,7 +28,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Build BOOTX64.EFI and kernel.elf.
+    /// Build BOOTX64.EFI, kernel.elf and system.img.
     Build,
     /// Build target/relay/relay-os.img.
     Image {
@@ -64,7 +64,7 @@ enum Cmd {
     },
     /// Write to the Kingston test stick.
     Flash {
-        /// Replace loader and kernel only; keep files on /.
+        /// Replace loader, kernel, system.img and cmdline only; keep files on /.
         #[arg(long, conflicts_with = "full", required_unless_present = "full")]
         kernel: bool,
         /// Repartition and reformat the whole stick.
@@ -77,7 +77,8 @@ enum Cmd {
         #[arg(long, default_value = "")]
         cmdline: String,
     },
-    /// e2fsck the stick's root filesystem and list its files.
+    /// e2fsck the stick's root filesystem, list its files and check the
+    /// check scripts' transcripts.
     VerifyUsb,
     /// Write a udev rule giving you access to the test stick.
     SetupUdev,
