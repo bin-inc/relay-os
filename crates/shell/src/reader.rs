@@ -3,20 +3,17 @@
 //! after it finish it. The prompt, `sh FILE` and `X | sh` all read through
 //! one.
 
-use crate::parser::{self, COMMAND_MAX, List, ParseError, Word};
-use alloc::string::String;
+use crate::parser::{self, COMMAND_MAX, List, ParseError, Parser, Word};
 
 /// What has been read of the command so far.
 #[derive(Default)]
 pub(crate) struct Reader {
-    text: String,
+    /// What has been read of the command, kept between its lines.
+    parser: Parser,
     /// A command was dropped before its end: its later lines are dropped
     /// too, up to one that finishes it, so that none of them runs without
     /// what came before (the end of an `&&` chain without its guard).
     dropping: bool,
-    /// How many times all the text was parsed (the tests count them).
-    #[cfg(test)]
-    whole_parses: usize,
 }
 
 impl Reader {
@@ -32,39 +29,18 @@ impl Reader {
             self.dropping = matches!(alone(line), Alone::GoesOn | Alone::Nothing);
             return Ok(None);
         }
-        if self.text.len() + line.len() + 1 > COMMAND_MAX {
+        if self.parser.len() + line.len() + 1 > COMMAND_MAX {
             self.drop_line(line);
             return Err(ParseError::TooLong);
         }
-        // While a command goes on, a line that alone would leave it
-        // unfinished (ending after `|`, `&&` or `||`), or holds nothing,
-        // leaves it unfinished: so each line is parsed once alone, and all
-        // the text only when a line may finish it, which keeps reading a
-        // long command linear.
-        let more = self.reading() && matches!(alone(line), Alone::GoesOn | Alone::Nothing);
-        self.text.push_str(line);
-        self.text.push('\n');
-        if more {
-            return Ok(None);
-        }
-        #[cfg(test)]
-        {
-            self.whole_parses += 1;
-        }
-        match parser::parse_line(&self.text) {
-            Err(ParseError::Incomplete) => Ok(None),
-            Err(e) => {
-                // A line refused while it leaves the command open drops the
-                // rest of the command with it, as `drop_line` does.
-                self.text.clear();
-                self.dropping = parser::ends_open(line);
-                Err(e)
-            }
-            Ok(list) => {
-                self.text.clear();
-                Ok(Some(list))
-            }
-        }
+        // The parser keeps what it has read, so each line is read once, in
+        // its context.
+        self.parser.line(line).inspect_err(|_| {
+            // A line refused while it leaves the command open drops the
+            // rest of the command with it, as `drop_line` does.
+            self.parser = Parser::new();
+            self.dropping = parser::ends_open(line);
+        })
     }
 
     /// Drops the command a line is part of that cannot be added (too
@@ -73,7 +49,7 @@ impl Reader {
     /// finishes it.
     pub fn drop_line(&mut self, line: &str) {
         let reading = self.reading();
-        self.text.clear();
+        self.parser = Parser::new();
         // What does not parse alone might go on (a line's last bytes may
         // start inside a quote): it is dropped to be safe.
         self.dropping = match alone(line) {
@@ -85,20 +61,20 @@ impl Reader {
 
     /// Part of a command has been read, or is being dropped.
     pub fn reading(&self) -> bool {
-        !self.text.is_empty() || self.dropping
+        !self.parser.is_empty() || self.dropping
     }
 
     /// The input ended: a command read only in part is bash's `unexpected
     /// end of file`, and is dropped; one being dropped was already told.
     pub fn end(&mut self) -> Option<ParseError> {
-        let reading = !self.text.is_empty();
+        let reading = !self.parser.is_empty();
         self.clear();
         reading.then_some(ParseError::Incomplete)
     }
 
     /// Drops what has been read (Ctrl-C at the `> ` prompt).
     pub fn clear(&mut self) {
-        self.text.clear();
+        self.parser = Parser::new();
         self.dropping = false;
     }
 }
@@ -192,21 +168,33 @@ mod tests {
     }
 
     #[test]
-    fn the_text_is_parsed_whole_only_when_a_line_may_finish_it() {
-        // The review found each line parsing all the text before it: 64 KiB
-        // of `a |` lines took over a minute. A line that alone leaves the
-        // command unfinished, or is blank or a comment, needs no such parse.
+    fn each_line_is_read_once() {
+        // Plan 1's review found each line parsing all the text before it:
+        // 64 KiB of `a |` lines took over a minute. The parser keeps what
+        // it has read, so each line is read once.
         let mut r = Reader::new();
         for _ in 0..1000 {
             assert_eq!(r.add("a |"), Ok(None));
             assert_eq!(r.add(""), Ok(None));
             assert_eq!(r.add("  # c"), Ok(None));
         }
+        assert_eq!(r.parser.read, 1000 * ("a |\n\n  # c\n".len()));
         assert_eq!(names(&r.add("b").unwrap().unwrap()).len(), 1);
-        assert_eq!(r.whole_parses, 2, "the first line's, and the last's");
-        // A line that might finish it, or be wrong, is parsed with the rest.
+    }
+
+    #[test]
+    fn an_error_is_told_on_the_line_that_has_it() {
+        // Plan 1 judged a line alone, and told these a line late or as
+        // the end of the file.
+        let mut r = Reader::new();
+        assert_eq!(r.add("a |"), Ok(None));
+        assert_eq!(r.add("! b |"), Err(ParseError::MissingTarget("!")));
+        let mut r = Reader::new();
         assert_eq!(r.add("a &&"), Ok(None));
-        assert_eq!(r.add("|| b"), Err(ParseError::MissingTarget("||")));
+        assert_eq!(
+            r.add("b & c &&"),
+            Err(ParseError::Unsupported("& after &&".into()))
+        );
     }
 
     #[test]
