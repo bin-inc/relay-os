@@ -271,7 +271,8 @@ impl<'a> Shell<'a> {
     /// Runs one pipeline, or starts it in the background with the job's
     /// text `background`. After a `!` its status is negated, as bash's is:
     /// 0 becomes 1 and anything else 0, even 130 after Ctrl-C, which still
-    /// ends the line. Neither a background job's start nor `exit` is.
+    /// ends the line. Neither a background job's start nor `exit` is, nor
+    /// a command whose expansion abandoned the line, which never ran.
     fn run_pipeline(
         &mut self,
         typed: &parser::Pipeline<parser::Word>,
@@ -281,7 +282,7 @@ impl<'a> Shell<'a> {
         if status == CANCELLED {
             self.cancelled = true;
         }
-        if !typed.negated || background.is_some() || self.stopped {
+        if !typed.negated || background.is_some() || self.stopped || self.abandoned {
             return status;
         }
         self.status = i32::from(status == 0);
@@ -989,6 +990,22 @@ mod tests {
         assert_eq!(h.run("! A=1; echo $? $A"), (0, "1 1\n".into()));
         // `exit` stops the shell with its own status.
         assert_eq!(h.run("! exit 3"), (3, "".into()));
+    }
+
+    #[test]
+    fn a_negated_command_that_does_not_expand_fails() {
+        // bash's `$?` is 1: the command never ran, so there is nothing to
+        // negate (the review found 0).
+        let mut h = Harness::new();
+        assert_eq!(
+            h.lines(&["! echo ${1A}", "echo $?", "! A=${1A}", "echo $?"]),
+            (
+                0,
+                "relay-sh: ${1A}: bad substitution\n1\n\
+                 relay-sh: ${1A}: bad substitution\n1\n"
+                    .into()
+            )
+        );
     }
 
     #[test]
