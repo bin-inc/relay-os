@@ -1127,6 +1127,15 @@ mod tests {
     }
 
     #[test]
+    fn a_compound_command_runs_none_of_its_parts() {
+        let mut h = Harness::new();
+        assert_eq!(
+            h.run("echo a; if true; then echo b; fi"),
+            (2, "relay-sh: unsupported syntax: if\n".into())
+        );
+    }
+
+    #[test]
     fn each_item_of_a_list_is_synced() {
         let mut h = Harness::new();
         h.run("pwd; pwd; pwd");

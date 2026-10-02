@@ -35,7 +35,9 @@
 //! `&&` and `||` join pipelines into an and-or list. bash's syntax errors
 //! name any of them with no command before it, and an and-or list ending
 //! with `&` is refused. An unquoted `!` word at a pipeline's start negates
-//! its status. Every other shell feature is refused: an unquoted `*`, `?`,
+//! its status. bash's reserved words (`if`, `while`, `{`, …) are refused
+//! where a command name would stand. Every other shell feature is refused:
+//! an unquoted `*`, `?`,
 //! `<`, `` ` ``, `(` or `)` is an error naming the character, instead of
 //! being passed on as if it were plain text; so are `|&` (the errors into
 //! the pipe too), `>&` and `2>` (another stream).
@@ -195,6 +197,11 @@ impl Word {
         matches!(&self.pieces[..], [Piece::Text(t, false)] if t == "!")
     }
 
+    /// The word is one of bash's reserved words, unquoted.
+    fn is_reserved(&self) -> bool {
+        matches!(&self.pieces[..], [Piece::Text(t, false)] if RESERVED.contains(&t.as_str()))
+    }
+
     /// The word if it is one unquoted piece of text, all ASCII digits (`2`
     /// in `2>`).
     fn digits(&self) -> Option<&str> {
@@ -241,6 +248,14 @@ impl fmt::Display for ParseError {
 }
 
 const UNSUPPORTED: &[char] = &['*', '?', '<', '`', '(', ')'];
+
+/// bash's reserved words, and its loop built-ins, refused where a command
+/// name could stand (programmable shell gate §4.2) until the compound
+/// commands are implemented.
+const RESERVED: &[&str] = &[
+    "if", "then", "elif", "else", "fi", "while", "until", "for", "in", "do", "done", "case",
+    "esac", "select", "function", "time", "coproc", "{", "}", "[[", "]]", "break", "continue",
+];
 
 /// The characters a line is read from, and where each is.
 struct Cursor<'l> {
@@ -553,6 +568,9 @@ impl Parts {
                     return Err(ParseError::MissingTarget("!"));
                 }
                 self.bangs += 1;
+            }
+            None if self.words.is_empty() && self.redirect.is_none() && w.is_reserved() => {
+                return Err(ParseError::Unsupported(w.typed));
             }
             None => self.words.push(w),
         }
@@ -1536,6 +1554,45 @@ mod tests {
         // A background job's text leaves it out, as bash's `jobs` does.
         assert_eq!(background("! sleep 5 &").as_deref(), Some("sleep 5"));
         assert_eq!(background("! ! sleep 5 &").as_deref(), Some("sleep 5"));
+    }
+
+    #[test]
+    fn a_reserved_word_where_a_command_name_stands_is_unsupported() {
+        // Until compound commands come (programmable shell gate §4.2),
+        // bash's reserved words are refused where they would be one, rather
+        // than run as commands that are not found.
+        // The words of the spec's §4.2, written out apart from `RESERVED`.
+        for word in [
+            "if", "then", "elif", "else", "fi", "while", "until", "for", "in", "do", "done",
+            "case", "esac", "select", "function", "time", "coproc", "{", "}", "[[", "]]", "break",
+            "continue",
+        ] {
+            for line in [
+                alloc::format!("{word} x"),
+                alloc::format!("a; {word}"),
+                alloc::format!("a && {word} b"),
+                alloc::format!("a | {word}"),
+                alloc::format!("! {word}"),
+            ] {
+                assert_eq!(
+                    parse_line(&line),
+                    Err(ParseError::Unsupported(String::from(word))),
+                    "{line:?}"
+                );
+            }
+        }
+        // Anywhere else, quoted or escaped, or after a redirection (a
+        // command's name in bash), it is a word.
+        for (line, words) in [
+            ("echo if then fi", &["echo", "if", "then", "fi"][..]),
+            ("'if' x", &["if", "x"]),
+            ("\\while x", &["while", "x"]),
+            ("> f done", &["done"]),
+            ("iffy", &["iffy"]),
+        ] {
+            assert_eq!(parse(line).unwrap()[0].words, words, "{line}");
+        }
+        assert!(parse_line("if=1").is_ok(), "an assignment");
     }
 
     #[test]
