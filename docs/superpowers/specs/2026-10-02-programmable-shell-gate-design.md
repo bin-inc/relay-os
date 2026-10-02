@@ -1,7 +1,7 @@
 # Relay OS — Programmable Shell Gate Design (milestones 4 and 5)
 
 - **Date:** 2026-10-02
-- **Status:** Draft for the owner's review
+- **Status:** Approved 2026-10-02; revised while planning milestone 4's plan 1 (see §15)
 - **Builds on:** the user-space gate (version 0.4.0,
   `docs/superpowers/specs/2026-09-29-user-space-gate-design.md`, cited below
   as "UG §n") and milestone 1 (`2026-09-26-milestone-1-boot-shell-fs-design.md`,
@@ -189,7 +189,7 @@ added until the text is complete or wrong.
 What is typed or read is untrusted (AGENTS.md):
 
 - A construct being read holds at most 64 KiB, as a script does (M1 §15
-  item 12). Beyond it the construct is dropped:
+  item 12). Beyond it the construct is dropped, to its end (§15 item 1):
   `relay-sh: the command would be longer than 64 KiB`, status 2.
 - Nesting is at most 32 levels deep, counting each compound command and
   each `&&`/`||` chain inside one: `relay-sh: unsupported syntax: more
@@ -218,9 +218,11 @@ command and a pipeline becomes its leaves.
   (UG §16 item 10).
 - `exit` anywhere stops the shell at once.
 - An expansion error (`bad substitution`, a line expanding past 64 KiB)
-  ends the whole top-level command it is in, status 1, as interactive bash
-  abandons the whole construct. A redirection that cannot be made fails
-  only its own command, status 1, as in bash.
+  in a command the shell runs itself ends the whole top-level command it
+  is in, status 1, as interactive bash abandons the whole construct; in a
+  pipeline or a background job, which bash expands in shells of their own,
+  it fails only that pipeline or job (§15 item 1). A redirection that
+  cannot be made fails only its own command, status 1, as in bash.
 
 ### 5.2 Ctrl-C
 
@@ -503,6 +505,10 @@ comments:
   it on (§8.5).
 - `test`'s file operators do not follow symbolic links (§6.2).
 - `:` is not a built-in; `true` is the program for it (§14).
+- A `\` at a line's end is an error, where bash joins the line to the
+  next (§15 item 1).
+- The line editor's history keeps each line of a command typed across
+  lines apart, where bash keeps the command as one entry (§15 item 1).
 
 ## 11. Testing
 
@@ -625,3 +631,88 @@ Each milestone's roadmap fixes its plans; this is the expected split.
 
 Changes made while planning either milestone are recorded here, as UG §16
 does.
+
+1. **Decisions made while planning milestone 4's plan 1** (lists):
+   - **The tree** (§4.1). A line parses to a `List` of items, each an
+     `AndOr` of `Pipeline`s (`negated`, `commands`) and, ended by `&`, its
+     background text; a blank or comment line is a list of no items. Each
+     pipeline is expanded just before it runs, so it reads the `$?` of the
+     one before. Plan 1 is three pull requests: its plan, the lists
+     (`;`, `&&`, `||`, `!`, `&`, the corpus), and the reader (commands
+     across lines, the `> ` prompt, `help`, the scenario `control`). It
+     has no NUC check; plan 4's check 6 runs lists there.
+   - **What ends the rest of a line** (§5.1, §5.2). `exit`; Ctrl-C, told
+     by how a command ended (a program killed by it, or a command that saw
+     it, as `wait` does), not by a status of 130, which a program may exit
+     with, and kept as a flag so that `!` cannot hide it; and an expansion
+     that abandons the line, a bad substitution or a line that would
+     expand past 64 KiB, as interactive bash abandons it, but only in a
+     command the shell runs itself (an assignment too): in a pipeline or a
+     background job, which bash expands in shells of their own, it fails
+     only that pipeline or job, and the line goes on. An ambiguous
+     redirect, or variables that would hold more than 64 KiB, fail only
+     their command, as bash's do. A script the in-process runner runs keeps
+     an abandoned line to itself. `!` leaves the status of a command whose
+     expansion abandoned the line as it is, bash's 1.
+   - **`;`, `&&` and `||`** (§4.1). A `;`, `&&` or `||` with nothing typed
+     before it, and bash's `case` terminators `;;`, `;&` and `;;&`, are
+     bash's `syntax error near unexpected token` naming it; one at the end
+     of the text needs more lines. A
+     pipeline `&&` or `||` does not run leaves `$?` alone. An and-or list
+     ending with `&` is `unsupported syntax: & after &&` (or `||`, the
+     connector before the pipeline `&` would start).
+   - **`!`** (§4.1, §5.1). An unquoted `!` word before anything of a
+     pipeline's first command; each one turns the status again, as bash's
+     does. Alone before `;`, a newline or the end it is an empty command
+     negated, status 1; before `|`, `&&`, `||` or `&`, or before a later
+     command of a pipeline, bash's syntax error; after a redirection, a
+     command's name. 130 negated is 0, bash's `$?` after Ctrl-C under `!`,
+     and the line still ends. `exit` keeps its status, and a background
+     job's start is 0, its text without the `!`, as bash's `jobs` shows it.
+   - **`&` mid-line** (§4.1). It ends an item that runs in the background
+     and the line goes on, a job's text its own item's, on one line: a job
+     typed across lines has its lines joined by a blank, without comments
+     or blank lines, as bash's `jobs` shows it. The in-process runner,
+     which has no programs, refuses a line holding a background job before
+     any of it runs (`unsupported syntax: &`, status 2).
+   - **Reserved words before plan 2** (§4.2). With `;` and `&&` a line such
+     as `if true; then echo b; fi` would run as commands that are not
+     found. Until plan 2, every reserved word of §4.2 and the compound
+     commands' (`if`, `then`, `elif`, `else`, `fi`, `while`, `until`,
+     `for`, `in`, `do`, `done`) is `unsupported syntax: <word>` where a
+     command name would stand; plan 2 turns the compound commands' into
+     grammar.
+   - **Newlines and the reader** (§4.3, §4.5). A newline ends an item as
+     `;` does; after `|`, `&&` or `||` the command goes on past blank and
+     comment lines. A comment runs to the end of its line. A `\` before a
+     newline stays `syntax error: nothing after \`, where bash joins the
+     lines (§10). `crates/shell/src/reader.rs` keeps the lines until one
+     finishes the command, at most 64 KiB with their newlines
+     (`relay-sh: the command would be longer than 64 KiB`, status 2); a
+     line that does not parse drops the command, as does one of `X | sh`
+     over 64 KiB or not text. A command dropped before its end is dropped
+     to its end: its later lines, up to one that would have finished it,
+     are dropped too, so that the end of an `&&` chain never runs without
+     its guard (a line over 64 KiB is judged by its last kilobyte or two,
+     and dropped to be safe when that does not parse alone). While a
+     command goes on, each line is parsed alone, and the text whole only
+     when a line may finish it, so reading 64 KiB of lines is linear.
+   - **Scripts across lines** (§5.4). Each line is traced as it is read
+     (blank and comment lines are not) and the command runs once a line
+     finishes it. A script ending inside a command is `syntax error:
+     unexpected end of file`, status 2, and runs none of it; Ctrl-C between
+     its lines ends the script with `^C` alone.
+   - **The `> ` prompt** (§5.5). Each line is edited on its own and kept
+     apart in the history, where bash keeps the command as one entry
+     (§10). The input's end at `> ` is `unexpected end of file`, status 2,
+     and the shell ends, as bash's does.
+   - **The bash corpus** (§11.2). `crates/shell/src/corpus.rs`, a test
+     module, runs `crates/shell/tests/corpus/*.sh` under the host's bash
+     (`--norc --noprofile`, the environment cleared but `LC_ALL=C` and
+     `PATH=/usr/bin:/bin`) and under the in-process runner, as `X | sh`
+     reads its input, and compares standard output and status; bash must
+     be 5.2 and write nothing to standard error.
+   - **Left for plan 2.** The compound commands, which turn their reserved
+     words into grammar; the 32-level bound (§4.5: lists do not nest); the
+     Ctrl-C check between commands (a list of built-ins always ends); and
+     the refusals of a compound command in a pipeline or with `&`.
