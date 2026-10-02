@@ -11,10 +11,12 @@ use vfs::path;
 pub const UNAME: &str = "Relay";
 pub const UNAME_ALL: &str = concat!("Relay relay ", env!("CARGO_PKG_VERSION"), " x86_64");
 
-/// `cd [dir]`: no argument goes to `/root`. `cd -` is not supported.
+/// `cd [dir]`: no argument goes to `/root`, an empty one nowhere (as in
+/// bash). `cd -` is not supported.
 pub fn cd(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     let dir = match args {
         [] => HOME,
+        [dir] if dir.is_empty() => return 0,
         [dir] if dir == "-" => {
             return ctx.fail(NAME, format_args!("cd: -: not supported"));
         }
@@ -158,6 +160,23 @@ mod tests {
         assert_eq!(h.run("pwd").1, "/\n");
         h.run("cd ~");
         assert_eq!(h.run("pwd").1, "/root\n");
+    }
+
+    #[test]
+    fn cd_to_an_empty_directory_stays_where_it_is() {
+        // As bash's does (status 0), so a script's `cd "$1"` without an
+        // argument does nothing; `cd $E` unquoted gets no word and goes
+        // home, as `cd` alone.
+        let mut h = Harness::new();
+        assert_eq!(
+            h.lines(&["cd /etc", "cd \"\"", "pwd", "cd \"$1\"", "pwd"]),
+            (0, "/etc\n/etc\n".into())
+        );
+        assert_eq!(h.lines(&["cd /etc", "E=", "cd $E", "pwd"]).1, "/root\n");
+        assert_eq!(
+            h.run("cd '' ''"),
+            (1, "relay-sh: cd: too many arguments\n".into())
+        );
     }
 
     #[test]

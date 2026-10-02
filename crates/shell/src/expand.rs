@@ -8,6 +8,7 @@
 //! only in quotes.
 
 use crate::parser::{Command, Line, Param, Piece, Redirect, Word};
+use alloc::borrow::Cow;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -188,9 +189,14 @@ impl<'v> Expander<'v> {
             quoted: false,
         }];
         for piece in &word.pieces {
-            match piece {
-                Piece::Param(Param::All, quoted) => {
-                    let Some((first, rest)) = self.vars.args[1..].split_first() else {
+            let (value, quoted) = match piece {
+                Piece::Text(t, quoted) => (Value::One(Cow::Borrowed(t.as_str())), quoted),
+                Piece::Param(p, quoted) => (self.value(p)?, quoted),
+            };
+            match value {
+                Value::One(text) => self.push(&mut fields, &text, *quoted)?,
+                Value::Args(args) => {
+                    let Some((first, rest)) = args.split_first() else {
                         continue;
                     };
                     self.push(&mut fields, first, *quoted)?;
@@ -202,11 +208,6 @@ impl<'v> Expander<'v> {
                         });
                         self.push(&mut fields, a, *quoted)?;
                     }
-                }
-                Piece::Text(t, quoted) => self.push(&mut fields, t, *quoted)?,
-                Piece::Param(p, quoted) => {
-                    let value = self.value(p)?;
-                    self.push(&mut fields, &value, *quoted)?;
                 }
             }
         }
@@ -222,18 +223,25 @@ impl<'v> Expander<'v> {
         Ok(())
     }
 
-    /// A parameter's value (`$@`'s joined by blanks).
-    fn value(&self, p: &Param) -> Result<String, Error> {
+    /// A parameter's value, borrowed from the variables where it is
+    /// theirs, so that its room is taken before any of it is copied.
+    fn value(&self, p: &Param) -> Result<Value<'v>, Error> {
         let args = &self.vars.args;
         Ok(match p {
-            Param::Name(n) => String::from(self.vars.get(n)),
-            Param::Arg(i) => args.get(*i).cloned().unwrap_or_default(),
-            Param::Count => (args.len() - 1).to_string(),
-            Param::Status => self.status.to_string(),
-            Param::All => args[1..].join(" "),
+            Param::Name(n) => Value::One(Cow::Borrowed(self.vars.get(n))),
+            Param::Arg(i) => Value::One(Cow::Borrowed(args.get(*i).map_or("", String::as_str))),
+            Param::Count => Value::One(Cow::Owned((args.len() - 1).to_string())),
+            Param::Status => Value::One(Cow::Owned(self.status.to_string())),
+            Param::All => Value::Args(&args[1..]),
             Param::Bad(t) => return Err(Error::BadSubstitution(t.clone())),
         })
     }
+}
+
+/// What a piece of a word gives: text, or `$@`'s arguments, a word each.
+enum Value<'v> {
+    One(Cow<'v, str>),
+    Args(&'v [String]),
 }
 
 /// The words of `line` with nothing set: for callers that run no shell

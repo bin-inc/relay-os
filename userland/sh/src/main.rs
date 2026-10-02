@@ -12,6 +12,7 @@
 extern crate alloc;
 
 use alloc::string::String;
+use relay_abi::console::MODE_RAW;
 use relay_rt::sysio::words;
 use relay_rt::{Args, SysConsole, SysPrograms, SysStdin, SysStdout, SysSystem, SysVfs, sys};
 use shell::Shell;
@@ -34,16 +35,16 @@ fn main(args: Args) -> u8 {
             Shell::spawning(&mut vfs, &mut console, &mut system, &mut programs).named(&name);
         shell.run_input(&mut SysStdin) as u8
     } else if words.is_empty() {
-        // An interactive shell leads a process group of its own when it
-        // was started at a prompt (the group is numbered after it); one a
-        // script started is in the script's group. One in a group of its
-        // own that was never given the console (`sh &`) has no console to
-        // read: it ends before its first prompt.
-        let leader = match sys::console_foreground(sys::getpid()) {
-            Ok(()) => true,
-            Err(relay_abi::errno::EPERM) => return 0,
-            Err(_) => false,
-        };
+        // A shell whose group was never given the console (`sh &`, or one
+        // a background script started) may not set its mode, and has no
+        // console to read: it ends before its first prompt. Otherwise it
+        // leads a process group of its own when it was started at a prompt
+        // (the group is numbered after it); one a script started is in the
+        // script's group, and no group has its number.
+        if sys::console_mode(MODE_RAW) == Err(relay_abi::errno::EPERM) {
+            return 0;
+        }
+        let leader = sys::console_foreground(sys::getpid()).is_ok();
         let mut console = SysConsole::interactive(leader.then(sys::getpid));
         let mut programs = SysPrograms::new(leader);
         let mut shell =

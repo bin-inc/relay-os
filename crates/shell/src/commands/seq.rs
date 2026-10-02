@@ -25,22 +25,30 @@ pub fn seq(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     if let Some(extra) = ops.get(3) {
         return ctx.fail("seq", format_args!("extra operand {}", quote(extra)));
     }
+    // GNU's refusals first, in its order: each operand must be a number,
+    // and the increment of three not zero, which GNU checks as soon as it
+    // has read it.
+    for (i, op) in ops.iter().enumerate() {
+        if is_nan(op) {
+            let message = format_args!("invalid 'not-a-number' argument: {}", quote(op));
+            return ctx.fail("seq", message);
+        }
+        if !is_number(op) {
+            let message = format_args!("invalid floating point argument: {}", quote(op));
+            return ctx.fail("seq", message);
+        }
+        if i == 1 && ops.len() == 3 && is_zero(op) {
+            let message = format_args!("invalid Zero increment value: {}", quote(op));
+            return ctx.fail("seq", message);
+        }
+    }
+    // Then this seq's own: whole numbers only.
     let mut numbers = Vec::new();
     for op in ops {
         match whole(op) {
             Some(n) => numbers.push(n),
-            None if is_nan(op) => {
-                return ctx.fail(
-                    "seq",
-                    format_args!("invalid 'not-a-number' argument: {}", quote(op)),
-                );
-            }
-            None if is_number(op) => {
-                return ctx.fail("seq", format_args!("not a whole number: {}", quote(op)));
-            }
             None => {
-                let message = format_args!("invalid floating point argument: {}", quote(op));
-                return ctx.fail("seq", message);
+                return ctx.fail("seq", format_args!("not a whole number: {}", quote(op)));
             }
         }
     }
@@ -51,10 +59,6 @@ pub fn seq(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
         [first, step, last] => (first, step, last),
         _ => unreachable!("at most three operands"),
     };
-    if step == 0 {
-        let message = format_args!("invalid Zero increment value: {}", quote(&ops[1]));
-        return ctx.fail("seq", message);
-    }
     let mut n = first;
     while !ctx.interrupted() && !ctx.out_failed() {
         if (step > 0 && n > last) || (step < 0 && n < last) {
@@ -110,6 +114,19 @@ fn is_number(s: &str) -> bool {
     mantissa_ok && exponent_ok
 }
 
+/// Whether a number (one `is_number` takes) is zero: all its digits
+/// before any exponent are `0`.
+fn is_zero(s: &str) -> bool {
+    let s = s.trim_start_matches([' ', '\t']);
+    let s = s.strip_prefix(['+', '-']).unwrap_or(s).to_ascii_lowercase();
+    let (digits, exponent_mark) = match s.strip_prefix("0x") {
+        Some(hex) => (hex, 'p'),
+        None => (s.as_str(), 'e'),
+    };
+    let mantissa = digits.split(exponent_mark).next().unwrap_or("");
+    mantissa.chars().all(|c| c == '0' || c == '.')
+}
+
 /// GNU's not-a-number (`nan`, either case, with a sign or none).
 fn is_nan(s: &str) -> bool {
     let s = s.trim_start_matches([' ', '\t']);
@@ -144,6 +161,10 @@ mod tests {
             &["seq", "1", "2", "9"],
             &["seq", "1", "2", "10"],
             &["seq", "10", "-3", "1"],
+            // Only the increment may not be zero.
+            &["seq", "0", "2", "6"],
+            &["seq", "3", "-1", "0"],
+            &["seq", "-2", "0"],
             &["seq", "0"],
             &["seq", "-3", "-1"],
             &["seq", "--", "5"],
@@ -188,6 +209,8 @@ mod tests {
             ("seq -.5 1", "seq: not a whole number: '-.5'\n"),
             ("seq inf", "seq: not a whole number: 'inf'\n"),
             ("seq 0x10", "seq: not a whole number: '0x10'\n"),
+            // A hexadecimal increment's `e` is a digit (14), not zero.
+            ("seq 1 0x0e 5", "seq: not a whole number: '0x0e'\n"),
             // GNU's options are not this seq's.
             ("seq -w 3", "seq: invalid option -- 'w'\n"),
         ] {
@@ -209,8 +232,31 @@ mod tests {
             &["seq", "-x", "3"],
             &["seq", "--foo", "3"],
             &["seq", "nan"],
+            // GNU refuses a zero increment as soon as it has read it,
+            // before the last operand, in any form a number takes.
+            &["seq", "1", "0", "x"],
+            &["seq", "1", "0", "1.5"],
+            &["seq", "1", "0", "nan"],
+            &["seq", "1.5", "0", "x"],
+            &["seq", "0x10", "0", "x"],
+            &["seq", "1", "0.0", "5"],
+            &["seq", "1", "-0", "5"],
+            &["seq", "1", " +0", "5"],
+            &["seq", "1", ".0", "5"],
+            &["seq", "1", "0x0", "5"],
+            &["seq", "1", "0x.0p3", "5"],
+            &["seq", "1", "0e5", "x"],
+            &["seq", "x", "0", "1"],
+            &["seq", "nan", "0", "1"],
+            // And every operand is a number before this seq asks for a
+            // whole one.
+            &["seq", "1.5", "x"],
+            &["seq", "1e3", "nan"],
         ] {
             let mut h = Harness::new();
+            // A zero increment taken would print for ever: a Ctrl-C ends
+            // it, and the test fails.
+            h.console.interrupt_after = Some(10_000);
             let (status, out, err) = host_tool(args, &[], b"");
             let first = err.lines().next().unwrap_or("");
             assert_eq!(
