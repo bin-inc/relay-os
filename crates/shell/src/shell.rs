@@ -999,6 +999,27 @@ mod tests {
     }
 
     #[test]
+    fn a_dropped_construct_s_refused_syntax_hides_none_of_its_end() {
+        // The prototype's review ran each tail without its loop: a `fi` or
+        // `done` that the refused syntax around it hides from bash was
+        // counted, or an opener it shows to bash was not.
+        let head = b"while t-args a; do\n";
+        for inner in [
+            &b"time for f in b\ndo t-args c\ndone\n"[..],
+            b"select x in a b; do\nt-args c\ndone\n",
+            b"{ if t-args b\nthen t-args c\nfi\n}\n",
+            b"t-args ` if t-args b; then t-args c; fi `\n",
+            b"t-args copy of $(hostname) done\n",
+            b"case b in\ndone) t-args c;;\nesac\n",
+        ] {
+            let mut text = head.to_vec();
+            text.extend_from_slice(inner);
+            text.extend_from_slice(b"t-args tail\ndone\nt-args next\n");
+            assert_eq!(piped(&text), ["next"], "{}", String::from_utf8_lossy(inner));
+        }
+    }
+
+    #[test]
     fn jobs_shows_a_job_typed_across_lines_on_one_line() {
         let mut h = with_jobs();
         let mut input = crate::Bytes::new(b"sleep 5 |\n# c\ncat &\njobs\n".to_vec());

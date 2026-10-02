@@ -4,7 +4,10 @@
 //! ends after `|`, `&&` or `||`, so that nothing of it runs without what
 //! came before. The scan reads quotes, escapes and comments as the parser
 //! does, but never fails, and takes a line a byte at a time, so that a line
-//! too long to keep, or not text, still counts whole.
+//! too long to keep, or not text, still counts whole. It runs after a
+//! refusal, so it reads what the parser refuses as bash reads it: `$(…)`
+//! and backquotes whole, a command name's place after `time`, `{` and `}`,
+//! `select` and `case` opening constructs, a `case` pattern before `)`.
 
 /// Where a `for` is, while its name and words are read.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -17,8 +20,8 @@ enum For {
     AfterName,
 }
 
-/// The longest keyword, `until` and `while`.
-const KEYWORD_MAX: usize = 5;
+/// The longest keyword the scan looks for, `select`.
+const KEYWORD_MAX: usize = 6;
 
 /// What the lines read so far open and close.
 pub(crate) struct Scan {
@@ -34,8 +37,9 @@ pub(crate) struct Scan {
     /// After a `\`, which takes the next character.
     escaped: bool,
     comment: bool,
-    /// How many `${` are open.
-    braces: usize,
+    /// How many `${`, `$(` and `(` inside them are open: what is in them
+    /// is part of a word.
+    nested: usize,
     /// The byte before, outside quotes.
     last: u8,
     /// The word being read: its first bytes, and how many it has. A quote
@@ -58,7 +62,7 @@ impl Scan {
             quote: None,
             escaped: false,
             comment: false,
-            braces: 0,
+            nested: 0,
             last: b'\n',
             word: [0; KEYWORD_MAX],
             len: 0,
@@ -95,17 +99,18 @@ impl Scan {
         if let Some(q) = self.quote {
             match b {
                 _ if b == q => self.quote = None,
-                b'\\' if q == b'"' => self.escaped = true,
+                b'\\' if q != b'\'' => self.escaped = true,
                 _ => {}
             }
             return;
         }
         let last = core::mem::replace(&mut self.last, b);
-        if self.braces > 0 {
+        if self.nested > 0 {
             match b {
-                b'}' => self.braces -= 1,
-                b'{' if last == b'$' => self.braces += 1,
-                b'\'' | b'"' => self.quote = Some(b),
+                b'}' | b')' => self.nested -= 1,
+                b'{' if last == b'$' => self.nested += 1,
+                b'(' => self.nested += 1,
+                b'\'' | b'"' | b'`' => self.quote = Some(b),
                 b'\\' => self.escaped = true,
                 _ => {}
             }
@@ -113,7 +118,7 @@ impl Scan {
         }
         match b {
             b' ' | b'\t' => self.end_word(),
-            b'\'' | b'"' => {
+            b'\'' | b'"' | b'`' => {
                 self.add(b);
                 self.quote = Some(b);
             }
@@ -121,9 +126,9 @@ impl Scan {
                 self.add(b);
                 self.escaped = true;
             }
-            b'{' if last == b'$' && self.in_word => {
+            b'{' | b'(' if last == b'$' && self.in_word => {
                 self.add(b);
-                self.braces = 1;
+                self.nested = 1;
             }
             b'#' if !self.in_word => self.comment = true,
             // `&&` and `||` go on to the next line, as `|` does.
@@ -132,7 +137,12 @@ impl Scan {
                 self.operator();
                 self.open = true;
             }
-            b';' | b'&' | b'(' | b')' => self.operator(),
+            // The word before a `)` is a `case` pattern, no keyword.
+            b')' => {
+                self.command = false;
+                self.operator();
+            }
+            b';' | b'&' | b'(' => self.operator(),
             b'>' | b'<' => {
                 self.end_word();
                 self.target = true;
@@ -167,7 +177,7 @@ impl Scan {
         self.quote = None;
         self.escaped = false;
         self.comment = false;
-        self.braces = 0;
+        self.nested = 0;
         self.last = b'\n';
         self.command = true;
         self.target = false;
@@ -210,12 +220,18 @@ impl Scan {
         }
         match word {
             b"if" | b"while" | b"until" => self.depth = self.depth.saturating_add(1),
-            b"for" => {
+            b"for" | b"select" => {
                 self.depth = self.depth.saturating_add(1);
                 self.for_ = For::Name;
             }
-            b"fi" | b"done" => self.depth = self.depth.saturating_sub(1),
-            b"then" | b"elif" | b"else" | b"do" | b"!" => {}
+            // Its word and `in` are no command's name; a pattern is
+            // followed by `)`.
+            b"case" => {
+                self.depth = self.depth.saturating_add(1);
+                self.command = false;
+            }
+            b"fi" | b"done" | b"esac" => self.depth = self.depth.saturating_sub(1),
+            b"then" | b"elif" | b"else" | b"do" | b"!" | b"time" | b"{" | b"}" => {}
             _ => self.command = false,
         }
     }
@@ -370,6 +386,40 @@ mod tests {
         assert_eq!(after(&["echo ${x;if}; if c"]), (1, false));
         assert_eq!(after(&["echo ${a:-${b}; if x}; if c"]), (1, false));
         assert_eq!(after(&["echo ${a:-\\}; if x}; if c"]), (1, false));
+    }
+
+    #[test]
+    fn refused_syntax_is_read_as_bash_reads_it() {
+        // The prototype's review: the scan runs after a refusal, so it
+        // must count across what was refused as bash would.
+        for (lines, depth) in [
+            // A command name stands after `time`, `{` and `}`.
+            (&["time if a; then"][..], 1),
+            (&["{ while a; do"], 1),
+            (&["while a; do { b; } done"], 0),
+            // `select` opens as `for` does, `case` as `esac` closes.
+            (&["select x in if; do"], 1),
+            (&["select x in a; do b; done"], 0),
+            (&["case a in"], 1),
+            (&["case done in"], 1),
+            (&["case a in", "b) c;;", "esac"], 0),
+            // A word before `)` is a `case` pattern.
+            (&["case a in", "done) b;;", "fi) c;;"], 1),
+            // `$(…)`, `$((…))` and backquotes are read whole.
+            (&["echo $(if a; then b; fi) done"], 0),
+            (&["echo $(a; fi) done; if b"], 1),
+            (&["echo $((1 + (2))) fi; while a"], 1),
+            (&["echo $(a (b) ; if c) x; while d"], 1),
+            (&["echo $(a `)` b) fi; if c"], 1),
+            (&["echo ` if a; then b; fi `; until c"], 1),
+            (&["echo `a \\` fi` b; for x in y; do"], 1),
+            (&["echo \"$(a) `b`\" done"], 0),
+        ] {
+            assert_eq!(after(lines), (depth, false), "{lines:?}");
+        }
+        // Left open at a line's end, they end with it as quotes do.
+        assert_eq!(after(&["echo $(a", "if b"]), (1, false));
+        assert_eq!(after(&["echo `a", "if b"]), (1, false));
     }
 
     #[test]
