@@ -1,7 +1,7 @@
 # Relay OS — Programmable Shell Gate Design (milestones 4 and 5)
 
 - **Date:** 2026-10-02
-- **Status:** Approved 2026-10-02; revised while planning milestone 4's plan 1 (see §15)
+- **Status:** Approved 2026-10-02; revised while planning milestone 4's plans 1 and 2 (see §15)
 - **Builds on:** the user-space gate (version 0.4.0,
   `docs/superpowers/specs/2026-09-29-user-space-gate-design.md`, cited below
   as "UG §n") and milestone 1 (`2026-09-26-milestone-1-boot-shell-fs-design.md`,
@@ -177,9 +177,9 @@ added until the text is complete or wrong.
   body, a keyword out of place, a missing `then`), and
   `syntax error: unexpected end of file` when the input ends inside a
   construct.
-- A syntax error discards the whole construct read so far; in a script the
-  next line starts afresh, as a failing line does not stop a script (UG
-  §8.3).
+- A syntax error discards the whole construct, to its end (§15 item 2);
+  in a script the line after it starts afresh, as a failing line does not
+  stop a script (UG §8.3).
 - Messages carry no line numbers, as today.
 - Exactly which token each error names is what interactive bash 5.2 names;
   the parser's tests record each case against it (§11.1).
@@ -192,8 +192,8 @@ What is typed or read is untrusted (AGENTS.md):
   item 12). Beyond it the construct is dropped, to its end (§15 item 1):
   `relay-sh: the command would be longer than 64 KiB`, status 2.
 - Nesting is at most 32 levels deep, counting each compound command and
-  each `&&`/`||` chain inside one: `relay-sh: unsupported syntax: more
-  than 32 levels of nesting`, status 2. The parser and the walker recurse,
+  each `&&`/`||` chain inside one (§15 item 2): `relay-sh: unsupported
+  syntax: more than 32 levels of nesting`, status 2. The walker recurses,
   and `/bin/sh` runs on a fixed stack.
 - A loop's passes are not bounded (§5.2).
 
@@ -227,7 +227,9 @@ command and a pipeline becomes its leaves.
 ### 5.2 Ctrl-C
 
 - Ctrl-C ends the running program (status 130) and every construct around
-  it, up to the top-level command.
+  it, up to the top-level command; `$?` is then 130, except after a
+  top-level command that is one pipeline of simple commands (§15
+  item 2).
 - The walker also checks for a Ctrl-C before each command, so a loop of
   built-ins only (`while cd; do cd; done`) ends too, printing `^C`, status
   130.
@@ -509,6 +511,14 @@ comments:
   next (§15 item 1).
 - The line editor's history keeps each line of a command typed across
   lines apart, where bash keeps the command as one entry (§15 item 1).
+- A command dropped before its end, after a syntax error or a refused
+  line, is dropped to its end, where interactive bash runs its later lines
+  as new commands (§15 items 1 and 2).
+- Ctrl-C ends a lone compound command even in its condition, status 130,
+  where bash goes on to its `else` or `elif` (§15 item 2).
+- A pipeline is expanded whole before it starts, so a command of it that
+  does not expand fails the whole pipeline, status 1, where bash fails only
+  that command (§15 item 2).
 
 ## 11. Testing
 
@@ -716,3 +726,124 @@ does.
      words into grammar; the 32-level bound (§4.5: lists do not nest); the
      Ctrl-C check between commands (a list of built-ins always ends); and
      the refusals of a compound command in a pipeline or with `&`.
+
+2. **Decisions made while planning milestone 4's plan 2** (compound
+   commands):
+   - **The tree** (§4.1). `Command` stays the simple command (words and a
+     redirection), which expansion and the runner take. A `Pipeline` holds
+     its `!` and either simple commands joined by `|` or one compound
+     command: `If` (each `if` or `elif` condition with its body, and the
+     `else` body), `While` and `Until` (a condition and a body) and `For`
+     (its name as typed, its words, or none for `"$@"`, and its body), each
+     condition and body a `List`. A compound command among other commands,
+     with `&` or with a redirection cannot stand in the tree: the parser
+     refuses it. Plan 2 is four pull requests: its plan; `if`, with the
+     tree, the parser read a line at a time, the dropping of a construct to
+     its end, the nesting bound and the refusals, while `while`, `until`
+     and `for` stay refused; the loops and the Ctrl-C check, which reaches
+     the kernel and `relay-rt`; `help` and the scenario `control`. It has
+     no NUC check; plan 4's check 6 runs compound commands there.
+   - **Keywords** (§4.2). A compound command's word is a keyword only
+     unquoted, whole, and where a command name would stand (after any
+     `!`), and `in` and `do` also where a `for` takes them; after a
+     command's name and in a `for`'s words it is a word (`echo if`,
+     `for x in if then`). After `fi` or `done` the next word must be a
+     keyword that the construct around takes there (`fi fi`, `fi done`,
+     `fi then`, as bash takes them) or an operator; any other word,
+     `!` and `if` included, is bash's syntax error naming it, and so is
+     `in` where a command name would stand. bash's other reserved words,
+     `break` and `continue` stay refused.
+   - **`for`** (§4.1). Its name must be on its line (`for` alone is the
+     syntax error near `newline`); any word is taken as the name, `in`
+     too, and checked when the loop runs, as bash checks it: ``relay-sh:
+     `1x': not a valid identifier``, status 1, naming the word as typed,
+     and the line goes on. The words after `in` run to a `;` or a newline,
+     keywords among them; then, past blank lines, `do`. `for NAME do`,
+     `for NAME; do` and `for NAME` with `do` on a later line loop over
+     `"$@"`.
+   - **Syntax errors** (§4.4), each bash 5.2's ``syntax error near
+     unexpected token `X'``, status 2, as interactive bash names it: a
+     keyword where none fits (`then`, `elif`, `else`, `fi`, `do`, `done`
+     or `in` where a command name stands and the construct around does not
+     take it), an empty condition or body (the keyword after it, or the `;`
+     that ends nothing, as in `do; echo`), a `for` without `in` or `do` (the
+     word in their place), a word after `fi` or `done`; the input's end
+     inside a construct is `syntax error: unexpected end of file`.
+   - **Refusals** (§4.1), `relay-sh: unsupported syntax: <what>`, status 2:
+     `| after fi` (or `done`) for a compound command before `|`, `if after
+     |` (or `while`, `until`, `for`) for one after it, `& after fi`, and
+     `> after fi` or `>> after fi` until milestone 5 redirects compound
+     commands. A background job inside a compound command (`a &`) is
+     allowed, as in bash; the in-process runner refuses a command holding
+     one at any depth before any of it runs.
+   - **Reading a construct** (§4.3, §4.5). The parser keeps its state from
+     one line to the next, so the reader gives it each line once, in its
+     context: reading 64 KiB stays linear, and an error is told on the line
+     that has it, which fixes plan 1's judging of a line alone (`a |` then
+     `! b |` was told a line late). A command dropped before its end (a
+     syntax error, a refused word, past 64 KiB, a line that is no text, an
+     `X | sh` line over 64 KiB) is dropped to its end by a scan that never
+     fails: it reads quotes, escapes, comments, `${…}`, `$(…)` and
+     backquotes as the parser and bash read them, counts each `if`,
+     `while`, `until`, `for`, `select` and `case` and each `fi`, `done` and
+     `esac` where a command name would stand (after `time`, `{` and `}`
+     too, which bash allows, and never in a word before `)`, a `case`
+     pattern), and notes a line ending after `|`, `&&` or `||`; the drop
+     ends with the line after which the count is 0 and nothing is left
+     open. It runs over the text read so far, then over
+     each later line; a line too long or not text is fed to it a byte at a
+     time as it is read, so the count stays exact (replacing plan 1's
+     judging of such a line by its last bytes). So `if true` / `then` /
+     `fi` drops nothing after `fi`, as bash does, and in `if true; then` /
+     `echo a; then` / `echo b` / `fi` the line `echo b`, which interactive
+     bash would run, is dropped (§10). At the prompt `> ` shows while a
+     construct is read or dropped.
+   - **The nesting bound** (§4.5). Each compound command is one level, and
+     one that follows `&&` or `||` one more, as the walker's frame for the
+     and-or list stands under it. The parser keeps the open constructs on a
+     stack of its own and never recurses; the opener that would pass 32
+     levels is refused with §4.5's message, and its construct is dropped to
+     its end. The `control` scenario runs a script at 32 levels under
+     `/bin/sh` and one refused at 33.
+   - **Statuses** (§5.1), as bash 5.2's: an `if` with no branch taken is 0,
+     even after a failing condition; a loop whose body never runs is 0; a
+     `while` or `until` condition is expanded again on each pass; `for`
+     expands its words once, as arguments are, and sets its variable
+     through the shell's variables before each pass. A value that does not
+     fit in their 64 KiB fails the loop, status 1, and the line goes on, as
+     an assignment that does not fit does; a bad substitution in its words
+     abandons the top-level command, as `for` is a command the shell runs
+     itself.
+   - **Ctrl-C** (§5.2). The walker checks for a Ctrl-C before each simple
+     and each compound command, printing `^C` and ending the command with
+     130. After Ctrl-C ends a top-level command `$?` is 130, as bash's is,
+     unless that command is one pipeline, which keeps its own status (130,
+     or 0 under `!`, §15 item 1); this fixes plan 1's `! sleep 5; echo x`,
+     which left 0. bash 5.2 goes on after Ctrl-C in the condition of a lone
+     compound command (`if sleep 5; then …; else echo b; fi` prints `b`,
+     status 0); here §5.2 holds and it ends, status 130 (§10).
+   - **The Ctrl-C between the shell's own commands** (§5.2). The
+     interactive `/bin/sh` keeps the console in raw mode while it runs its
+     own commands, where a Ctrl-C is input it would read only at the next
+     prompt, so it asks the kernel: `wait(0, WAIT_NOHANG | WAIT_CTRL_C)`,
+     which was `EINVAL`, says whether a raw Ctrl-C was typed for the
+     caller's group (`EINTR`, taking it) and collects no child; the ABI's
+     values and version (3) do not change. Once a foreground program it
+     waited for has ended, the shell takes the console back (its group,
+     raw mode), and a line-mode Ctrl-C that reaches a group with no
+     process left is kept as a raw one for the group that holds the
+     console next, so that a Ctrl-C typed after a program on the same
+     command line still ends a loop of built-ins (the prototype's review
+     found it lost until a reset). So plan 2 changes the kernel and
+     `relay-rt`, not only the shell.
+   - **Here-documents** (§4.2). `<<` and `<<-` stay refused; the lines
+     after a line refused for one, up to its delimiter's line, are
+     dropped with it, so a here-document's body never runs as commands
+     (the prototype's review found it run since milestone 3).
+   - **The script trace** (§5.4). Each line is traced as it is read, before
+     the reader takes it, dropped lines too, so a construct's lines are all
+     traced before any of it runs; blank and comment lines are not.
+   - **A pipeline is expanded whole** (UG §16 item 10). `echo ${1A} | cat;
+     echo $?` gives the bad substitution and 1, where bash's subshells fail
+     only `echo` and `cat` gives 0. This is kept, a decided difference
+     (§10), rather than expanding each command of a pipeline apart.
