@@ -9,14 +9,14 @@ programs, the timer shares the CPU among them, and Ctrl-C stops the
 command that runs. Programs open, read and write files, map memory (their
 runtime gives them a heap), read the console a line at a time or as it is
 typed, and copy what the console shows into files (tees). Every command
-is also a program of its own in `/bin` (`/bin/ls`), which prints what the
+but the shell's built-ins (`cd`, `exit`, `help`, `jobs`, `kill`, `wait`)
+is a program of its own in `/bin` (`/bin/ls`), which prints what the
 shell's command prints, and the shell itself is one too: `/bin/sh` runs
-every command but its built-ins (`cd`, `exit`, `help`, `jobs`, `wait`,
-`kill`) as a program, and its scripts may run scripts. Process 1 is the
-kernel's init: it starts `/bin/sh` at boot and again whenever it ends, and
-a machine that cannot run its shell (no `system.img`, or a shell that
-keeps ending) shows an error screen and restarts at a key. The kernel
-holds no shell of its own any more.
+each of those commands as a program, and its scripts may run scripts.
+Process 1 is the kernel's init: it starts `/bin/sh` at boot and again
+whenever it ends, and a machine that cannot run its shell (no
+`system.img`, or a shell that keeps ending) shows an error screen and
+restarts at a key. The kernel holds no shell of its own any more.
 
 Milestone 3 connects the programs: pipes (`seq 1000 | grep 7 | wc -l`),
 with `grep`, `seq`, `sleep`, `true` and `false`; jobs in the background
@@ -54,16 +54,23 @@ has the whole checklist):
    the output of every script.
 
 After a code change, `cargo xtask flash --kernel` replaces only the loader,
-the kernel and the programs of `/bin` (`system.img`) and keeps the files on
-the stick.
+the kernel, the programs of `/bin` (`system.img`) and the kernel command
+line (empty unless `--cmdline` is given) and keeps the files on the stick.
 
 ## Requirements (host)
 
-Linux with `rustup`, `qemu-system-x86_64`, OVMF (`/usr/share/OVMF`),
-`mtools`, `e2fsprogs`, `util-linux` (`sfdisk`), `udisks2`, `binutils`
-(`readelf` checks every user program) and `linux-libc-dev` (the tests check
-the error numbers against Linux's headers). The Rust toolchain and targets
-are installed automatically from `rust-toolchain.toml`.
+Linux with `rustup`, a C toolchain (the host tools link with `cc`),
+`qemu-system-x86_64`, OVMF (`/usr/share/OVMF/OVMF_CODE_4M.fd` and
+`OVMF_VARS_4M.fd`), `mtools`, `e2fsprogs`, `sfdisk`, `udisks2`, `binutils`
+(`readelf` checks every user program) and `linux-libc-dev` (the tests
+check the error numbers against Linux's headers). On Ubuntu or Linux Mint:
+
+```sh
+sudo apt install build-essential qemu-system-x86 ovmf mtools e2fsprogs fdisk udisks2 binutils linux-libc-dev
+```
+
+The Rust toolchain and targets are installed automatically from
+`rust-toolchain.toml`.
 
 ## Common commands
 
@@ -73,29 +80,44 @@ are installed automatically from `rust-toolchain.toml`.
 | `cargo xtask lint` | `cargo fmt --check` and clippy (warnings are errors) on every crate |
 | `cargo xtask unit` | Host unit tests |
 | `cargo xtask test` | Host unit tests, then every QEMU scenario in `tests/e2e/`, up to 4 at once (`--jobs 1` for one at a time) |
-| `cargo xtask qemu` | Boot the image in a QEMU window (serial on this terminal) |
+| `cargo xtask test --scenario NAME` | Host unit tests, then one scenario (`tests/e2e/NAME.txt`); `--e2e-only` skips the unit tests |
+| `cargo xtask build` | Build the loader, the kernel and `system.img` |
 | `cargo xtask image` | Build `target/relay/relay-os.img` |
-| `cargo xtask host-shell <img>` | Run the shell on this machine over the image's ext2 partition (changes it in place; `poweroff` leaves) |
-| `cargo xtask flash --full` | Erase and write the Kingston test stick |
-| `cargo xtask flash --kernel` | Update loader, kernel and `system.img` on the stick, keep files |
+| `cargo xtask qemu` | Boot the image in a QEMU window (serial on this terminal; `--serial-only` for no window) |
+| `cargo xtask host-shell <img>` | Run the shell on this machine over the image's ext2 partition (changes it in place; `exit` leaves) |
+| `cargo xtask setup-udev` | Write a udev rule that gives you access to the test stick, and print the three `sudo` commands that install it |
+| `cargo xtask flash --full` | Erase and write the Kingston test stick (`--yes` skips typing `ERASE`) |
+| `cargo xtask flash --kernel` | Update loader, kernel, `system.img` and command line on the stick, keep files |
 | `cargo xtask verify-usb` | `e2fsck` the stick, list its files and check the transcripts of the check scripts |
+| `cargo xtask gen-font <bdf>` | Regenerate `crates/term/src/font.rs` from a Spleen BDF file |
 
-Set `RELAY_QEMU_ACCEL=tcg` to run QEMU without KVM.
+`image`, `qemu` and `flash` take `--cmdline '…'`, the kernel command line
+written to the ESP (`docs/hardware-test.md` lists the options).
+
+`RELAY_QEMU_ACCEL` is the list of QEMU accelerators to try, comma-separated;
+it defaults to `kvm,tcg`, so QEMU falls back to software emulation without
+`/dev/kvm`. Set `RELAY_QEMU_ACCEL=tcg` to force it.
 
 ## Continuous integration
 
-Every pull request to `main` runs `.github/workflows/ci.yml` with three jobs
-(`lint`, `unit`, `e2e`). The jobs only install tools and call the `cargo xtask`
-subcommands above, so `cargo xtask ci` locally checks exactly what CI checks.
-If a scenario fails, its serial log and screenshot are attached to the run as
-the `e2e-logs` artefact. Hardware checks on the NUC stay manual
-(`docs/hardware-test.md`); the pull-request template asks about them.
+Every pull request to `main`, and every push to it, runs
+`.github/workflows/ci.yml` with three jobs (`lint`, `unit`, `e2e`). The jobs
+only install tools and call the `cargo xtask` subcommands above, so
+`cargo xtask ci` locally checks what these jobs check. If a scenario fails,
+the scenarios' run directories (`target/relay/e2e/`: serial logs, screenshots
+and disk images) are attached to the run as the `e2e-logs` artefact. GitHub's
+CodeQL default setup also scans every pull request; it has no local
+equivalent. Dependabot (`.github/dependabot.yml`) proposes weekly updates of
+the crates, the Rust toolchain and the actions. Hardware checks on the NUC
+stay manual (`docs/hardware-test.md`); the pull-request template asks about
+them.
 
 ## Contributing
 
 Commit messages and pull-request titles follow Conventional Commits
 (`feat(kernel): …`, `fix(usb): …`); the types, scopes and rules are in
-`CONTRIBUTING.md`.
+`CONTRIBUTING.md`. AI coding agents start from `AGENTS.md`: the rules the
+code keeps, how tests are written and how plans are made and executed.
 
 ## Layout
 
@@ -107,18 +129,22 @@ Commit messages and pull-request titles follow Conventional Commits
 | `crates/term` | Framebuffer text terminal |
 | `crates/vfs` | Error numbers, block-device and filesystem traits, paths, mount table, in-memory filesystem |
 | `crates/ext2` | ext2 driver with its block cache |
-| `crates/shell` | Line editor, parser, built-in commands and scripts (`sh FILE`) |
+| `crates/shell` | Line editor, parser, expansion (`$1`, `$NAME`), pipelines, jobs, scripts (`sh FILE`) and every command's function; used by `/bin/sh`, each program of `/bin` and `host-shell` |
 | `crates/usb` | xHCI host controller driver, HID boot keyboard and USB mass storage (BOT, SCSI), over a `Hal` trait |
 | `crates/heap` | The heap allocator of the kernel and of user programs |
 | `crates/crc32` | CRC-32, for GPT and `system.img` |
-| `crates/relay-abi` | The system-call ABI: version, call numbers, error numbers, result encoding, `WaitStatus` |
-| `crates/relay-rt` | The runtime of user programs: entry, arguments, system calls, heap, panic handler, ABI note, linker script; the shell's `Vfs`, `Console` and `System` over system calls |
+| `crates/relay-abi` | The system-call ABI: version, ELF note, call numbers, error numbers, result encoding, and the structs the calls pass (`Stat`, `SpawnArgs`, `ProcInfo`, `WaitStatus`, …); no architecture detail |
+| `crates/relay-rt` | The runtime of user programs: entry, arguments, system calls, heap, panic handler, ABI note, linker script; the shell's `Vfs`, `Console`, `System`, `Stdin`, `Stdout` and `Programs` over system calls |
 | `crates/sysimg` | The `system.img` archive: format, writer, reader, and `SysImgFs`, mounted at `/bin` |
 | `crates/elf` | The rules a program's ELF file must follow; the kernel's `spawn` and xtask's build both check them |
-| `userland/` | User programs: `sh/` the shell (`/bin/sh`), `utils/` one per command (`cat`, `ls`, …), `tests/` the `t-*` test programs |
-| `xtask/` | Build, image, QEMU, test and flash tool; it builds `userland/`, checks each program with `readelf` and the kernel's rules, and packs `system.img` |
+| `userland/` | User programs: `sh/` the shell (`/bin/sh`), `utils/` one per command (`cat`, `ls`, …), `tests/` the `t-*` test programs (xtask adds `t-abi`, a copy of `t-args` stamped with an older ABI) |
+| `xtask/` | Build, image, QEMU, test and flash tool; it builds `userland/`, checks each program with `readelf` and the kernel's rules, and packs `system.img`; `xtask/fixtures/checks/` holds the check scripts' recorded transcripts (QEMU and NUC) |
+| `kernel/fixtures/acpi/` | ACPI tables of QEMU and the NUC for the kernel's unit tests |
 | `rootfs/` | Files copied into `/`, among them the NUC check scripts in `root/checks/` |
 | `tests/e2e/` | QEMU end-to-end scenarios |
-| `docs/hardware-test.md` | Manual checklist for the NUC |
-| `.github/` | CI workflow and pull-request template |
+| `docs/hardware-test.md` | Manual checklist for the NUC, and the log of its results |
+| `docs/superpowers/` | Design specs (`specs/`), milestone roadmaps and the implementation plans (`plans/`) |
+| `.github/` | CI workflow, Dependabot configuration and pull-request template |
+| `.cargo/config.toml`, `rust-toolchain.toml` | The `cargo xtask` alias and static relocation for everything built for `x86_64-unknown-none` (the kernel and the programs); the pinned Rust toolchain and targets |
 | `CONTRIBUTING.md` | Commit-message and pull-request rules |
+| `AGENTS.md` | Context and working rules for AI coding agents (`CLAUDE.md` points Claude Code at it) |

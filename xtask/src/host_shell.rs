@@ -1,7 +1,8 @@
 //! `cargo xtask host-shell <img>`: the Relay shell on the host, over the
 //! ext2 root partition of an image file (spec §9.1), through a file-backed
-//! `BlockDevice`. For working on the filesystem and the shell before the
-//! USB drivers exist. It changes the image in place.
+//! `BlockDevice`. For trying the filesystem and the shell's commands
+//! without a machine: the in-process runner runs the command functions
+//! (no programs, no `&`). It changes the image in place.
 
 use crate::image;
 use crate::util::run_stdout;

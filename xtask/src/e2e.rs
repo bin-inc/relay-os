@@ -21,8 +21,10 @@
 //!                                   capture what it did the first time a
 //!                                   step of that name matched)
 //! send <text>                      (types <text> + Enter over serial)
+//! send-crlf <text>                 (as send, ending with CR LF)
 //! key <text>                       (types <text> + Enter on the USB keyboard,
 //!                                   QMP send-key; {up}, {ctrl-c}: see keys.rs)
+//! type <text>                      (as key, without the Enter)
 //! screenshot-nonblank              (QMP screendump; top rows not one colour)
 //! alive 12                         (fails if QEMU exits within 12 seconds)
 //! screenshot-pixel 2540 20 #000000 (QMP screendump; that pixel has that colour)

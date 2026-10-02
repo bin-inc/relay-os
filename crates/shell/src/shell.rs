@@ -69,8 +69,8 @@ impl<'a> Shell<'a> {
     }
 
     /// A shell whose commands are programs: `/bin/sh` (the spawning
-    /// runner, user-space gate §8.2). Only `cd`, `exit` and `help` run in
-    /// it.
+    /// runner, user-space gate §8.2). Only the shell's own commands
+    /// ([`commands::BUILTINS`]) run in it.
     pub fn spawning(
         vfs: &'a mut dyn Vfs,
         console: &'a mut dyn Console,
@@ -174,8 +174,8 @@ impl<'a> Shell<'a> {
         }
     }
 
-    /// Shows `/etc/motd` and goes to `/root`, as the shell does when the
-    /// machine starts.
+    /// Shows `/etc/motd` and goes to `/root`, as init does when the machine
+    /// starts (`cargo xtask host-shell` calls it).
     pub fn greet(&mut self) {
         if let Ok(node) = self.vfs.lookup(b"/etc/motd") {
             let mut buf = alloc::vec![0; MOTD_MAX];

@@ -1,5 +1,6 @@
-//! The built-in commands (spec §7.3): a table from name to function, so
-//! each command is small and tested on its own.
+//! Every command's function (spec §7.3): a table from name to function, so
+//! each command is small and tested on its own. [`BUILTINS`] run in the
+//! shell; the others are programs of `/bin` that call the same function.
 
 use crate::ctx::Ctx;
 use alloc::string::String;

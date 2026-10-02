@@ -515,10 +515,9 @@ free
     }
 
     /// The real check scripts against a transcript of each machine: QEMU's
-    /// from the `checks` scenario, the NUC's as the NUC wrote them in NUC
-    /// check 3 of milestone 2's plan 3b on 2026-09-30
-    /// (`docs/hardware-test.md`), copied off the stick unchanged; check 4's
-    /// is QEMU's until NUC check 4 records the NUC's. A `#nuc>` line must
+    /// from the `checks` scenario, the NUC's as the NUC wrote them in the
+    /// last NUC run of checks 3, 4 and 5 (`docs/hardware-test.md`'s results
+    /// log), copied off the stick unchanged. A `#nuc>` line must
     /// not need a line of its own next to the `#>` line for the same
     /// output, which QEMU alone cannot show.
     #[test]

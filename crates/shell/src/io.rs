@@ -1,6 +1,7 @@
 //! What the shell needs from its surroundings besides files (spec §7.3).
-//! `relay-rt` implements `Console` and `System` over system calls; `xtask
-//! host-shell` over the host terminal; the tests over buffers. `Programs`
+//! `relay-rt` implements `Console`, `System`, `Stdin`, `Stdout` and
+//! `Programs` over system calls; `xtask host-shell` `Console` over the host
+//! terminal and `System` over the host; the tests over buffers and fakes. `Programs`
 //! is `/bin/sh`'s way to its commands. `Stdin` is a command's standard
 //! input: a program's fd 0, or bytes in memory (`Bytes`).
 

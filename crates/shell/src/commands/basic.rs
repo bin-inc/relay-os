@@ -1,6 +1,6 @@
 //! `cd`, `exit`, `pwd`, `echo`, `clear`, `help` and `uname`.
 
-use super::COMMANDS;
+use super::{BUILTINS, COMMANDS};
 use crate::ctx::{Ctx, getopt, outln};
 use crate::parser::HOME;
 use crate::shell::NAME;
@@ -108,14 +108,26 @@ pub fn clear(ctx: &mut Ctx<'_>, _: &[String]) -> i32 {
     0
 }
 
+/// `help`: the programs of `/bin`, then the shell's built-ins and its
+/// syntax, so that those stay on a screen too short for the whole list.
 pub fn help(ctx: &mut Ctx<'_>, _: &[String]) -> i32 {
-    outln!(ctx, "Built-in commands:");
-    for b in COMMANDS {
-        outln!(ctx, "  {:<9} {}", b.name, b.help);
+    for (heading, builtin) in [("Programs in /bin:", false), ("Shell built-ins:", true)] {
+        outln!(ctx, "{heading}");
+        for b in COMMANDS
+            .iter()
+            .filter(|b| BUILTINS.contains(&b.name) == builtin)
+        {
+            outln!(ctx, "  {:<9} {}", b.name, b.help);
+        }
     }
     outln!(
         ctx,
-        "Send output to a file with `> file` (replace) or `>> file` (append)."
+        "Send output to a file with `> file` (replace) or `>> file` (append),\n\
+         or into another program with `| cmd` (built-ins cannot be in a\n\
+         pipeline). End a line with `&` to run it in the background.\n\
+         `sh FILE ARG...` runs a script, which reads its arguments as\n\
+         `$1`...`$9`, `$#` and \"$@\". `$?` is the last command's status, and\n\
+         `NAME=value` sets `$NAME`."
     );
     0
 }
@@ -307,15 +319,36 @@ mod tests {
         let mut h = Harness::new();
         let (status, text) = h.run("help");
         assert_eq!(status, 0);
-        assert!(text.starts_with("Built-in commands:\n"));
+        // The programs first, then the built-ins, so that on the NUC's 33
+        // rows the built-ins and the syntax stay on the screen.
+        let (programs, builtins) = text
+            .strip_prefix("Programs in /bin:\n")
+            .and_then(|t| t.split_once("Shell built-ins:\n"))
+            .expect(&text);
         for b in super::COMMANDS {
-            assert!(
-                text.contains(&alloc::format!("  {:<9} {}\n", b.name, b.help)),
-                "{}",
-                b.name
-            );
+            let line = alloc::format!("  {:<9} {}\n", b.name, b.help);
+            let section = if super::BUILTINS.contains(&b.name) {
+                builtins
+            } else {
+                programs
+            };
+            assert!(section.contains(&line), "{}", b.name);
         }
-        assert!(text.contains("  cd        change the current directory\n"));
+        assert!(builtins.starts_with("  cd        change the current directory\n"));
+        // What the shell's syntax offers besides command names.
+        for what in [
+            "> file",
+            ">> file",
+            "| ",
+            "&",
+            "sh FILE",
+            "$1",
+            "\"$@\"",
+            "$?",
+            "NAME=value",
+        ] {
+            assert!(builtins.contains(what), "{what}");
+        }
     }
 
     #[test]

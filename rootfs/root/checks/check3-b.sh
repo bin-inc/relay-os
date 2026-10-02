@@ -1,5 +1,5 @@
 # NUC check 3, part 2 (docs/hardware-test.md): after check3-a.sh and a
-# `reboot`, `sh checks/check3-b.sh`, then `poweroff`. Its transcript is
+# `reboot`, `sh checks/check3-b.sh`, then checks 4 and 5. Its transcript is
 # check3-b.log; the `#>` lines are explained in check3-a.sh.
 
 # The files written before the restart are still there.

@@ -2,7 +2,8 @@
 
 - **Date:** 2026-09-29
 - **Status:** Approved 2026-09-29; revised while planning milestone 2's plans 1, 2, 3a, 3b, 4a, 4b and 5
-  and milestone 3's plans 1, 2, 3 and 4 (see §16)
+  and milestone 3's plans 1, 2, 3 and 4 (see §16); implemented: milestone 2 ended at version 0.3.0
+  and milestone 3, which ends the gate, at version 0.4.0 (tags `v0.3.0`, `v0.4.0`)
 - **Builds on:** milestone 1 (version 0.2.0,
   `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`,
   cited below as "M1 §n")
@@ -2146,3 +2147,7 @@ does. Facts found before the spec was first merged are already in its body.
       minors 3–7 and the deferred findings of plans 1–3 (above); `|&`,
       `X | sh`'s reads and `pipe()`'s inserts were settled by plans 2 and
       3. What stays out of the gate is §15's list.
+    - **NUC checks 3, 4 and 5** (the definition of done's item 2). They
+      passed on 2026-10-02 at `7ef2413`: 84, 5, 33 and 29 commands as
+      expected, check 5's transcript the same as QEMU's
+      (`docs/hardware-test.md`'s results log).

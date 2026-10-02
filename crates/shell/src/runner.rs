@@ -1,7 +1,7 @@
 //! How the shell runs a command that is not one of its own built-ins
 //! (user-space gate §8.2), and a pipeline (§9.1): the `Runner`. The
 //! in-process runner runs the command functions against the shell's `Vfs`,
-//! `Console` and `System`, as milestone 1 does (the unit tests and `cargo
+//! `Console` and `System`, as milestone 1 did (the unit tests and `cargo
 //! xtask host-shell`, where there are no programs), a pipeline's stages one
 //! after another, each one's output kept in memory as the next one's
 //! input; the spawning runner starts `/bin/<name>` for every one
@@ -62,7 +62,7 @@ impl Ran {
     }
 }
 
-/// Runs the commands that are not the shell's own (`cd`, `exit`, `help`).
+/// Runs the commands that are not the shell's own (`commands::BUILTINS`).
 pub(crate) trait Runner {
     /// Runs `name` with `args`, its standard output going to `redirect`
     /// if there is one.

@@ -5,12 +5,21 @@ Target: NUC 12 Pro `NUC12WSHi7` (Core i7-1260P, firmware
 Kingston DataTraveler 3.0 test stick (serial `08606E6D413FB27127135F8E`).
 The NUC also runs Linux Mint, which is where the stick is written.
 
+Checks 1, 1b and 2 test the boot, the display and the keyboard, and are run by
+hand. Checks 3, 4 and 5 are one run of four scripts on the stick, with a
+few steps by hand; it is the check every release gets. The results log at
+the end records each run.
+
 ## One-time setup (in Linux Mint)
 
 1. `cargo xtask setup-udev` and run the three `sudo` commands it prints.
 2. Unplug and replug the stick.
 3. `cargo xtask verify-usb` must no longer say "no access". (Before the first
    `flash --full` it may fail because the stick has no Relay OS layout yet.)
+
+`flash --full` asks you to type `ERASE` (`--yes` skips the question) and
+ends by asking you to replug the stick, since Linux still sees its old
+partition table.
 
 ## Booting the stick
 
@@ -19,7 +28,25 @@ UEFI entry for the Kingston DataTraveler 3.0. The Linux Mint boot order is
 not changed. To get back to Mint, hold the power button for 4 s and power on
 normally.
 
-## Check 1 — text on HDMI (plan 1)
+## Command-line options
+
+`cargo xtask flash --kernel --cmdline '…'` (or `flash --full --cmdline '…'`)
+writes the command line to `\EFI\RELAY\cmdline` on the stick; words are
+separated by blanks. Every `flash` writes it, so a `flash --kernel` without
+`--cmdline` clears it again.
+
+| Option | Effect |
+|---|---|
+| `video=WxH` | The loader asks for this video mode instead of the monitor's native one |
+| `check=timer` | Counts timer ticks over three RTC seconds at boot (check 1b) |
+| `debug=usb` | The USB stack's log goes to the screen too, for a keyboard that does not work |
+| `tsc=hpet` | Measures the TSC against the HPET even when CPUID gives its frequency |
+| `panic=pagefault`, `ud`, `panic`, `stack` | Crashes the kernel after boot, to show the panic screen |
+| `panic=early` | Crashes the kernel before its console starts |
+| `panic=user-read`, `user-exec` | The kernel reads or runs a program's page: SMAP or SMEP must stop it with a page fault |
+| `test=1` | For the QEMU scenarios only |
+
+## Check 1 — text on HDMI
 
 1. In Mint: `cargo xtask flash --full` and type `ERASE` when asked.
 2. Boot the stick (see above).
@@ -30,10 +57,12 @@ normally.
      most the top-left 1920×1080 of it, so wider or taller screens have a
      black margin.
    - `[ ok ] cpu tables`
-   - `[ ok ] boot info: N MiB usable in M regions, cmdline ''` — N should be
-     roughly 15000.
-   - Since plan 4 more lines follow (checks 1b and 2), and the last one is
-     the shell prompt `root@relay:/# ` with a solid block cursor.
+   - `[ ok ] boot info: N MiB usable in M regions, cmdline ''` — N about
+     15944 (the check scripts want `159nn`).
+   - the lines of checks 1b, 2 and 3, ending with
+     `[ ok ] system: 42 programs, ABI 3`, then the motd
+     (`Welcome to Relay OS.`) and the prompt `root@relay:~# ` with a solid
+     block cursor.
 4. Panic screen: in Mint run `cargo xtask flash --kernel --cmdline panic=pagefault`,
    boot the stick, and check for a red screen with
    `CPU exception 14: page fault` and `CR2=0x00007fffdead0000`.
@@ -66,9 +95,9 @@ at the leftmost one:
 | No Kingston entry under F10 | Stick not FAT32/GPT, or not detected | Re-run `flash --full`; try another USB port |
 | `[PANIC] relay-boot: …` and `System halted` | Loader error (text says which); the machine stays on | Photograph the screen, then hold the power button |
 | Loader text, then squares, then nothing | Boot stopped at the leftmost square | Note the count and colour of the last square |
-| Garbled or blue-tinted text | Pixel format mismatch | Photograph the screen; note W×H |
+| Garbled or blue-tinted text, or a wrong W×H | Pixel format mismatch, or a mode the monitor shows badly | Photograph the screen; note W×H; try `--cmdline video=1920x1080` |
 
-## Check 1b — kernel core (plan 2, optional)
+## Check 1b — kernel core (optional)
 
 One boot answers everything: memory, ACPI, timer, RTC, PCI and the timer
 self-check.
@@ -76,8 +105,8 @@ self-check.
 1. In Mint: `cargo xtask flash --kernel --cmdline check=timer`.
 2. Boot the stick. After about 5 s the screen shows, below the check 1 lines
    (values from the NUC's firmware tables and Linux's view of the machine):
-   - `[ ok ] memory: N MiB free of 15948 MiB, heap 32 MiB` — N a little
-     below 15948.
+   - `[ ok ] memory: N MiB free of M MiB, heap 32 MiB` — M the boot info's
+     MiB (15944 at 0.4.0), N a little below it.
    - `[ ok ] acpi: 30 tables, ECAM 0xc0000000 buses 0-255, HPET 0xfed00000, S5 7/0`
    - `[ ok ] timer: TSC 2496.000 MHz (CPUID 0x15), 1000 Hz tick (xAPIC)`
    - `[ ok ] rtc: <date and time>` — the current UTC time (Mint keeps the
@@ -92,7 +121,7 @@ self-check.
 A `[FAIL]` line names the step and the reason; boot carries on after it
 (except for memory, which stops the machine).
 
-## Check 2 — typing on the K120 (plan 4)
+## Check 2 — typing on the K120
 
 The K120 must be on the port it has in Mint (`lsusb -t`: bus 3 port 3), the
 Unifying receiver on port 1 and the stick on a USB 3 port.
@@ -112,16 +141,15 @@ Unifying receiver on port 1 and the stick on a USB 3 port.
      - `usb: 00:14.0 port 3: 046d:c31c low-speed, keyboard` (the K120)
      - `usb: 00:14.0 port 10: 8087:0033 full-speed, not claimed` (the
        NUC's internal Bluetooth)
-     - `usb: 00:14.0 port 15: 0951:1666 SuperSpeed, not claimed` (the
-       stick on bus 4 port 3, the third USB 3 port; its driver comes with
-       plan 5)
+     - `usb: 00:14.0 port 15: 0951:1666 SuperSpeed, disk Kingston
+       DataTraveler 3.0, 14.4 GiB` (the stick on bus 4 port 3, the third
+       USB 3 port)
 
      The boot waits for them: at least 100 ms, and up to 1 s while a USB 3
      link is still training (`dmesg`: `ports settled after N ms`).
    - `[ ok ] usb: 2 controllers, 4 devices` (or 1 controller),
-     `[ ok ] keyboard: 2 keyboards`, `[FAIL] mount /: no storage driver
-     yet`, and the prompt `root@relay:/# `. (Since plan 5 the stick is a
-     disk, `/` is mounted and the prompt is `root@relay:~# `; see check 3.)
+     `[ ok ] keyboard: 2 keyboards`, then the lines of check 3 step 3 and
+     the prompt `root@relay:~# `.
 3. On the K120, type and check each result:
    - `echo hello`, Enter → `hello`.
    - `echo Hello, World!` with Shift → `Hello, World!`.
@@ -158,142 +186,160 @@ The NUC has no serial port, so a keyboard that does not work cannot run
 | `[FAIL] keyboard: no USB keyboard found` and no `port 3` line | The K120 connected after the boot's wait, or not at all | Type anyway: a late keyboard is set up when it appears. If nothing works, `debug=usb`: a `port 3: connected` line means it appeared late, none means the port never saw it; the `ports settled` line shows the wait |
 | Keys show up twice or not at all | Firmware still emulating a keyboard (handoff) | `debug=usb`: the `legacy support` line |
 
-## Check 3 — files on the stick (plans 5 and 6; milestone 2), and checks 4 and 5
+## Checks 3, 4 and 5 — files, programs, pipes and jobs
 
-The full checklist of spec §9.4. The K120 and the stick sit on the ports
-of check 2 (the stick on bus 4 port 3 in Mint's `lsusb -t`). Since plan 6
-the commands come from two scripts on the stick,
-`/root/checks/check3-a.sh` and `check3-b.sh` (in the repository under
-`rootfs/root/checks/`), and since milestone 2's plan 4b a third,
-`check4.sh` (NUC check 4 of the user-space gate, spec §12.4), after which
-the error screen is visited by hand (plan 5), and since milestone 3's
-plan 4 a fourth, `check5.sh` (NUC check 5). Every command is a program
-now, and `/bin/sh` runs them, which the kernel's init starts as process 2:
-`sh` runs each line as if it were typed, shows it as `+ <command>` before
-its output, and writes everything it shows into a transcript next to the
+The full checklist of the milestone 1 spec's §9.4 and the user-space gate
+spec's §12.4, in one run. The K120 and the stick sit on the ports of
+check 2 (the stick on bus 4 port 3 in Mint's `lsusb -t`).
+
+Most of the run is four scripts on the stick, in `/root/checks/` (in the
+repository under `rootfs/root/checks/`): `check3-a.sh` and `check3-b.sh`
+(check 3, either side of a restart), `check4.sh` and `check5.sh`. The
+`/bin/sh` that init (process 1) starts as process 2 runs them: `sh FILE`
+runs each line as if it were typed, shows it as `+ <command>` before its
+output, and writes everything it shows into a transcript next to the
 script (`check3-a.log`). `verify-usb` checks the transcripts in Mint
 against the output the scripts expect (their `#>` lines), so only the boot
-screen needs a look. The QEMU scenario `checks` runs the same scripts on
-every pull request.
+screen and the steps by hand need a look. The QEMU scenario `checks` runs
+the same scripts on every pull request.
+
+Every command but the shell's built-ins (`cd`, `exit`, `help`, `jobs`,
+`kill`, `wait`) is a program in `/bin`.
+
+### Check 3 — boot, files and programs
 
 1. In Mint: `cargo xtask flash --full` and type `ERASE` when asked (this
    erases the files of earlier runs and writes the current scripts;
    `flash --kernel` leaves the scripts on the stick as they were).
 2. Reboot, press F10 and choose the UEFI entry for the Kingston stick.
 3. The screen shows every startup line `[ ok ]`, at the monitor's native
-   resolution (`console 1920x1200` on the ASUS PA248QV). After check 2's
-   `usb:` lines, which now end:
+   resolution (`console 1920x1200` on the ASUS PA248QV). Check 2's `usb:`
+   lines end with:
    - `usb: 00:14.0 port 15: 0951:1666 SuperSpeed, disk Kingston
      DataTraveler 3.0, 14.4 GiB`
    - `[ ok ] usb: 2 controllers, 4 devices`, `[ ok ] keyboard: 2 keyboards`
-   - `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 2.0 GiB` (the
-     root is 2 GiB since milestone 2's plan 2; a stick written by an older
-     `flash --full` still shows `14.3 GiB`, which the check scripts refuse:
-     run `flash --full` again)
-   - `[ ok ] system: 42 programs, ABI 3` (milestone 2: the programs of
-     `/bin` from `\EFI\RELAY\system.img`; the count grows as later plans
-     add programs)
+   - `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 2.0 GiB` (a
+     `14.3 GiB` root is a stick written before 0.3.0, which the check
+     scripts refuse: run `flash --full` again)
+   - `[ ok ] system: 42 programs, ABI 3` (the programs of `/bin`, read
+     from `\EFI\RELAY\system.img`)
    - the motd (`Welcome to Relay OS.`), which init prints, and the prompt
      `root@relay:~# ` of the `/bin/sh` it started.
 
    Photograph the screen.
-4. On the K120, type `sh checks/check3-a.sh`. It runs for about a minute:
-   `uname -a`, `date`, `dmesg` (every startup line of checks 1-3, checked
-   later), `ls -l /bin` (the programs of the system archive),
-   `t-args a 'b c' ''` and `t-fault null-read` (programs in ring 3: three
-   arguments printed, then `relay-sh: t-fault: killed (page fault at 0x0,
-   read, ip …)` and the script goes on), `t-spin 1` (a program that never
-   makes a system call ends after its second: the timer takes the CPU from
-   it), `t-spawn 100` (`frames lost: 0`), `t-spawn kill` (a child killed
-   while its parent sleeps; process 1 cannot be killed), `t-fault sse`,
-   `t-fault flags-ac` and `t-fault gsbase` (an SSE instruction, a spin with
-   the alignment check flag set and a program setting its own `gs` base,
-   all killed), plan 3b's programs (`t-files basic`, `dir`, `cwd` and
-   `gone`: the file calls on the stick's ext2 root, and another process's
-   removal of a program's working directory and open file; `t-mem map`
-   and `grow 64`: memory from `mem_map` and a heap that grows, `frames
-   lost: 0`; `t-tee end`: a console tee; `t-sys uname`; `t-read apart`:
-   a program outside the console's group reads nothing), the `fileops`
-   scenario's operations on `/root/notes` (`mkdir -p`,
-   `echo >`/`>>`, `cat`, `ls -l`, `cp`, `mv`, `rmdir` of a full directory,
-   `rm -r`, `touch`, `stat`, `head`, `tail`, `wc`, the errors of `cat` and
-   `rm -r /`), an 8 MiB file built by doubling (each step writes up to
-   4 MiB to the stick and syncs), and `df`. Ctrl-C stops it. The prompt
-   comes back after `+ df` and its two lines.
+4. On the K120, type `sh checks/check3-a.sh`. It runs for one to two
+   minutes:
+   - `uname -a`, `date`, `dmesg` (every startup line of checks 1-3, checked
+     later), `ls -l /bin` (the programs of the system archive);
+   - programs in ring 3: `t-args a 'b c' ''` (three arguments printed) and
+     `t-fault null-read` (`relay-sh: t-fault: killed (page fault at 0x0,
+     read, ip …)`, and the script goes on); `t-spin 1` (a program that
+     never makes a system call ends after its second: the timer takes the
+     CPU from it); `t-spawn 100` (`frames lost: 0`); `t-spawn kill` (a
+     child killed while its parent sleeps; process 1 cannot be killed);
+     `t-fault sse`, `t-fault flags-ac` and `t-fault gsbase` (an SSE
+     instruction, a spin with the alignment check flag set and a program
+     setting its own `gs` base, all killed);
+   - the system calls: `t-files basic`, `dir`, `cwd` and `gone` (the file
+     calls on the stick's ext2 root, and another process's removal of a
+     program's working directory and open file); `t-mem map` and
+     `grow 64` (memory from `mem_map` and a heap that grows,
+     `frames lost: 0`); `t-tee end` (a console tee); `t-sys uname`;
+     `t-read apart` (a program outside the console's group reads nothing);
+   - the `fileops` scenario's operations on `/root/notes` (`mkdir -p`,
+     `echo >`/`>>`, `cat`, `ls -l`, `cp`, `mv`, `rmdir` of a full
+     directory, `rm -r`, `touch`, `stat`, `head`, `tail`, `wc`, the errors
+     of `cat` and `rm -r /`), an 8 MiB file built by doubling (each step
+     writes up to 4 MiB to the stick and syncs), and `df`.
+
+   Ctrl-C stops it. The prompt comes back after `+ df` and its two lines.
    `dmesg`'s lines include `cpu: SMEP on, SMAP on`: the kernel would fault
    if it touched a program's page.
-5. Three steps by hand (milestone 2, plans 3a and 3b; a script cannot
-   type):
+5. Three steps by hand (a script cannot type):
    - `t-spin 5`, and while it spins type `echo typed` and Enter on the
-     K120: the line shows as it is typed (milestone 2, plan 3b: the line
-     discipline echoes it). After five seconds its `… iterations` line
-     comes, then the prompt with `echo typed` again, then `typed`: the
-     keyboard is polled on every tick that interrupts a program, and what
-     the program did not read is the shell's, as in bash.
+     K120: the line shows as it is typed (the line discipline echoes it).
+     After five seconds its `… iterations` line comes, then the prompt
+     with `echo typed` again, then `typed`: the keyboard is polled on every
+     tick that interrupts a program, and what the program did not read is
+     the shell's, as in bash.
    - `t-spin`, then Ctrl-C: `^C` and the prompt come back at once, and
      `dmesg` ends with `pid <n> (/bin/t-spin): killed: Ctrl-C`.
    - `t-read`, then on the K120 `hello wrold`, four Backspaces, `orld`
      and Enter: the letters show as they are typed and the Backspaces
      erase them, and `t-read` prints `[12] hello world\n`. Then Ctrl-D:
-     `end of input` and the prompt (the line discipline, milestone 2,
-     plan 3b).
+     `end of input` and the prompt.
 
    Photograph the screen after each.
-6. `reboot`: the NUC restarts (`relay: restarting`). Choose the stick again
-   with F10 and type `sh checks/check3-b.sh`: the files written before the
-   restart are read back.
-7. Check 4 (milestone 2, plan 4b): type `sh checks/check4.sh`. It runs for
-   about ten seconds: `t-spawn fill` (60 children, the table's room beside
-   init and two shells), `t-spawn 1000` (`frames lost: 0`), `free`, every
-   `t-fault` kind (each killed with its message, the script going on),
-   `t-spawn kill-new` and `orphan` (an orphan that init collects), `t-args`,
-   `t-abi` (`relay-sh: t-abi: Exec format error`: a program built for
-   another ABI), `ls /bin` into a file (one name a line) and `cat` of a
-   file into itself (refused), a script that runs another, and `free` again
-   (the same memory in use).
-8. Check 5 (milestone 3, plan 4): type `sh checks/check5.sh`. It runs for
-   a few seconds: pipes (`seq 1000000 | wc -c`, 6888896 bytes through a
-   16 KiB pipe; `seq 1000000 | head -n 1`, which ends at once;
-   `seq 1000 | grep 7 | wc -l`; a pipeline's status; `X | sh`), a
-   background job (`t-spin &`, `jobs`, `ps | grep -c t-spin`, `kill %1`,
-   `wait %1` and its status 137), and a script given three arguments, one
-   empty and one with two blanks, that passes them on to another
-   (`"$@"`, `$#`, `cd "$9"`, a variable whose value has blanks, `$?`). A
-   script prints no `[1] <pid>` and no Done line. The prompt comes back
-   after `+ false`, `+ echo $?` and `1`. Then one step by hand: `exit` at
-   the prompt. `init: /bin/sh (pid <n>) exited with 0; starting it again`
-   and a new prompt `root@relay:~# ` come at once, without the motd: the
-   shell is a program, and process 1 starts another. Photograph the
-   screen.
-9. The error screen (milestone 2, plan 5): `reboot`, and choose the stick
-   again with F10, so that the kernel log's last lines are the boot's. At
-   the prompt type `exit` three times within 10 s. After the first two,
-   init's line and a new prompt; after the third,
-   `init: /bin/sh (pid <n>) exited with 0` and the error screen: `*** Relay
-   OS cannot run its shell ***`, `/bin/sh ended 3 times within 10 s`, the
-   kernel log's last 20 lines, from the `xhci 00:14.0: port 15:` lines to
-   init's three, and `Press any key to reboot.`
+6. `reboot`: the NUC restarts (`relay: restarting through the FADT reset
+   register`). Choose the stick again with F10 and type
+   `sh checks/check3-b.sh`: the files written before the restart are read
+   back.
+
+### Check 4 — processes
+
+7. Type `sh checks/check4.sh`. It runs for about ten seconds:
+   `t-spawn fill` (60 children, the table's room beside init and two
+   shells), `t-spawn 1000` (`frames lost: 0`), `free`, every `t-fault`
+   kind (each killed with its message, the script going on; `flags-exit`
+   exits cleanly instead), `t-spawn kill-new` and `orphan` (an orphan that
+   init collects), `t-args`, `t-abi` (`relay-sh: t-abi: Exec format
+   error`: a program built for another ABI), `ls /bin` into a file (one
+   name a line) and `cat` of a file into itself (refused), a script that
+   runs another, and `free` again (the same memory in use).
+
+### Check 5 — pipes, jobs and script arguments
+
+8. Type `sh checks/check5.sh`. It runs for a few seconds:
+   - pipes: `seq 1000000 | wc -c` (6888896 bytes through a 16 KiB pipe),
+     `seq 1000000 | head -n 1` (which ends at once),
+     `seq 1000 | grep 7 | wc -l`, a pipeline's status, and `X | sh`;
+   - a background job: `t-spin &`, `jobs`, `ps | grep -c t-spin`,
+     `kill %1`, and `wait %1` with its status 137;
+   - a script given three arguments, one empty and one with two blanks,
+     that passes them on to another (`"$@"`, `$#`, `cd "$9"`);
+   - a variable whose value has blanks (`A='a  b'`), and `$?` after
+     `false`.
+
+   A script prints no `[1] <pid>` and no Done line. The prompt comes back
+   after `+ false`, `+ echo $?` and `1`.
+
+   Then one step by hand: `exit` at the prompt.
+   `init: /bin/sh (pid <n>) exited with 0; starting it again` and a new
+   prompt `root@relay:~# ` come at once, without the motd: the shell is a
+   program, and process 1 starts another. Photograph the screen.
+
+### The error screen, power off and verify-usb
+
+9. The error screen: `reboot`, and choose the stick again with F10, so
+   that the kernel log's last lines are the boot's. At the prompt type
+   `exit` three times within 10 s. After the first two, init's line and a
+   new prompt; after the third, `init: /bin/sh (pid <n>) exited with
+   <status>` (0 unless the command before `exit` failed) and the error
+   screen: `*** Relay OS cannot run its shell ***`,
+   `/bin/sh ended 3 times within 10 s`, the kernel log's last 20 lines,
+   from the `xhci 00:14.0: port 15:` lines to init's three, and
+   `Press any key to reboot.`
    The line `xhci 00:14.0: slot 4: interface 0 class 8/6/80, …` is wider
    than the screen and takes two rows, and the heading stays at the top.
    Photograph it, wait a few seconds (it waits for the key, however long),
    then press a key on the K120: the NUC restarts. Choose the stick again
    with F10: the motd and the prompt.
 10. `poweroff`: the NUC switches itself off (`relay: powering off`). If the
-   screen says `System halted. It is now safe to power off.` instead, note
-   the `relay:` line above it and hold the power button.
+    screen says `System halted. It is now safe to power off.` instead, note
+    the `relay:` line above it and hold the power button.
 11. Boot Mint and run `cargo xtask verify-usb`: `e2fsck: clean`, the tree
-   lists `/root/notes/a`, `/root/notes/big` (8388608 bytes) and
-   `/root/notes/t`, and the last lines are `system.img: built <time>`,
-   `/root/checks/check3-a.sh: ok, 84 of 84 commands as expected (run <time>)`,
-   `/root/checks/check3-b.sh: ok, 5 of 5 commands as expected (run <time>)`,
-   `/root/checks/check4.sh: ok, 33 of 33 commands as expected (run
-   <time>)` and `/root/checks/check5.sh: ok, 29 of 29 commands as
-   expected (run <time>)`, with the UTC times of the four runs. A
-   transcript older than the stick's
-   `system.img` (a run before the last `flash --kernel`, which keeps the
-   transcripts; `flash --full` erases them) fails. A `FAILED` line is
-   followed by the script line, the expectation that failed and what the
-   command printed there; a script that was not run is `FAILED, not run`.
+    lists `/root/notes/a`, `/root/notes/big` (8388608 bytes) and
+    `/root/notes/t`, and the last lines are `system.img: built <time>`,
+    `/root/checks/check3-a.sh: ok, 84 of 84 commands as expected (run <time>)`,
+    `/root/checks/check3-b.sh: ok, 5 of 5 commands as expected (run <time>)`,
+    `/root/checks/check4.sh: ok, 33 of 33 commands as expected (run <time>)`
+    and `/root/checks/check5.sh: ok, 29 of 29 commands as expected (run <time>)`,
+    with the UTC times of the four runs. A transcript older than the
+    stick's `system.img` (a run before the last `flash --kernel`, which
+    keeps the transcripts; `flash --full` erases them) fails. A `FAILED`
+    line is followed by the script line, the expectation that failed and
+    what the command printed there; a script that was not run is
+    `FAILED, not run`.
 
 ### If it fails
 
@@ -303,8 +349,11 @@ every pull request.
 | `port 15: setup failed: …` | Enumeration failed three times | Replug the stick into the same port and reboot; `debug=usb` shows each try |
 | `[FAIL] mount /: no disk with a GPT` | The stick was set up but its reads fail, or it has no GPT | `dmesg`: a `usb: 00:14.0 port 15: read at block N: …` line and the `storage: slot N:` lines with the sense mean the reads fail; `storage: 00:14.0 port 15: no valid GPT` means re-run `flash --full` |
 | `mount /: warning: no disk has the boot partition …; using …` above `[ ok ] mount /` | The loader's boot GUID matches no partition, and the one disk with an ESP and a Linux partition was used | Note the GUID in the warning and the `boot info` line; the files are usable |
+| `mount /: <disk>: primary GPT damaged, using the backup` in `dmesg` | The stick's primary GPT is damaged; its backup at the end of the disk was used | The files are usable; `flash --full` writes both again |
 | `[FAIL] system: no system.img`, then the error screen (`*** Relay OS cannot run its shell ***`) | The loader could not read `\EFI\RELAY\system.img` (it is missing, or the FAT is damaged) | `cargo xtask flash --kernel` writes it with the loader and the kernel |
 | `[FAIL] system: ABI N, kernel wants M` or `[FAIL] system: system.img: …`, then the error screen | The archive on the ESP is from another build, or damaged | `cargo xtask flash --kernel` from the same worktree as the kernel |
+| `[FAIL] system: system.img at 0x… (N bytes) is not loader memory`, then the error screen | The loader's hand-off placed the archive outside the memory it reserved | Photograph the screen; `cargo xtask flash --kernel` from the same worktree as the kernel |
+| `[FAIL] system: cannot mount /bin: …`, then the error screen | The archive was read but could not be mounted | Photograph the screen; note the reason |
 | `exit` at the prompt gives no new prompt, or the error screen | Init does not see the shell end, or its clock runs fast (three ends within 10 s) | Photograph the screen: the log's lines on it end with init's `init: /bin/sh (pid N) …` lines |
 | `check4.sh`: `t-spawn fill` fills the table with fewer than 60 children, or the second `free` differs | A process of an earlier command was left over (a zombie init did not collect, or a program still running) | `verify-usb` names the line; `dmesg` shows the `pid N (…)` lines of the programs killed |
 | `check5.sh` stops after a pipeline's `+` line: no output, no prompt | A pipe's reader or writer was not woken on this machine | Photograph the screen, then Ctrl-C: the prompt comes back, and `dmesg` ends with a `pid <n> (…): killed: Ctrl-C` line for each process of the pipeline still there (and the script's `/bin/sh`) |
@@ -313,7 +362,7 @@ every pull request.
 | The error screen with `/bin/sh cannot start: …` or `/bin/sh ended 3 times within 10 s` | The shell cannot be loaded, or ends as soon as it starts (its `init: /bin/sh (pid N) …` lines, in the log's lines on the screen, say how) | Photograph the screen; a key restarts the machine |
 | A key on the K120 at the error screen does nothing | The keyboard is not polled while init waits (the idle task polls it) | Photograph the screen and hold the power button |
 | The error screen's heading has scrolled away, or a program's line shows under `Press any key` | A log line takes more rows than counted, or a process still ran | Photograph the screen |
-| The panic screen just after `+ t-args` or `+ t-fault` | Entering ring 3, a system call or a fault in ring 3 goes wrong on this CPU, where QEMU's works | Photograph the panic screen: its vector, `rip`, `cr2` and registers say which |
+| The panic screen just after `+ t-args` or `+ t-fault` | Entering ring 3, a system call or a fault in ring 3 goes wrong on this CPU, where QEMU's works | Photograph the panic screen: its vector, `RIP=`, `CR2=` and registers say which |
 | `t-spin 1` never ends, or the keyboard stops during `t-spin 5` | The LAPIC timer's ticks do not reach ring 3 on this machine, or the tick's poll of the xHCI keyboard fails there | Photograph the screen; after a reboot, `dmesg` shows the `timer:` and `usb:` lines |
 | The panic screen during `t-spawn` or `t-fault flags-ac` | A context switch, or an interrupt taken in ring 3, goes wrong on this CPU: the panic's message names the check that failed (`a program's flags reached a switch`, `TSS rsp0 and the syscall stack differ`, `an interrupt with the program's gs`) | Photograph the panic screen |
 | `t-read` shows nothing as it is typed, a Backspace does not erase, or Ctrl-D does not end it | The line discipline gets the K120's keys otherwise than QEMU's keyboard sends them | Photograph the screen; `dmesg` shows the keyboard's `usb:` lines |
@@ -322,7 +371,7 @@ every pull request.
 | `cpu: SMEP not available, SMAP not available` in `dmesg` | CPUID reports neither (the i7-1260P has both) | Note the `dmesg` line; the check scripts expect both on the NUC |
 | `relay-sh: t-args: Exec format error` | The kernel refused the program; `dmesg` shows `spawn /bin/t-args: <reason>` | `cargo xtask flash --kernel` from the same worktree as the kernel |
 | `[FAIL] mount /: no disk with the boot partition` | No disk has the boot partition, and none has exactly one ESP and one Linux partition | `dmesg`: the `storage:` GPT lines list what each disk has |
-| `[FAIL] mount /: …; mounted read-only` | The stick refused a write (worn out or write-protected) | The files can be read; note the `usb: … write at block N:` line in `dmesg` |
+| `[FAIL] mount /: …; mounted read-only, …` | The stick refused a write (worn out or write-protected) | The files can be read; note the `usb: … write at block N:` line in `dmesg` |
 | `[FAIL] mount /: ext2 on 00:14.0 port 15 partition 2, 2.0 GiB: Invalid argument` | The ext2 root is not what `flash --full` writes | `dmesg` shows the `ext2:` reason; re-run `flash --full` |
 | A command prints `Input/output error` | A disk request failed after three tries | `dmesg`: the `storage:` and `usb:` lines name the command and block |
 | `reboot` leaves the screen as it is | No reset method worked (unlikely: the last is a triple fault) | Photograph the screen; hold the power button |

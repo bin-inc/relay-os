@@ -8,8 +8,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use vfs::{Errno, FileType, Node};
 
-/// Files are read in pieces of this size (on the heap: the kernel stack is
-/// small).
+/// Files are read in pieces of this size (on the heap: a program's stack
+/// is small).
 const CHUNK: usize = 64 * 1024;
 const DEFAULT_LINES: u64 = 10;
 
