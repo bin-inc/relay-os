@@ -25,6 +25,7 @@ mod pattern;
 mod program;
 mod reader;
 mod runner;
+mod scan;
 mod shell;
 mod testing;
 pub mod time;

@@ -742,6 +742,11 @@ impl Parser {
         self.text.is_empty()
     }
 
+    /// The text read so far, with the newline of each line.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
     /// Reads `line` and its newline: the list the text makes if the line
     /// finishes it, none while it needs more lines (it ends after `|`,
     /// `&&` or `||`), or why it does not parse. Once it gives a list the
@@ -1003,38 +1008,6 @@ pub fn parse_line(line: &str) -> Result<List<Word>, ParseError> {
     };
     parser.read(0)?;
     parser.end()
-}
-
-/// Whether `line`, read as the parser reads quotes, escapes and comments,
-/// ends after `|`, `&&` or `||`: the command it is in goes on after it, even
-/// when the line does not parse (a reader drops a refused command to its
-/// end). What is quoted counts as a word's characters, so a quote left
-/// open, the line's own error, ends nothing open.
-pub fn ends_open(line: &str) -> bool {
-    let mut seen = String::new();
-    let mut quote = None;
-    let mut chars = line.chars();
-    while let Some(c) = chars.next() {
-        match (quote, c) {
-            (Some(q), c) if c == q => quote = None,
-            (Some('"'), '\\') => {
-                chars.next();
-            }
-            (Some(_), _) => {}
-            (None, '\'' | '"') => quote = Some(c),
-            (None, '\\') => {
-                chars.next();
-                seen.push('x');
-            }
-            (None, '#') if seen.chars().last().is_none_or(|p| " \t;&|<>()".contains(p)) => break,
-            (None, c) => seen.push(c),
-        }
-        if quote.is_some() {
-            seen.push('x');
-        }
-    }
-    let seen = seen.trim_end_matches([' ', '\t']);
-    seen.ends_with('|') || seen.ends_with("&&")
 }
 
 /// What was typed of a background job from `start` to `end` (its `&`), as

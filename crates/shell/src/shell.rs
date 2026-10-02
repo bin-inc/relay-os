@@ -29,9 +29,6 @@ pub const SYNTAX: i32 = 2;
 pub const CANCELLED: i32 = 130;
 /// The prompt while a command needs more lines, bash's `PS2`.
 const CONTINUE: &str = "> ";
-/// How much of a line over 64 KiB `X | sh` keeps: its last bytes, between
-/// this and twice it.
-const LINE_TAIL: usize = 1024;
 /// The most of `/etc/motd` shown at start.
 const MOTD_MAX: usize = 16 * 1024;
 
@@ -613,16 +610,14 @@ impl<'a> Shell<'a> {
             } else if !too_long {
                 line.push(byte[0]);
                 if line.len() as u64 > SCRIPT_MAX {
+                    // Not kept, but counted whole: it says how much of what
+                    // follows is dropped with it.
                     too_long = true;
+                    reader.drop_bytes(&line);
                     line.clear();
                 }
             } else {
-                // Only its last bytes, which say whether the command it is
-                // in goes on after it.
-                line.push(byte[0]);
-                if line.len() == 2 * LINE_TAIL {
-                    line.drain(..LINE_TAIL);
-                }
+                reader.drop_bytes(&byte);
             }
         }
     }
@@ -633,14 +628,14 @@ impl<'a> Shell<'a> {
         self.collect_jobs();
         match core::str::from_utf8(line) {
             _ if too_long => {
-                reader.drop_line(&String::from_utf8_lossy(line));
+                reader.drop_end();
                 self.finish(1, String::from("sh: standard input: a line over 64 KiB\n"));
             }
             Ok(text) => {
                 self.read_line(reader, text);
             }
             Err(_) => {
-                reader.drop_line(&String::from_utf8_lossy(line));
+                reader.drop_line(line);
                 self.finish(1, String::from("sh: standard input: not a text line\n"));
             }
         }
@@ -954,6 +949,53 @@ mod tests {
         let mut text = alloc::vec![b'x'; 70_000];
         text.extend_from_slice(b"\nt-args next\n");
         assert_eq!(piped(&text), ["next"]);
+    }
+
+    #[test]
+    fn a_refused_construct_runs_none_of_its_lines() {
+        // Plan 1's final review ruled that a script's `if` written across
+        // lines ran its body, each refused line dropped alone: the lines
+        // are dropped up to its `fi`, counting the constructs inside.
+        let text = b"if t-args a\nthen t-args b\nwhile t-args c\ndo t-args d\ndone\nt-args e\nfi\nt-args next\n";
+        assert_eq!(piped(text), ["next"]);
+        // Opened by a line too long, or no text.
+        let mut text = b"while t-args a; do ".to_vec();
+        text.extend(alloc::vec![b'x'; 70_000]);
+        text.extend_from_slice(b"\nt-args b\ndone\nt-args next\n");
+        assert_eq!(piped(&text), ["next"]);
+        assert_eq!(
+            piped(b"for x in \xff; do\nt-args b\ndone\nt-args next\n"),
+            ["next"]
+        );
+        // In a script, each line traced as it is read.
+        let mut h = Harness::new();
+        h.put(
+            "/tmp/s.sh",
+            b"if true\nthen echo a\nwhile true\ndo echo b\ndone\nfi\necho next\n",
+        );
+        assert_eq!(
+            h.run("sh /tmp/s.sh"),
+            (
+                0,
+                "+ if true\nrelay-sh: unsupported syntax: if\n+ then echo a\n+ while true\n\
+                 + do echo b\n+ done\n+ fi\n+ echo next\nnext\n"
+                    .into()
+            )
+        );
+        // At the prompt, with `> ` until its end.
+        let mut h = spawning();
+        let out = typed(
+            &mut h,
+            &["if t-args a", "then t-args b", "fi", "t-args next"],
+        );
+        let args: Vec<&str> = h
+            .programs
+            .spawned
+            .iter()
+            .map(|s| s.args[1].as_str())
+            .collect();
+        assert_eq!(args, ["next"]);
+        assert_eq!(out.matches("\n> ").count(), 2, "{out}");
     }
 
     #[test]

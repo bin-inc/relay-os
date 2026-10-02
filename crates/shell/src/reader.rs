@@ -3,17 +3,20 @@
 //! after it finish it. The prompt, `sh FILE` and `X | sh` all read through
 //! one.
 
-use crate::parser::{self, COMMAND_MAX, List, ParseError, Parser, Word};
+use crate::parser::{COMMAND_MAX, List, ParseError, Parser, Word};
+use crate::scan::Scan;
 
 /// What has been read of the command so far.
 #[derive(Default)]
 pub(crate) struct Reader {
     /// What has been read of the command, kept between its lines.
     parser: Parser,
-    /// A command was dropped before its end: its later lines are dropped
-    /// too, up to one that finishes it, so that none of them runs without
-    /// what came before (the end of an `&&` chain without its guard).
-    dropping: bool,
+    /// A command was dropped before its end: what its lines open and
+    /// close, while its later lines are dropped too, up to the one that
+    /// closes what it opened (a construct's `fi` or `done`, or the line
+    /// that finishes an `&&` chain), so that none of them runs without what
+    /// came before.
+    dropping: Option<Scan>,
 }
 
 impl Reader {
@@ -25,43 +28,69 @@ impl Reader {
     /// more lines, or why the lines do not parse, which drops them. A
     /// command longer than [`COMMAND_MAX`] is dropped too.
     pub fn add(&mut self, line: &str) -> Result<Option<List<Word>>, ParseError> {
-        if self.dropping {
-            self.dropping = matches!(alone(line), Alone::GoesOn | Alone::Nothing);
+        if let Some(scan) = &mut self.dropping {
+            scan.line(line.as_bytes());
+            if scan.done() {
+                self.dropping = None;
+            }
             return Ok(None);
         }
         if self.parser.len() + line.len() + 1 > COMMAND_MAX {
-            self.drop_line(line);
+            self.drop_line(line.as_bytes());
             return Err(ParseError::TooLong);
         }
         // The parser keeps what it has read, so each line is read once, in
         // its context.
         self.parser.line(line).inspect_err(|_| {
-            // A line refused while it leaves the command open drops the
-            // rest of the command with it, as `drop_line` does.
-            self.parser = Parser::new();
-            self.dropping = parser::ends_open(line);
+            // A line that does not parse drops the rest of its command
+            // with it: what has been read, the line too, says how far.
+            let scan = self.drop_start();
+            if !scan.done() {
+                self.dropping = Some(scan);
+            }
         })
     }
 
-    /// Drops the command a line is part of that cannot be added (too
-    /// long, or no text: `line` is what can be read of it, or its last
-    /// bytes): its later lines are dropped too unless this one plainly
-    /// finishes it.
-    pub fn drop_line(&mut self, line: &str) {
-        let reading = self.reading();
+    /// Drops the command a line that cannot be added is part of (too
+    /// long, or no text), and the lines after it up to its end.
+    pub fn drop_line(&mut self, line: &[u8]) {
+        self.drop_bytes(line);
+        self.drop_end();
+    }
+
+    /// Drops the command the line being read is part of, `bytes` being
+    /// more of the line: so a line too long to keep is counted whole.
+    pub fn drop_bytes(&mut self, bytes: &[u8]) {
+        let mut scan = self.drop_start();
+        scan.bytes(bytes);
+        self.dropping = Some(scan);
+    }
+
+    /// The line [`Reader::drop_bytes`] took ends.
+    pub fn drop_end(&mut self) {
+        if let Some(scan) = &mut self.dropping {
+            scan.bytes(b"\n");
+            if scan.done() {
+                self.dropping = None;
+            }
+        }
+    }
+
+    /// What the command being dropped opens and closes: as far as it has
+    /// been read, the lines before this one first.
+    fn drop_start(&mut self) -> Scan {
+        let scan = self.dropping.take().unwrap_or_else(|| {
+            let mut scan = Scan::new();
+            scan.bytes(self.parser.text().as_bytes());
+            scan
+        });
         self.parser = Parser::new();
-        // What does not parse alone might go on (a line's last bytes may
-        // start inside a quote): it is dropped to be safe.
-        self.dropping = match alone(line) {
-            Alone::GoesOn | Alone::Wrong => true,
-            Alone::Nothing => reading,
-            Alone::Ends => false,
-        };
+        scan
     }
 
     /// Part of a command has been read, or is being dropped.
     pub fn reading(&self) -> bool {
-        !self.parser.is_empty() || self.dropping
+        !self.parser.is_empty() || self.dropping.is_some()
     }
 
     /// The input ended: a command read only in part is bash's `unexpected
@@ -75,28 +104,7 @@ impl Reader {
     /// Drops what has been read (Ctrl-C at the `> ` prompt).
     pub fn clear(&mut self) {
         self.parser = Parser::new();
-        self.dropping = false;
-    }
-}
-
-/// What a line, read alone, does to an unfinished command before it.
-enum Alone {
-    /// It ends after `|`, `&&` or `||`: the command goes on after it.
-    GoesOn,
-    /// Blanks or a comment: the command goes on after it.
-    Nothing,
-    /// A command: it may finish the one before.
-    Ends,
-    /// It does not parse alone.
-    Wrong,
-}
-
-fn alone(line: &str) -> Alone {
-    match parser::parse_line(line) {
-        Err(ParseError::Incomplete) => Alone::GoesOn,
-        Ok(list) if list.items.is_empty() => Alone::Nothing,
-        Ok(_) => Alone::Ends,
-        Err(_) => Alone::Wrong,
+        self.dropping = None;
     }
 }
 
@@ -231,24 +239,76 @@ mod tests {
     #[test]
     fn a_line_that_cannot_be_read_drops_its_command_to_its_end() {
         let mut r = Reader::new();
-        // Its text decides, or what is left of it: one that plainly
-        // finishes a command ends it; one that goes on, or might, does not.
+        // Its bytes decide, all of them: one that finishes a command ends
+        // it; one that goes on does not.
         r.add("a &&").unwrap();
-        r.drop_line("x");
+        r.drop_line(b"x");
         assert!(!r.reading());
-        r.drop_line("x &&");
+        r.drop_line(b"x \xff &&");
         assert!(r.reading());
         r.add("b").unwrap();
         assert!(!r.reading());
-        r.drop_line("x' &&");
-        assert!(r.reading(), "a quote cut in two: it might go on");
-        r.clear();
+        r.drop_line(b"x' &&");
+        assert!(!r.reading(), "the quote is the line's, left open");
         // A blank one ends nothing, and starts nothing.
         r.add("a ||").unwrap();
-        r.drop_line("   ");
+        r.drop_line(b"   ");
         assert!(r.reading());
         r.clear();
-        r.drop_line("   ");
+        r.drop_line(b"   ");
+        assert!(!r.reading());
+        // One that opens a construct drops it to its end.
+        r.drop_line(b"while \xff; do");
+        for line in ["echo a", "if b; then", "fi"] {
+            assert_eq!(r.add(line), Ok(None), "{line}");
+        }
+        assert!(r.reading());
+        assert_eq!(r.add("done"), Ok(None));
+        assert!(!r.reading());
+    }
+
+    #[test]
+    fn a_line_too_long_to_keep_is_counted_whole() {
+        // Plan 1 judged such a line by its last bytes, and dropped the
+        // next command to be safe when they did not parse alone.
+        let mut r = Reader::new();
+        r.drop_bytes(b"if a; then ");
+        for _ in 0..100 {
+            r.drop_bytes(&[b'x'; 1024]);
+        }
+        r.drop_bytes(b" '");
+        assert!(r.reading());
+        r.drop_end();
+        assert!(r.reading(), "inside its `if`");
+        assert_eq!(r.add("fi"), Ok(None));
+        assert!(!r.reading());
+        r.drop_bytes(&[b'x'; 70 * 1024]);
+        r.drop_bytes(b" '");
+        r.drop_end();
+        assert!(!r.reading(), "a quote left open ends with its line");
+        assert_eq!(names(&r.add("b").unwrap().unwrap()), ["b"]);
+    }
+
+    #[test]
+    fn a_refused_construct_is_dropped_to_its_end() {
+        // Plan 1 dropped each refused line alone, so a script's `if`
+        // written across lines ran its body (its final review's ruling):
+        // its lines are dropped up to its `fi`, counting those inside.
+        let mut r = Reader::new();
+        assert_eq!(r.add("if true"), Err(ParseError::Unsupported("if".into())));
+        assert!(r.reading());
+        for line in ["then echo a", "while b", "do c", "done", "echo d"] {
+            assert_eq!(r.add(line), Ok(None), "{line}");
+            assert!(r.reading(), "{line}");
+        }
+        assert_eq!(r.add("fi"), Ok(None));
+        assert!(!r.reading());
+        assert_eq!(names(&r.add("echo e").unwrap().unwrap()), ["echo"]);
+        // Opened on a later line of the command, and refused there.
+        assert_eq!(r.add("a &&"), Ok(None));
+        assert!(r.add("for x in b; do").is_err());
+        assert_eq!(r.add("echo $x"), Ok(None));
+        assert_eq!(r.add("done"), Ok(None));
         assert!(!r.reading());
     }
 
