@@ -1,0 +1,45 @@
+# Lists (programmable shell gate §4.1, §5; milestone 4, plan 1): ;, &&,
+# || and ! under /bin/sh; a command typed across lines with bash's >
+# prompt, and Ctrl-C there; Ctrl-C in the middle of a list; & mid-line;
+# and a script whose command goes on across lines, with its transcript.
+timeout 30
+expect root@relay:~# $
+send echo a; false; echo $?
+expect \na\n1\nroot@relay:~# $
+send true && echo yes || echo no
+expect \nyes\nroot@relay:~# $
+send ! true || echo negated
+expect \nnegated\nroot@relay:~# $
+# A command that needs more lines shows bash's > prompt for each.
+send echo first &&
+expect \n> $
+send echo second |
+expect \n> $
+send wc -c
+expect \nfirst\n7\nroot@relay:~# $
+# Ctrl-C at > drops the command, with status 130.
+send echo dropped ||
+expect \n> $
+type {ctrl-c}
+expect \^C\nroot@relay:~# $
+send echo $?
+expect \n130\nroot@relay:~# $
+# Ctrl-C of a program ends the rest of its line.
+send t-spin; echo not-run
+alive 1
+type {ctrl-c}
+expect \n\^C\nroot@relay:~# $
+# & mid-line starts a job, and the line goes on.
+send sleep 1 & echo went-on
+expect \n\[1\] \d+\nwent-on\nroot@relay:~# $
+send wait %1
+expect \n\[1\]\+  Done                    sleep 1\nroot@relay:~# $
+# A script's command goes on across lines; each line is traced as it is
+# read, and the command runs once a line finishes it.
+send echo 'echo s1 &&' > s.sh
+send echo '  echo s2' >> s.sh
+send sh s.sh
+expect \n\+ echo s1 &&\n\+ echo s2\ns1\ns2\nroot@relay:~# $
+send cat s.log
+expect \n\+ echo s1 &&\n\+ echo s2\ns1\ns2\nroot@relay:~# $
+poweroff
