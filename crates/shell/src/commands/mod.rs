@@ -14,6 +14,7 @@ mod script;
 mod seq;
 mod stat;
 mod system;
+mod test;
 mod text;
 
 pub use basic::{clear, echo, r#false, pwd, r#true, uname};
@@ -26,6 +27,7 @@ pub use script::{SCRIPT_MAX, transcript_name};
 pub use seq::seq;
 pub use stat::stat;
 pub use system::{date, df, dmesg, free, poweroff, ps, reboot, sleep, sync};
+pub use test::{bracket, named};
 pub use text::{cat, head, tail, wc};
 
 /// A command function: runs the command with its arguments (without the
@@ -42,6 +44,11 @@ pub struct Builtin {
 
 /// Every command, sorted by name.
 pub const COMMANDS: &[Builtin] = &[
+    Builtin {
+        name: "[",
+        help: "evaluate an expression, as test does, up to a ]",
+        run: test::bracket,
+    },
     Builtin {
         name: "cat",
         help: "print files",
@@ -198,6 +205,11 @@ pub const COMMANDS: &[Builtin] = &[
         run: text::tail,
     },
     Builtin {
+        name: "test",
+        help: "evaluate an expression: 0 if true, 1 if false",
+        run: test::test,
+    },
+    Builtin {
         name: "touch",
         help: "create files or update their times",
         run: change::touch,
@@ -239,7 +251,8 @@ pub fn builtin(name: &str) -> Option<&'static Builtin> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Not a glob: the module `test` would make `#[test]` ambiguous.
+    use super::{COMMANDS, builtin, find};
 
     #[test]
     fn the_table_is_sorted_and_names_are_unique() {

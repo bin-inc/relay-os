@@ -736,14 +736,28 @@ impl Harness {
         self.vfs.chdir(dir.as_bytes()).unwrap();
         self.stdin = stdin.to_vec();
         let mut out = FakeStdout::file(None);
-        let line = args
-            .iter()
-            .map(|a| crate::ctx::quote_if_needed(a))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let (status, errors) = self.program(&line, &mut out);
+        let (status, errors) = self.program_args(args, &mut out);
         self.vfs.chdir(b"/").unwrap();
         (status, out.text(), errors)
+    }
+
+    /// As [`Harness::program`], with the words given (the command's name
+    /// first), so that any byte can be in one.
+    pub fn program_args(&mut self, args: &[&str], stdout: &mut FakeStdout) -> (i32, String) {
+        let words: Vec<String> = args.iter().map(|a| String::from(*a)).collect();
+        let status = crate::run_command(
+            &words[0],
+            crate::commands::find(&words[0]).unwrap().run,
+            &words[1..],
+            crate::CommandIo {
+                vfs: &mut self.vfs,
+                console: &mut self.console,
+                system: &mut self.system,
+                stdin: &mut Bytes::new(core::mem::take(&mut self.stdin)),
+                stdout,
+            },
+        );
+        (status, self.console.take())
     }
 
     /// Creates (or replaces) a file.
@@ -774,6 +788,161 @@ impl Harness {
     pub fn exists(&mut self, path: &str) -> bool {
         self.vfs.lookup(path.as_bytes()).is_ok()
     }
+}
+
+/// A file a test makes on both sides, in a fresh directory: on the host
+/// for its own tool ([`host_files`]) and in a `MemFs` for ours
+/// ([`like_host_files`]).
+#[derive(Clone, Copy, Debug)]
+pub struct TestFile<'a> {
+    pub name: &'a str,
+    pub made: Made<'a>,
+    /// Access and modification times, in seconds since 1970.
+    pub times: Option<(u64, u64)>,
+}
+
+/// What a [`TestFile`] is.
+#[derive(Clone, Copy, Debug)]
+pub enum Made<'a> {
+    File(&'a [u8]),
+    Dir,
+    /// Another name for the file of that name, made before it.
+    HardLink(&'a str),
+}
+
+impl<'a> TestFile<'a> {
+    pub fn file(name: &'a str, data: &'a [u8]) -> TestFile<'a> {
+        TestFile::made(name, Made::File(data))
+    }
+
+    pub fn dir(name: &'a str) -> TestFile<'a> {
+        TestFile::made(name, Made::Dir)
+    }
+
+    pub fn hard_link(name: &'a str, to: &'a str) -> TestFile<'a> {
+        TestFile::made(name, Made::HardLink(to))
+    }
+
+    fn made(name: &'a str, made: Made<'a>) -> TestFile<'a> {
+        TestFile {
+            name,
+            made,
+            times: None,
+        }
+    }
+
+    pub fn times(self, atime: u64, mtime: u64) -> TestFile<'a> {
+        TestFile {
+            times: Some((atime, mtime)),
+            ..self
+        }
+    }
+}
+
+/// Runs `args` (the command's name first) as its program, in `/w` of a
+/// fresh standard tree holding `files`: its status, standard output and
+/// standard error, to compare with [`host_files`]'.
+pub fn like_host_files(args: &[&str], files: &[TestFile<'_>]) -> (i32, String, String) {
+    let mut fs = memfs();
+    let w = fs.mkdir(fs.root(), b"w").unwrap();
+    let mut made: Vec<(&str, Ino)> = Vec::new();
+    for f in files {
+        let (dir, name) = match f.name.rsplit_once('/') {
+            Some((d, n)) => (lookup_in(&mut fs, w, d), n),
+            None => (w, f.name),
+        };
+        let ino = match f.made {
+            Made::File(data) => {
+                let ino = fs.create(dir, name.as_bytes()).unwrap();
+                fs.write_at(ino, 0, data).unwrap();
+                ino
+            }
+            Made::Dir => fs.mkdir(dir, name.as_bytes()).unwrap(),
+            Made::HardLink(to) => {
+                let ino = made.iter().find(|m| m.0 == to).unwrap().1;
+                fs.link(dir, name.as_bytes(), ino).unwrap();
+                ino
+            }
+        };
+        made.push((f.name, ino));
+    }
+    // Last, as on the host: making a file changes its directory's times.
+    for (f, &(_, ino)) in files.iter().zip(&made) {
+        if let Some((atime, mtime)) = f.times {
+            fs.set_times(ino, atime, mtime).unwrap();
+        }
+    }
+    let mut h = Harness::on(fs);
+    h.vfs.chdir(b"/w").unwrap();
+    let mut out = FakeStdout::file(None);
+    let (status, errors) = h.program_args(args, &mut out);
+    (status, out.text(), errors)
+}
+
+/// The directory `path` under `dir`.
+fn lookup_in(fs: &mut MemFs, dir: Ino, path: &str) -> Ino {
+    path.split('/')
+        .fold(dir, |d, name| fs.lookup(d, name.as_bytes()).unwrap())
+}
+
+/// What the host's own tool prints for `args` (its name first), as
+/// [`host_tool`] runs it, in a fresh directory holding `files`; with
+/// `root`, through `unshare -r`, so that it answers as root (Relay OS runs
+/// every program as root). A missing tool, or a namespace refused, fails
+/// the test.
+pub fn host_files(args: &[&str], files: &[TestFile<'_>], root: bool) -> (i32, String, String) {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/like-host")
+        .join(std::format!("{}-{}", std::process::id(), next_dir()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for f in files {
+        let path = dir.join(f.name);
+        match f.made {
+            Made::File(data) => std::fs::write(&path, data).unwrap(),
+            Made::Dir => std::fs::create_dir(&path).unwrap(),
+            Made::HardLink(to) => std::fs::hard_link(dir.join(to), &path).unwrap(),
+        }
+    }
+    for f in files {
+        if let Some((atime, mtime)) = f.times {
+            for (flag, t) in [("-a", atime), ("-m", mtime)] {
+                let ok = std::process::Command::new("touch")
+                    .args(["-h", flag, "-d", &std::format!("@{t}")])
+                    .arg(dir.join(f.name))
+                    .status()
+                    .expect("the host's touch is needed")
+                    .success();
+                assert!(ok, "touch {flag} {}", f.name);
+            }
+        }
+    }
+    let mut cmd = if root {
+        let mut c = std::process::Command::new("unshare");
+        c.arg("-r").args(args);
+        c
+    } else {
+        let mut c = std::process::Command::new(args[0]);
+        c.args(&args[1..]);
+        c
+    };
+    let out = cmd
+        .current_dir(&dir)
+        .env("LC_ALL", "C")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap_or_else(|e| panic!("the host's {} is needed: {e}", args[0]));
+    let _ = std::fs::remove_dir_all(&dir);
+    let text = |b: Vec<u8>| String::from_utf8_lossy(&b).into_owned();
+    let stderr = text(out.stderr);
+    if root {
+        assert!(
+            !stderr.starts_with("unshare:"),
+            "unshare -r is needed (on Ubuntu 24.04, sysctl \
+             kernel.apparmor_restrict_unprivileged_userns=0): {stderr}"
+        );
+    }
+    (out.status.code().unwrap_or(-1), text(out.stdout), stderr)
 }
 
 /// A number for each fresh directory a test asks for.
