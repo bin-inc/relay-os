@@ -10,6 +10,9 @@ use alloc::string::String;
 #[derive(Default)]
 pub(crate) struct Reader {
     text: String,
+    /// How many times all the text was parsed (the tests count them).
+    #[cfg(test)]
+    whole_parses: usize,
 }
 
 impl Reader {
@@ -25,8 +28,26 @@ impl Reader {
             self.text.clear();
             return Err(ParseError::TooLong);
         }
+        // While a command goes on, a line that alone would leave it
+        // unfinished (ending after `|`, `&&` or `||`), or holds nothing,
+        // leaves it unfinished: so each line is parsed once alone, and all
+        // the text only when a line may finish it, which keeps reading a
+        // long command linear.
+        let goes_on = self.reading()
+            && match parser::parse_line(line) {
+                Err(ParseError::Incomplete) => true,
+                Ok(list) => list.items.is_empty(),
+                Err(_) => false,
+            };
         self.text.push_str(line);
         self.text.push('\n');
+        if goes_on {
+            return Ok(None);
+        }
+        #[cfg(test)]
+        {
+            self.whole_parses += 1;
+        }
         match parser::parse_line(&self.text) {
             Err(ParseError::Incomplete) => Ok(None),
             done => {
@@ -118,6 +139,24 @@ mod tests {
         // Up to the limit, newlines counted, it is read.
         let fits = "x".repeat(COMMAND_MAX - 1);
         assert_eq!(r.add(&fits).unwrap().unwrap().items.len(), 1);
+    }
+
+    #[test]
+    fn the_text_is_parsed_whole_only_when_a_line_may_finish_it() {
+        // The review found each line parsing all the text before it: 64 KiB
+        // of `a |` lines took over a minute. A line that alone leaves the
+        // command unfinished, or is blank or a comment, needs no such parse.
+        let mut r = Reader::new();
+        for _ in 0..1000 {
+            assert_eq!(r.add("a |"), Ok(None));
+            assert_eq!(r.add(""), Ok(None));
+            assert_eq!(r.add("  # c"), Ok(None));
+        }
+        assert_eq!(names(&r.add("b").unwrap().unwrap()).len(), 1);
+        assert_eq!(r.whole_parses, 2, "the first line's, and the last's");
+        // A line that might finish it, or be wrong, is parsed with the rest.
+        assert_eq!(r.add("a &&"), Ok(None));
+        assert_eq!(r.add("|| b"), Err(ParseError::MissingTarget("||")));
     }
 
     #[test]
