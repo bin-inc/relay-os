@@ -4,20 +4,28 @@ timeout 30
 expect root@relay:~# $
 send echo hello, world
 expect \nhello, world\n
+expect root@relay:~# $
 send uname -a
 expect \nRelay relay 0\.4\.0 x86_64\n
+expect root@relay:~# $
 send cat /etc/hostname
 expect \nrelay\n
+expect root@relay:~# $
 send ls /
 expect \nbin  dev  etc  home  lost\+found  root  tmp  usr  var\n
+expect root@relay:~# $
 send date
 expect \n(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \w{3} [ \d]\d \d\d:\d\d:\d\d UTC 20\d\d\n
+expect root@relay:~# $
 send free
 expect \nMem:\s+\d+\s+\d+\s+\d+\nHeap:\s+32768\s+\d+\s+\d+\n
+expect root@relay:~# $
 send df
 expect \nFilesystem\s+1K-blocks\s+Used\s+Available\s+Use% Mounted on\n/dev/root\s+\d+\s+\d+\s+\d+\s+\d+% /\n
+expect root@relay:~# $
 send dmesg
 expect \n\[ ok \] mount /: .*\n
+expect root@relay:~# $
 send nosuch
 expect \nrelay-sh: nosuch: command not found\n
 expect root@relay:~# $

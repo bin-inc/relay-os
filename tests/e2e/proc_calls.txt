@@ -11,5 +11,6 @@ expect \Asleeping child: /bin/sleep, sleep, frames\nended child: /bin/true, zomb
 expect \A(pid \d+ \(/bin/(sleep|cat)\): killed: kill\n){3}root@relay:~# $
 send t-proc short
 expect \none entry: pid 1, of more than one: true\nno entry: the same count: true\n
+expect root@relay:~# $
 send t-proc long
 expect \na name of 90 bytes: 64 bytes, its start: true\n

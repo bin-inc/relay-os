@@ -5,19 +5,24 @@
 timeout 30
 expect root@relay:~# $
 send echo before > /root/f
+expect root@relay:~# $
 send cat /root/f
 expect \nbefore\n
+expect root@relay:~# $
 unplug
 expect port \d: slot \d+ released
 # Three tries of 5 s each would be 15 s per request.
 timeout 3
 send touch /root/g
 expect \nrelay-sh: sync failed: Input/output error\n
+expect root@relay:~# $
 send echo still here
 expect \nstill here\n
 # A program's power call keeps the machine up too, and says why.
+expect root@relay:~# $
 send t-sys poweroff
 expect \npower: EIO\n
+expect root@relay:~# $
 send poweroff
 expect \npoweroff: cannot shut the filesystems down cleanly: Input/output error\npoweroff: use 'poweroff -f' to go ahead anyway\n
 expect root@relay:~# $

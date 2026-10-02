@@ -5,8 +5,10 @@ timeout 60
 expect root@relay:~# $
 send t-sys uname
 expect \nRelay relay \d+\.\d+\.\d+ x86_64\n
+expect root@relay:~# $
 send uname -a
 expect \nRelay relay \d+\.\d+\.\d+ x86_64\n
+expect root@relay:~# $
 send t-sys log
 expect \n\d+ bytes, the first line: Relay OS \d+\.\d+\.\d+\nthe newest 16 bytes: 16 of them, the log's end: true\n
 poweroff t-sys poweroff

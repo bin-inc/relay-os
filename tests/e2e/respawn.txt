@@ -8,15 +8,18 @@ timeout 30
 expect \nWelcome to Relay OS\.\n
 expect root@relay:~# $
 send cd /
+expect root@relay:/# $
 send exit
 expect \ninit: /bin/sh \(pid 2\) exited with 0; starting it again\nroot@relay:~# $
 send echo alive
 expect \nalive\n
+expect root@relay:~# $
 send exit 3
 expect \ninit: /bin/sh \(pid \d+\) exited with 3; starting it again\nroot@relay:~# $
 # An orphan still running when the screen comes (t-spin 1) is killed
 # before it can print over it.
 send t-spawn orphan
+expect root@relay:~# $
 send-crlf exit
 expect \ninit: /bin/sh \(pid \d+\) exited with 0\n
 expect \*\*\* Relay OS cannot run its shell \*\*\*\n\n/bin/sh ended 3 times within 10 s\n\n--- last kernel log lines ---\n

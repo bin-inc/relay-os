@@ -6,82 +6,107 @@ timeout 60
 expect root@relay:~# $
 send sleep 4 &
 expect \n\[1\] \d+\n
+expect root@relay:~# $
 send t-spin &
 expect \n\[2\] \d+\n
+expect root@relay:~# $
 send jobs
 expect \n\[1\]-  Running                 sleep 4 &\n\[2\]\+  Running                 t-spin &\n
 # ps shows them both, with init and the shell; t-spin shares the CPU.
+expect root@relay:~# $
 send ps
 expect \n  PID  PPID STATE      MEM  TIME CMD\n    1     0 wait         0  0:00 init\n    2     1 wait +\d+  0:00 /bin/sh\n
 expect \A +\d+     2 sleep +\d+  0:00 /bin/sleep\n +\d+     2 (ready|run) +\d+  0:0\d /bin/t-spin\n +\d+     2 run +\d+  0:00 /bin/ps\n
 # Ctrl-C at the prompt only cancels the line typed: the jobs run on.
+expect root@relay:~# $
 key echo nope{ctrl-c}
 expect \^C\n
+expect root@relay:~# $
 send jobs
 expect \n\[1\]-  Running                 sleep 4 &\n\[2\]\+  Running                 t-spin &\n
 # Process 1 cannot be killed; a job's group can, and wait says so.
+expect root@relay:~# $
 send kill 1
 expect \nrelay-sh: kill: \(1\) - Operation not permitted\n
-send kill %2
-send wait %2
-expect \n\[2\]\+  Killed                  t-spin\n
+expect root@relay:~# $
+send kill %2; wait %2
+expect \n(pid \d+ \(/bin/t-spin\): killed: kill\n)?\[2\]\+  Killed                  t-spin\n
+expect root@relay:~# $
 send wait %1
 expect \n\[1\]\+  Done                    sleep 4\n
+expect root@relay:~# $
 send jobs
-expect root@relay:~# jobs\nroot@relay:~# $
+expect jobs\nroot@relay:~# $
 # Ctrl-C ends a wait at the prompt; the job runs on until it is killed.
 send t-spin &
 expect \n\[1\] \d+\n
+expect root@relay:~# $
 send wait
 alive 1
-key {ctrl-c}
+key-ahead {ctrl-c}
 expect \n\^C\n
+expect root@relay:~# $
 send jobs
 expect \n\[1\]\+  Running                 t-spin &\n
-send kill %1
+expect root@relay:~# $
+send kill %1; wait
 # A bare wait tells of a job a signal ended, as bash's does.
-send wait
-expect root@relay:~# wait\n(pid \d+ \(/bin/t-spin\): killed: kill\n)?\[1\]\+  Killed                  t-spin\nroot@relay:~# $
+expect \n(pid \d+ \(/bin/t-spin\): killed: kill\n)?\[1\]\+  Killed                  t-spin\n
+expect root@relay:~# $
 send dmesg
 expect \npid \d+ \(/bin/t-spin\): killed: kill\npid \d+ \(/bin/t-spin\): killed: kill\n
 # A job reading the console gets end of input at once; a pipeline's output
 # goes to the screen; a script in the background never takes the console.
+expect root@relay:~# $
 send cat &
 expect \n\[1\] \d+\n
+expect root@relay:~# $
 send wait %1
 expect \n\[1\]\+  Done                    cat\n
+expect root@relay:~# $
 send seq 3 | grep 2 &
 expect \n\[1\] \d+\n
-send wait %1
+send-ahead wait %1
 # Printed at the prompt or after the wait's echo, whichever came first.
 expect (# |\n)2\n
 expect \[1\]\+  Done                    seq 3 \| grep 2\n
+expect root@relay:~# $
 send echo 'sleep 1' > s.sh
+expect root@relay:~# $
 send echo 'echo the script ran' >> s.sh
+expect root@relay:~# $
 send sh s.sh &
 expect \n\[1\] \d+\n
-send echo the prompt is mine
+send-ahead echo the prompt is mine
 expect \nthe prompt is mine\n
-send wait %1
+send-ahead wait %1
 expect the script ran\n
 expect \[1\]\+  Done                    sh s.sh\n
 # Its transcript, a console tee, also got what the screen showed meanwhile
 # (here what was typed at the prompt).
+expect root@relay:~# $
 send cat s.log
 expect \n\+ sleep 1\n
 expect \+ echo the script ran\nthe script ran\n
 # Four scripts in the background, a transcript's tee each, leave room for
 # a fifth in the foreground: a process pushes 4 tees, 64 in all.
+expect root@relay:~# $
 send echo 'sleep 2' > a.sh
+expect root@relay:~# $
 send sh a.sh &
 expect \n\[1\] \d+\n
+expect root@relay:~# 
 send sh a.sh &
 expect \n\[2\] \d+\n
+expect root@relay:~# 
 send sh a.sh &
 expect \n\[3\] \d+\n
+expect root@relay:~# 
 send sh a.sh &
 expect \n\[4\] \d+\n
+expect root@relay:~# 
 send echo 'echo hello' > b.sh
+expect root@relay:~# 
 send sh b.sh
 # Typed only at the prompt: until then the console is still the ended
 # script's, in line mode, which echoed a line typed early once more.
@@ -93,6 +118,7 @@ expect wait\n(\[\d\][-+ ]  Done                    sh a\.sh\n){0,4}root@relay:~#
 # exit leaves a running job to process 1, which collects it when it ends.
 send t-spin 1 &
 expect \n\[1\] \d+\n
+expect root@relay:~# $
 send exit
 expect \ninit: /bin/sh \(pid 2\) exited with 0; starting it again\nroot@relay:~# $
 expect \d+ iterations\n

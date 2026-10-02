@@ -5,10 +5,13 @@
 timeout 30
 expect root@relay:~# $
 send cd /
+expect root@relay:/# $
 send rm -r /root
+expect root@relay:/# $
 send exit
 expect \ninit: /bin/sh \(pid 2\) exited with 0; starting it again\nroot@relay:/# $
 send pwd
 expect \n/\n
+expect root@relay:/# $
 send ls /
 expect \nbin  dev  etc  home  lost\+found  tmp  usr  var\n

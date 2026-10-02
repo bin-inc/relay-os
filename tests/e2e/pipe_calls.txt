@@ -10,26 +10,36 @@ expect root@relay:~# $
 send t-spawn fill
 expect \nfilled the table with 61 children\n
 alive 1
+expect root@relay:~# $
 send free
 expect-same mem \nMem:\s+\d+\s+(\d+)\s
+expect root@relay:~# $
 send t-pipe basic
 expect \npipe: 3 4\nwrite: 5\nread: hello\nfstat: fifo, dev 0\nseek: EINVAL\nread the write end: EBADF\nwrite the read end: EBADF\ntee: EINVAL\nafter the writer closed: 0\n
+expect root@relay:~# $
 send t-pipe room
 expect \nwrite 20000: 16384\nread back: 16384, all as written: true\n
 # 1 MiB through 16 KiB: the writer and the reader block in turn.
+expect root@relay:~# $
 send t-pipe child
 expect-same sum \ndrained 1048576 bytes, checksum (\d+)\n
 expect-same sum sent 1048576 bytes, checksum (\d+)\n
+expect root@relay:~# $
 send t-pipe eof
 expect \nend of data once the child ended: 0\n
+expect root@relay:~# $
 send t-pipe epipe
 expect \nwrite with no reader: EPIPE\nt-args with nobody reading: exited with 141\n
+expect root@relay:~# $
 send t-pipe killed
 expect \na reader blocked on an empty pipe: kill\n
 expect \na writer blocked on a full pipe: kill\n
+expect root@relay:~# $
 send dmesg
 expect \npid \d+ \(/bin/t-pipe\): killed: kill\npid \d+ \(/bin/t-pipe\): killed: kill\n
+expect root@relay:~# $
 send t-pipe many
 expect \npipes: 14, then EMFILE\nthe last fd: 31\n
+expect root@relay:~# $
 send free
 expect-same mem \nMem:\s+\d+\s+(\d+)\s

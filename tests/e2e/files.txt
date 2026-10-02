@@ -24,6 +24,7 @@ expect sync: ok\nrmdir: ok\nstat it: ENOENT\nroot@relay:~# $
 send t-files cwd
 expect \ngetcwd: /root\ngetcwd into 3 bytes: ERANGE\nchdir: ok\ngetcwd: /root/t-files.c\nstat it from above: 4\n
 expect chdir to a file: ENOTDIR\nchdir to nothing: ENOENT\nmy working directory: /root/t-files.c\nmy working directory: /root\ngetcwd: /root\n
+expect root@relay:~# $
 send pwd
 expect \n/root\nroot@relay:~# $
 send ls t-files.c
@@ -31,6 +32,7 @@ expect \nls: cannot access 't-files.c': No such file or directory\n
 # Another process removes a program's working directory and an open file
 # (spec §16 item 4): both are gone for it, and the new directory and file,
 # which may get their inodes, keep what they hold.
+expect root@relay:~# $
 send t-files gone
 expect \nread the removed file: ENOENT\nthe child's working directory: /root/t-files.g\nthe child creates x: ENOENT\n
 expect the child reads its file: ENOENT\nthe child writes its file: ENOENT\nthe new file holds: "new"\nthe new directory holds x: ENOENT\nroot@relay:~# $

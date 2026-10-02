@@ -8,68 +8,103 @@ timeout 30
 expect root@relay:~# $
 send free
 expect-same mem \nMem:\s+\d+\s+(\d+)\s
+expect root@relay:~# $
 send /bin/pwd
 expect \n/root\n
+expect root@relay:~# $
 send /bin/mkdir -p /root/a/b/c
+expect root@relay:~# $
 send /bin/echo hello > /root/a/f
+expect root@relay:~# $
 send /bin/echo world >> /root/a/f
+expect root@relay:~# $
 send /bin/cat /root/a/f
 expect \nhello\nworld\n
+expect root@relay:~# $
 send /bin/ls -l /root/a
 expect \ntotal 8\ndrwxr-xr-x 3 root root 4096 \w{3} [ \d]\d \d\d:\d\d b\n-rw-r--r-- 1 root root   12 \w{3} [ \d]\d \d\d:\d\d f\n
+expect root@relay:~# $
 send /bin/cp /root/a/f /root/a/g
+expect root@relay:~# $
 send /bin/mv /root/a/g /root/a/b/h
+expect root@relay:~# $
 send /bin/ls /root/a /root/a/b
 expect \n/root/a:\nb  f\n\n/root/a/b:\nc  h\n
+expect root@relay:~# $
 send /bin/ls /root/a > /root/list
+expect root@relay:~# $
 send /bin/cat /root/list
 expect \nb\nf\n
+expect root@relay:~# $
 send /bin/cat /root/list >> /root/list
 expect \ncat: /root/list: input file is output file\n
+expect root@relay:~# $
 send /bin/rmdir /root/a/b
 expect \nrmdir: failed to remove '/root/a/b': Directory not empty\n
+expect root@relay:~# $
 send /bin/rm -r /root/a/b
+expect root@relay:~# $
 send /bin/touch /root/t
+expect root@relay:~# $
 send /bin/stat /root/t
 expect \n  File: /root/t\n  Size: 0 .*regular empty file\n
+expect root@relay:~# $
 send /bin/head -n 1 /root/a/f
 expect \nhello\n
+expect root@relay:~# $
 send /bin/tail -n 1 /root/a/f
 expect \nworld\n
+expect root@relay:~# $
 send /bin/wc /root/a/f
 expect \n 2  2 12 /root/a/f\n
 # Errors keep their place among the output, and never enter a file.
+expect root@relay:~# $
 send /bin/cat /root/a/f /root/nope /root/a/f
 expect \nhello\nworld\ncat: /root/nope: No such file or directory\nhello\nworld\n
+expect root@relay:~# $
 send /bin/cat /root/nope > /root/out
 expect \ncat: /root/nope: No such file or directory\n
+expect root@relay:~# $
 send /bin/stat /root/out
 expect \n  File: /root/out\n  Size: 0 .*regular empty file\n
 # A program of /bin copies onto the root (SysVfs's tests show that files
 # of two filesystems with one inode number are two files).
+expect root@relay:~# $
 send /bin/cp /bin/t-args /root/t
 expect /bin/cp /bin/t-args /root/t\nroot@relay:~# $
 send /bin/rm /root/a/f /root/t /root/out /root/list
+expect root@relay:~# $
 send /bin/rmdir /root/a
+expect root@relay:~# $
 send /bin/ls
 expect \nREADME  checks\n
+expect root@relay:~# $
 send /bin/rm /bin/t-args
 expect \nrm: cannot remove '/bin/t-args': Read-only file system\n
+expect root@relay:~# $
 send /bin/rm -r /
 expect \nrm: it is dangerous to operate recursively on '/'\n
+expect root@relay:~# $
 send /bin/ls /
 expect \nbin  dev  etc  home  lost\+found  root  tmp  usr  var\n
+expect root@relay:~# $
 send /bin/uname -a
 expect \nRelay relay \d+\.\d+\.\d+ x86_64\n
+expect root@relay:~# $
 send /bin/date
 expect \n(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \w{3} [ \d]\d \d\d:\d\d:\d\d UTC 20\d\d\n
+expect root@relay:~# $
 send /bin/df
 expect \nFilesystem     1K-blocks +Used Available Use% Mounted on\n/dev/root +\d+ +\d+ +\d+ +\d+% /\n
+expect root@relay:~# $
 send /bin/dmesg
 expect \n\[ ok \] system: \d+ programs, ABI 3\n
+expect root@relay:~# $
 send /bin/sync
+expect root@relay:~# $
 send /bin/free
 expect \n +total +used +free\nMem: +\d+ +\d+ +\d+\nHeap: +\d+ +\d+ +\d+\n
+expect root@relay:~# $
 send free
 expect-same mem \nMem:\s+\d+\s+(\d+)\s
 poweroff /bin/poweroff

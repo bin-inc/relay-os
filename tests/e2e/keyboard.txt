@@ -6,29 +6,39 @@ expect root@relay:~# $
 key echo hello
 expect \nhello\n
 # Shift for capitals and symbols.
+expect root@relay:~# $
 key echo Hello, World!
 expect \nHello, World!\n
 # Caps Lock: letters change, digits do not, Shift inverts it.
+expect root@relay:~# $
 key echo {caps_lock}abc1{caps_lock}def
 expect \nABC1def\n
+expect root@relay:~# $
 key echo {caps_lock}aBc{caps_lock}
 expect \nAbC\n
 # Backspace and the cursor keys.
+expect root@relay:~# $
 key echo abcx{backspace}d
 expect \nabcd\n
+expect root@relay:~# $
 key echo ac{left}b{end}d
 expect \nabcd\n
 # History: the up arrow brings back earlier lines (a repeated line is kept
 # once).
+expect root@relay:~# $
 key {up}
 expect \nabcd\n
+expect root@relay:~# $
 key {up}{up}{up}
 expect \nABC1def\n
 # Ctrl-C drops the line being typed.
+expect root@relay:~# $
 key echo nope{ctrl-c}
 expect \^C\n
 # The keyboard and the serial line type into the same shell.
+expect root@relay:~# $
 send echo serial
 expect \nserial\n
+expect root@relay:~# $
 key echo keyboard
 expect \nkeyboard\n

@@ -31,7 +31,7 @@ expect \n130\nroot@relay:~# $
 # Ctrl-C of a program ends the rest of its line.
 send t-spin; echo not-run
 alive 1
-type {ctrl-c}
+type-ahead {ctrl-c}
 expect \n\^C\nroot@relay:~# $
 # & mid-line starts a job, and the line goes on.
 send sleep 1 & echo went-on
@@ -41,7 +41,9 @@ expect \n\[1\]\+  Done                    sleep 1\nroot@relay:~# $
 # A script's command goes on across lines; each line is traced as it is
 # read, and the command runs once a line finishes it.
 send echo 'echo s1 &&' > s.sh
+expect root@relay:~# $
 send echo '  echo s2' >> s.sh
+expect root@relay:~# $
 send sh s.sh
 expect \n\+ echo s1 &&\n\+ echo s2\ns1\ns2\nroot@relay:~# $
 send cat s.log
@@ -93,13 +95,13 @@ expect \n\+ for x in a b\n\+ do\n\+ for y in 1 2; do echo \$x\$y; done\n\+ done\
 # for one before each command. A loop of programs ends at one too.
 send while cd; do cd; done
 alive 1
-type {ctrl-c}
+type-ahead {ctrl-c}
 expect \n\^C\nroot@relay:~# $
 send echo $?
 expect \n130\nroot@relay:~# $
 send while true; do sleep 1; done
 alive 2
-type {ctrl-c}
+type-ahead {ctrl-c}
 expect \^C\nroot@relay:~# $
 send echo $?
 expect \n130\nroot@relay:~# $
@@ -108,14 +110,14 @@ expect \n130\nroot@relay:~# $
 # typed meanwhile is kept for it; plan 1's `wait` too.
 send true; while cd; do cd; done
 alive 1
-type {ctrl-c}
+type-ahead {ctrl-c}
 expect \n\^C\nroot@relay:~# $
 send echo $?
 expect \n130\nroot@relay:~# $
 send sleep 30 & true; wait
 expect \n\[1\] \d+\n
 alive 1
-type {ctrl-c}
+type-ahead {ctrl-c}
 expect \^C\nroot@relay:~# $
 # On one line, so that the kernel's line for the killed sleep comes
 # before wait's and never inside a command's echo.
