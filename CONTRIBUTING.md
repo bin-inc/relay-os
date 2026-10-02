@@ -3,7 +3,9 @@
 ## Commit messages
 
 Every commit follows [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/),
-the format [release-please](https://github.com/googleapis/release-please) reads:
+in the form [release-please](https://github.com/googleapis/release-please)
+reads (the repository runs no release automation; the format keeps that
+open):
 
 ```
 type(scope): description
@@ -35,14 +37,16 @@ another from the footers. Only the subject is required.
 | `perf` | Faster or smaller, same behaviour |
 | `refactor` | Code changes with the same behaviour, including removing dead code |
 | `test` | Tests only: unit tests, e2e scenarios, NUC check scripts and their transcripts |
-| `docs` | Documentation only |
+| `docs` | Documentation only, including `.github/pull_request_template.md` |
 | `build` | Build system, toolchain, image layout |
-| `ci` | `.github/workflows/` |
+| `ci` | `.github/workflows/` and `.github/dependabot.yml` |
 | `chore` | Anything else; a release is `chore(release): 0.4.0` |
 | `revert` | Undoing an earlier commit |
 
 The type names the commit's main change. Tests that come with a feature or
 a fix belong to that commit and take its type (`feat` or `fix`), not `test`.
+Dependabot's pull requests keep its own prefixes (`chore(deps)`,
+`chore(gha)`), toolchain bumps included.
 
 ### Scopes
 
@@ -61,7 +65,7 @@ in lowercase.
 | `e2e` | `tests/e2e/` |
 | `checks` | NUC check scripts and transcripts (`rootfs/root/checks/`, `xtask/fixtures/checks/`), `docs/hardware-test.md` |
 | `rootfs` | `rootfs/`, but not the check scripts |
-| `spec`, `plan` | `docs/superpowers/specs/`, `docs/superpowers/plans/` |
+| `spec`, `plan` | `docs/superpowers/specs/`, `docs/superpowers/plans/` (but not the roadmaps) |
 | `roadmap` | `docs/superpowers/plans/*-roadmap.md` |
 | `release` | Version bumps |
 | `deps`, `gha` | Dependency and GitHub Actions updates (Dependabot's prefixes) |
@@ -135,10 +139,18 @@ kernel refuses their ABI note.
 
 ## Pull requests
 
+- One branch per pull request, named after the plan and its part
+  (`m3p4/shell`) or the topic (`docs/…`, `perf/…`).
+- `cargo xtask ci` passes locally before the branch is pushed.
 - The pull request's title follows the same rules as a commit subject,
-  since a squash merge makes it the commit on `main`. For a pull request
-  that touches many modules, the title takes the main change's type and
-  scope.
+  since a squash merge makes it the commit on `main`. GitHub appends
+  ` (#N)` to that subject, so keep the title within 65 characters. For a
+  pull request that touches many modules, the title takes the main
+  change's type and scope.
+- A pull request that needs a NUC check (`docs/hardware-test.md`) is
+  opened as a draft and stays one until the check has passed; its
+  transcripts (copied off the stick and checked by `verify-usb`) and the
+  results-log row go into a commit of that same pull request.
 - Merge commits keep GitHub's default subject
   (`Merge pull request #N from …`).
 - Plans in `docs/superpowers/plans/` write their commit messages in this
