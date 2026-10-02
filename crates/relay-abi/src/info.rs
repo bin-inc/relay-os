@@ -43,7 +43,7 @@ pub struct Uname {
     pub sysname: [u8; UNAME_FIELD],
     /// `relay`.
     pub nodename: [u8; UNAME_FIELD],
-    /// The kernel's version, `0.4.0`.
+    /// The kernel's version: the workspace's, from `Cargo.toml`.
     pub release: [u8; UNAME_FIELD],
     /// The machine, `x86_64`.
     pub machine: [u8; UNAME_FIELD],
