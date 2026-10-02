@@ -13,7 +13,7 @@ use relay_abi::file::{KIND_CHAR_DEVICE, OPEN_APPEND, OPEN_CREATE, OPEN_TRUNCATE,
 use relay_abi::info::LOG_MAX;
 use relay_abi::power::{POWER_FORCE, POWER_POWEROFF, POWER_REBOOT};
 use relay_abi::spawn::{FOREGROUND, NEW_GROUP};
-use relay_abi::{FdMap, WaitStatus};
+use relay_abi::{FdMap, Stat, WaitStatus};
 use shell::{Console, Group, MemInfo, Programs, Stdin, Stdout, System};
 use vfs::{Errno, Node};
 
@@ -118,6 +118,10 @@ impl System for SysSystem {
         sys::memory().ok().map(mem_info)
     }
 
+    fn is_terminal(&self, fd: u32) -> bool {
+        sys::fstat(fd).is_ok_and(|st| is_console(&st))
+    }
+
     fn kernel_log(&self) -> Vec<u8> {
         let mut buf = vec![0; LOG_MAX];
         let n = sys::kernel_log(&mut buf).unwrap_or(0);
@@ -151,6 +155,12 @@ impl System for SysSystem {
     }
 }
 
+/// Whether `fstat` says this is the console: the character device on
+/// filesystem 0, the only one there is.
+pub fn is_console(st: &Stat) -> bool {
+    st.kind == u32::from(KIND_CHAR_DEVICE) && st.dev == 0
+}
+
 /// Standard input: fd 0, the console (in line mode, as the shell gives it
 /// to its command) or a pipe.
 pub struct SysStdin;
@@ -158,7 +168,7 @@ pub struct SysStdin;
 impl SysStdin {
     /// Whether fd 0 is the console (`fstat` says a character device).
     pub fn is_console() -> bool {
-        sys::fstat(0).is_ok_and(|st| st.kind == u32::from(KIND_CHAR_DEVICE))
+        sys::fstat(0).is_ok_and(|st| is_console(&st))
     }
 }
 
@@ -175,7 +185,7 @@ pub struct SysStdout {
 
 impl SysStdout {
     pub fn new() -> SysStdout {
-        let tty = sys::fstat(1).is_ok_and(|st| st.kind == u32::from(KIND_CHAR_DEVICE));
+        let tty = sys::fstat(1).is_ok_and(|st| is_console(&st));
         SysStdout { tty }
     }
 }
@@ -387,6 +397,24 @@ mod tests {
                 heap_used: 4,
             }
         );
+    }
+
+    #[test]
+    fn the_console_is_the_character_device_of_filesystem_0() {
+        let console = Stat {
+            kind: u32::from(KIND_CHAR_DEVICE),
+            dev: 0,
+            ..Stat::default()
+        };
+        assert!(is_console(&console));
+        // A device on a disk, and anything else on filesystem 0.
+        assert!(!is_console(&Stat { dev: 1, ..console }));
+        let fifo = u32::from(relay_abi::file::KIND_FIFO);
+        assert!(!is_console(&Stat {
+            kind: fifo,
+            ..console
+        }));
+        assert!(!is_console(&Stat::default()));
     }
 
     #[test]
