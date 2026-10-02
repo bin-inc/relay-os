@@ -18,8 +18,9 @@ and runs programs in ring 3 from a read-only `/bin` (`system.img`).
 Process 1 is the kernel's init, which runs `/bin/sh`; the shell has
 pipes, background jobs, scripts with arguments and variables, and six
 built-ins (`cd`, `exit`, `help`, `jobs`, `kill`, `wait`). Every other
-command is a program. No later milestone has been planned yet; the next
-expected direction is an aarch64 port.
+command is a program. The next gate, being designed, is the programmable
+shell: milestone 4 (control flow, 0.5.0) and milestone 5 (redirection and
+environment, 0.6.0). The aarch64 port comes later.
 
 ## Where to read
 
@@ -28,7 +29,8 @@ expected direction is an aarch64 port.
 | Layout, host tools, every `cargo xtask` command | `README.md` |
 | Commit and pull-request format | `CONTRIBUTING.md` |
 | Milestone 1's design (boot, kernel core, USB, ext2, shell) | `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`, cited as "M1 §n" |
-| Milestones 2 and 3's design (programs, ABI, pipes, jobs, scripts) | `docs/superpowers/specs/2026-09-29-user-space-gate-design.md`; its §16 records every decision taken while planning |
+| Milestones 2 and 3's design (programs, ABI, pipes, jobs, scripts) | `docs/superpowers/specs/2026-09-29-user-space-gate-design.md`, cited as "UG §n"; its §16 records every decision taken while planning |
+| Milestones 4 and 5's design (lists, `if`/`while`/`for`, `test`, redirection, environment) | `docs/superpowers/specs/2026-10-02-programmable-shell-gate-design.md`; its §15 records every decision taken while planning |
 | What each plan delivered | `docs/superpowers/plans/*-roadmap.md` and the plans beside them |
 | The hardware check and its history | `docs/hardware-test.md` |
 | The e2e scenario language | the module comment of `xtask/src/e2e.rs` |
