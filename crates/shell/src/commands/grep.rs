@@ -1,6 +1,6 @@
-//! `grep [-i] [-v] [-n] [-c] PATTERN [FILE...]` (user-space gate §9.1):
-//! the lines of each file, or of standard input, that hold a match of
-//! `PATTERN` (`crate::pattern`), as GNU grep prints them with `LC_ALL=C`
+//! `grep [-i] [-v] [-n] [-c] [-q] PATTERN [FILE...]` (user-space gate
+//! §9.1): the lines of each file, or of standard input, that hold a match
+//! of `PATTERN` (`crate::pattern`), as GNU grep prints them with `LC_ALL=C`
 //! (a file `-` is standard input too).
 //! Several files put each one's name before its lines; `-i` ignores case,
 //! `-v` selects the lines that do not match, `-n` numbers them, `-c` counts
@@ -9,6 +9,11 @@
 //! instead of printing it; it never reads the file its output goes to.
 //! The status is 0 if a line was selected, 1 if none was, and 2 after an
 //! error, a write error included.
+//!
+//! `-q` (spec §15 item 3), GNU's quiet mode, prints nothing and ends at the
+//! first selected line, reading no further and opening no later file, with
+//! status 0 even after an error; it writes nothing, so its output may be an
+//! input.
 
 use crate::ctx::{Ctx, getopt};
 use crate::pattern::Pattern;
@@ -21,11 +26,12 @@ use vfs::{Errno, FileType};
 /// Input is read in pieces of this size.
 const CHUNK: usize = 64 * 1024;
 
-/// What `-n`, `-v`, `-c` and the number of inputs ask for.
+/// What `-n`, `-v`, `-c`, `-q` and the number of inputs ask for.
 struct Options {
     invert: bool,
     number: bool,
     count: bool,
+    quiet: bool,
     /// Each line starts with its input's name.
     names: bool,
 }
@@ -39,7 +45,7 @@ enum Outcome {
 
 pub fn grep(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     ctx.set_write_error_status(2);
-    let opts = match getopt(args, "cinv", "") {
+    let opts = match getopt(args, "cinqv", "") {
         Ok(o) => o,
         Err(e) => return usage(ctx, Some(format!("{e}"))),
     };
@@ -57,6 +63,7 @@ pub fn grep(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
         invert: opts.has('v'),
         number: opts.has('n'),
         count: opts.has('c'),
+        quiet: opts.has('q'),
         names: files.len() > 1,
     };
     let mut outcomes = Vec::new();
@@ -64,14 +71,18 @@ pub fn grep(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
         outcomes.push(search(ctx, &pattern, &options, None));
     }
     for file in files {
-        if ctx.out_failed() || ctx.interrupted() {
+        let found = || outcomes.iter().any(|o| matches!(o, Outcome::Read(true)));
+        if ctx.out_failed() || ctx.interrupted() || (options.quiet && found()) {
             break;
         }
         outcomes.push(search(ctx, &pattern, &options, Some(file)));
     }
-    if outcomes.iter().any(|o| matches!(o, Outcome::Failed)) {
+    let found = outcomes.iter().any(|o| matches!(o, Outcome::Read(true)));
+    if options.quiet && found {
+        0
+    } else if outcomes.iter().any(|o| matches!(o, Outcome::Failed)) {
         2
-    } else if outcomes.iter().any(|o| matches!(o, Outcome::Read(true))) {
+    } else if found {
         0
     } else {
         1
@@ -101,8 +112,9 @@ fn search(
     let name = file.map_or("(standard input)", String::as_str);
     let mut source = match file {
         Some(path) => match open(ctx, path) {
-            // It would read what it wrote, for ever (`grep x f >> f`).
-            Ok(node) if ctx.output_node() == Some(node) => {
+            // It would read what it wrote, for ever (`grep x f >> f`);
+            // `-q` writes nothing.
+            Ok(node) if ctx.output_node() == Some(node) && !options.quiet => {
                 ctx.fail(
                     "grep",
                     format_args!("{path}: input file is also the output"),
@@ -156,7 +168,7 @@ fn search(
             }
         }
     }
-    if options.count {
+    if options.count && !options.quiet {
         let prefix = if options.names {
             format!("{name}:")
         } else {
@@ -182,13 +194,17 @@ struct Lines<'p> {
 impl Lines<'_> {
     /// The next line, without its newline: printed if it is selected.
     /// False once a binary input has had a line selected, which is said
-    /// instead, and the rest of the input is not read.
+    /// instead, and the rest of the input is not read; and under `-q` once
+    /// a line is selected at all.
     fn take(&mut self, ctx: &mut Ctx<'_>, line: &[u8]) -> bool {
         self.number += 1;
         if self.pattern.is_match(line) == self.options.invert {
             return true;
         }
         self.selected += 1;
+        if self.options.quiet {
+            return false;
+        }
         if self.options.count {
             return true;
         }
@@ -298,6 +314,105 @@ mod tests {
                 "{args:?}"
             );
         }
+    }
+
+    #[test]
+    fn grep_q_says_only_whether_a_line_is_selected() {
+        // probes/grepq.txt q1–q15 (GNU grep 3.11).
+        let files: &[(&str, &[u8])] = &[
+            ("f", b"a\nb\n"),
+            ("g", b"zz\n"),
+            ("bin", b"a\0b\n"),
+            ("d/", b""),
+        ];
+        let cases: &[(&[&str], &[u8])] = &[
+            (&["grep", "-q", "a", "f"], b""),
+            (&["grep", "-q", "x", "f"], b""),
+            // It stops at the first selected line: `nope` is never opened.
+            (&["grep", "-q", "a", "f", "nope"], b""),
+            (&["grep", "-q", "a", "f", "d"], b""),
+            // An error before it is told; the status is still 0.
+            (&["grep", "-q", "a", "nope", "f"], b""),
+            (&["grep", "-q", "x", "nope", "f"], b""),
+            (&["grep", "-q", "a", "d", "g", "f"], b""),
+            (&["grep", "-qc", "a", "f"], b""),
+            (&["grep", "-qc", "x", "f"], b""),
+            (&["grep", "-qn", "a", "f"], b""),
+            (&["grep", "-qv", "a", "f"], b""),
+            (&["grep", "-qv", ".", "f"], b""),
+            (&["grep", "-qi", "A", "f"], b""),
+            (&["grep", "-q", "", "g"], b""),
+            (&["grep", "-q", "a", "bin"], b""),
+            (&["grep", "-q", "a", "f", "f"], b""),
+            (&["grep", "-q", "a", "-", "f"], b"z\n"),
+            (&["grep", "-q", "a"], b"x\na\n"),
+            (&["grep", "-q", "a"], b""),
+            (&["grep", "-q", "é"], "été\n".as_bytes()),
+            (&["grep", "-q"], b""),
+            (&["grep", "-q", "[a", "f"], b""),
+        ];
+        for (args, stdin) in cases {
+            let mut h = Harness::new();
+            assert_eq!(
+                h.like_host(args, files, stdin),
+                host_tool(args, files, stdin),
+                "{args:?}"
+            );
+        }
+    }
+
+    /// Standard input that never ends by itself: `yes` lines, counted.
+    struct Endless {
+        reads: usize,
+    }
+
+    impl crate::Stdin for Endless {
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize, vfs::Errno> {
+            self.reads += 1;
+            if self.reads > 100 {
+                return Ok(0);
+            }
+            let n = buf.len().min(4096) / 4 * 4;
+            for line in buf[..n].chunks_mut(4) {
+                line.copy_from_slice(b"yes\n");
+            }
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn grep_q_stops_reading_at_its_first_selected_line() {
+        // As GNU's: `yes | grep -q y` ends at once (probe q17).
+        for (args, status, reads) in [(&["-q", "y"][..], 0, 1), (&["-c", "y"], 0, 101)] {
+            let mut h = Harness::new();
+            let mut input = Endless { reads: 0 };
+            let mut out = crate::testing::FakeStdout::file(None);
+            let args: alloc::vec::Vec<String> = args.iter().map(|a| String::from(*a)).collect();
+            let got = crate::run_command(
+                "grep",
+                super::grep,
+                &args,
+                crate::CommandIo {
+                    vfs: &mut h.vfs,
+                    console: &mut h.console,
+                    system: &mut h.system,
+                    stdin: &mut input,
+                    stdout: &mut out,
+                },
+            );
+            assert_eq!((got, input.reads), (status, reads), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn grep_q_writes_nothing_so_its_output_may_be_an_input() {
+        // GNU skips the check of an input that is the output file under -q,
+        // which writes nothing (probes q16, q16c).
+        let mut h = Harness::new();
+        h.put("/tmp/f", b"a\nb\n");
+        assert_eq!(h.run("grep -q a /tmp/f >> /tmp/f"), (0, "".into()));
+        assert_eq!(h.run("grep -q x /tmp/f >> /tmp/f"), (1, "".into()));
+        assert_eq!(h.get("/tmp/f"), b"a\nb\n");
     }
 
     #[test]

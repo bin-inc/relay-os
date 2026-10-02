@@ -106,7 +106,7 @@ pub const COMMANDS: &[Builtin] = &[
     },
     Builtin {
         name: "grep",
-        help: "print the lines that match a pattern",
+        help: "print lines that match a pattern, or with -q say if one does",
         run: grep::grep,
     },
     Builtin {

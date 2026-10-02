@@ -362,9 +362,9 @@ impl fmt::Display for ParseError {
 
 const UNSUPPORTED: &[char] = &['*', '?', '<', '`', '(', ')'];
 
-/// bash's other reserved words, and its loop built-ins, refused where a
-/// command name could stand (programmable shell gate §4.2); the loops'
-/// until they are implemented.
+/// bash's other reserved words, and its loop built-ins `break` and
+/// `continue`, refused where a command name could stand (programmable
+/// shell gate §4.2, §14).
 const RESERVED: &[&str] = &[
     "case", "esac", "select", "function", "time", "coproc", "{", "}", "[[", "]]", "break",
     "continue",

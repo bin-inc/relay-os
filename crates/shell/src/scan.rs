@@ -83,9 +83,9 @@ const OPENERS: &[&[u8]] = &[b"if", b"while", b"until", b"for", b"select", b"case
 
 /// What the lines read so far open and close.
 pub(crate) struct Scan {
-    /// The constructs open: each `if`, `while`, `until` and `for` where a
-    /// command name would stand counts one, and each `fi` and `done` there
-    /// one less.
+    /// The constructs open: each `if`, `while`, `until`, `for`, `select`
+    /// and `case` where a command name would stand counts one, and each
+    /// `fi`, `done` and `esac` there one less.
     depth: usize,
     /// What was read ends after `|`, `&&` or `||` (blank and comment lines
     /// after it leave it so).
