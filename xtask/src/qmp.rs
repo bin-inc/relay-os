@@ -134,7 +134,8 @@ mod tests {
     use std::os::unix::net::UnixListener;
 
     /// A fake QEMU on a socket of its own in `name`'s directory: greets,
-    /// accepts `qmp_capabilities`, then runs `then` on its end.
+    /// accepts `qmp_capabilities`, then runs `then` on its end. It binds
+    /// through `reachable`, so it works however deep the checkout is.
     fn fake_qemu(
         name: &str,
         then: impl FnOnce(UnixStream) + Send + 'static,
@@ -143,7 +144,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("qmp.sock");
         let _ = std::fs::remove_file(&socket);
-        let listener = UnixListener::bind(&socket).unwrap();
+        let (_dir, path) = reachable(&socket).unwrap();
+        let listener = UnixListener::bind(&path).unwrap();
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let mut w = stream.try_clone().unwrap();
