@@ -96,11 +96,7 @@ pub(crate) struct Opener<'x> {
 }
 
 impl Opener<'_> {
-    fn open(&mut self, op: &RedirectOp) -> Result<Handle, Errno> {
-        let (path, append) = match op {
-            RedirectOp::Write(path) => (path, false),
-            RedirectOp::Append(path) => (path, true),
-        };
+    fn open(&mut self, path: &str, append: bool) -> Result<Handle, Errno> {
         if let Some(programs) = self.programs.as_deref_mut() {
             return programs
                 .open_output(path.as_bytes(), append)
@@ -169,12 +165,22 @@ impl Files {
         let mut fds = base;
         self.hold(&fds);
         for r in redirects {
-            let slot = match opener.open(&r.op) {
+            let (path, append) = match &r.op {
+                RedirectOp::Write(path) => (path, false),
+                RedirectOp::Append(path) => (path, true),
+                // The other fd as it is now, held once more.
+                RedirectOp::Copy(from) => {
+                    let slot = fds.0[*from as usize];
+                    self.hold_slot(slot);
+                    let replaced = core::mem::replace(&mut fds.0[r.fd as usize], slot);
+                    self.drop_slot(replaced, opener);
+                    continue;
+                }
+            };
+            let slot = match opener.open(path, append) {
                 Ok(handle) => Slot::File(self.add(handle)),
                 Err(error) => {
-                    let path = match &r.op {
-                        RedirectOp::Write(path) | RedirectOp::Append(path) => path.clone(),
-                    };
+                    let path = path.clone();
                     return Err(Failed { fds, path, error });
                 }
             };
@@ -196,11 +202,16 @@ impl Files {
     /// One more fd holds each of `fds`' files.
     fn hold(&mut self, fds: &Fds) {
         for slot in fds.0 {
-            if let Slot::File(i) = slot
-                && let Some(Some((_, count))) = self.open.get_mut(i)
-            {
-                *count += 1;
-            }
+            self.hold_slot(slot);
+        }
+    }
+
+    /// One more fd holds `slot`.
+    fn hold_slot(&mut self, slot: Slot) {
+        if let Slot::File(i) = slot
+            && let Some(Some((_, count))) = self.open.get_mut(i)
+        {
+            *count += 1;
         }
     }
 

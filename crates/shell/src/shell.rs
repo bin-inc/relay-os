@@ -3014,6 +3014,52 @@ mod tests {
     }
 
     #[test]
+    fn one_output_may_be_made_a_copy_of_the_other() {
+        // bash 5.2 (tmp/m5p1/probes/p1.txt, p2.txt): the copy is of the
+        // fd as it is at that point.
+        let mut h = Harness::new();
+        h.put("/tmp/f", b"");
+        assert_eq!(h.run("ls /tmp/f /nope > /tmp/o 2>&1"), (2, String::new()));
+        assert_eq!(
+            h.get("/tmp/o"),
+            b"ls: cannot access '/nope': No such file or directory\n/tmp/f\n"
+        );
+        assert_eq!(
+            h.run("ls /tmp/f /nope 2>&1 > /tmp/o2"),
+            (
+                2,
+                "ls: cannot access '/nope': No such file or directory\n".into()
+            )
+        );
+        assert_eq!(h.get("/tmp/o2"), b"/tmp/f\n");
+        // Output to fd 2.
+        assert_eq!(h.run("echo a 2> /tmp/e >&2"), (0, String::new()));
+        assert_eq!(h.get("/tmp/e"), b"a\n");
+        assert_eq!(h.run("echo a >&2 2> /tmp/e2"), (0, "a\n".into()));
+        assert_eq!(h.get("/tmp/e2"), b"");
+        // A built-in's errors and output, in order.
+        assert_eq!(h.run("cd /nope > /tmp/c 2>&1"), (1, String::new()));
+        assert_eq!(
+            h.get("/tmp/c"),
+            b"relay-sh: cd: /nope: No such file or directory\n"
+        );
+        // Under /bin/sh both fds are the one file, opened once.
+        let mut h = spawning();
+        assert_eq!(h.spawning("t-args > /tmp/o 2>&1").0, 3);
+        assert_eq!(h.programs.spawned[0].fds, [0, 4, 4]);
+        assert_eq!(h.spawning("t-args 2>&1 > /tmp/o").0, 3);
+        assert_eq!(h.programs.spawned[1].fds, [0, 5, 1]);
+        assert_eq!(h.spawning("t-args 2> /tmp/e 1>&2 2>&1").0, 3);
+        assert_eq!(h.programs.spawned[2].fds, [0, 6, 6]);
+        assert_eq!(h.programs.closed, [4, 5, 6], "each once, after the program");
+        assert_eq!(h.spawning("nope > /tmp/n 2>&1"), (127, String::new()));
+        assert_eq!(
+            h.programs.written_to("/tmp/n"),
+            b"relay-sh: nope: command not found\n"
+        );
+    }
+
+    #[test]
     fn bin_sh_gives_a_program_a_file_as_fd_2() {
         let mut h = spawning();
         assert_eq!(h.spawning("t-args 2> /tmp/e").0, 3);

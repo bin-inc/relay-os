@@ -474,7 +474,10 @@ pub(crate) fn run_function<'s>(
     control: Option<JobControl<'s>>,
 ) -> Ran {
     let out = to(parts.files, fds.0[1]);
-    let err = to(parts.files, fds.0[2]);
+    let err = match fds.0[2] {
+        Slot::File(_) if fds.0[2] == fds.0[1] => To::Output,
+        slot => to(parts.files, slot),
+    };
     let mut ctx = Ctx::new(parts.vfs, parts.system, parts.console, out, err);
     ctx.control = control;
     if let Some(input) = parts.input {

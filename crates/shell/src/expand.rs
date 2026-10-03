@@ -178,6 +178,7 @@ impl<'v> Expander<'v> {
         let op = match &r.op {
             RedirectOp::Write(path) => RedirectOp::Write(self.target(path)?),
             RedirectOp::Append(path) => RedirectOp::Append(self.target(path)?),
+            RedirectOp::Copy(fd) => RedirectOp::Copy(*fd),
         };
         Ok(Redirect { fd: r.fd, op })
     }

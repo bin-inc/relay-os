@@ -69,13 +69,15 @@ impl JobControl<'_> {
 }
 
 /// Where a command the shell runs itself writes (programmable shell gate
-/// §7.5): the screen, a file of the in-process runner's at an offset, or
-/// an fd of `/bin/sh`'s, which its `Programs` write.
+/// §7.5): the screen, a file of the in-process runner's at an offset, an
+/// fd of `/bin/sh`'s, which its `Programs` write, or (errors) where the
+/// output goes, when fd 2 is a copy of fd 1's file or the other way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum To {
     Console,
     File(Node, u64),
     Fd(u32),
+    Output,
 }
 
 enum Output<'a> {
@@ -116,7 +118,7 @@ impl<'a> Ctx<'a> {
         err: To,
     ) -> Ctx<'a> {
         let out = match to {
-            To::Console => Output::Console,
+            To::Console | To::Output => Output::Console,
             To::File(node, offset) => Output::File {
                 node,
                 offset,
@@ -225,6 +227,10 @@ impl<'a> Ctx<'a> {
     pub fn err(&mut self, bytes: &[u8]) {
         match &mut self.err {
             To::Console => self.streams().screen(bytes),
+            // In order with the output, through its buffer and offset.
+            To::Output => {
+                let _ = self.streams().out(bytes);
+            }
             To::File(node, offset) => {
                 *offset = fds::write_file(&mut *self.vfs, *node, *offset, bytes).0;
             }
