@@ -2,7 +2,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-02-programmable-shell-gate-design.md` (the programmable shell gate; milestone 4 is its first half, "Control flow", version 0.5.0)
 
-**Status:** Plans 1 and 2 are done (#99–#101, #103–#106); plan 3 is planned and lands with these notes; plan 4 is written just before it runs.
+**Status:** Plans 1 to 3 are done (#99–#101, #103–#106, #107–#111); plan 4 is planned and lands with these notes.
 
 Milestone 4 makes `/bin/sh` a shell one can program in: lists (`;`, `&&`, `||`, `!`, `&` mid-line), commands read across lines with bash's `> ` prompt, the compound commands `if`, `while`, `until` and `for`, and `test` and `[` as programs (spec §4–§6). It is split into the four plans of spec §12, named `m4-plan-1` to `m4-plan-4` (their files `docs/superpowers/plans/<date>-m4-plan-<n>-<name>.md`, their branches `m4p<n>/…`). Each one ends with software that can be tested by itself. Each plan is written just before it is executed, so it builds on the code that actually exists and on what the previous plan's checks showed.
 
@@ -36,5 +36,9 @@ Plan 1 ──► Plan 2 ──► Plan 3 ──► Plan 4
 - **Plan 3 changes CI** (spec §15 item 3): the `unit` job lets unprivileged user namespaces be made, since the `test` unit tests run GNU's `test` through `unshare -r` to get root's answers.
 - **For milestone 5's plan 2 (ABI 4):** `statfs` gains a flag that says a filesystem is read-only, and `test -w` answers false on every read-only filesystem with it, as GNU does; until then it knows only `/bin`'s (spec §10, §15 item 3; plan 3's review found the root mounted read-only after an `EIO`).
 - **Every scenario's input is paced by its prompt** from plan 3 on (spec §15 item 3): the scenario parser refuses a `send`, `key` or `type` that no `expect` of a prompt comes before, unless it is marked as typed ahead (`send-ahead`); #103's first CI run failed on a line typed ahead.
+- **Plan 3's deferred minors** (`tmp/m4p3/plan-ledger-final.md`), settled by plan 4 (spec §15 item 4): `poweroff`, `reboot` and `reset` with a command were outside the pacing rule; a misspelt `-ahead` step right after a prompt was told it came too early instead of that it is unknown.
+- **The empty prompt after `wait`** (plan 3's prototype): the `jobs` scenario's `key echo nope{ctrl-c}` pressed Enter after the Ctrl-C, and that Enter arrived after the scenario had moved on; plan 4 refuses a `key` step whose last key is Ctrl-C (spec §15 item 4).
+- **Plan 4's NUC check** (spec §15 item 4): checks 3 to 6 on a stick written by `flash --full` with 0.5.0; its pull request is a draft until the maintainer's run, and the transcripts and the results-log row go into it.
+- **For milestone 5's plan 2 (`/dev/null`):** `relay_rt::sysio::is_console` takes a character device on filesystem 0 to be the console, so `/dev/null` must not report filesystem 0 with that kind, or `test -t` and the shell would take it for the console.
 - **Fixed outside the plans:** the xtask test `qmp::tests::an_event_cut_at_the_deadline_is_read_whole_later`, which failed in a checkout whose path is long, binds its fake QEMU's socket through a short path since #102.
 - **Still out of the gate** (spec §14): command substitution, arithmetic, globbing, word splitting, functions, `case`, `break`, `continue`, `read`, here-documents, subshells; `PATH`, `CDPATH`; users, an editor, interrupts, floating point, networking, other architectures.

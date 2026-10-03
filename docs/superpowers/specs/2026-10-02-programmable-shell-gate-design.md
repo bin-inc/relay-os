@@ -1,7 +1,7 @@
 # Relay OS — Programmable Shell Gate Design (milestones 4 and 5)
 
 - **Date:** 2026-10-02
-- **Status:** Approved 2026-10-02; revised while planning milestone 4's plans 1 to 3 (see §15)
+- **Status:** Approved 2026-10-02; revised while planning milestone 4's plans 1 to 4 (see §15)
 - **Builds on:** the user-space gate (version 0.4.0,
   `docs/superpowers/specs/2026-09-29-user-space-gate-design.md`, cited below
   as "UG §n") and milestone 1 (`2026-09-26-milestone-1-boot-shell-fs-design.md`,
@@ -529,6 +529,10 @@ comments:
 - A pipeline is expanded whole before it starts, so a command of it that
   does not expand fails the whole pipeline, status 1, where bash fails only
   that command (§15 item 2).
+- Quotes do not continue across lines: a line that leaves one open (`echo
+  'a`) is `syntax error: unterminated quote`, status 2, where bash shows
+  `> ` and reads on; in a script the lines up to the one that closes it
+  are dropped with it (§15 items 1, 2 and 4).
 
 ## 11. Testing
 
@@ -586,12 +590,12 @@ after check 5, and `check3-a.sh` from `/root/checks` (§9.2).
 
 - **Check 6** (`check6.sh`, milestone 4, run after `check5.sh`): `if`,
   `elif`, `else`; `while` and `until` controlled by files; `for` over words
-  and over `"$@"` (the script runs itself with arguments); the statuses of
-  `&&`, `||` and `!`; `test` on the stick's files; and 100 commands as two
-  nested `for` loops of 10 words, timed by `date` before and after (a
-  regex line, so any time passes; the results log records it). Then, by
-  hand: a `for` typed across three lines, Ctrl-C at `> `, and Ctrl-C in a
-  running `while` loop.
+  and over `"$@"` (a helper the script writes, run with arguments, §15
+  item 4); the statuses of `&&`, `||` and `!`; `test` on the stick's
+  files; and 100 commands as two nested `for` loops of 10 words, timed by
+  `date` before and after (a regex line, so any time passes; the results
+  log records it). Then, by hand: a `for` typed across three lines, Ctrl-C
+  at `> `, and Ctrl-C in a running `while` loop.
 - **Check 7** (`check7.sh`, milestone 5), started with `cd checks` and
   `sh check7.sh`: redirections with `/dev/null` and `[ -c /dev/null ]`;
   `export`, `env` with `-i` and `-u`, `A=1` before a command, a nested `sh`
@@ -949,3 +953,77 @@ does.
      `wait %1` pair, which nothing paced. The scan reading `(( x = 1 << 2
      ))` as a here-document (on the safe side) and a test of the kernel's
      `tty::ctrl_c` wiring go to plan 4 (the maintainer, 2026-10-02).
+
+4. **Decisions made while planning milestone 4's plan 4** (hardening and
+   0.5.0):
+   - **The pull requests.** Plan 4 is four: its plan; plan 2's two
+     deferred minors in the shell and the kernel, with the drop scan's
+     groups and subshells (the prototype's review); xtask's and the
+     scenarios' rules, with milestone 3's three deferred minors and plan
+     3's two; `check6.sh`, version 0.5.0 and NUC checks 3 to 6, a draft
+     until the maintainer's run, whose transcripts copied off the stick
+     and results-log row go into a commit of that pull request. Milestone
+     4 ends with it.
+   - **Check 6's `"$@"`** (§11.4). `check6.sh` writes a helper,
+     `/root/check6-a.sh`, and runs it with three arguments (one empty, one
+     holding two blanks), as check 5 does, rather than running itself: a
+     script run inside itself empties its own transcript, which the inner
+     `sh` opens afresh and tees a second time, so the outer run's later
+     lines land over the inner run's (the spike). The helper loops with
+     `for a in "$@"` and with `for a do`.
+   - **Constructs in a check script.** A construct written across lines
+     is traced line by line before any of it runs (§5.4), so the checker
+     needs no change: the `#>` lines of its output follow its last line,
+     and each of its lines counts as one of the script's commands.
+     `check6.nuc.log` is a copy of the QEMU transcript until the NUC run
+     replaces it, as `check5.nuc.log` was.
+   - **The timing** (§5.3, §13). Check 6 prints `date` before and after
+     100 programs, two nested `for` loops of 10 `true`, each followed by a
+     sync; any time passes, and the results log records it. Over 10
+     seconds on the NUC, milestone 5's plan 4 syncs once per top-level
+     command and after each program instead (a note for milestone 5);
+     under it, §13's risk is closed (the maintainer, 2026-10-03).
+   - **Input paced by its prompt** (§11.3, §15 item 3). `poweroff`,
+     `reboot` and `reset` with a command type a line, so each follows an
+     `expect` of the prompt, as `send` does; a bare `reset` and
+     `reset-key` press a key at the error screen, where no prompt comes,
+     and stay exempt (the maintainer, 2026-10-03). Only `send-ahead`,
+     `send-crlf-ahead`, `key-ahead` and `type-ahead` mark input typed
+     ahead; another word ending in `-ahead` is an unknown step.
+   - **A `key` step whose last key is Ctrl-C** is refused (`type` sends
+     it alone). `key` presses Enter after its text; after a Ctrl-C the
+     next `expect` matches the prompt the Ctrl-C brought before QEMU has
+     delivered that Enter, so the Enter lands later, wherever the shell
+     next reads: the empty prompt after a `wait` that the `jobs` scenario
+     has shown since milestone 3 was this Enter, not the shell's (the
+     spike traced it; the maintainer, 2026-10-03). A last Ctrl-D, which
+     ends a program's input the same way, is refused too (the
+     prototype's review).
+   - **The drop scan and arithmetic** (§15 item 2). `((` where a command
+     name stands, right after a keyword (`for((`, `!((`) too, is bash's
+     arithmetic command, read to its `))`, so a `<<` in it is a shift,
+     not a here-document, and a keyword may follow it, as after `fi`;
+     before, the rest of a dropped script was dropped without a word, on
+     the safe side. When its first `)` is not followed by another, bash
+     reads two subshells instead (`((cat <<EOF)`), which the scan cannot
+     read again, so the rest of the script is dropped with them, as
+     before, on the safe side (the prototype's review).
+   - **The drop scan and groups** (§15 item 2; the prototype's review,
+     the maintainer, 2026-10-03). The scan counted no `{ … }`, `( … )` or
+     function body, so a dropped `a || {` ended its drop at once and the
+     group's lines ran without their guard (`exit 1` included), since
+     plan 2. It now also counts `{` and `}` where a command name stands,
+     a function's body (`f() {`) among them, and the `(` and `)` of a
+     subshell, and keeps the kind of each construct open: a `)` closes a
+     subshell, ends a `case` pattern, or closes nothing, as in bash, and
+     `}` closes only a group.
+   - **Milestone 3's deferred minors.** `verify-usb` names mcopy's reason
+     when it cannot read the stick's `system.img`; the test that every
+     check script has its transcripts considers only `*.sh` files of
+     `rootfs/root/checks`; the scan for TLB instructions outside
+     `kernel/src/arch/` reads code without its comments.
+   - **Version 0.5.0** (§11.5): `uname -a`, `check3-a.sh`, the `uname`
+     unit test, the transcripts' version lines and `docs/hardware-test.md`
+     change with it; NUC checks 3 to 6 run on a stick written by `flash
+     --full`, and their transcripts replace those edited by hand
+     (`check4.nuc.log`) or copied from QEMU (`check6.nuc.log`).
