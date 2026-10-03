@@ -445,25 +445,28 @@ impl<'a> Shell<'a> {
             let message = format!("{NAME}: {}: cannot be used in {place}\n", first.typed);
             return self.finish(1, message);
         }
-        let mut pipeline = match expand::expand(commands, &self.vars, self.status) {
-            Ok(p) => match background {
-                Some(text) => return self.background(&p, text),
-                None => p,
-            },
-            Err(e) => {
-                let alone = commands.len() == 1 && background.is_none();
-                return self.not_expanded(e, alone);
-            }
-        };
-        if pipeline.len() > 1 {
-            return self.pipeline(&pipeline);
+        // A pipeline or a job is expanded whole before it starts (§10); a
+        // lone command's words first, then each redirection's target as
+        // it is reached, as bash expands them.
+        if commands.len() > 1 || background.is_some() {
+            return match expand::expand(commands, &self.vars, self.status) {
+                Ok(p) => match background {
+                    Some(text) => self.background(&p, text),
+                    None => self.pipeline(&p),
+                },
+                Err(e) => self.not_expanded(e, false),
+            };
         }
-        let cmd = pipeline.remove(0);
-        if cmd.words.is_empty() && cmd.redirects.is_empty() {
+        let typed = &commands[0];
+        let words = match expand::words(&typed.words, &self.vars, self.status) {
+            Ok(words) => words,
+            Err(e) => return self.not_expanded(e, true),
+        };
+        if words.is_empty() && typed.redirects.is_empty() {
             // Its words expanded to nothing: bash's status 0.
             return self.finish(0, String::new());
         }
-        let Some(fds) = self.redirect(self.fds, &cmd.redirects) else {
+        let Some(fds) = self.make(self.fds, &typed.redirects) else {
             return self.finish(1, String::new());
         };
         let parts = Parts {
@@ -479,7 +482,7 @@ impl<'a> Shell<'a> {
             },
             files: &mut self.files,
         };
-        let ran = match cmd.words.split_first() {
+        let ran = match words.split_first() {
             Some((name, args)) => match commands::builtin(name) {
                 Some(builtin) => {
                     let control = JobControl {
@@ -529,14 +532,7 @@ impl<'a> Shell<'a> {
                 return self.not_expanded(e, true);
             }
         }
-        let mut redirects = Vec::new();
-        for r in &cmd.redirects {
-            match expand::redirect(r, &self.vars, self.status) {
-                Ok(r) => redirects.push(r),
-                Err(e) => return self.not_expanded(e, true),
-            }
-        }
-        match self.redirect(self.fds, &redirects) {
+        match self.make(self.fds, &cmd.redirects) {
             Some(fds) => {
                 self.release(fds);
                 self.finish(0, String::new())
@@ -618,6 +614,36 @@ impl<'a> Shell<'a> {
             }
         }
         self.finish(started.ran.status, started.ran.message)
+    }
+
+    /// The context the typed `redirects` make over `base`, each target
+    /// expanded as it is reached, as bash does (programmable shell gate
+    /// §15 item 5): a target that does not expand is told on fd 2 as it
+    /// stands then (`2> e > $E` writes `$E: ambiguous redirect` into `e`),
+    /// and a bad substitution abandons the line too, as in bash.
+    fn make(&mut self, base: Fds, redirects: &[parser::Redirect<parser::Word>]) -> Option<Fds> {
+        let mut expanded = Vec::new();
+        let mut failed = None;
+        for r in redirects {
+            match expand::redirect(r, &self.vars, self.status) {
+                Ok(r) => expanded.push(r),
+                Err(e) => {
+                    failed = Some(e);
+                    break;
+                }
+            }
+        }
+        let fds = self.redirect(base, &expanded)?;
+        let Some(e) = failed else {
+            return Some(fds);
+        };
+        self.abandoned = matches!(
+            e,
+            expand::Error::BadSubstitution(_) | expand::Error::TooLong
+        );
+        self.say_on(fds, format!("{NAME}: {e}\n").as_bytes());
+        self.release(fds);
+        None
     }
 
     /// The context `redirects` make over `base` (programmable shell gate
@@ -3166,6 +3192,34 @@ mod tests {
             (1, "relay-sh: /nodir/x: No such file or directory\n".into())
         );
         assert_eq!(h.programs.spawned.len(), 4, "the first ran");
+    }
+
+    #[test]
+    fn a_redirection_s_target_is_expanded_when_it_is_reached() {
+        // bash 5.2 (tmp/m5p1/probes/p11.txt, p12.txt): a target that does
+        // not expand is told on fd 2 as it stands, and the redirections
+        // after it are not made.
+        let mut h = Harness::new();
+        assert_eq!(h.run("E="), (0, String::new()));
+        assert_eq!(h.run("echo a 2> /tmp/e1 > $E"), (1, String::new()));
+        assert_eq!(h.get("/tmp/e1"), b"relay-sh: $E: ambiguous redirect\n");
+        assert_eq!(
+            h.run("echo a > $E 2> /tmp/e2"),
+            (1, "relay-sh: $E: ambiguous redirect\n".into())
+        );
+        assert!(!h.exists("/tmp/e2"));
+        // A bad substitution abandons the line too.
+        assert_eq!(
+            h.run("echo a 2> /tmp/e3 > ${1A}; echo after"),
+            (1, String::new())
+        );
+        assert_eq!(h.get("/tmp/e3"), b"relay-sh: ${1A}: bad substitution\n");
+        // The words come first: one that does not expand makes no file.
+        assert_eq!(
+            h.run("echo ${1A} 2> /tmp/e4"),
+            (1, "relay-sh: ${1A}: bad substitution\n".into())
+        );
+        assert!(!h.exists("/tmp/e4"));
     }
 
     #[test]
