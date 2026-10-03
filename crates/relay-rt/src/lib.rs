@@ -25,6 +25,7 @@ mod allocator;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod arch;
 mod args;
+pub mod env;
 // Off Relay OS only the tests use these.
 #[cfg_attr(not(target_os = "none"), allow(dead_code))]
 mod note;

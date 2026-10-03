@@ -48,15 +48,25 @@ pub fn panic_message(
 mod on_relay {
     use super::{name, panic_message, set_name};
     use crate::args::Args;
-    use crate::sys;
+    use crate::{env, sys};
 
     /// Runs the program: the arguments the kernel laid out at `ptr` (`len`
-    /// bytes, `count` arguments), then `main`, whose result is the exit status.
+    /// bytes, `count` arguments) and the environment at `env` (`env_len`
+    /// bytes, `env_count` entries; programmable shell gate §8.2), then
+    /// `main`, whose result is the exit status.
     ///
     /// # Safety
-    /// `ptr` and `len` must describe memory that stays readable for the whole
-    /// run (the kernel puts the arguments above the stack).
-    pub unsafe extern "sysv64" fn start(ptr: *const u8, len: usize, count: usize) -> ! {
+    /// `ptr` and `len`, and `env` and `env_len`, must describe memory that
+    /// stays readable for the whole run (the kernel puts both above the
+    /// stack).
+    pub unsafe extern "sysv64" fn start(
+        ptr: *const u8,
+        len: usize,
+        count: usize,
+        env: *const u8,
+        env_len: usize,
+        env_count: usize,
+    ) -> ! {
         unsafe extern "Rust" {
             /// Defined by `relay_rt::main!`.
             fn __relay_main(args: Args) -> u8;
@@ -68,6 +78,12 @@ mod on_relay {
         };
         let args = Args::new(bytes, count);
         set_name(args.name());
+        let env_bytes: &'static [u8] = if env.is_null() {
+            &[]
+        } else {
+            unsafe { core::slice::from_raw_parts(env, env_len) }
+        };
+        env::set(env::Block::new(env_bytes, env_count));
         let code = unsafe { __relay_main(args) };
         sys::exit(code)
     }
