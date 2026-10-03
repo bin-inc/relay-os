@@ -227,11 +227,14 @@ impl OpenFile {
     /// Past the end is allowed; before the start, past 2^63 − 1 and an
     /// unknown `whence` are `EINVAL`. A directory only goes back to its
     /// start, where `read_dir` begins again; a character device's `seek`
-    /// gives 0.
+    /// gives 0 for any offset, a known `whence` first, as Linux's.
     pub fn seek(&self, vfs: &mut dyn Vfs, offset: i64, whence: u32) -> Result<u64, Errno> {
         let at = self.offset()?;
         if self.device {
-            return Ok(0);
+            return match whence {
+                SEEK_START | SEEK_CURRENT | SEEK_END => Ok(0),
+                _ => Err(Errno::EINVAL),
+            };
         }
         if self.dir {
             if (offset, whence) != (0, SEEK_START) {
@@ -523,8 +526,8 @@ mod tests {
 
     #[test]
     fn a_character_device_s_seek_gives_0() {
-        // As Linux's /dev/null: every seek gives 0, after writes too
-        // (programmable shell gate §8.4).
+        // As Linux's /dev/null: every seek gives 0, after writes too, and
+        // to any offset (programmable shell gate §8.4).
         let mut t = table();
         t.mount(b"/dev", Box::new(vfs::DevFs::new(1_000))).unwrap();
         let f = open(&mut t, b"/dev/null", RW | OPEN_TRUNCATE).unwrap();
@@ -532,7 +535,9 @@ mod tests {
         assert_eq!(f.seek(&mut t, 0, SEEK_CURRENT), Ok(0));
         assert_eq!(f.seek(&mut t, 100, SEEK_START), Ok(0));
         assert_eq!(f.seek(&mut t, -5, SEEK_END), Ok(0));
-        assert_eq!(f.seek(&mut t, 0, 9), Ok(0), "whatever is asked");
+        // But for an unknown whence, which Linux refuses before it asks
+        // the device (the prototype's review, M-3).
+        assert_eq!(f.seek(&mut t, 0, 9), Err(Errno::EINVAL));
         let mut buf = [0u8; 8];
         assert_eq!(f.read(&mut t, &mut buf), Ok(0));
         let a = open(&mut t, b"/dev/null", OPEN_WRITE | OPEN_APPEND).unwrap();
