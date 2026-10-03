@@ -209,6 +209,23 @@ pub struct Command<W = String> {
 }
 
 impl<W> Redirect<W> {
+    /// Its operator, as a refusal names it (`<`, `2>>`, `>&2`).
+    fn operator(&self) -> String {
+        let fd = |default| {
+            if self.fd == default {
+                String::new()
+            } else {
+                format!("{}", self.fd)
+            }
+        };
+        match &self.op {
+            RedirectOp::Read(_) => format!("{}<", fd(0)),
+            RedirectOp::Write(_) => format!("{}>", fd(1)),
+            RedirectOp::Append(_) => format!("{}>>", fd(1)),
+            RedirectOp::Copy(from) => format!("{}>&{from}", fd(1)),
+        }
+    }
+
     /// `> file` or `>> file` on fd 1.
     fn is_output_file(&self) -> bool {
         self.fd == 1 && matches!(self.op, RedirectOp::Write(_) | RedirectOp::Append(_))
@@ -904,8 +921,17 @@ impl Parts {
         if self.later && self.redirects.iter().any(|r| r.fd == 0) {
             return Err(ParseError::Unsupported("< after |".into()));
         }
-        if self.words.is_empty() || self.redirects.iter().any(Redirect::is_output_file) {
-            return Err(ParseError::Unsupported("> before |".into()));
+        // A redirection alone, which bash runs, is refused like an output
+        // file: each names what was typed.
+        let refused = match self.redirects.first() {
+            Some(first) if self.words.is_empty() => Some(first),
+            _ => self.redirects.iter().find(|r| r.is_output_file()),
+        };
+        if let Some(r) = refused {
+            return Err(ParseError::Unsupported(format!(
+                "{} before |",
+                r.operator()
+            )));
         }
         let p = core::mem::take(self);
         self.bangs = p.bangs;
@@ -957,7 +983,13 @@ fn end_pipeline(
             (true, true) if parts.bangs == 0 => return Ok(None),
             (true, _) => {}
             (false, true) => return Err(ParseError::MissingTarget(end)),
-            (false, false) => return Err(ParseError::Unsupported("| >".into())),
+            (false, false) => {
+                let first = parts.redirects.first().map(Redirect::operator);
+                return Err(ParseError::Unsupported(format!(
+                    "| {}",
+                    first.unwrap_or_default()
+                )));
+            }
         }
     }
     let p = core::mem::take(parts);
@@ -1107,6 +1139,14 @@ impl Parser {
                     self.end_word(line, at)?;
                 }
                 if let Some(stage) = self.for_header() {
+                    // A redirection there is bash's error, naming its fd if
+                    // it has one (`for x in a 2>f`).
+                    if redirection
+                        && self.word.started
+                        && let Some(digits) = self.word.word.digits()
+                    {
+                        return Err(ParseError::Unexpected(digits.into()));
+                    }
                     self.for_operator(stage, c, &mut cur)?;
                     self.item_start = cur.pos();
                     continue;
@@ -1149,7 +1189,11 @@ impl Parser {
                         return Err(ParseError::Unsupported(format!("{typed}{op} after {end}")));
                     }
                     self.parts.pending = Some(if copy {
-                        let typed = if typed == "2" { "2>&" } else { ">&" };
+                        let typed = match typed {
+                            "1" => "1>&",
+                            "2" => "2>&",
+                            _ => ">&",
+                        };
                         Pending::Copy { fd, typed }
                     } else {
                         Pending::File { fd, append }
@@ -2765,6 +2809,24 @@ mod tests {
                 "{line}"
             );
         }
+        // A `>&` not followed by a bare fd names the fd as typed.
+        assert_eq!(
+            one("echo a 1>&x"),
+            Err(ParseError::Unsupported("1>&x".into()))
+        );
+        // In a `for`'s words a redirection is bash's error, naming its fd
+        // if it has one (the prototype's review, M-4).
+        for (line, token) in [
+            ("for x in a 2>f; do b; done", "2"),
+            ("for x in a 0<f; do b; done", "0"),
+            ("for x in a >f; do b; done", ">"),
+        ] {
+            assert_eq!(
+                parse_line(line).unwrap_err().to_string(),
+                alloc::format!("syntax error near unexpected token `{token}'"),
+                "{line}"
+            );
+        }
         // bash's syntax errors.
         for (line, token) in [
             ("cat < < f", "<"),
@@ -3145,10 +3207,15 @@ mod tests {
         // Only the last command redirects its output (spec §9.1): bash
         // would send the first one's output into the file and the second
         // nothing.
-        for line in ["a > f | b", "a >> f | b", "a 1> f | b", "a 2>&1 > f | b"] {
+        for (line, op) in [
+            ("a > f | b", ">"),
+            ("a >> f | b", ">>"),
+            ("a 1> f | b", ">"),
+            ("a 2>&1 > f | b", ">"),
+        ] {
             assert_eq!(
                 parse(line).unwrap_err().to_string(),
-                "unsupported syntax: > before |",
+                alloc::format!("unsupported syntax: {op} before |"),
                 "{line}"
             );
         }
@@ -3179,9 +3246,16 @@ mod tests {
         // commands are programs, so one without a name is refused.
         for (line, what) in [
             ("> f | b", "> before |"),
-            (">> f | b | c", "> before |"),
+            (">> f | b | c", ">> before |"),
             ("a | > f", "| >"),
-            ("a | b | >> f", "| >"),
+            ("a | b | >> f", "| >>"),
+            // Each names what was typed (the prototype's review, M-4).
+            ("< f | cat", "< before |"),
+            ("2> e | cat", "2> before |"),
+            ("a 2> e >> f | b", ">> before |"),
+            ("a | < f", "| <"),
+            ("a | 2> e", "| 2>"),
+            ("a | 2>&1", "| 2>&1"),
         ] {
             assert_eq!(
                 parse(line),
