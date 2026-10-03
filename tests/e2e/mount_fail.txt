@@ -14,5 +14,8 @@ expect root@relay:/# $
 send touch /f
 expect \ntouch: cannot touch '/f': Read-only file system\n
 expect root@relay:/# $
+# test -w knows the root is read-only (programmable shell gate §15 item 6).
+send [ -w / ]; echo "status $?"
+expect \nstatus 1\nroot@relay:/# $
 send echo still here
 expect \nstill here\n
