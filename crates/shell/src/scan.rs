@@ -12,8 +12,10 @@
 //! and `}`, `select` and `case` opening constructs, a `case` pattern before
 //! `)`, groups (`{ … }`, a function's body too, `function f {` among them)
 //! and subshells (`( … )`), each `(` paired with its `)`, arithmetic
-//! (`((…))`) whole, and a here-document's body, data up to its delimiter's
-//! line.
+//! (`((…))`) whole, or as the two subshells bash reads when its first `)`
+//! is not followed by another and what it held reads the same as a
+//! subshell's command (the rest dropped when it does not), and a
+//! here-document's body, data up to its delimiter's line.
 
 /// Where a `for` is, while its name and words are read.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -85,6 +87,28 @@ const LEVELS_KEPT: usize = 64;
 
 /// The words that open a construct.
 const OPENERS: &[&[u8]] = &[b"if", b"while", b"until", b"for", b"select", b"case"];
+
+/// bash's reserved words and the scan's other keywords, any of which
+/// could change how a subshell's command reads.
+const KEYWORDS: &[&[u8]] = &[
+    b"if",
+    b"then",
+    b"elif",
+    b"else",
+    b"fi",
+    b"while",
+    b"until",
+    b"for",
+    b"select",
+    b"in",
+    b"do",
+    b"done",
+    b"case",
+    b"esac",
+    b"function",
+    b"time",
+    b"coproc",
+];
 
 /// What an open construct is: a keyword's closer closes only a keyword's
 /// construct, a `}` only a group, and a `)` only a subshell or another
@@ -160,6 +184,13 @@ pub(crate) struct Scan {
     /// (`arithmetic_check`).
     arithmetic: bool,
     arithmetic_check: bool,
+    /// What an arithmetic command holds up to its first `)` reads the same
+    /// as a subshell's command: no quote, `$`, redirection, separator or
+    /// parenthesis, and no word that could be a keyword (`plain`, the word
+    /// being read so far, and its length).
+    plain: bool,
+    plain_word: [u8; KEYWORD_MAX],
+    plain_len: usize,
     /// What was read cannot be told apart any more: the drop goes on to the
     /// end of the input.
     lost: bool,
@@ -213,6 +244,9 @@ impl Scan {
             coproc: false,
             arithmetic: false,
             arithmetic_check: false,
+            plain: false,
+            plain_word: [0; KEYWORD_MAX],
+            plain_len: 0,
             lost: false,
             word: [0; KEYWORD_MAX],
             len: 0,
@@ -246,11 +280,20 @@ impl Scan {
             return;
         }
         // An arithmetic `((` whose first `)` is not followed by another is
-        // two subshells, as bash reads it, which the scan read as words:
-        // a here-document or a keyword in them went unseen.
+        // two subshells, as bash reads it, which the scan read as words.
+        // When what it held reads the same as a subshell's command
+        // (`((a); b)`), the outer subshell is open and the inner closed;
+        // otherwise a here-document or a keyword in them went unseen.
         if core::mem::take(&mut self.arithmetic_check) && b != b')' {
             self.arithmetic = false;
-            self.lost = true;
+            if self.plain {
+                // The `((` left `closed` set: as after any subshell's `)`,
+                // a keyword may follow and an opener is bash's error.
+                self.nested = 0;
+                self.open(Kind::Subshell);
+            } else {
+                self.lost = true;
+            }
         }
         if b == b'\n' {
             // As bash reads on (the final review): a `\` before it joins
@@ -363,6 +406,8 @@ impl Scan {
                 self.open_level(false);
                 self.closed = true;
                 self.arithmetic = true;
+                self.plain = true;
+                self.plain_len = 0;
             }
             b'(' => {
                 // A keyword before it (`for((`, `!((`) ends here.
@@ -653,6 +698,9 @@ impl Scan {
     /// A byte inside a `${…}` or `$(…)`, part of a word: only the levels
     /// count, and in a `$(…)` a `case`, whose patterns' `)` close nothing.
     fn nested_byte(&mut self, b: u8, last: u8) {
+        if self.plain && self.nested == 2 {
+            self.plain_byte(b);
+        }
         match b {
             b'\'' | b'"' | b'`' => {
                 self.inner_dirty();
@@ -693,6 +741,29 @@ impl Scan {
                 }
                 self.inner_len = self.inner_len.saturating_add(1);
             }
+        }
+    }
+
+    /// A byte of an arithmetic command before its first `)`: whether what
+    /// it holds still reads the same as a subshell's command.
+    fn plain_byte(&mut self, b: u8) {
+        if b.is_ascii_alphanumeric() || b == b'_' {
+            if let Some(slot) = self.plain_word.get_mut(self.plain_len) {
+                *slot = b;
+            }
+            self.plain_len = self.plain_len.saturating_add(1);
+            return;
+        }
+        let len = core::mem::take(&mut self.plain_len);
+        let word = self.plain_word.get(..len).unwrap_or(b"");
+        if len > KEYWORD_MAX || KEYWORDS.contains(&word) {
+            self.plain = false;
+        }
+        if !matches!(
+            b,
+            b' ' | b'\t' | b')' | b'+' | b'-' | b'*' | b'/' | b'%' | b'=' | b',' | b'.' | b'!'
+        ) {
+            self.plain = false;
         }
     }
 
@@ -1114,8 +1185,40 @@ mod tests {
             done_after(&["((cat <<EOF)", ")", "ran", "EOF", ")", "b"]),
             [false; 6]
         );
-        assert_eq!(done_after(&["((a) << 1)", "b", "1", "c"]), [false; 4]);
-        assert_eq!(done_after(&["((a) )", "b"]), [false, false]);
+        // When what it held reads the same as a subshell's command, the
+        // scan reads on as bash does, the outer subshell open (milestone
+        // 4's deferred minor M-2; tmp/m5p1/probes/p13.txt).
+        assert_eq!(done_after(&["((a); b)", "c"]), [true, true]);
+        assert_eq!(done_after(&["((a) )", "b"]), [true, true]);
+        assert_eq!(
+            done_after(&["((a b) ; if c", "fi )", "d"]),
+            [false, true, true]
+        );
+        assert_eq!(done_after(&["((x + 1) && (y))", "c"]), [true, true]);
+        assert_eq!(done_after(&["((a) ; b", "c)", "d"]), [false, true, true]);
+        // After the inner `)` an opener is no construct, as after `fi`.
+        assert_eq!(done_after(&["((a) if b)", "c"]), [true, true]);
+        assert_eq!(
+            done_after(&["((a) << 1)", "b", "1", "c"]),
+            [false, false, true, true]
+        );
+        // Otherwise the rest is dropped: a keyword, a quote, a `$`, a
+        // redirection, a separator or a parenthesis before the `)`.
+        for line in [
+            "((if) ; b)",
+            "((a fi); b)",
+            "((a 'x'); b)",
+            "((a $x); b)",
+            "((a > f); b)",
+            "((a; b); c)",
+            "(((a)); b)",
+            "((function); b)",
+            "((abcdefghij); b)",
+        ] {
+            assert_eq!(done_after(&[line, "c"]), [false, false], "{line}");
+        }
+        // `$((a) b)` is a substitution of a subshell and a word: a word.
+        assert_eq!(done_after(&["echo $((a) b)", "c"]), [true, true]);
         // After its `))`, a `$(…)` nested in a word is a word's again.
         assert_eq!(done_after(&["(( 1 )); echo $($(a) b)", "c"]), [true, true]);
         assert_eq!(

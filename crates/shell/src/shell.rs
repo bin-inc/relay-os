@@ -1366,6 +1366,17 @@ mod tests {
     }
 
     #[test]
+    fn two_subshells_dropped_as_arithmetic_end_their_drop() {
+        // Milestone 4's deferred minor M-2: `((a); b)`, two subshells to
+        // bash, dropped the rest of the input.
+        assert_eq!(piped(b"((t-args a); t-args b)\nt-args next\n"), ["next"]);
+        assert_eq!(
+            piped(b"t-args 3> x &&\n((t-args a) ; if t-args b\nfi )\nt-args next\n"),
+            ["next"]
+        );
+    }
+
+    #[test]
     fn a_group_after_time_s_options_or_coproc_is_dropped_whole() {
         // Milestone 4's deferred gap: the scan took `{` after `time -p` or
         // `coproc` for a word, so the group's lines ran without their
