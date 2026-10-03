@@ -1,6 +1,7 @@
 //! Process 1, init (user-space gate §6.6, §16 item 6): a process of the
 //! kernel's own, without a program. It prints `/etc/motd`, starts
-//! `/bin/sh` in `/root` (or `/` without one) as its child, collects every
+//! `/bin/sh` in `/root` (or `/` without one) as its child with the
+//! environment `HOME=/root` (programmable shell gate §8.5), collects every
 //! orphan as it ends, and when the shell ends says how and starts another.
 //! Three ends within 10 s, or a shell that cannot be started, reach the
 //! error screen instead.
@@ -28,6 +29,8 @@ pub const ENDS: usize = 3;
 pub const WINDOW: Duration = Duration::from_secs(10);
 /// Where the shell starts (spec §6.6).
 const HOME: &[u8] = b"/root";
+/// The shell's environment (programmable shell gate §8.5).
+const ENV: &[u8] = b"HOME=/root\0";
 /// The most of `/etc/motd` shown.
 const MOTD_MAX: usize = 16 * 1024;
 
@@ -81,21 +84,27 @@ fn motd() {
     }
 }
 
-/// Starts `/bin/sh` without arguments in `/root`, or in `/` without one
-/// (the empty read-only root the kernel falls back to), as a group of its
-/// own with the console, its fds 0-2 the console; its pid.
+/// Starts `/bin/sh` in `/root`, or in `/` without one (the empty read-only
+/// root the kernel falls back to): [`shell_request`]; its pid.
 fn start_shell() -> Result<u32, Errno> {
     let mut vfs = KernelVfs;
     if vfs.chdir(HOME).is_err() {
         let _ = vfs.chdir(b"/");
     }
+    proc::spawn(&shell_request())
+}
+
+/// `/bin/sh` without arguments, in init's current directory, as a group of
+/// its own with the console, its fds 0-2 the console, and its environment
+/// [`ENV`].
+fn shell_request() -> Spawn {
     let fds = [0, 1, 2].map(|fd| FdMap {
         child: fd,
         parent: fd,
     });
     let mut args: Vec<u8> = SHELL.into();
     args.push(0);
-    proc::spawn(&Spawn {
+    Spawn {
         path: SHELL.into(),
         args,
         argc: 1,
@@ -103,9 +112,9 @@ fn start_shell() -> Result<u32, Errno> {
         fds: fds.to_vec(),
         group: Group::New,
         foreground: true,
-        env: Vec::new(),
-        envc: 0,
-    })
+        env: ENV.into(),
+        envc: 1,
+    }
 }
 
 /// When the shell ended lately, to tell whether to start it again (spec
@@ -186,6 +195,19 @@ mod tests {
         assert!(r.ended(Duration::ZERO));
         assert!(r.ended(Duration::ZERO));
         assert!(!r.ended(Duration::ZERO));
+    }
+
+    #[test]
+    fn the_shell_starts_with_home_set() {
+        let s = shell_request();
+        assert_eq!(
+            (&s.path[..], &s.args[..], s.argc),
+            (&b"/bin/sh"[..], &b"/bin/sh\0"[..], 1)
+        );
+        assert_eq!((&s.env[..], s.envc), (&b"HOME=/root\0"[..], 1));
+        assert!(s.cwd.is_empty() && s.group == Group::New && s.foreground);
+        let fds: Vec<(u32, u32)> = s.fds.iter().map(|m| (m.child, m.parent)).collect();
+        assert_eq!(fds, [(0, 0), (1, 1), (2, 2)]);
     }
 
     #[test]
