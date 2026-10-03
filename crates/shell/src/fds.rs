@@ -1,0 +1,310 @@
+//! The fd context (programmable shell gate §7.2, §7.4): what a command's
+//! fds 0, 1 and 2 are where the walker stands, and the files its
+//! redirections opened. A context is made from the one around it and the
+//! command's redirections, left to right; a file is counted by the fds of
+//! every context that holds it and closed once none does, so a file a later
+//! redirection replaces is closed at once. Under `/bin/sh` a file is an fd
+//! of the shell's, which a program gets as one of its fds and a built-in
+//! writes through, so both share its offset; the shell's own fds 0 to 2
+//! never change. In the in-process runner it is the file's node and an
+//! offset every fd of it shares.
+
+use crate::io::Programs;
+use crate::parser::{Redirect, RedirectOp};
+use alloc::string::String;
+use alloc::vec::Vec;
+use vfs::{Errno, FileType, Node, Vfs};
+
+/// What one of a command's fds is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Slot {
+    /// The shell's own fd of that number.
+    Shell(u32),
+    /// A file a redirection opened, by its place in [`Files`].
+    File(usize),
+}
+
+/// A command's fds 0, 1 and 2.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Fds(pub [Slot; 3]);
+
+impl Fds {
+    /// The shell's own, where nothing is redirected.
+    pub const SHELL: Fds = Fds([Slot::Shell(0), Slot::Shell(1), Slot::Shell(2)]);
+}
+
+/// A file a redirection opened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Handle {
+    /// `/bin/sh`'s fd.
+    Fd(u32),
+    /// The in-process runner's: the file, and where the next write goes.
+    Node { node: Node, offset: u64 },
+}
+
+/// The files open for redirections, each with how many fds hold it.
+#[derive(Default)]
+pub(crate) struct Files {
+    open: Vec<Option<(Handle, usize)>>,
+}
+
+/// How files are opened and closed: through `/bin/sh`'s calls when it has
+/// `programs`, or else in the `Vfs`.
+pub(crate) struct Opener<'x> {
+    pub vfs: &'x mut dyn Vfs,
+    pub programs: Option<&'x mut dyn Programs>,
+}
+
+impl Opener<'_> {
+    fn open(&mut self, op: &RedirectOp) -> Result<Handle, Errno> {
+        let (path, append) = match op {
+            RedirectOp::Write(path) => (path, false),
+            RedirectOp::Append(path) => (path, true),
+        };
+        if let Some(programs) = self.programs.as_deref_mut() {
+            return programs
+                .open_output(path.as_bytes(), append)
+                .map(Handle::Fd);
+        }
+        let (node, offset) = open_output(&mut *self.vfs, path, append)?;
+        Ok(Handle::Node { node, offset })
+    }
+
+    fn close(&mut self, handle: Handle) {
+        if let (Handle::Fd(fd), Some(programs)) = (handle, self.programs.as_deref_mut()) {
+            programs.close(fd);
+        }
+    }
+}
+
+/// Opens a file for output in `vfs`: created if missing, emptied, or with
+/// `append` written at its end; the node and the offset to write at.
+fn open_output(vfs: &mut dyn Vfs, path: &str, append: bool) -> Result<(Node, u64), Errno> {
+    let path = path.as_bytes();
+    let node = match vfs.lookup(path) {
+        Ok(node) => {
+            if vfs.stat(node)?.kind == FileType::Directory {
+                return Err(Errno::EISDIR);
+            }
+            if !append {
+                vfs.truncate(node, 0)?;
+            }
+            node
+        }
+        Err(Errno::ENOENT) => vfs.create(path)?,
+        Err(e) => return Err(e),
+    };
+    let offset = if append { vfs.stat(node)?.size } else { 0 };
+    Ok((node, offset))
+}
+
+/// A redirection that could not be made: the context as it stood, on
+/// whose fd 2 it is told and which the caller releases, and the file and
+/// why.
+#[derive(Debug)]
+pub(crate) struct Failed {
+    pub fds: Fds,
+    pub path: String,
+    pub error: Errno,
+}
+
+impl Files {
+    /// The file at `i`.
+    pub fn handle(&self, i: usize) -> Handle {
+        match self.open.get(i) {
+            Some(Some((handle, _))) => *handle,
+            _ => unreachable!("a slot names an open file"),
+        }
+    }
+
+    /// The context made from `base` and `redirects`, left to right
+    /// (programmable shell gate §7.2), which holds its files until it is
+    /// released; a file a later redirection replaces is closed at once.
+    pub fn redirect(
+        &mut self,
+        base: Fds,
+        redirects: &[Redirect],
+        opener: &mut Opener<'_>,
+    ) -> Result<Fds, Failed> {
+        let mut fds = base;
+        self.hold(&fds);
+        for r in redirects {
+            let slot = match opener.open(&r.op) {
+                Ok(handle) => Slot::File(self.add(handle)),
+                Err(error) => {
+                    let path = match &r.op {
+                        RedirectOp::Write(path) | RedirectOp::Append(path) => path.clone(),
+                    };
+                    return Err(Failed { fds, path, error });
+                }
+            };
+            let fd = r.fd as usize;
+            let replaced = core::mem::replace(&mut fds.0[fd], slot);
+            self.drop_slot(replaced, opener);
+        }
+        Ok(fds)
+    }
+
+    /// A context made with [`Files::redirect`] ends: the files it held
+    /// last are closed.
+    pub fn release(&mut self, fds: Fds, opener: &mut Opener<'_>) {
+        for slot in fds.0 {
+            self.drop_slot(slot, opener);
+        }
+    }
+
+    /// One more fd holds each of `fds`' files.
+    fn hold(&mut self, fds: &Fds) {
+        for slot in fds.0 {
+            if let Slot::File(i) = slot
+                && let Some(Some((_, count))) = self.open.get_mut(i)
+            {
+                *count += 1;
+            }
+        }
+    }
+
+    /// An fd that held `slot` holds it no more.
+    fn drop_slot(&mut self, slot: Slot, opener: &mut Opener<'_>) {
+        let Slot::File(i) = slot else {
+            return;
+        };
+        let Some(entry) = self.open.get_mut(i) else {
+            return;
+        };
+        if let Some((handle, count)) = entry {
+            *count -= 1;
+            if *count == 0 {
+                let handle = *handle;
+                *entry = None;
+                opener.close(handle);
+            }
+        }
+    }
+
+    /// A file just opened, held by one fd: its place.
+    fn add(&mut self, handle: Handle) -> usize {
+        let entry = Some((handle, 1));
+        match self.open.iter().position(Option::is_none) {
+            Some(i) => {
+                self.open[i] = entry;
+                i
+            }
+            None => {
+                self.open.push(entry);
+                self.open.len() - 1
+            }
+        }
+    }
+
+    /// How many files are open.
+    #[cfg(test)]
+    pub fn count(&self) -> usize {
+        self.open.iter().flatten().count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::Harness;
+
+    fn write(fd: u32, path: &str) -> Redirect {
+        Redirect {
+            fd,
+            op: RedirectOp::Write(path.into()),
+        }
+    }
+
+    #[test]
+    fn a_context_holds_its_files_until_it_is_released() {
+        let mut h = Harness::new();
+        let mut opener = Opener {
+            vfs: &mut h.vfs,
+            programs: Some(&mut h.programs),
+        };
+        let mut files = Files::default();
+        let outer = files
+            .redirect(Fds::SHELL, &[write(1, "/tmp/a")], &mut opener)
+            .unwrap();
+        assert_eq!(outer.0, [Slot::Shell(0), Slot::File(0), Slot::Shell(2)]);
+        // A command inside holds the same file, and its own.
+        let inner = files.redirect(outer, &[], &mut opener).unwrap();
+        assert_eq!(inner, outer);
+        files.release(inner, &mut opener);
+        assert_eq!(files.count(), 1, "the outer context still holds it");
+        files.release(outer, &mut opener);
+        assert_eq!(files.count(), 0);
+        assert_eq!(h.programs.opened, [("/tmp/a".into(), false, 4)]);
+        assert_eq!(h.programs.closed, [4]);
+    }
+
+    #[test]
+    fn a_file_a_later_redirection_replaces_is_closed_at_once() {
+        let mut h = Harness::new();
+        let mut opener = Opener {
+            vfs: &mut h.vfs,
+            programs: Some(&mut h.programs),
+        };
+        let mut files = Files::default();
+        let fds = files
+            .redirect(
+                Fds::SHELL,
+                &[write(1, "/tmp/a"), write(1, "/tmp/b")],
+                &mut opener,
+            )
+            .unwrap();
+        // `/tmp/a` (fd 4) is closed as soon as `/tmp/b` takes its place,
+        // before the command runs.
+        assert_eq!(fds.0[1], Slot::File(1));
+        assert_eq!(files.handle(1), Handle::Fd(5));
+        assert_eq!(files.count(), 1);
+        files.release(fds, &mut opener);
+        assert_eq!(h.programs.closed, [4, 5]);
+    }
+
+    #[test]
+    fn a_failed_redirection_gives_the_context_as_it_stood() {
+        let mut h = Harness::new();
+        let mut opener = Opener {
+            vfs: &mut h.vfs,
+            programs: None,
+        };
+        let mut files = Files::default();
+        let failed = files
+            .redirect(
+                Fds::SHELL,
+                &[write(1, "/tmp/a"), write(1, "/nodir/b")],
+                &mut opener,
+            )
+            .unwrap_err();
+        assert_eq!(
+            (failed.path.as_str(), failed.error),
+            ("/nodir/b", Errno::ENOENT)
+        );
+        assert_eq!(failed.fds.0[1], Slot::File(0));
+        files.release(failed.fds, &mut opener);
+        assert_eq!(files.count(), 0);
+        // In the `Vfs` a file is made, emptied or appended to.
+        h.put("/tmp/a", b"12345");
+        let mut opener = Opener {
+            vfs: &mut h.vfs,
+            programs: None,
+        };
+        let append = Redirect {
+            fd: 1,
+            op: RedirectOp::Append("/tmp/a".into()),
+        };
+        let fds = files.redirect(Fds::SHELL, &[append], &mut opener).unwrap();
+        let Handle::Node { offset, .. } = files.handle(0) else {
+            unreachable!()
+        };
+        assert_eq!(offset, 5);
+        files.release(fds, &mut opener);
+        let fds = files
+            .redirect(Fds::SHELL, &[write(1, "/tmp/a")], &mut opener)
+            .unwrap();
+        files.release(fds, &mut opener);
+        assert_eq!(h.get("/tmp/a"), b"");
+    }
+}

@@ -184,10 +184,8 @@ impl System for TestSystem {
 pub struct Spawned {
     pub path: String,
     pub args: Vec<String>,
-    /// What it got as fd 0 (a pipe's read end) and fd 1 (a pipe's write
-    /// end or a redirection), instead of the shell's.
-    pub stdin: Option<u32>,
-    pub stdout: Option<u32>,
+    /// The shell's fds it got as its fds 0, 1 and 2.
+    pub fds: [u32; 3],
     pub group: Group,
 }
 
@@ -208,6 +206,10 @@ pub struct FakePrograms {
     pub pipes: Vec<(u32, u32)>,
     pub pipe_error: Option<(usize, Errno)>,
     pub closed: Vec<u32>,
+    /// Every write to an fd the shell opened: the fd and the bytes.
+    pub written: Vec<(u32, Vec<u8>)>,
+    /// What `write` fails with, if anything.
+    pub write_error: Option<Errno>,
     pub spawned: Vec<Spawned>,
     /// The programs that run on through this many rounds of `collect` (a
     /// round ends when it finds nothing), by path; the others end at once.
@@ -246,6 +248,8 @@ impl FakePrograms {
             pipes: Vec::new(),
             pipe_error: None,
             closed: Vec::new(),
+            written: Vec::new(),
+            write_error: None,
             spawned: Vec::new(),
             lives: Vec::new(),
             children: Vec::new(),
@@ -274,6 +278,21 @@ struct FakeChild {
 }
 
 impl FakePrograms {
+    /// What the shell wrote, through the fds it opened for `path`.
+    pub fn written_to(&self, path: &str) -> Vec<u8> {
+        let fds: Vec<u32> = self
+            .opened
+            .iter()
+            .filter(|o| o.0 == path)
+            .map(|o| o.2)
+            .collect();
+        self.written
+            .iter()
+            .filter(|w| fds.contains(&w.0))
+            .flat_map(|w| w.1.iter().copied())
+            .collect()
+    }
+
     /// The children not yet collected, by pid, with their groups.
     pub fn children(&self) -> Vec<(u32, u32)> {
         self.children.iter().map(|c| (c.pid, c.group)).collect()
@@ -289,6 +308,13 @@ impl Programs for FakePrograms {
         let path = String::from_utf8_lossy(path).into_owned();
         self.opened.push((path, append, self.next_fd));
         Ok(self.next_fd)
+    }
+    fn write(&mut self, fd: u32, bytes: &[u8]) -> Result<(), Errno> {
+        if let Some(e) = self.write_error {
+            return Err(e);
+        }
+        self.written.push((fd, bytes.to_vec()));
+        Ok(())
     }
     fn close(&mut self, fd: u32) {
         self.closed.push(fd);
@@ -308,8 +334,7 @@ impl Programs for FakePrograms {
         &mut self,
         path: &[u8],
         args: &[&[u8]],
-        stdin: Option<u32>,
-        stdout: Option<u32>,
+        fds: [u32; 3],
         group: Group,
     ) -> Result<u32, Errno> {
         let path = String::from_utf8_lossy(path).into_owned();
@@ -329,8 +354,7 @@ impl Programs for FakePrograms {
                 .iter()
                 .map(|a| String::from_utf8_lossy(a).into_owned())
                 .collect(),
-            stdin,
-            stdout,
+            fds,
             group,
         });
         self.next_pid += 1;

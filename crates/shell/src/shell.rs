@@ -6,6 +6,7 @@ use crate::commands::{self, SCRIPT_MAX, Script};
 use crate::ctx::{Ctx, JobControl, quote_if_needed};
 use crate::editor::{Feed, LineEditor};
 use crate::expand::{self, Vars};
+use crate::fds::{Fds, Files, Opener};
 use crate::io::{Console, Programs, Stdin, Stdout, System};
 use crate::jobs::Jobs;
 use crate::parser::{self, HOME};
@@ -64,6 +65,11 @@ pub struct Shell<'a> {
     /// A command of the line ended with Ctrl-C (spec §6.4), whatever a
     /// `!` made of its status; a status of 130 alone is none.
     cancelled: bool,
+    /// What fds 0, 1 and 2 are where the walker stands (programmable shell
+    /// gate §7.4).
+    fds: Fds,
+    /// The files redirections have open.
+    files: Files,
 }
 
 impl<'a> Shell<'a> {
@@ -113,6 +119,8 @@ impl<'a> Shell<'a> {
             vars: Vars::new(NAME),
             abandoned: false,
             cancelled: false,
+            fds: Fds::SHELL,
+            files: Files::default(),
         }
     }
 
@@ -455,6 +463,10 @@ impl<'a> Shell<'a> {
             // Its words expanded to nothing: bash's status 0.
             return self.finish(0, String::new());
         }
+        let fds = match self.redirect(self.fds, &cmd.redirects) {
+            Ok(fds) => fds,
+            Err(message) => return self.finish(1, message),
+        };
         let parts = Parts {
             vfs: &mut *self.vfs,
             console: &mut *self.console,
@@ -466,6 +478,7 @@ impl<'a> Shell<'a> {
                 Some(input) => Some(&mut **input),
                 None => None,
             },
+            files: &mut self.files,
         };
         let ran = match cmd.words.split_first() {
             Some((name, args)) => match commands::builtin(name) {
@@ -475,23 +488,18 @@ impl<'a> Shell<'a> {
                         programs: self.runner.programs(),
                         report: self.prompting && !self.in_script,
                     };
-                    match runner::redirect_to(&mut *parts.vfs, cmd.output()) {
-                        Ok(file) => runner::run_function(parts, builtin, args, file, Some(control)),
-                        Err(ran) => ran,
-                    }
+                    runner::run_function(parts, builtin, args, fds, Some(control))
                 }
                 None => {
-                    let ran = self.runner.get().run(parts, name, args, cmd.output());
+                    let ran = self.runner.get().run(parts, name, args, fds);
                     self.console.take_back();
                     ran
                 }
             },
             // A bare `> file` just creates or empties the file.
-            None => match runner::redirect_to(&mut *parts.vfs, cmd.output()) {
-                Ok(_) => Ran::said(0, String::new()),
-                Err(ran) => ran,
-            },
+            None => Ran::said(0, String::new()),
         };
+        self.release(fds);
         self.stopped = ran.stop;
         self.exited = ran.exited;
         self.cancelled |= ran.cancelled;
@@ -520,13 +528,12 @@ impl<'a> Shell<'a> {
                 Err(e) => return self.not_expanded(e, true),
             }
         }
-        let output = parser::Command {
-            words: Vec::new(),
-            redirects,
-        };
-        match runner::redirect_to(&mut *self.vfs, output.output()) {
-            Ok(_) => self.finish(0, String::new()),
-            Err(ran) => self.finish(ran.status, ran.message),
+        match self.redirect(self.fds, &redirects) {
+            Ok(fds) => {
+                self.release(fds);
+                self.finish(0, String::new())
+            }
+            Err(message) => self.finish(1, message),
         }
     }
 
@@ -537,6 +544,11 @@ impl<'a> Shell<'a> {
             let ran = runner::in_a_pipeline(name);
             return self.finish(ran.status, ran.message);
         }
+        let all = match self.stage_fds(stages) {
+            Ok(all) => all,
+            Err(message) => return self.finish(1, message),
+        };
+        let staged = runner_stages(stages, &all);
         let parts = Parts {
             vfs: &mut *self.vfs,
             console: &mut *self.console,
@@ -548,8 +560,12 @@ impl<'a> Shell<'a> {
                 Some(input) => Some(&mut **input),
                 None => None,
             },
+            files: &mut self.files,
         };
-        let ran = self.runner.get().pipeline(parts, stages);
+        let ran = self.runner.get().pipeline(parts, &staged);
+        for fds in all {
+            self.release(fds);
+        }
         self.console.take_back();
         self.cancelled |= ran.cancelled;
         self.finish(ran.status, ran.message)
@@ -564,6 +580,11 @@ impl<'a> Shell<'a> {
             let message = format!("{NAME}: {name}: cannot be used in the background\n");
             return self.finish(1, message);
         }
+        let all = match self.stage_fds(stages) {
+            Ok(all) => all,
+            Err(message) => return self.finish(1, message),
+        };
+        let staged = runner_stages(stages, &all);
         let parts = Parts {
             vfs: &mut *self.vfs,
             console: &mut *self.console,
@@ -572,8 +593,12 @@ impl<'a> Shell<'a> {
             in_script: self.in_script,
             status: self.status,
             input: None,
+            files: &mut self.files,
         };
-        let started = self.runner.get().background(parts, stages);
+        let started = self.runner.get().background(parts, &staged);
+        for fds in all {
+            self.release(fds);
+        }
         if let Some(pgid) = started.pgid {
             let number = self.jobs.add(pgid, &started.pids, text);
             if self.prompting && !self.in_script {
@@ -582,6 +607,50 @@ impl<'a> Shell<'a> {
             }
         }
         self.finish(started.ran.status, started.ran.message)
+    }
+
+    /// The context `redirects` make over `base` (programmable shell gate
+    /// §7.2), or what keeps one from being made.
+    fn redirect(&mut self, base: Fds, redirects: &[parser::Redirect]) -> Result<Fds, String> {
+        let mut opener = Opener {
+            vfs: &mut *self.vfs,
+            programs: self.runner.programs(),
+        };
+        match self.files.redirect(base, redirects, &mut opener) {
+            Ok(fds) => Ok(fds),
+            Err(failed) => {
+                self.files.release(failed.fds, &mut opener);
+                Err(format!("{NAME}: {}: {}\n", failed.path, failed.error))
+            }
+        }
+    }
+
+    /// A context made by `redirect` ends: the files it held last are
+    /// closed.
+    fn release(&mut self, fds: Fds) {
+        let mut opener = Opener {
+            vfs: &mut *self.vfs,
+            programs: self.runner.programs(),
+        };
+        self.files.release(fds, &mut opener);
+    }
+
+    /// Each stage's fds, its redirections made over the context; none if
+    /// one cannot be made.
+    fn stage_fds(&mut self, stages: &[parser::Command]) -> Result<Vec<Fds>, String> {
+        let mut all = Vec::new();
+        for stage in stages {
+            match self.redirect(self.fds, &stage.redirects) {
+                Ok(fds) => all.push(fds),
+                Err(message) => {
+                    for fds in all {
+                        self.release(fds);
+                    }
+                    return Err(message);
+                }
+            }
+        }
+        Ok(all)
     }
 
     /// Collects the background jobs' processes that have ended.
@@ -828,6 +897,18 @@ impl<'a> Shell<'a> {
             self.say(format!("{NAME}: sync failed: {e}\n").as_bytes());
         }
     }
+}
+
+/// A pipeline's stages for the runner: each one's words and fds.
+fn runner_stages<'c>(stages: &'c [parser::Command], fds: &[Fds]) -> Vec<runner::Stage<'c>> {
+    stages
+        .iter()
+        .zip(fds)
+        .map(|(c, fds)| runner::Stage {
+            words: &c.words,
+            fds: *fds,
+        })
+        .collect()
 }
 
 /// Whether `list` is one pipeline of simple commands, and nothing else.
@@ -2261,7 +2342,7 @@ mod tests {
         );
         let groups: Vec<crate::Group> = h.programs.spawned.iter().map(|s| s.group).collect();
         assert_eq!(groups, [crate::Group::Background, crate::Group::Join(101)]);
-        assert_eq!(h.programs.spawned[1].stdout, Some(4), "the redirection");
+        assert_eq!(h.programs.spawned[1].fds[1], 4, "the redirection");
         let (r, w) = h.programs.pipes[0];
         assert!(
             [r, w, 4].iter().all(|fd| h.programs.closed.contains(fd)),
@@ -2627,7 +2708,7 @@ mod tests {
         let s = &h.programs.spawned[0];
         assert_eq!((s.args.len(), s.group), (1, crate::Group::New));
         let (r, w) = h.programs.pipes[0];
-        assert_eq!(s.stdin, Some(r), "the pipe it reads");
+        assert_eq!(s.fds[0], r, "the pipe it reads");
         assert!(h.programs.closed.contains(&w), "with no writer");
         assert_eq!(h.spawning("t-args | $E > /tmp/o"), (0, "".into()));
         let (path, append, fd) = h.programs.opened.last().unwrap();

@@ -269,16 +269,29 @@ pub fn arg_bytes(args: &[&[u8]]) -> Vec<u8> {
     bytes
 }
 
-/// A command's fds: `stdin` or the shell's 0, `stdout` or the shell's 1,
-/// and the shell's 2.
-pub fn command_fds(stdin: Option<u32>, stdout: Option<u32>) -> [FdMap; 3] {
-    [(0, stdin.unwrap_or(0)), (1, stdout.unwrap_or(1)), (2, 2)]
-        .map(|(child, parent)| FdMap { child, parent })
+/// A command's fds 0, 1 and 2: the shell's `fds`.
+pub fn command_fds(fds: [u32; 3]) -> [FdMap; 3] {
+    [0, 1, 2].map(|child| FdMap {
+        child,
+        parent: fds[child as usize],
+    })
 }
 
 impl Programs for SysPrograms {
     fn open_output(&mut self, path: &[u8], append: bool) -> Result<u32, Errno> {
         sys::open(path, output_flags(append)).map_err(Errno::from_number)
+    }
+
+    fn write(&mut self, fd: u32, bytes: &[u8]) -> Result<(), Errno> {
+        let mut done = 0;
+        while done < bytes.len() {
+            match sys::write(fd, &bytes[done..]) {
+                Ok(0) => return Err(Errno::ENOSPC),
+                Ok(n) => done += n,
+                Err(e) => return Err(Errno::from_number(e)),
+            }
+        }
+        Ok(())
     }
 
     fn close(&mut self, fd: u32) {
@@ -293,8 +306,7 @@ impl Programs for SysPrograms {
         &mut self,
         path: &[u8],
         args: &[&[u8]],
-        stdin: Option<u32>,
-        stdout: Option<u32>,
+        fds: [u32; 3],
         group: Group,
     ) -> Result<u32, Errno> {
         let (flags, pgid) = spawn_group(group, self.own_group, self.leader);
@@ -305,7 +317,7 @@ impl Programs for SysPrograms {
             // prompt.
             let _ = sys::console_mode(MODE_LINE);
         }
-        let fds = command_fds(stdin, stdout);
+        let fds = command_fds(fds);
         let pid = sys::spawn(path, &arg_bytes(args), b"", &fds, flags, pgid)
             .map_err(Errno::from_number)?;
         if flags & NEW_GROUP != 0 {
@@ -433,14 +445,10 @@ mod tests {
     }
 
     #[test]
-    fn a_command_gets_the_shell_s_fds_but_its_pipes_and_redirection() {
+    fn a_command_gets_the_shell_s_fds_it_is_given() {
         let pairs = |fds: [FdMap; 3]| fds.map(|f| (f.child, f.parent));
-        assert_eq!(pairs(command_fds(None, None)), [(0, 0), (1, 1), (2, 2)]);
-        assert_eq!(pairs(command_fds(None, Some(5))), [(0, 0), (1, 5), (2, 2)]);
-        assert_eq!(
-            pairs(command_fds(Some(4), Some(7))),
-            [(0, 4), (1, 7), (2, 2)]
-        );
+        assert_eq!(pairs(command_fds([0, 1, 2])), [(0, 0), (1, 1), (2, 2)]);
+        assert_eq!(pairs(command_fds([4, 7, 7])), [(0, 4), (1, 7), (2, 7)]);
         assert_eq!(arg_bytes(&[b"ls", b"", b"a b"]), b"ls\0\0a b\0");
     }
 

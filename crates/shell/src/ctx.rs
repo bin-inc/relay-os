@@ -1,8 +1,8 @@
 //! What a command gets to work with: the filesystem, the system, standard
 //! input (none, a program's fd 0, or bytes in memory), standard output
-//! (the screen, a redirection file, or a program's fd 1) and the screen
-//! for errors; plus the helpers every command shares for options and
-//! GNU-style messages.
+//! (the screen, a redirection file, `/bin/sh`'s fd for one, or a program's
+//! fd 1) and the screen for errors; plus the helpers every command shares
+//! for options and GNU-style messages.
 
 use crate::io::{Console, Programs, Stdin, Stdout, System};
 use crate::jobs::Jobs;
@@ -65,8 +65,25 @@ impl JobControl<'_> {
     }
 }
 
+/// Where a command the shell runs itself writes (programmable shell gate
+/// §7.5): the screen, a file of the in-process runner's at an offset, or
+/// an fd of `/bin/sh`'s, which its `Programs` write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum To {
+    Console,
+    File(Node, u64),
+    Fd(u32),
+}
+
 enum Output<'a> {
     Console,
+    /// An fd of `/bin/sh`'s, written through its `Programs` in pieces of
+    /// 4 KiB, so that a built-in shares the file's offset with programs.
+    Fd {
+        fd: u32,
+        buf: Vec<u8>,
+        error: Option<Errno>,
+    },
     File {
         node: Node,
         offset: u64,
@@ -86,21 +103,26 @@ enum Output<'a> {
 }
 
 impl<'a> Ctx<'a> {
-    /// `file`: the redirection target and the offset to write at.
+    /// Standard output goes `to` (an fd through `control`'s programs).
     pub(crate) fn new(
         vfs: &'a mut dyn Vfs,
         system: &'a mut dyn System,
         console: &'a mut dyn Console,
-        file: Option<(Node, u64)>,
+        to: To,
     ) -> Ctx<'a> {
-        let out = match file {
-            Some((node, offset)) => Output::File {
+        let out = match to {
+            To::Console => Output::Console,
+            To::File(node, offset) => Output::File {
                 node,
                 offset,
                 buf: Vec::new(),
                 error: None,
             },
-            None => Output::Console,
+            To::Fd(fd) => Output::Fd {
+                fd,
+                buf: Vec::new(),
+                error: None,
+            },
         };
         Ctx::with_output(vfs, system, console, out)
     }
@@ -177,6 +199,10 @@ impl<'a> Ctx<'a> {
             console: &mut *self.console,
             out: &mut self.out,
             transcript: &mut self.transcript,
+            programs: self
+                .control
+                .as_mut()
+                .and_then(|c| c.programs.as_deref_mut()),
         }
     }
 
@@ -209,7 +235,7 @@ impl<'a> Ctx<'a> {
     pub fn is_tty(&self) -> bool {
         match self.out {
             Output::Console => true,
-            Output::File { .. } => false,
+            Output::File { .. } | Output::Fd { .. } => false,
             Output::Program { tty, .. } => tty,
         }
     }
@@ -219,7 +245,9 @@ impl<'a> Ctx<'a> {
     pub fn out_failed(&self) -> bool {
         matches!(
             self.out,
-            Output::File { error: Some(_), .. } | Output::Program { error: Some(_), .. }
+            Output::File { error: Some(_), .. }
+                | Output::Fd { error: Some(_), .. }
+                | Output::Program { error: Some(_), .. }
         )
     }
 
@@ -228,7 +256,7 @@ impl<'a> Ctx<'a> {
         match &self.out {
             Output::File { node, .. } => Some(*node),
             Output::Program { stdout, .. } => stdout.node(),
-            Output::Console => None,
+            Output::Console | Output::Fd { .. } => None,
         }
     }
 
@@ -236,7 +264,9 @@ impl<'a> Ctx<'a> {
     pub(crate) fn finish(&mut self) -> Result<(), Errno> {
         self.streams().flush();
         match self.out {
-            Output::File { error: Some(e), .. } | Output::Program { error: Some(e), .. } => Err(e),
+            Output::File { error: Some(e), .. }
+            | Output::Fd { error: Some(e), .. }
+            | Output::Program { error: Some(e), .. } => Err(e),
             _ => Ok(()),
         }
     }
@@ -254,6 +284,8 @@ struct Streams<'s, 'a> {
     console: &'s mut dyn Console,
     out: &'s mut Output<'a>,
     transcript: &'s mut Option<Transcript>,
+    /// `/bin/sh`'s, for `Output::Fd`.
+    programs: Option<&'s mut (dyn Programs + 'a)>,
 }
 
 impl Streams<'_, '_> {
@@ -273,7 +305,9 @@ impl Streams<'_, '_> {
                     *error = Some(e);
                 }
             }
-            Output::File { buf, error, .. } | Output::Program { buf, error, .. } => {
+            Output::File { buf, error, .. }
+            | Output::Fd { buf, error, .. }
+            | Output::Program { buf, error, .. } => {
                 if let Some(e) = error {
                     return Err(*e);
                 }
@@ -284,7 +318,9 @@ impl Streams<'_, '_> {
             }
         }
         match &*self.out {
-            Output::File { error: Some(e), .. } | Output::Program { error: Some(e), .. } => Err(*e),
+            Output::File { error: Some(e), .. }
+            | Output::Fd { error: Some(e), .. }
+            | Output::Program { error: Some(e), .. } => Err(*e),
             _ => Ok(()),
         }
     }
@@ -331,6 +367,18 @@ impl Streams<'_, '_> {
                     && let Err(e) = stdout.write(buf)
                 {
                     *error = Some(e);
+                }
+                buf.clear();
+            }
+            Output::Fd { fd, buf, error } => {
+                if error.is_none() && !buf.is_empty() {
+                    let written = match self.programs.as_deref_mut() {
+                        Some(programs) => programs.write(*fd, buf),
+                        None => Err(Errno::EBADF),
+                    };
+                    if let Err(e) = written {
+                        *error = Some(e);
+                    }
                 }
                 buf.clear();
             }
