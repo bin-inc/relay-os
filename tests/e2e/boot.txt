@@ -25,7 +25,7 @@ expect \[ ok \] keyboard: 1 keyboard
 expect storage: root on 00:02\.0 port 2, the disk with the boot partition 52454C41-5900-4000-8000-000000000002
 expect \[ ok \] mount /: ext2 on 00:02\.0 port 2 partition 2, 190 MiB
 # The programs of /bin, from \EFI\RELAY\system.img (user-space gate §4.3).
-expect \[ ok \] system: \d+ programs?, ABI 3
+expect \[ ok \] system: \d+ programs?, ABI 4
 expect \nWelcome to Relay OS\.\n
 expect root@relay:~# $
 screenshot-nonblank

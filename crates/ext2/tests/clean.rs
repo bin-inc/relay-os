@@ -44,6 +44,7 @@ fn a_read_write_mount_is_not_clean_until_shutdown() {
         assert_eq!(state(&img), "clean");
         let (mut fs, env) = mount(&img, rw());
         assert!(!fs.is_read_only());
+        assert!(!fs.statfs().unwrap().read_only);
         // Mounting itself wrote the superblock and flushed.
         assert_eq!(state(&img), "not clean");
         assert_eq!(sb_field(&img, "Mount count"), 1);
@@ -52,6 +53,7 @@ fn a_read_write_mount_is_not_clean_until_shutdown() {
         fsck(&img);
         fs.shutdown().unwrap();
         assert!(fs.is_read_only());
+        assert!(fs.statfs().unwrap().read_only, "statfs says so");
         assert_eq!(fs.touch(fs.root()), Err(Errno::EROFS));
         assert_eq!(state(&img), "clean");
         assert_eq!(sb_field(&img, "Mount count"), 1);
@@ -151,7 +153,7 @@ fn a_read_only_mount_writes_nothing() {
     let f = fs.lookup(fs.root(), b"f").unwrap();
     let mut buf = [0u8; 16];
     fs.read_at(f, 0, &mut buf).unwrap();
-    fs.statfs().unwrap();
+    assert!(fs.statfs().unwrap().read_only);
     fs.sync().unwrap();
     fs.shutdown().unwrap();
     drop(fs);
@@ -174,6 +176,7 @@ fn a_read_only_fallback_writes_nothing() {
     let before = fs::read(&img).unwrap();
     let (mut fs, _) = mount(&img, rw());
     assert!(fs.is_read_only());
+    assert!(fs.statfs().unwrap().read_only, "fell back to read-only");
     fs.shutdown().unwrap();
     assert!(fs::read(&img).unwrap() == before);
 }

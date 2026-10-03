@@ -98,7 +98,7 @@ send /bin/df
 expect \nFilesystem     1K-blocks +Used Available Use% Mounted on\n/dev/root +\d+ +\d+ +\d+ +\d+% /\n
 expect root@relay:~# $
 send /bin/dmesg
-expect \n\[ ok \] system: \d+ programs, ABI 3\n
+expect \n\[ ok \] system: \d+ programs, ABI 4\n
 expect root@relay:~# $
 send /bin/sync
 expect root@relay:~# $

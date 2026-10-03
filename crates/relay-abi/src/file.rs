@@ -26,6 +26,9 @@ pub const SEEK_END: u32 = 2;
 /// `stat`'s flag: a symbolic link's own status, not its target's.
 pub const STAT_NOFOLLOW: u32 = 1;
 
+/// [`StatFs::flags`]: the filesystem is read-only (Linux's `ST_RDONLY`).
+pub const STATFS_READ_ONLY: u64 = 1;
+
 /// What kind of file a [`Stat`] or a directory entry is.
 pub const KIND_UNKNOWN: u8 = 0;
 pub const KIND_REGULAR: u8 = 1;
@@ -107,6 +110,8 @@ pub struct StatFs {
     pub avail_blocks: u64,
     pub files: u64,
     pub free_files: u64,
+    /// [`STATFS_READ_ONLY`] or 0.
+    pub flags: u64,
 }
 
 impl StatFs {
@@ -121,6 +126,7 @@ impl StatFs {
             self.avail_blocks,
             self.files,
             self.free_files,
+            self.flags,
         ];
         for (i, v) in longs.iter().enumerate() {
             b[8 * i..8 * i + 8].copy_from_slice(&v.to_ne_bytes());
@@ -222,13 +228,14 @@ mod tests {
         assert_eq!(offset_of!(Stat, gid), 64);
         assert_eq!(offset_of!(Stat, block_size), 68);
         assert_eq!(offset_of!(Stat, dev), 72);
-        assert_eq!(StatFs::SIZE, 48);
+        assert_eq!(StatFs::SIZE, 56);
         assert_eq!(offset_of!(StatFs, block_size), 0);
         assert_eq!(offset_of!(StatFs, blocks), 8);
         assert_eq!(offset_of!(StatFs, free_blocks), 16);
         assert_eq!(offset_of!(StatFs, avail_blocks), 24);
         assert_eq!(offset_of!(StatFs, files), 32);
         assert_eq!(offset_of!(StatFs, free_files), 40);
+        assert_eq!(offset_of!(StatFs, flags), 48);
         assert_eq!(size_of::<DirEntry>(), 16);
         assert_eq!(offset_of!(DirEntry, ino), 0);
         assert_eq!(offset_of!(DirEntry, len), 8);
@@ -252,6 +259,7 @@ mod tests {
         assert_eq!(flags.iter().fold(0, |a, f| a | f), OPEN_FLAGS);
         assert_eq!((SEEK_START, SEEK_CURRENT, SEEK_END), (0, 1, 2));
         assert_eq!(STAT_NOFOLLOW, 1);
+        assert_eq!(STATFS_READ_ONLY, 1, "Linux's ST_RDONLY");
         assert_eq!(
             [
                 KIND_UNKNOWN,
@@ -294,6 +302,7 @@ mod tests {
             avail_blocks: 4,
             files: 5,
             free_files: 6,
+            flags: 7,
         };
         let mem: [u8; StatFs::SIZE] = unsafe { core::mem::transmute(f) };
         assert_eq!(f.to_bytes(), mem);

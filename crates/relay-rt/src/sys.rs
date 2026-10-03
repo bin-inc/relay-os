@@ -254,14 +254,30 @@ fn write_all_by(
 }
 
 /// Starts the program at `path` with `args` (each followed by a NUL,
-/// argument 0 first) in `cwd` (empty: this program's), giving it the fds
-/// `fds` names (child, parent) and closing its others; with `NEW_GROUP` in
-/// `flags` it starts a process group of its own, which `FOREGROUND` also
-/// gives the console, in line mode; without it, a `pgid` other than 0 is
-/// the group of another child of this program's that it joins. Its pid.
+/// argument 0 first) and no environment in `cwd` (empty: this program's),
+/// giving it the fds `fds` names (child, parent) and closing its others;
+/// with `NEW_GROUP` in `flags` it starts a process group of its own, which
+/// `FOREGROUND` also gives the console, in line mode; without it, a `pgid`
+/// other than 0 is the group of another child of this program's that it
+/// joins. Its pid.
 pub fn spawn(
     path: &[u8],
     args: &[u8],
+    cwd: &[u8],
+    fds: &[FdMap],
+    flags: u32,
+    pgid: u32,
+) -> Result<u32, u16> {
+    spawn_env(path, args, b"", cwd, fds, flags, pgid)
+}
+
+/// [`spawn`] with the environment `env`: entries each followed by a NUL,
+/// at most 64 KiB (programmable shell gate §8.1); `crate::env::block()`
+/// passes on this program's own.
+pub fn spawn_env(
+    path: &[u8],
+    args: &[u8],
+    env: &[u8],
     cwd: &[u8],
     fds: &[FdMap],
     flags: u32,
@@ -280,6 +296,8 @@ pub fn spawn(
         fd_count: fds.len() as u32,
         flags,
         pgid,
+        env: env.as_ptr() as u64,
+        env_len: env.len() as u64,
         ..SpawnArgs::default()
     };
     a.fds[..fds.len()].copy_from_slice(fds);

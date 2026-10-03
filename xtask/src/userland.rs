@@ -633,12 +633,12 @@ mod tests {
             .filter(|&i| t_abi[i] != t_args[i])
             .collect();
         assert_eq!(differ.len(), 1, "one byte of the version: 3 -> 2");
-        assert_eq!(STALE_ABI, 2);
+        assert_eq!(STALE_ABI, 3);
         let e = check_program(path("t-abi")).unwrap_err().to_string();
-        assert!(e.contains("built for ABI 2, this is ABI 3"), "{e}");
+        assert!(e.contains("built for ABI 3, this is ABI 4"), "{e}");
         assert_eq!(
             kernel_check(path("t-abi")).unwrap_err().to_string(),
-            "the kernel's check: built for ABI 2"
+            "the kernel's check: built for ABI 3"
         );
         let names: Vec<&str> = programs.iter().map(|p| p.name.as_str()).collect();
         let mut sorted = names.clone();

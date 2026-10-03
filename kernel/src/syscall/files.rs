@@ -10,7 +10,7 @@ use crate::mm::user::{UserSlice, UserStr};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use relay_abi::StatFs;
-use relay_abi::file::{KIND_CHAR_DEVICE, KIND_FIFO, STAT_NOFOLLOW, Stat};
+use relay_abi::file::{KIND_CHAR_DEVICE, KIND_FIFO, STAT_NOFOLLOW, STATFS_READ_ONLY, Stat};
 use vfs::{Errno, Vfs};
 
 /// A path of the program's, copied in: at most 4096 bytes.
@@ -247,6 +247,7 @@ pub(super) fn statfs(
         avail_blocks: f.avail_blocks,
         files: f.files,
         free_files: f.free_files,
+        flags: if f.read_only { STATFS_READ_ONLY } else { 0 },
     };
     caller.write(&slice, 0, &s.to_bytes())?;
     Ok(0)
@@ -273,7 +274,7 @@ mod tests {
     use relay_abi::errno;
     use relay_abi::file::{
         KIND_REGULAR, OPEN_APPEND, OPEN_CREATE, OPEN_EXCLUSIVE, OPEN_READ, OPEN_WRITE, SEEK_END,
-        SEEK_START,
+        SEEK_START, STATFS_READ_ONLY,
     };
 
     /// Opens `path` (put at `W + 512`) with `flags`.
@@ -680,8 +681,9 @@ mod tests {
     fn statfs_fills_in_the_filesystem_s_figures() {
         let mut f = fake();
         assert_eq!(on(&mut f, Call::Statfs, b"/full", [W, 0]), Ok(0));
-        let b = get(&mut f, W, 48);
+        let b = get(&mut f, W, 56);
         let want = vfs::Vfs::statfs(&mut f.vfs, b"/full").unwrap();
+        assert_eq!(u64_at(&b, 48), 0, "not read-only");
         assert_eq!(
             [
                 u64_at(&b, 0),
@@ -700,6 +702,11 @@ mod tests {
                 want.free_files
             ]
         );
+        // A read-only filesystem says so in `flags`.
+        let ro = vfs::MemFs::new(alloc::boxed::Box::new(Clock)).read_only();
+        f.vfs.mount(b"/ro", alloc::boxed::Box::new(ro)).unwrap();
+        assert_eq!(on(&mut f, Call::Statfs, b"/ro", [W, 0]), Ok(0));
+        assert_eq!(u64_at(&get(&mut f, W, 56), 48), STATFS_READ_ONLY);
         assert_eq!(
             on(&mut f, Call::Statfs, b"/nope", [W, 0]),
             Err(errno::ENOENT)

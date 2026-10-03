@@ -1,7 +1,8 @@
 //! x86_64 (spec §7.1): the call number in `rax`, arguments in `rdi`, `rsi`,
 //! `rdx`, `r10`, `r8`, `r9`, the result in `rax`; `syscall` itself
 //! clobbers `rcx` and `r11`. And `_start`, which the kernel jumps to with
-//! the arguments' address, length and count in `rdi`, `rsi`, `rdx`.
+//! the arguments' address, length and count in `rdi`, `rsi`, `rdx`, and the
+//! environment's in `rcx`, `r8`, `r9`.
 
 use core::arch::{asm, naked_asm};
 use relay_abi::Call;
@@ -31,7 +32,8 @@ pub unsafe fn syscall(call: Call, a: [u64; 6]) -> u64 {
 
 /// The program's first instruction. The stack is 16-byte aligned at entry
 /// (spec §5.3); a call leaves it as the SysV ABI expects on function
-/// entry. `rdi`, `rsi` and `rdx` pass through to `start` untouched.
+/// entry. `rdi`, `rsi`, `rdx`, `rcx`, `r8` and `r9` pass through to `start`
+/// untouched, its six arguments.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 unsafe extern "sysv64" fn _start() -> ! {

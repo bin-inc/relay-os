@@ -165,7 +165,8 @@ pub fn kernel_stacks_agree() -> bool {
 
 /// Goes to ring 3 at `entry` (spec §5.3) with the program's `gs`: its
 /// stack, `rdi` = the arguments' address, `rsi` their length, `rdx` their
-/// count, interrupts on, every other register zero. The kernel stack this
+/// count, `rcx`, `r8` and `r9` the environment's (programmable shell gate
+/// §8.2), interrupts on, every other register zero. The kernel stack this
 /// is called on is where the program's system calls, interrupts and
 /// faults arrive from now on.
 ///
@@ -183,9 +184,12 @@ pub unsafe extern "C" fn enter(entry: *const Entry) -> ! {
         "push qword ptr [rdi + {ip}]",
         "mov rsi, [rdi + {len}]",
         "mov rdx, [rdi + {argc}]",
+        "mov rcx, [rdi + {env}]",
+        "mov r8, [rdi + {env_len}]",
+        "mov r9, [rdi + {envc}]",
         "mov rdi, [rdi + {args}]",
-        "xor eax, eax", "xor ebx, ebx", "xor ecx, ecx", "xor ebp, ebp",
-        "xor r8d, r8d", "xor r9d, r9d", "xor r10d, r10d", "xor r11d, r11d",
+        "xor eax, eax", "xor ebx, ebx", "xor ebp, ebp",
+        "xor r10d, r10d", "xor r11d, r11d",
         "xor r12d, r12d", "xor r13d, r13d", "xor r14d, r14d", "xor r15d, r15d",
         "swapgs",
         "iretq",
@@ -197,6 +201,9 @@ pub unsafe extern "C" fn enter(entry: *const Entry) -> ! {
         args = const core::mem::offset_of!(Entry, args),
         len = const core::mem::offset_of!(Entry, args_len),
         argc = const core::mem::offset_of!(Entry, argc),
+        env = const core::mem::offset_of!(Entry, env),
+        env_len = const core::mem::offset_of!(Entry, env_len),
+        envc = const core::mem::offset_of!(Entry, envc),
     )
 }
 

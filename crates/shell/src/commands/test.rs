@@ -5,20 +5,21 @@
 //! argument must be `]`, and `[ --help` and `[ --version` are refused
 //! where GNU prints its help.
 //!
-//! The rules by argument count come first, for 1 to 4 arguments, then
-//! `-o` over `-a` over terms; a term is a run of `!`, then `(` and an
-//! expression of up to 4 arguments before its `)` (or of all the rest), a
-//! binary operator if the argument after next is one, a unary operator of
-//! the form `-X`, or a string. Strings are compared as bytes; GNU's program
-//! has no `<` or `>`, which bash's built-in has. Integers are read as GNU
-//! reads them (blanks around, a sign, any number of digits) and compared as
-//! digit strings, so nothing overflows; `-l STRING` stands for STRING's
-//! length. Files are answered from `stat`, as for root, with two decided
-//! differences (spec §10): a symbolic link is never followed, so `-e`, `-f`
-//! and `-d` look at the link itself, and `-w` is false only on `/bin`'s
-//! filesystem, the read-only one a program can tell. The evaluator never
-//! recurses: each open `(` waits on a stack of its own, so it nests as deep
-//! as the arguments go, as GNU does on its larger stack.
+//! The rules by argument count come first, for 1 to 4 arguments, then `-o`
+//! over `-a` over terms; a term is a run of `!`, then `(` and an expression
+//! of up to 4 arguments before its `)` (or of all the rest), a binary
+//! operator if the argument after next is one, a unary operator of the form
+//! `-X`, or a string. Strings are compared as bytes; GNU's program has no
+//! `<` or `>`, which bash's built-in has. Integers are read as GNU reads
+//! them (blanks around, a sign, any number of digits) and compared as digit
+//! strings, so nothing overflows; `-l STRING` stands for STRING's length.
+//! Files are answered from `stat`, as for root, with one decided difference
+//! (spec §10): a symbolic link is never followed, so `-e`, `-f` and `-d`
+//! look at the link itself. `-w` is false on a filesystem `statfs` says is
+//! read-only, but for a device or a FIFO, as Linux's `access` answers (spec
+//! §15 item 6). The evaluator never recurses: each open `(` waits on a
+//! stack of its own, so it nests as deep as the arguments go, as GNU does
+//! on its larger stack.
 
 use crate::commands::Run;
 use crate::ctx::Ctx;
@@ -338,7 +339,9 @@ impl<'e> Eval<'e, '_> {
             }
             b'w' => {
                 let path = self.unary_operand()?;
-                return Ok(self.stat(path).is_some_and(|(node, _)| !self.on_bin(node)));
+                return Ok(self
+                    .stat(path)
+                    .is_some_and(|(_, s)| !self.read_only(path, &s)));
             }
             // As for root, which reads every file.
             b'e' | b'r' => |_| true,
@@ -365,18 +368,19 @@ impl<'e> Eval<'e, '_> {
         Ok(self.stat(path).is_some_and(|(_, s)| file(&s)))
     }
 
-    /// Whether `node` is on `/bin`'s filesystem, `system.img`, which is
-    /// read-only: no call says which filesystems are, and `open` for writing
-    /// succeeds on them, so a root the kernel mounted read-only is not told
-    /// (spec §10, §15 item 3).
-    /// Only when `/bin` is a mount of its own: `host-shell`'s `/bin` is a
-    /// directory of the image's root.
-    fn on_bin(&mut self, node: vfs::Node) -> bool {
-        let vfs = &mut self.ctx.vfs;
-        match (vfs.lookup(b"/bin"), vfs.lookup(b"/")) {
-            (Ok(bin), Ok(root)) => bin.mount != root.mount && bin.mount == node.mount,
-            _ => false,
-        }
+    /// Whether writing `path`, whose status is `s`, is refused because its
+    /// filesystem is read-only, as `statfs` tells (spec §15 item 6): as
+    /// Linux's `access` says `EROFS` for a regular file, a directory or a
+    /// symbolic link there, and not for a device or a FIFO.
+    fn read_only(&mut self, path: &str, s: &vfs::Stat) -> bool {
+        matches!(
+            s.kind,
+            FileType::Regular | FileType::Directory | FileType::Symlink
+        ) && self
+            .ctx
+            .vfs
+            .statfs(path.as_bytes())
+            .is_ok_and(|f| f.read_only)
     }
 
     /// GNU's `binary_operator`, at the left operand (or at the `-l`
@@ -585,7 +589,10 @@ fn quote(arg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::named;
-    use crate::testing::{Harness, TestFile, host_files, host_tool, like_host_files, memfs};
+    use crate::testing::{
+        Harness, TestFile, host_files, host_files_read_only, host_tool, like_host_files,
+        like_host_files_read_only, memfs,
+    };
     use alloc::boxed::Box;
     use alloc::string::String;
     use alloc::vec::Vec;
@@ -1095,8 +1102,8 @@ mod tests {
 
     #[test]
     fn nothing_on_bin_s_filesystem_is_writable() {
-        // `/bin` is read-only (system.img), which no call tells: a file
-        // on its filesystem is not writable (spec §15 item 3).
+        // `/bin` is read-only (system.img): a file on its filesystem is
+        // not writable (spec §15 items 3 and 6).
         let mut programs = memfs();
         let root = programs.root();
         let ls = programs.create(root, b"ls").unwrap();
@@ -1125,6 +1132,67 @@ mod tests {
         }
         let etc = h.vfs.lookup(b"/etc").unwrap();
         assert_eq!(etc.ino, h.vfs.lookup(b"/bin/ls").unwrap().ino);
+    }
+
+    #[test]
+    fn nothing_on_a_read_only_filesystem_is_writable_but_a_device() {
+        // `statfs` says which filesystems are read-only (spec §15 item 6):
+        // a root mounted so too, and a `/bin` mounted writable is
+        // writable. As Linux's `access`, which GNU asks, a device or a
+        // FIFO stays writable there.
+        let mut h = Harness::new();
+        let mut bin = memfs();
+        let root = bin.root();
+        bin.create(root, b"ls").unwrap();
+        h.vfs.mkdir(b"/bin").unwrap();
+        h.vfs.mount(b"/bin", Box::new(bin)).unwrap();
+        for line in ["test -w /bin/ls", "[ -w /bin ]", "test -w /etc/motd"] {
+            assert_eq!(h.run(line), (0, String::new()), "{line}");
+        }
+        let mut ro = memfs();
+        let root = ro.root();
+        ro.create(root, b"f").unwrap();
+        ro.mkdir(root, b"d").unwrap();
+        ro.symlink(root, b"l", b"f").unwrap();
+        ro.special(root, b"p", FileType::Fifo).unwrap();
+        ro.special(root, b"c", FileType::CharDev).unwrap();
+        h.vfs = vfs::MountTable::new(Box::new(ro.read_only()));
+        for (line, status) in [
+            ("test -w /f", 1),
+            ("test -w /d", 1),
+            ("test -w /", 1),
+            ("test -w /l", 1),
+            ("test -w /p", 0),
+            ("test -w /c", 0),
+            ("test -r /f", 0),
+            ("test -w /nope", 1),
+        ] {
+            assert_eq!(h.run(line), (status, String::new()), "{line}");
+        }
+    }
+
+    #[test]
+    fn on_a_read_only_filesystem_as_gnu_s_test() {
+        // GNU's test as root on a directory bound read-only (unshare -rm),
+        // against a read-only filesystem mounted at /w (spec §15 item 6):
+        // a FIFO or a socket stays writable.
+        let files = [
+            TestFile::file("f", b"x"),
+            TestFile::dir("d"),
+            TestFile::link("l", "f"),
+            TestFile::fifo("p"),
+            TestFile::socket("s"),
+        ];
+        for op in ["-w", "-r", "-e"] {
+            for name in ["f", "d", "l", "p", "s", ".", "nope"] {
+                let line = ["test", op, name];
+                assert_eq!(
+                    like_host_files_read_only(&line, &files),
+                    host_files_read_only(&line, &files),
+                    "{line:?}"
+                );
+            }
+        }
     }
 
     #[test]

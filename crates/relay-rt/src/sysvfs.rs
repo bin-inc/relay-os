@@ -15,7 +15,7 @@ use core::cell::RefCell;
 use relay_abi::file::{
     KIND_BLOCK_DEVICE, KIND_CHAR_DEVICE, KIND_DIRECTORY, KIND_FIFO, KIND_REGULAR, KIND_SOCKET,
     KIND_SYMLINK, OPEN_CREATE, OPEN_DIRECTORY, OPEN_EXCLUSIVE, OPEN_READ, OPEN_WRITE, SEEK_START,
-    STAT_NOFOLLOW, dir_entries,
+    STAT_NOFOLLOW, STATFS_READ_ONLY, dir_entries,
 };
 use vfs::{DirEntry, Errno, FileType, Node, Stat, StatFs, Vfs};
 
@@ -366,6 +366,7 @@ impl<C: Calls> Vfs for SysVfs<C> {
             avail_blocks: s.avail_blocks,
             files: s.files,
             free_files: s.free_files,
+            read_only: s.flags & STATFS_READ_ONLY != 0,
         })
     }
 
@@ -517,6 +518,17 @@ mod tests {
         ] {
             assert_eq!(run(&mut sys, line), run(&mut direct, line), "{line}");
         }
+    }
+
+    #[test]
+    fn statfs_says_which_filesystems_are_read_only() {
+        let mut t = tree();
+        t.mkdir(b"/ro").unwrap();
+        t.mount(b"/ro", Box::new(memfs().read_only())).unwrap();
+        let mut v = SysVfs::with(FakeCalls::new(t));
+        assert!(v.statfs(b"/ro").unwrap().read_only);
+        assert!(!v.statfs(b"/").unwrap().read_only);
+        assert!(!v.statfs(b"/bin").unwrap().read_only);
     }
 
     #[test]

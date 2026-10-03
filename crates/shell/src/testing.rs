@@ -943,10 +943,35 @@ impl<'a> TestFile<'a> {
 pub fn like_host_files(args: &[&str], files: &[TestFile<'_>]) -> (i32, String, String) {
     let mut fs = memfs();
     let w = fs.mkdir(fs.root(), b"w").unwrap();
+    make_files(&mut fs, w, files);
+    let mut h = Harness::on(fs);
+    h.vfs.chdir(b"/w").unwrap();
+    let mut out = FakeStdout::file(None);
+    let (status, errors) = h.program_args(args, &mut out);
+    (status, out.text(), errors)
+}
+
+/// [`like_host_files`] with `files` on a read-only filesystem mounted at
+/// `/w`, to compare with [`host_files_read_only`]'.
+pub fn like_host_files_read_only(args: &[&str], files: &[TestFile<'_>]) -> (i32, String, String) {
+    let mut fs = memfs();
+    let root = fs.root();
+    make_files(&mut fs, root, files);
+    let mut h = Harness::new();
+    h.vfs.mkdir(b"/w").unwrap();
+    h.vfs.mount(b"/w", Box::new(fs.read_only())).unwrap();
+    h.vfs.chdir(b"/w").unwrap();
+    let mut out = FakeStdout::file(None);
+    let (status, errors) = h.program_args(args, &mut out);
+    (status, out.text(), errors)
+}
+
+/// Makes `files` in the directory `w` of `fs`.
+fn make_files(fs: &mut MemFs, w: Ino, files: &[TestFile<'_>]) {
     let mut made: Vec<(&str, Ino)> = Vec::new();
     for f in files {
         let (dir, name) = match f.name.rsplit_once('/') {
-            Some((d, n)) => (lookup_in(&mut fs, w, d), n),
+            Some((d, n)) => (lookup_in(fs, w, d), n),
             None => (w, f.name),
         };
         let ino = match f.made {
@@ -976,11 +1001,6 @@ pub fn like_host_files(args: &[&str], files: &[TestFile<'_>]) -> (i32, String, S
             fs.set_mode(ino, mode).unwrap();
         }
     }
-    let mut h = Harness::on(fs);
-    h.vfs.chdir(b"/w").unwrap();
-    let mut out = FakeStdout::file(None);
-    let (status, errors) = h.program_args(args, &mut out);
-    (status, out.text(), errors)
 }
 
 /// The directory `path` under `dir`.
@@ -995,6 +1015,24 @@ fn lookup_in(fs: &mut MemFs, dir: Ino, path: &str) -> Ino {
 /// every program as root). A missing tool, or a namespace refused, fails
 /// the test.
 pub fn host_files(args: &[&str], files: &[TestFile<'_>], root: bool) -> (i32, String, String) {
+    host_run(args, files, if root { As::Root } else { As::User })
+}
+
+/// [`host_files`] as root with the directory bound over itself read-only,
+/// in a mount namespace of its own (`unshare -rm`).
+pub fn host_files_read_only(args: &[&str], files: &[TestFile<'_>]) -> (i32, String, String) {
+    host_run(args, files, As::RootReadOnly)
+}
+
+/// Who runs a host tool, and on what.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum As {
+    User,
+    Root,
+    RootReadOnly,
+}
+
+fn host_run(args: &[&str], files: &[TestFile<'_>], how: As) -> (i32, String, String) {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/like-host")
         .join(std::format!("{}-{}", std::process::id(), next_dir()));
@@ -1050,14 +1088,26 @@ pub fn host_files(args: &[&str], files: &[TestFile<'_>], root: bool) -> (i32, St
             std::fs::set_permissions(dir.join(f.name), mode).unwrap();
         }
     }
-    let mut cmd = if root {
-        let mut c = std::process::Command::new("unshare");
-        c.arg("-r").args(args);
-        c
-    } else {
-        let mut c = std::process::Command::new(args[0]);
-        c.args(&args[1..]);
-        c
+    let mut cmd = match how {
+        As::User => {
+            let mut c = std::process::Command::new(args[0]);
+            c.args(&args[1..]);
+            c
+        }
+        As::Root => {
+            let mut c = std::process::Command::new("unshare");
+            c.arg("-r").args(args);
+            c
+        }
+        As::RootReadOnly => {
+            // Into the mount just made: the working directory is the one
+            // below it.
+            let bind = "d=$PWD; mount --bind \"$d\" \"$d\" && \
+                        mount -o remount,bind,ro \"$d\" && cd \"$d\" && exec \"$@\"";
+            let mut c = std::process::Command::new("unshare");
+            c.args(["-rm", "sh", "-c", bind, "sh"]).args(args);
+            c
+        }
     };
     let out = cmd
         .current_dir(&dir)
@@ -1076,9 +1126,9 @@ pub fn host_files(args: &[&str], files: &[TestFile<'_>], root: bool) -> (i32, St
     let _ = std::fs::remove_dir_all(&dir);
     let text = |b: Vec<u8>| String::from_utf8_lossy(&b).into_owned();
     let stderr = text(out.stderr);
-    if root {
+    if how != As::User {
         assert!(
-            !stderr.starts_with("unshare:"),
+            !stderr.starts_with("unshare:") && !stderr.starts_with("mount:"),
             "unshare -r is needed (on Ubuntu 24.04, sysctl \
              kernel.apparmor_restrict_unprivileged_userns=0): {stderr}"
         );

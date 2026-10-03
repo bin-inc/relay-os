@@ -321,7 +321,8 @@ pub fn get(f: &mut Fake, at: u64, len: usize) -> Vec<u8> {
     buf
 }
 
-struct Clock;
+/// The tests' time, 1000.
+pub struct Clock;
 
 impl Env for Clock {
     fn now(&self) -> u64 {

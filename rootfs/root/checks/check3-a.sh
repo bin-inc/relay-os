@@ -54,7 +54,7 @@ dmesg
 #nuc> storage: root on 00:14\.0 port 15, the disk with the boot partition [0-9A-F-]{36}
 #qemu> \[ ok \] mount /: ext2 on .*
 #nuc> \[ ok \] mount /: ext2 on 00:14\.0 port 15 partition 2, 2\.0 GiB
-#> \[ ok \] system: \d+ programs?, ABI 3
+#> \[ ok \] system: \d+ programs?, ABI 4
 #> ...
 #!> \[FAIL\].*
 
