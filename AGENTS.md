@@ -145,11 +145,13 @@ test stick and the maintainer; do not run them unless asked.
   its prompt has no newline before it; kernel log lines (`pid N (…):
   killed: …`) can arrive between other lines. `key` and `type` cannot type
   `{`, which opens a key name (`{ctrl-c}`), so send it over serial
-  (`send`). Every `send`, `key` and `type` waits for the prompt: an
-  `expect` that ends at it must come since the input before, or the
-  scenario is refused; input for a running program, a Ctrl-C, or a line
-  beside a background job's output is `send-ahead`, `key-ahead` or
-  `type-ahead`.
+  (`send`). Every `send`, `key` and `type`, and every `poweroff`, `reboot`
+  and `reset <command>`, waits for the prompt: an `expect` that ends at it
+  must come since the input before, or the scenario is refused; input for
+  a running program, a Ctrl-C, or a line beside a background job's output
+  is `send-ahead`, `key-ahead` or `type-ahead`. A Ctrl-C or a Ctrl-D is
+  the last key of a `type` step, never of a `key` step, whose Enter would
+  come after the prompt the key brings.
 - **Mutation checks:** for a guard, break it and see a test fail. A
   mutant that does not compile is no kill; a surviving mutant usually
   names a case no test reaches.
