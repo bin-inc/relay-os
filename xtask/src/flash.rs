@@ -358,7 +358,7 @@ fn modified(target: &Path, root: Partition, path: &str) -> Result<u64> {
 fn system_built(target: &Path, esp: Partition, scratch: &Path) -> Result<u64, String> {
     let path = "/EFI/RELAY/system.img";
     let image = image::esp_read(target, esp, path, scratch)
-        .map_err(|_| format!("cannot read {path} on the ESP"))?;
+        .map_err(|e| format!("cannot read {path} on the ESP: {e:#}"))?;
     sysimg::Archive::parse(&image)
         .map(|a| a.build_time())
         .map_err(|e| e.to_string())
@@ -567,11 +567,33 @@ mod tests {
         // Without its build time no transcript can be shown to be older
         // than the system on the stick: the check fails, rather than
         // passing them unchecked.
+        // Milestone 3's deferred minor: mcopy's reason is kept, so a
+        // missing file, a damaged FAT and a stick that cannot be opened are
+        // told apart.
         let dir = out_dir().join("verify-usb-selftest-system");
         let (esp_img, esp) = image::blank_esp(&dir.join("esp"));
         assert_eq!(
             system_built(&esp_img, esp, &dir),
-            Err("cannot read /EFI/RELAY/system.img on the ESP".into())
+            Err("cannot read /EFI/RELAY/system.img on the ESP: \
+                 mcopy: File \"::/EFI/RELAY/system.img\" not found"
+                .into())
+        );
+        let zeros = dir.join("zeros.img");
+        std::fs::write(&zeros, vec![0; 1 << 20]).unwrap();
+        assert_eq!(
+            system_built(&zeros, esp, &dir),
+            Err("cannot read /EFI/RELAY/system.img on the ESP: \
+                 init :: non DOS media; Cannot initialize '::'"
+                .into())
+        );
+        let missing = dir.join("missing.img");
+        assert_eq!(
+            system_built(&missing, esp, &dir),
+            Err(format!(
+                "cannot read /EFI/RELAY/system.img on the ESP: \
+                 Can't open {}: No such file or directory; Cannot initialize '::'",
+                missing.display()
+            ))
         );
         image::esp_write(&esp_img, esp, "/EFI/RELAY/system.img", b"damaged", &dir).unwrap();
         assert_eq!(

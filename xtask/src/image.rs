@@ -184,10 +184,19 @@ pub fn esp_delete(target: &Path, esp: Partition, path: &str) -> Result<()> {
 pub fn esp_read(target: &Path, esp: Partition, path: &str, scratch: &Path) -> Result<Vec<u8>> {
     fs::create_dir_all(scratch)?;
     let file = scratch.join("esp-read.tmp");
-    run(mtools("mcopy")
+    let out = mtools("mcopy")
         .args(["-o", "-i", &mtools_target(target, esp)])
         .arg(format!("::{path}"))
-        .arg(&file))?;
+        .arg(&file)
+        .output()
+        .context("cannot start mcopy")?;
+    if !out.status.success() {
+        // mtools' own words, which tell a missing file, a damaged FAT and
+        // a stick that cannot be opened apart, on one line.
+        let said = String::from_utf8_lossy(&out.stderr);
+        let lines: Vec<&str> = said.lines().collect();
+        bail!("{}", lines.join("; "));
+    }
     Ok(fs::read(&file)?)
 }
 
