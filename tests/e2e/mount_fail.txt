@@ -9,7 +9,9 @@ expect \[FAIL\] mount /: ext2 on 00:02\.0 port 2 partition 2, 190 MiB: Invalid a
 expect root@relay:/# $
 send ls -a /
 expect \n\.\s+\.\.\s+bin\n
+expect root@relay:/# $
 send touch /f
 expect \ntouch: cannot touch '/f': Read-only file system\n
+expect root@relay:/# $
 send echo still here
 expect \nstill here\n

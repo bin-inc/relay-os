@@ -8,24 +8,26 @@ timeout 30
 expect root@relay:~# $
 send t-spin 3
 alive 1
-key echo typed-while-it-spins
+key-ahead echo typed-while-it-spins
 expect \n\d+ iterations\n
 expect \ntyped-while-it-spins\n
 # Ctrl-C on the keyboard kills the command's process group (spec §6.4):
 # t-spin alone would never end. The shell says `^C`, as when Ctrl-C stops
 # a built-in, and the kernel log names the process.
+expect root@relay:~# $
 send t-spin
 alive 1
-key {ctrl-c}
+key-ahead {ctrl-c}
 expect \n\^C\nroot@relay:~# 
 send dmesg
 expect \npid \d+ \(/bin/t-spin\): killed: Ctrl-C\n
 # A program that spends its time in system calls, where a tick only
 # counts, is polled on its way back to ring 3 after a tick passed: Ctrl-C
 # stops it too, although a tick almost never finds it in ring 3.
+expect root@relay:~# $
 send t-mem churn
 alive 1
-key {ctrl-c}
+key-ahead {ctrl-c}
 timeout 3
 expect \n\^C\nroot@relay:~# 
 timeout 30
@@ -36,7 +38,7 @@ expect \npid \d+ \(/bin/t-mem\): killed: Ctrl-C\n
 # while dmesg's group still had the console, the line would be dmesg's.)
 expect root@relay:~# $
 send t-spin
-key {ctrl-c}
+key-ahead {ctrl-c}
 expect \n\^C\nroot@relay:~# 
 # Ctrl-C ends a group that waits in the kernel: t-spawn blocked in wait
 # for a child in a group of its own, and three children in sleep. Each ends
@@ -44,11 +46,12 @@ expect \n\^C\nroot@relay:~#
 # alone, and the shell says `^C` at once; the child apart sleeps on.
 send t-spawn sleepers
 alive 1
-key {ctrl-c}
+key-ahead {ctrl-c}
 expect t-spawn sleepers\n(pid \d+ \(/bin/t-spawn\): killed: Ctrl-C\n){4}\^C\nroot@relay:~# 
 # At the prompt, Ctrl-C only cancels the line being typed.
 key echo nope{ctrl-c}
 expect \^C\n
+expect root@relay:~# $
 send echo still here
 expect \nstill here\n
 # A program that waits for a child with WAIT_CTRL_C while its group has
@@ -56,10 +59,11 @@ expect \nstill here\n
 # Ctrl-C ends the wait, and is taken from what was typed, the rest of it
 # left for the program to read. Its child, in a group of its own, spins on
 # until the program kills it.
+expect root@relay:~# $
 send t-spawn ctrl-c
 expect \nwaiting for t-spin\n
 alive 1
-type {ctrl-c}x
+type-ahead {ctrl-c}x
 expect \Await: EINTR\nthen read: "x"\n
 expect root@relay:~# $
 # A program waiting with WAIT_CTRL_C in a group that does not have the
@@ -68,6 +72,6 @@ expect root@relay:~# $
 send t-spawn ctrl-c-apart
 expect \nthe child waits apart\n
 alive 1
-type {ctrl-c}x
+type-ahead {ctrl-c}x
 expect \Athe child's wait: a child\nthe child's wait: a child\nthen read: "\\u\{3\}x"\n
 expect root@relay:~# $

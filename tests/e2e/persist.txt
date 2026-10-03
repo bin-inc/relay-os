@@ -3,9 +3,13 @@
 timeout 30
 expect root@relay:~# $
 send mkdir /root/notes
+expect root@relay:~# $
 send echo remember me > /root/notes/a
+expect root@relay:~# $
 send echo and me >> /root/notes/a
+expect root@relay:~# $
 send touch /root/notes/b
+expect root@relay:~# $
 send ls /root/notes
 expect \na  b\n
 reboot
@@ -13,6 +17,7 @@ expect \[ ok \] mount /
 expect root@relay:~# $
 send cat /root/notes/a
 expect \nremember me\nand me\n
+expect root@relay:~# $
 send ls /root/notes
 expect \na  b\n
 poweroff

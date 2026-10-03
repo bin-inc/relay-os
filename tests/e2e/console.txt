@@ -7,39 +7,40 @@ expect root@relay:~# $
 send t-read size
 expect \nconsole: \d+x\d+\nmode 7: EINVAL\nforeground 999999: ESRCH\nforeground of my own group: ok\n
 # Over COM1 and on the USB keyboard.
+expect root@relay:~# $
 send t-read
 alive 1
-send hello
+send-ahead hello
 expect \nhello\n\[6\] hello\\n\n
-key wrold{backspace}{backspace}{backspace}{backspace}orld
+key-ahead wrold{backspace}{backspace}{backspace}{backspace}orld
 expect wrold(\x08 \x08){4}orld\n\[6\] world\\n\n
 # Ctrl-D hands over a line without its newline; on an empty line it ends
 # the input.
-type abc{ctrl-d}
+type-ahead abc{ctrl-d}
 expect abc\[3\] abc\n
-type {ctrl-d}
+type-ahead {ctrl-d}
 expect end of input\nroot@relay:~# $
 # cat without a file reads its standard input, the console: a line at a
 # time, each echoed as typed and printed when Enter ends it, until Ctrl-D
 # (milestone 3).
 send cat
 alive 1
-key first line
+key-ahead first line
 expect \nfirst line\nfirst line\n
-key second
+key-ahead second
 expect second\nsecond\n
-type {ctrl-d}
+type-ahead {ctrl-d}
 expect root@relay:~# $
 # Typed while a program does not read: echoed at once, and the shell's
 # afterwards, as in bash.
 send t-spin 2
 alive 1
-send echo typed
+send-ahead echo typed
 expect echo typed\n\d+ iterations\nroot@relay:~# echo typed\ntyped\nroot@relay:~# $
 # Raw mode: no echo, bytes as they come, until q.
 send t-read raw
 expect was line mode: true\n
-send xyq
+send-ahead xyq
 expect \[\d+\] xy
 expect root@relay:~# $
 send t-read apart
@@ -52,22 +53,26 @@ expect \nmode: EPERM\nforeground of my own group: EPERM\na child with the consol
 # is not an empty line for the command.
 send-crlf t-read
 alive 1
-type {ctrl-d}
+type-ahead {ctrl-d}
 expect t-read\nend of input\nroot@relay:~# $
 # A program outside the console's groups cannot put it in line mode
 # while the shell waits at its prompt (milestone 3).
 send t-read leave
-expect \nroot@relay:~# line mode from outside: EPERM\n
+expect \nroot@relay:~# 
+expect line mode from outside: EPERM\n
 send echo ok
 expect \nok\nroot@relay:~# $
 # What is typed during a script is echoed once, as it is typed, not again
 # at every later command; the shell's line editor shows it at the prompt.
 send echo t-spin 2 > s.sh
+expect root@relay:~# $
 send echo t-args one >> s.sh
+expect root@relay:~# $
 send echo t-args two >> s.sh
+expect root@relay:~# $
 send sh s.sh
 alive 1
-type abc
+type-ahead abc
 expect abc\d+ iterations\n\+ t-args one\n\[1\] one\n\+ t-args two\n\[1\] two\nroot@relay:~# abc$
-type {ctrl-c}
+type-ahead {ctrl-c}
 expect root@relay:~# $

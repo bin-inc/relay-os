@@ -4,37 +4,67 @@
 timeout 120
 expect root@relay:~# $
 send echo 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde > l
+expect root@relay:~# $
 send cat l l l l l l l l l l l l l l l l > m
+expect root@relay:~# $
 send cat m m m m > l
+expect root@relay:~# $
 send wc l
 expect \n\s*64\s+64\s+4096 l\n
+expect root@relay:~# $
 send cp l big
+expect root@relay:~# $
 send cat big > t
+expect root@relay:~# $
 send cat t >> big
+expect root@relay:~# $
 send cat big > t
+expect root@relay:~# $
 send cat t >> big
+expect root@relay:~# $
 send cat big > t
+expect root@relay:~# $
 send cat t >> big
+expect root@relay:~# $
 send cat big > t
+expect root@relay:~# $
 send cat t >> big
+expect root@relay:~# $
 send cat big > t
+expect root@relay:~# $
 send cat t >> big
+expect root@relay:~# $
 send cat big > t
+expect root@relay:~# $
 send cat t >> big
+expect root@relay:~# $
 send cat big > t
+expect root@relay:~# $
 send cat t >> big
+expect root@relay:~# $
 send cat big > t
+expect root@relay:~# $
 send cat t >> big
+expect root@relay:~# $
 send cat big > t
+expect root@relay:~# $
 send cat t >> big
+expect root@relay:~# $
 send cat big > t
+expect root@relay:~# $
 send cat t >> big
+expect root@relay:~# $
 send cat big > t
+expect root@relay:~# $
 send cat t >> big
+expect root@relay:~# $
 send wc big
 expect \n\s*131072\s+131072\s+8388608 big\n
+expect root@relay:~# $
 send cp big copy
+expect root@relay:~# $
 send rm t m
+expect root@relay:~# $
 send ls -l big copy
 expect \n-rw-r--r-- 1 root root 8388608 .* big\n-rw-r--r-- 1 root root 8388608 .* copy\n
 poweroff

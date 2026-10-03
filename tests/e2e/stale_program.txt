@@ -5,11 +5,15 @@
 timeout 30
 expect root@relay:~# $
 send cp /bin/t-abi /root/t-abi
+expect root@relay:~# $
 send /root/t-abi
 expect \nrelay-sh: /root/t-abi: Exec format error\n
+expect root@relay:~# $
 send t-abi
 expect \nrelay-sh: t-abi: Exec format error\n
+expect root@relay:~# $
 send dmesg
 expect \nspawn /root/t-abi: built for ABI 2\n
+expect root@relay:~# $
 send t-args still
 expect \n\[1\] still\n

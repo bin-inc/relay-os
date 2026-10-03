@@ -5,42 +5,74 @@ disk small
 timeout 120
 expect root@relay:~# $
 send echo 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde > l
+expect root@relay:~# $
 send cat l l l l l l l l l l l l l l l l > m
+expect root@relay:~# $
 send cat m m m m > l
+expect root@relay:~# $
 send cp l big
+expect root@relay:~# $
 send cat big > t
+expect root@relay:~# $
 send cat t >> big
+expect root@relay:~# $
 send cat big > t
+expect root@relay:~# $
 send cat t >> big
+expect root@relay:~# $
 send cat big > t
+expect root@relay:~# $
 send cat t >> big
+expect root@relay:~# $
 send cat big > t
+expect root@relay:~# $
 send cat t >> big
+expect root@relay:~# $
 send cat big > t
+expect root@relay:~# $
 send cat t >> big
+expect root@relay:~# $
 send cat big > t
+expect root@relay:~# $
 send cat t >> big
+expect root@relay:~# $
 send cat big > t
+expect root@relay:~# $
 send cat t >> big
+expect root@relay:~# $
 send cat big > t
+expect root@relay:~# $
 send cat t >> big
+expect root@relay:~# $
 send cat big > t
+expect root@relay:~# $
 send cat t >> big
+expect root@relay:~# $
 send cat big > t
+expect root@relay:~# $
 send cat t >> big
+expect root@relay:~# $
 send cat big > t
+expect root@relay:~# $
 send cat t >> big
+expect root@relay:~# $
 send cat big > t
+expect root@relay:~# $
 send cat t >> big
+expect root@relay:~# $
 send cat big > t
+expect root@relay:~# $
 send cat t >> big
 expect \ncat: write error: No space left on device\n
+expect root@relay:~# $
 send df
 expect \n/dev/root\s+\d+\s+\d+\s+0 100% /\n
+expect root@relay:~# $
 send echo more > more
 expect \necho: write error: No space left on device\n
 # A program sees the write error too, through the kernel: on its
 # standard output, which the shell redirected, and on a file it opened.
+expect root@relay:~# $
 send t-files full > more
 expect \nwriting standard output: ENOSPC\n
 expect writing a file of its own: ENOSPC\nroot@relay:~# $
@@ -48,7 +80,9 @@ expect writing a file of its own: ENOSPC\nroot@relay:~# $
 send t-tee full
 expect \npop: ENOSPC\nroot@relay:~# $
 send rm t
+expect root@relay:~# $
 send echo more > more
+expect root@relay:~# $
 send cat more
 expect \nmore\n
 poweroff

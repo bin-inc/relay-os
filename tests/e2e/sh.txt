@@ -13,33 +13,44 @@ expect root@relay:~# $
 send t-spawn fill
 expect \nfilled the table with 61 children\n
 alive 1
+expect root@relay:~# $
 send t-args collected
 expect \n\[1\] collected\n
+expect root@relay:~# $
 send free
 expect-same mem \nMem:\s+\d+\s+(\d+)\s
+expect root@relay:~# $
 send /bin/sh
 expect /bin/sh\nroot@relay:~# $
 send mkdir /root/a
+expect root@relay:~# $
 send touch /root/a/x /root/a/y
+expect root@relay:~# $
 send ls /root/a
 expect \nx  y\n
 # Into a file a program writes lines, not columns, and never reads its
 # own output back.
+expect root@relay:~# $
 send ls /root/a > /root/list
+expect root@relay:~# $
 send cat /root/list
 expect \nx\ny\n
+expect root@relay:~# $
 send cat /root/list >> /root/list
 expect \ncat: /root/list: input file is output file\n
+expect root@relay:~# $
 send nosuch
 expect \nrelay-sh: nosuch: command not found\n
+expect root@relay:~# $
 send t-fault null-read
 expect \nrelay-sh: t-fault: killed \(page fault at 0x0, read, ip 0x4[0-9a-f]+\)\n
 # The command reads the console at once: it has it before it runs.
+expect root@relay:~# $
 send t-read
 alive 1
-send hello
+send-ahead hello
 expect \nhello\n\[6\] hello\\n\n
-type {ctrl-d}
+type-ahead {ctrl-d}
 expect end of input\nroot@relay:~# $
 # t-read had the console in line mode; the prompt takes it back raw:
 # what is typed is echoed once, by the shell, and Ctrl-C only cancels the
@@ -50,14 +61,18 @@ type echo no{ctrl-c}
 expect \Aecho no\^C\nroot@relay:~# $
 send t-spin
 alive 1
-key {ctrl-c}
+key-ahead {ctrl-c}
 expect \n\^C\nroot@relay:~# 
 # Scripts: the transcript gets what the screen gets, a script's programs'
 # output and a nested script's lines too.
 send echo 'echo one' > /root/s.sh
+expect root@relay:~# $
 send echo 'sh /root/t.sh' >> /root/s.sh
+expect root@relay:~# $
 send echo 't-args x' >> /root/s.sh
+expect root@relay:~# $
 send echo 'echo two' > /root/t.sh
+expect root@relay:~# $
 send sh /root/s.sh
 expect \n\+ echo one\none\n\+ sh /root/t.sh\n\+ echo two\ntwo\n\+ t-args x\n\[1\] x\nroot@relay:~# $
 send cat /root/s.log
@@ -68,7 +83,9 @@ expect \n\+ echo two\ntwo\nroot@relay:~# $
 # own: it keeps the console all the same, its commands in that group, and
 # the script goes on after its `exit`.
 send echo sh > /root/i.sh
+expect root@relay:~# $
 send echo 'echo after' >> /root/i.sh
+expect root@relay:~# $
 send sh /root/i.sh
 expect \+ sh\nroot@relay:~# $
 send echo inner
@@ -80,20 +97,24 @@ expect \+ echo after\nafter\nroot@relay:~# $
 # Its commands get the console in line mode, as a command at a prompt
 # does, so Ctrl-C ends one, with the shell and the script around it.
 send echo sh > /root/j.sh
+expect root@relay:~# $
 send echo 'echo never' >> /root/j.sh
+expect root@relay:~# $
 send sh /root/j.sh
 expect \+ sh\nroot@relay:~# $
 send t-spin
 alive 1
-key {ctrl-c}
+key-ahead {ctrl-c}
 expect \^C\nroot@relay:~# 
 send echo back
 expect \nback\n
 # Ctrl-C ends a script with its command.
+expect root@relay:~# $
 send echo t-spin > /root/spin.sh
+expect root@relay:~# $
 send sh /root/spin.sh
 alive 1
-key {ctrl-c}
+key-ahead {ctrl-c}
 expect \+ t-spin\n(pid \d+ \(/bin/(t-spin|sh)\): killed: Ctrl-C\n){2}\^C\nroot@relay:~# 
 # Orphans that end while init waits for its shell are collected as they
 # end (a Ctrl-C'd script leaves its command's zombie to process 1 too):
@@ -101,6 +122,7 @@ expect \+ t-spin\n(pid \d+ \(/bin/(t-spin|sh)\): killed: Ctrl-C\n){2}\^C\nroot@r
 send t-spawn fill
 expect \nfilled the table with 60 children\n
 alive 1
+expect root@relay:~# $
 send t-spawn fill
 expect \nfilled the table with 60 children\n
 alive 1
@@ -108,6 +130,7 @@ alive 1
 # before its first prompt, and its job is done (milestone 3). It may end
 # before this shell's next prompt, which then says so first: the screen
 # shows one prompt and one Done line, and `jobs` that it was reported.
+expect root@relay:~# $
 send sh &
 expect \n\[1\] \d+\n
 alive 1
@@ -125,16 +148,18 @@ send sh /root/k.sh &
 expect \n\[1\] \d+\n
 alive 1
 expect \A(root@relay:~# \+ sh\n|\+ sh\n(\[1\]\+  Done {20}sh /root/k\.sh\n)?root@relay:~# )$
-send echo next
+send-ahead echo next
 expect \Aecho next\nnext\n(\[1\]\+  Done {20}sh /root/k\.sh\n)?root@relay:\S+# $
 send jobs
 expect \Ajobs\nroot@relay:\S+# $
 send rm -r /root/a /root/list /root/s.sh /root/s.log /root/t.sh /root/t.log /root/spin.sh /root/spin.log /root/i.sh /root/i.log /root/j.sh /root/j.log /root/k.sh /root/k.log
+expect root@relay:\S+# $
 send cd /tmp
 expect root@relay:/tmp# $
 send exit 3
 expect exit 3\nroot@relay:~# $
 send pwd
 expect \n/root\n
+expect root@relay:~# $
 send free
 expect-same mem \nMem:\s+\d+\s+(\d+)\s

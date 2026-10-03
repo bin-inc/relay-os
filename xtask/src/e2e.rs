@@ -25,6 +25,21 @@
 //! key <text>                       (types <text> + Enter on the USB keyboard,
 //!                                   QMP send-key; {up}, {ctrl-c}: see keys.rs)
 //! type <text>                      (as key, without the Enter)
+//! send-ahead <text>                (as send, while something runs on purpose:
+//!                                   input for a program, a line typed ahead;
+//!                                   send-crlf-ahead, key-ahead and type-ahead
+//!                                   likewise)
+//! ```
+//!
+//! Every `send`, `send-crlf`, `key` and `type` waits for the prompt: since
+//! the input before it (or the start, a reboot or a reset), an expect must
+//! have ended at one (`root@relay:~# `, `root@relay:~# $` or `> $`), or the
+//! scenario is refused. A line sent while a command runs is echoed twice,
+//! by the line discipline and by the shell's editor, and lands inside the
+//! output an expect waits for (programmable shell gate §15 item 3); input
+//! sent while something runs on purpose is marked `-ahead`.
+//!
+//! ```text
 //! screenshot-nonblank              (QMP screendump; top rows not one colour)
 //! alive 12                         (fails if QEMU exits within 12 seconds)
 //! screenshot-pixel 2540 20 #000000 (QMP screendump; that pixel has that colour)
@@ -186,6 +201,8 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
     let mut break_root = false;
     let mut esp_edits = Vec::new();
     let mut steps = Vec::new();
+    // An expect of the prompt has come since the last input.
+    let mut paced = false;
     for (i, raw) in text.lines().enumerate() {
         let line_no = i + 1;
         let line = raw.trim();
@@ -194,6 +211,27 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
         }
         let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
         let rest = rest.trim();
+        let input = matches!(word, "send" | "send-crlf" | "key" | "type");
+        if input && !paced {
+            bail!(
+                "{name}:{line_no}: {word} does not wait for the prompt: an expect that \
+                 ends at it must come first, or it is {word}-ahead (sent while \
+                 something runs)"
+            );
+        }
+        if word.ends_with("-ahead") && paced {
+            bail!(
+                "{name}:{line_no}: {word} after an expect of the prompt: it waits for \
+                 nothing, so it is {}",
+                word.trim_end_matches("-ahead")
+            );
+        }
+        if input || word.ends_with("-ahead") || matches!(word, "reboot" | "reset" | "reset-key") {
+            paced = false;
+        }
+        if matches!(word, "expect" | "expect-same") && ends_at_prompt(rest) {
+            paced = true;
+        }
         let step = match word {
             "cmdline" => {
                 if !steps.is_empty() {
@@ -254,13 +292,13 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
             "expect-same" => {
                 parse_expect_same(rest).with_context(|| format!("{name}:{line_no}"))?
             }
-            "send" => Step::Send(rest.to_string()),
-            "send-crlf" => Step::SendCrLf(rest.to_string()),
-            "key" => {
+            "send" | "send-ahead" => Step::Send(rest.to_string()),
+            "send-crlf" | "send-crlf-ahead" => Step::SendCrLf(rest.to_string()),
+            "key" | "key-ahead" => {
                 keys::presses(rest).with_context(|| format!("{name}:{line_no}"))?;
                 Step::Key(rest.to_string())
             }
-            "type" => {
+            "type" | "type-ahead" => {
                 keys::typed(rest).with_context(|| format!("{name}:{line_no}"))?;
                 Step::Type(rest.to_string())
             }
@@ -293,6 +331,15 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
         esp_edits,
         steps,
     })
+}
+
+/// Whether an expect's pattern ends at a prompt: the shell's
+/// (`root@relay:~# `, its blank trimmed with the line's, or `# $`) or the
+/// `> ` of a command that goes on (`> $`).
+fn ends_at_prompt(pattern: &str) -> bool {
+    static PROMPT: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"root@relay:\S*#( \$)?$|> \$$").unwrap());
+    PROMPT.is_match(pattern)
 }
 
 fn parse_file_lines(rest: &str) -> Result<Step> {
@@ -978,7 +1025,7 @@ mod tests {
     fn parses_steps_and_cmdline() {
         let s = parse_scenario(
             "x",
-            "# hi\ncmdline test=1 panic=ud\n\ntimeout 5\nexpect \\[ ok \\] cpu\nsend ls -l\nscreenshot-nonblank\n",
+            "# hi\ncmdline test=1 panic=ud\n\ntimeout 5\nexpect \\[ ok \\] cpu\nsend-ahead ls -l\nscreenshot-nonblank\n",
         )
         .unwrap();
         assert_eq!(s.cmdline, "test=1 panic=ud");
@@ -991,6 +1038,87 @@ mod tests {
                 (7, Step::ScreenshotNonblank),
             ]
         );
+    }
+
+    #[test]
+    fn input_waits_for_a_prompt_unless_typed_ahead() {
+        let at_prompt = |text: &str| {
+            parse_scenario("x", text)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        };
+        let prompt = "expect root@relay:~# $\n";
+        for ok in [
+            "expect root@relay:~# $\nsend a\n",
+            "expect \\na\\nroot@relay:~# $\nsend a\n",
+            "expect root@relay:/tmp# $\nkey a\n",
+            "expect \\^C\\nroot@relay:~# \ntype a\n",
+            "expect root@relay:\\S+# $\nsend-crlf a\n",
+            "expect \\n> $\nsend a\n",
+            "expect-same m (\\d+)\\nroot@relay:~# $\nsend a\n",
+            // An expect of the prompt, then others, before the input.
+            "expect root@relay:~# $\nexpect x\nalive 1\nsend a\n",
+            "send-ahead a\nkey-ahead b\ntype-ahead c\nsend-crlf-ahead d\n",
+        ] {
+            assert_eq!(at_prompt(ok), Ok(()), "{ok:?}");
+        }
+        for (text, line) in [
+            ("send a\n", 1),
+            ("expect x\nsend a\n", 2),
+            ("expect root@relay:~# $\nsend a\nsend b\n", 3),
+            ("expect root@relay:~# $\nsend a\nexpect \\na\\n\nkey b\n", 4),
+            ("expect root@relay:~# $\nsend a\nsend-ahead b\ntype c\n", 4),
+            ("expect root@relay:~# $\nreboot\nsend a\n", 3),
+            ("expect root@relay:~# $\nreset\nsend a\n", 3),
+            ("expect root@relay:~# $\nreset-key\nsend a\n", 3),
+            // A prompt with something after it is not the end of the text.
+            ("expect root@relay:~# x\nsend a\n", 2),
+            ("expect > x\nsend a\n", 2),
+            ("expect a> \nsend a\n", 2),
+        ] {
+            let e = at_prompt(text).unwrap_err();
+            assert!(e.starts_with(&format!("x:{line}: ")), "{text:?}: {e}");
+            assert!(e.contains("wait for the prompt"), "{e}");
+        }
+        assert!(at_prompt(&format!("{prompt}send a")).is_ok());
+        // Marked typed ahead right after the prompt, an input waits for
+        // nothing (the review).
+        for (text, word) in [
+            ("expect root@relay:~# $\nsend-ahead a\n", "send-ahead"),
+            ("expect x\nexpect \\n> $\nkey-ahead a\n", "key-ahead"),
+        ] {
+            let e = at_prompt(text).unwrap_err();
+            assert!(
+                e.contains(&format!("{word} after an expect of the prompt")),
+                "{e}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_scenario_waits_for_its_prompts() {
+        assert!(load_scenarios(None).unwrap().len() >= 49);
+    }
+
+    #[test]
+    fn input_typed_ahead_is_sent_as_other_input_is() {
+        let s = parse_scenario(
+            "x",
+            "send-ahead a b\nkey-ahead {ctrl-c}\ntype-ahead q\nsend-crlf-ahead c\n",
+        )
+        .unwrap();
+        assert_eq!(
+            s.steps,
+            vec![
+                (1, Step::Send("a b".into())),
+                (2, Step::Key("{ctrl-c}".into())),
+                (3, Step::Type("q".into())),
+                (4, Step::SendCrLf("c".into())),
+            ]
+        );
+        // A key name is checked as for `key` and `type`.
+        assert!(parse_scenario("x", "key-ahead {nope}").is_err());
+        assert!(parse_scenario("x", "type-ahead {nope}").is_err());
     }
 
     #[test]
@@ -1080,21 +1208,23 @@ mod tests {
 
     #[test]
     fn parses_the_unplug_step() {
-        let s = parse_scenario("x", "unplug\nsend ls").unwrap();
+        let s = parse_scenario("x", "unplug\nsend-ahead ls").unwrap();
         assert_eq!(s.steps[0], (1, Step::Unplug));
         assert!(parse_scenario("x", "unplug now").is_err());
     }
 
     #[test]
     fn parses_key_steps() {
-        let s = parse_scenario("x", "key echo {up}").unwrap();
+        let s = parse_scenario("x", "key-ahead echo {up}").unwrap();
         assert_eq!(s.steps, vec![(1, Step::Key("echo {up}".into()))]);
-        assert!(parse_scenario("x", "key {bogus}").is_err());
-        let s = parse_scenario("x", "send-crlf ls").unwrap();
+        let bad =
+            |t: &str| parse_scenario("x", &format!("expect root@relay:~# $\n{t}")).unwrap_err();
+        assert!(format!("{:#}", bad("key {bogus}")).contains("bogus"));
+        let s = parse_scenario("x", "send-crlf-ahead ls").unwrap();
         assert_eq!(s.steps, vec![(1, Step::SendCrLf("ls".into()))]);
-        let s = parse_scenario("x", "type {ctrl-d}").unwrap();
+        let s = parse_scenario("x", "type-ahead {ctrl-d}").unwrap();
         assert_eq!(s.steps, vec![(1, Step::Type("{ctrl-d}".into()))]);
-        assert!(parse_scenario("x", "type {bogus}").is_err());
+        assert!(format!("{:#}", bad("type {bogus}")).contains("bogus"));
     }
 
     #[test]

@@ -7,48 +7,71 @@ timeout 30
 expect root@relay:~# $
 send t-args warm-up
 expect \n\[1\] warm-up\n
+expect root@relay:~# $
 send free
 expect-same mem \nMem:\s+\d+\s+(\d+)\s
+expect root@relay:~# $
 send t-fault null-read
 expect \nrelay-sh: t-fault: killed \(page fault at 0x0, read, ip 0x4[0-9a-f]+\)\n
+expect root@relay:~# $
 send t-fault null-write
 expect \nrelay-sh: t-fault: killed \(page fault at 0x0, write, ip 0x4[0-9a-f]+\)\n
+expect root@relay:~# $
 send t-fault write-code
 expect \nrelay-sh: t-fault: killed \(page fault at 0x4[0-9a-f]+, write, ip 0x4[0-9a-f]+\)\n
+expect root@relay:~# $
 send t-fault exec-data
 expect \nrelay-sh: t-fault: killed \(page fault at 0x4[0-9a-f]+, execute, ip 0x4[0-9a-f]+\)\n
+expect root@relay:~# $
 send t-fault ud
 expect \nrelay-sh: t-fault: killed \(invalid opcode, ip 0x4[0-9a-f]+\)\n
+expect root@relay:~# $
 send t-fault div0
 expect \nrelay-sh: t-fault: killed \(divide error, ip 0x4[0-9a-f]+\)\n
+expect root@relay:~# $
 send t-fault sse
 expect \nrelay-sh: t-fault: killed \(FPU/SSE instruction, ip 0x4[0-9a-f]+\)\n
+expect root@relay:~# $
 send t-fault gsbase
 expect \nrelay-sh: t-fault: killed \(invalid opcode, ip 0x4[0-9a-f]+\)\n
+expect root@relay:~# $
 send t-fault stack
 expect \nrelay-sh: t-fault: killed \(stack overflow at 0x7fffffeff[0-9a-f]{3}, ip 0x4[0-9a-f]+\)\n
+expect root@relay:~# $
 send t-fault kernel-read
 expect \nrelay-sh: t-fault: killed \(page fault at 0xffff800000000000, read, ip 0x4[0-9a-f]+\)\n
+expect root@relay:~# $
 send t-fault flags-exit
+expect root@relay:~# $
 send t-args after-flags
 expect \n\[1\] after-flags\n
+expect root@relay:~# $
 send t-fault flags-ud
 expect \nrelay-sh: t-fault: killed \(invalid opcode, ip 0x4[0-9a-f]+\)\n
+expect root@relay:~# $
 send t-args after-a-fault
 expect \n\[1\] after-a-fault\n
+expect root@relay:~# $
 send t-fault flags-tf
 expect \nrelay-sh: t-fault: killed \(CPU exception 1, ip 0x4[0-9a-f]+\)\n
+expect root@relay:~# $
 send t-args after-the-trap-flag
 expect \n\[1\] after-the-trap-flag\n
+expect root@relay:~# $
 send t-fault flags-ac
 expect \nrelay-sh: t-fault: killed \(invalid opcode, ip 0x4[0-9a-f]+\)\n
+expect root@relay:~# $
 send t-args after-ticks-with-ac
 expect \n\[1\] after-ticks-with-ac\n
+expect root@relay:~# $
 send t-fault
 expect \nusage: t-fault null-read\|
+expect root@relay:~# $
 send dmesg
 expect \npid \d+ \(/bin/t-fault\): killed: page fault at 0x0, read, ip 0x4[0-9a-f]+\n
+expect root@relay:~# $
 send t-args still here
 expect \n\[1\] still\n\[2\] here\n
+expect root@relay:~# $
 send free
 expect-same mem \nMem:\s+\d+\s+(\d+)\s
