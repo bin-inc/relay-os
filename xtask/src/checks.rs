@@ -545,7 +545,8 @@ free
     /// last NUC run of checks 3, 4 and 5 (`docs/hardware-test.md`'s results
     /// log), copied off the stick unchanged but for check 4's `ls /bin`,
     /// which has `[` and `test` by hand until the next NUC run (spec §15
-    /// item 3). A `#nuc>` line must
+    /// item 3), and check 6's, a copy of QEMU's until its first NUC run
+    /// (spec §15 item 4). A `#nuc>` line must
     /// not need a line of its own next to the `#>` line for the same
     /// output, which QEMU alone cannot show.
     #[test]
@@ -574,6 +575,12 @@ free
                 include_str!("../../rootfs/root/checks/check5.sh"),
                 include_str!("../fixtures/checks/check5.qemu.log"),
                 include_str!("../fixtures/checks/check5.nuc.log"),
+            ),
+            (
+                "check6.sh",
+                include_str!("../../rootfs/root/checks/check6.sh"),
+                include_str!("../fixtures/checks/check6.qemu.log"),
+                include_str!("../fixtures/checks/check6.nuc.log"),
             ),
         ];
         // Every check script on the stick has its two transcripts here.
