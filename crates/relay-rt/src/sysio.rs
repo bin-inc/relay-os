@@ -10,7 +10,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use relay_abi::console::{MODE_LINE, MODE_RAW};
 use relay_abi::file::{
-    KIND_CHAR_DEVICE, OPEN_APPEND, OPEN_CREATE, OPEN_READ, OPEN_TRUNCATE, OPEN_WRITE,
+    KIND_CHAR_DEVICE, KIND_REGULAR, OPEN_APPEND, OPEN_CREATE, OPEN_READ, OPEN_TRUNCATE, OPEN_WRITE,
+    SEEK_CURRENT,
 };
 use relay_abi::info::LOG_MAX;
 use relay_abi::power::{POWER_FORCE, POWER_POWEROFF, POWER_REBOOT};
@@ -178,6 +179,14 @@ impl Stdin for SysStdin {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
         sys::read(0, buf).map_err(Errno::from_number)
     }
+
+    fn file(&mut self) -> Option<(Node, u64, u64)> {
+        let st = sys::fstat(0)
+            .ok()
+            .filter(|st| st.kind == u32::from(KIND_REGULAR))?;
+        let at = sys::seek(0, 0, SEEK_CURRENT).ok()?;
+        Some((node_of(&st), at, st.size))
+    }
 }
 
 /// Standard output: fd 1, the console or the file the shell opened.
@@ -211,7 +220,7 @@ impl Stdout for SysStdout {
     fn node(&self) -> Option<Node> {
         sys::fstat(1)
             .ok()
-            .filter(|st| st.dev != 0)
+            .filter(|st| st.kind == u32::from(KIND_REGULAR))
             .map(|st| node_of(&st))
     }
 }

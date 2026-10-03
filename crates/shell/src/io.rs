@@ -75,6 +75,13 @@ pub trait System {
 pub trait Stdin {
     /// Reads some bytes into `buf`: how many, 0 at the end of the input.
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno>;
+    /// The regular file it is, as the `Vfs` names files, where it has been
+    /// read up to and its size (`cat < f >> f` must not read its own
+    /// output); none for a pipe, the console or bytes in memory (the
+    /// default).
+    fn file(&mut self) -> Option<(Node, u64, u64)> {
+        None
+    }
 }
 
 /// Standard input that is bytes in memory: what a test gives a command, or

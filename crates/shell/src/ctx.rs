@@ -199,6 +199,16 @@ impl<'a> Ctx<'a> {
         self.input_file = Some((node, 0));
     }
 
+    /// The regular file standard input is, where it has been read up to and
+    /// its size, if it is one.
+    pub fn input_file(&mut self) -> Option<(Node, u64, u64)> {
+        if let Some((node, offset)) = self.input_file {
+            let size = self.vfs.stat(node).ok()?.size;
+            return Some((node, offset, size));
+        }
+        self.input.as_mut()?.file()
+    }
+
     /// Reads standard input into `buf`: how many bytes, 0 at its end. What
     /// waits for standard output is written first, so that what came of
     /// the last read reaches a pipe before the next one waits (a line typed

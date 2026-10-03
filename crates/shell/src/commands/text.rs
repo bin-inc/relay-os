@@ -64,8 +64,10 @@ pub fn cat(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
                 continue;
             }
         };
-        // `cat f >> f` would read its own output forever.
-        if ctx.output_node() == Some(node) {
+        // `cat f >> f` would read its own output forever: GNU's check, the
+        // output the same regular file and something left to read in it
+        // (`cat f > f` has emptied `f` and reads nothing).
+        if ctx.output_node() == Some(node) && ctx.vfs.stat(node).is_ok_and(|st| st.size > 0) {
             status = ctx.fail("cat", format_args!("{name}: input file is output file"));
             continue;
         }
@@ -80,8 +82,15 @@ pub fn cat(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
 }
 
 /// `cat` of standard input, to its end, Ctrl-C or a write error (which the
-/// shell reports).
+/// shell reports). A file that is the output, with bytes left to read, is
+/// refused, as for an operand (`cat < f >> f`).
 fn cat_input(ctx: &mut Ctx<'_>) -> i32 {
+    if let Some((node, at, size)) = ctx.input_file()
+        && ctx.output_node() == Some(node)
+        && at < size
+    {
+        return ctx.fail("cat", format_args!("-: input file is output file"));
+    }
     let mut buf = vec![0; CHUNK];
     while !ctx.interrupted() && !ctx.out_failed() {
         match ctx.read_input(&mut buf) {
@@ -648,6 +657,27 @@ mod tests {
             (1, "cat: /tmp/a: input file is output file\n".into())
         );
         assert_eq!(h.get("/tmp/a"), b"one\n");
+        // GNU's condition, standard input too (the prototype's review,
+        // I-1; GNU 9.4, tmp/m5p1/probes/p15.txt): the same regular file,
+        // with something left to read; `>` has emptied it.
+        assert_eq!(
+            h.run("cat < /tmp/a >> /tmp/a"),
+            (1, "cat: -: input file is output file\n".into())
+        );
+        assert_eq!(h.get("/tmp/a"), b"one\n");
+        assert_eq!(
+            h.run("cat - /tmp/a < /tmp/a >> /tmp/a"),
+            (
+                1,
+                "cat: -: input file is output file\ncat: /tmp/a: input file is output file\n"
+                    .into()
+            )
+        );
+        assert_eq!(h.run("cat < /tmp/a > /tmp/a"), (0, String::new()));
+        assert_eq!(h.get("/tmp/a"), b"");
+        h.put("/tmp/a", b"one\n");
+        assert_eq!(h.run("cat /tmp/a > /tmp/a"), (0, String::new()));
+        assert_eq!(h.get("/tmp/a"), b"");
     }
 
     #[test]

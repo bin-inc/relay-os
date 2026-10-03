@@ -110,11 +110,13 @@ fn search(
     // `-` is standard input, as no file is.
     let file = file.filter(|f| *f != "-");
     let name = file.map_or("(standard input)", String::as_str);
+    // It would read what it wrote, for ever (`grep x f >> f`): GNU refuses
+    // a file that is the output, whatever is left in it, unless it writes
+    // no lines (`-q`, `-c`).
+    let checks = !options.quiet && !options.count;
     let mut source = match file {
         Some(path) => match open(ctx, path) {
-            // It would read what it wrote, for ever (`grep x f >> f`);
-            // `-q` writes nothing.
-            Ok(node) if ctx.output_node() == Some(node) && !options.quiet => {
+            Ok(node) if checks && ctx.output_node() == Some(node) => {
                 ctx.fail(
                     "grep",
                     format_args!("{path}: input file is also the output"),
@@ -127,7 +129,17 @@ fn search(
                 return Outcome::Failed;
             }
         },
-        None => Source::Input,
+        None => {
+            let input = ctx.input_file().map(|(node, ..)| node);
+            if checks && input.is_some() && input == ctx.output_node() {
+                ctx.fail(
+                    "grep",
+                    format_args!("(standard input): input file is also the output"),
+                );
+                return Outcome::Failed;
+            }
+            Source::Input
+        }
     };
     let mut lines = Lines {
         pattern,
@@ -435,6 +447,19 @@ mod tests {
                 "grep: /tmp/nope: No such file or directory\ngrep: /tmp/f: input file is also the output\n".into()
             )
         );
+        // Standard input too, whatever is left in it, unless no line is
+        // written (`-q`, `-c`), as GNU's (the prototype's review, I-1; GNU
+        // grep 3.11, tmp/m5p1/probes/p15.txt).
+        h.put("/tmp/s", b"1\n");
+        let said = "grep: (standard input): input file is also the output\n";
+        assert_eq!(h.run("grep 1 < /tmp/s >> /tmp/s"), (2, said.into()));
+        assert_eq!(h.get("/tmp/s"), b"1\n");
+        assert_eq!(h.run("grep 1 < /tmp/s > /tmp/s"), (2, said.into()));
+        h.put("/tmp/s", b"1\n");
+        assert_eq!(h.run("grep -c 1 < /tmp/s >> /tmp/s"), (0, String::new()));
+        assert_eq!(h.run("grep -c 1 /tmp/s >> /tmp/s"), (0, String::new()));
+        assert_eq!(h.get("/tmp/s"), b"1\n1\n2\n");
+        assert_eq!(h.run("grep -q 1 < /tmp/s >> /tmp/s"), (0, String::new()));
         // Another file into it is fine.
         h.put("/tmp/g", b"1\n");
         assert_eq!(h.run("grep 1 /tmp/g >> /tmp/f"), (0, "".into()));

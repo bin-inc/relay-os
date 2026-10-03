@@ -78,4 +78,9 @@ expect root@relay:~# $
 send ls /
 expect \nbin  dev  etc  home  lost\+found  root  tmp  usr  var\n
 expect root@relay:~# $
+# A program whose input is its output refuses it, as GNU's does, rather
+# than read what it writes until the disk is full.
+send echo abc > io; cat < io >> io; echo "status $?"; grep a < io >> io; echo "status $?"; wc -c io
+expect \ncat: -: input file is output file\nstatus 1\ngrep: \(standard input\): input file is also the output\nstatus 2\n4 io\n
+expect root@relay:~# $
 poweroff

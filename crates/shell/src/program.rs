@@ -41,7 +41,7 @@ pub fn run_command(name: &str, run: Run, args: &[String], io: CommandIo<'_>) -> 
 mod tests {
     use crate::testing::{FakeStdout, Harness};
     use alloc::string::String;
-    use vfs::{Errno, Vfs};
+    use vfs::{Errno, Node, Vfs};
 
     #[test]
     fn output_goes_to_stdout_and_errors_to_the_console() {
@@ -103,6 +103,28 @@ mod tests {
             h.program("cat /tmp/f", &mut out),
             (1, "cat: /tmp/f: input file is output file\n".into())
         );
+        // Its fd 0 that file too, read up to some point (`cat < f >> f`
+        // under `/bin/sh`).
+        struct File(Node, u64);
+        impl crate::Stdin for File {
+            fn read(&mut self, _: &mut [u8]) -> Result<usize, Errno> {
+                unreachable!("refused before it reads")
+            }
+            fn file(&mut self) -> Option<(Node, u64, u64)> {
+                Some((self.0, self.1, 2))
+            }
+        }
+        let cat = crate::commands::find("cat").unwrap().run;
+        let mut out = FakeStdout::file(Some(node));
+        let io = crate::CommandIo {
+            vfs: &mut h.vfs,
+            console: &mut h.console,
+            system: &mut h.system,
+            stdin: &mut File(node, 1),
+            stdout: &mut out,
+        };
+        assert_eq!(crate::run_command("cat", cat, &[], io), 1);
+        assert_eq!(h.console.take(), "cat: -: input file is output file\n");
     }
 
     #[test]
