@@ -6,12 +6,13 @@
 //! does, but never fails, and takes a line a byte at a time, so that a line
 //! too long to keep, or not text, still counts whole. It runs after a
 //! refusal, so it reads what the parser refuses as bash reads it: `$(…)`
-//! and backquotes whole, a command name's place after `time`, `{` and `}`,
-//! `select` and `case` opening constructs, a `case` pattern before `)`,
-//! groups (`{ … }`, a function's body too, `function f {` among them)
-//! and subshells (`( … )`), each `(` paired with its `)`,
-//! arithmetic (`((…))`) whole, and a here-document's body, data up to its
-//! delimiter's line.
+//! and backquotes whole, in double quotes too, where quotes inside `$(…)`
+//! and `${…}` start afresh, a command name's place after `time`, `{` and
+//! `}`, `select` and `case` opening constructs, a `case` pattern before
+//! `)`, groups (`{ … }`, a function's body too, `function f {` among them)
+//! and subshells (`( … )`), each `(` paired with its `)`, arithmetic
+//! (`((…))`) whole, and a here-document's body, data up to its delimiter's
+//! line.
 
 /// Where a `for` is, while its name and words are read.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -127,6 +128,10 @@ pub(crate) struct Scan {
     /// Which of the open levels are `${` (a bit each, the first
     /// [`LEVELS_KEPT`]), the others `$(` or `(`.
     braces: u64,
+    /// Which of them were opened inside double quotes, which go on after
+    /// them; and whether the byte before, in double quotes, was a `$`.
+    quoted_levels: u64,
+    dollar: bool,
     /// A word inside a `$(…)`: its first bytes, how many it has, whether
     /// it stands where a command name would, and how many `case`s it has
     /// opened.
@@ -187,6 +192,8 @@ impl Scan {
             comment: false,
             nested: 0,
             braces: 0,
+            quoted_levels: 0,
+            dollar: false,
             inner: [0; 4],
             inner_len: 0,
             inner_command: true,
@@ -259,9 +266,23 @@ impl Scan {
             return;
         }
         if let Some(q) = self.quote {
+            let dollar = core::mem::take(&mut self.dollar);
             match b {
                 _ if b == q => self.quote = None,
                 b'\\' if q != b'\'' => self.escaped = true,
+                b'$' if q == b'"' => self.dollar = true,
+                // In double quotes `$(` and `${` open a level in which
+                // quotes start afresh, as bash reads `"$(echo ")")"`; the
+                // double quotes go on after it.
+                b'(' | b'{' if dollar => {
+                    self.quote = None;
+                    if self.nested < LEVELS_KEPT {
+                        self.quoted_levels |= 1u64 << self.nested;
+                    } else {
+                        self.lost = true;
+                    }
+                    self.open_level(b == b'{');
+                }
                 _ => {}
             }
             return;
@@ -592,6 +613,19 @@ impl Scan {
         self.inner_command = true;
     }
 
+    /// The innermost open level ends: the double quotes it was opened in,
+    /// if it was, go on.
+    fn close_level(&mut self) {
+        self.nested -= 1;
+        if self.nested < LEVELS_KEPT {
+            let bit = 1u64 << self.nested;
+            if self.quoted_levels & bit != 0 {
+                self.quoted_levels &= !bit;
+                self.quote = Some(b'"');
+            }
+        }
+    }
+
     /// Whether the innermost open level is a `${`.
     fn in_braces(&self) -> bool {
         self.nested <= LEVELS_KEPT && self.braces >> (self.nested - 1) & 1 == 1
@@ -612,7 +646,7 @@ impl Scan {
             b'{' if last == b'$' => self.open_level(true),
             b'}' if self.in_braces() => {
                 self.inner_end();
-                self.nested -= 1;
+                self.close_level();
             }
             _ if self.in_braces() => {}
             b'(' => self.open_level(false),
@@ -622,7 +656,7 @@ impl Scan {
                     // A pattern's: the commands of its branch follow.
                     self.inner_command = true;
                 } else {
-                    self.nested -= 1;
+                    self.close_level();
                 }
                 if self.arithmetic {
                     self.arithmetic_check = self.nested == 1;
@@ -810,6 +844,27 @@ mod tests {
         assert_eq!(after(&["echo ${x;if}; if c"]), (1, false));
         assert_eq!(after(&["echo ${a:-${b}; if x}; if c"]), (1, false));
         assert_eq!(after(&["echo ${a:-\\}; if x}; if c"]), (1, false));
+        // In double quotes `$(` and `${` start quotes afresh, as bash reads
+        // `"$(echo ")")"` (tmp/m5p1/probes/p13.txt); the double quotes go
+        // on after them (milestone 4's deferred gap).
+        assert_eq!(after(&["echo \"$(echo \")\")\"; if c"]), (1, false));
+        assert_eq!(after(&["echo \"${x:-\"}\"}\"; if c"]), (1, false));
+        assert_eq!(
+            after(&["echo \"$(echo \"$(echo \")\")\")\" if c"]),
+            (0, false)
+        );
+        assert_eq!(after(&["echo \"$(( 1 + (2) ))\"; if c"]), (1, false));
+        assert_eq!(after(&["echo \"$(a)if\" ; if c"]), (1, false));
+        assert_eq!(after(&["echo \"$x(\" ; if c"]), (1, false));
+        // Too deep to remember the quotes: the rest is dropped.
+        let mut s = Scan::new();
+        s.line(alloc::format!("echo \"{}", "$(\"".repeat(LEVELS_KEPT + 1)).as_bytes());
+        assert!(s.lost);
+        assert_eq!(after(&["echo \"\\$(\" ; if c"]), (1, false));
+        assert_eq!(
+            after(&["if a; then", "echo \"$(echo \"", "fi", "\")\""]),
+            (1, false)
+        );
     }
 
     #[test]

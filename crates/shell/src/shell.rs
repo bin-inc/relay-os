@@ -1366,6 +1366,15 @@ mod tests {
     }
 
     #[test]
+    fn a_quote_in_a_substitution_in_double_quotes_ends_no_drop() {
+        // Milestone 4's deferred gap: the scan took the `"` inside `$(…)`
+        // for the end of the outer quotes, so the `fi` in the string ended
+        // the drop and the line after it ran.
+        let text = b"if true; then\nt-args 3> x\necho \"$(echo \"\nfi\nt-args body\n\")\"\nfi\nt-args next\n";
+        assert_eq!(piped(text), ["next"]);
+    }
+
+    #[test]
     fn a_here_document_s_body_does_not_run() {
         // The prototype's review: `cat > x <<EOF`, refused, then ran each
         // line of its body as a command.
