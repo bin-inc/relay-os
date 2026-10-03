@@ -195,6 +195,9 @@ pub struct Scenario {
     pub steps: Vec<(usize, Step)>,
 }
 
+/// The steps that send input typed ahead, while something runs.
+const AHEAD: [&str; 4] = ["send-ahead", "send-crlf-ahead", "key-ahead", "type-ahead"];
+
 pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
     let mut cmdline = DEFAULT_CMDLINE.to_string();
     let mut small_disk = false;
@@ -212,6 +215,7 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
         let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
         let rest = rest.trim();
         let input = matches!(word, "send" | "send-crlf" | "key" | "type");
+        let ahead = AHEAD.contains(&word);
         if input && !paced {
             bail!(
                 "{name}:{line_no}: {word} does not wait for the prompt: an expect that \
@@ -219,14 +223,14 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
                  something runs)"
             );
         }
-        if word.ends_with("-ahead") && paced {
+        if ahead && paced {
             bail!(
                 "{name}:{line_no}: {word} after an expect of the prompt: it waits for \
                  nothing, so it is {}",
                 word.trim_end_matches("-ahead")
             );
         }
-        if input || word.ends_with("-ahead") || matches!(word, "reboot" | "reset" | "reset-key") {
+        if input || matches!(word, "reboot" | "reset" | "reset-key") {
             paced = false;
         }
         if matches!(word, "expect" | "expect-same") && ends_at_prompt(rest) {
@@ -1092,6 +1096,19 @@ mod tests {
                 e.contains(&format!("{word} after an expect of the prompt")),
                 "{e}"
             );
+        }
+        for word in ["send-ahead", "send-crlf-ahead", "key-ahead", "type-ahead"] {
+            let e = at_prompt(&format!("{prompt}{word} a\n")).unwrap_err();
+            assert!(
+                e.contains(&format!("{word} after an expect of the prompt")),
+                "{e}"
+            );
+        }
+        // Only the four marks are marks: a misspelt one is an unknown step,
+        // wherever it stands (plan 3's final review).
+        for text in ["expect root@relay:~# $\nsned-ahead a\n", "sned-ahead a\n"] {
+            let e = at_prompt(text).unwrap_err();
+            assert!(e.ends_with("unknown step 'sned-ahead'"), "{e}");
         }
     }
 
