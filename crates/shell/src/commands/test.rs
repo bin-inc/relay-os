@@ -589,7 +589,10 @@ fn quote(arg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::named;
-    use crate::testing::{Harness, TestFile, host_files, host_tool, like_host_files, memfs};
+    use crate::testing::{
+        Harness, TestFile, host_files, host_files_read_only, host_tool, like_host_files,
+        like_host_files_read_only, memfs,
+    };
     use alloc::boxed::Box;
     use alloc::string::String;
     use alloc::vec::Vec;
@@ -1165,6 +1168,30 @@ mod tests {
             ("test -w /nope", 1),
         ] {
             assert_eq!(h.run(line), (status, String::new()), "{line}");
+        }
+    }
+
+    #[test]
+    fn on_a_read_only_filesystem_as_gnu_s_test() {
+        // GNU's test as root on a directory bound read-only (unshare -rm),
+        // against a read-only filesystem mounted at /w (spec §15 item 6):
+        // a FIFO or a socket stays writable.
+        let files = [
+            TestFile::file("f", b"x"),
+            TestFile::dir("d"),
+            TestFile::link("l", "f"),
+            TestFile::fifo("p"),
+            TestFile::socket("s"),
+        ];
+        for op in ["-w", "-r", "-e"] {
+            for name in ["f", "d", "l", "p", "s", ".", "nope"] {
+                let line = ["test", op, name];
+                assert_eq!(
+                    like_host_files_read_only(&line, &files),
+                    host_files_read_only(&line, &files),
+                    "{line:?}"
+                );
+            }
         }
     }
 
