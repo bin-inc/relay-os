@@ -522,13 +522,14 @@ mod tests {
 
     #[test]
     fn a_script_s_input_may_be_a_file() {
-        // Its commands read it (programmable shell gate §15 item 5).
+        // Its commands read it, one after the other (programmable shell
+        // gate §15 item 5).
         let mut h = Harness::new();
-        h.put("/tmp/s.sh", b"cat\n");
+        h.put("/tmp/s.sh", b"head -n 1\ncat\n");
         h.put("/tmp/in", b"one\ntwo\n");
         assert_eq!(
             h.run("sh /tmp/s.sh < /tmp/in"),
-            (0, "+ cat\none\ntwo\n".into())
+            (0, "+ head -n 1\none\n+ cat\ntwo\n".into())
         );
     }
 

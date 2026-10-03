@@ -38,22 +38,23 @@
 //! bash's syntax errors name a `|` with no command before it or none after.
 //! A line is a [`List`] (programmable shell gate §4.1): an unquoted `;`
 //! ends one of its items, and an unquoted `&` ends one that runs in the
-//! background (user-space gate §9.2), the line going on after either;
-//! `&&` and `||` join pipelines into an and-or list. bash's syntax errors
-//! name any of them with no command before it, and an and-or list ending
-//! with `&` is refused. An unquoted `!` word at a pipeline's start negates
-//! its status. A newline ends an item as `;` does, but after `|`, `&&` or
-//! `||` the command goes on to the next line; text that ends there is
-//! [`ParseError::Incomplete`], and a reader asks for more. `if … then …
-//! [elif … then …] [else …] fi`, `while … do … done`, `until … do … done`
-//! and `for NAME [in WORD…] do … done` are compound commands, their words
-//! keywords only unquoted, whole and where a command name would stand (and
-//! `in` and `do` where a `for` takes them; after `fi` or `done`, only a
-//! keyword or an operator may follow); one cannot stand in a pipeline of
-//! several, before `&` or with a redirection. A `for`'s header takes no
-//! operator but the `;` or newline that ends its words. bash's other
-//! reserved words (`case`, `{`, …) are refused where a command name would
-//! stand.
+//! background (user-space gate §9.2), the line going on after either; `&&`
+//! and `||` join pipelines into an and-or list. bash's syntax errors name
+//! any of them with no command before it, and an and-or list ending with
+//! `&` is refused. An unquoted `!` word at a pipeline's start negates its
+//! status. A newline ends an item as `;` does, but after `|`, `&&` or `||`
+//! the command goes on to the next line; text that ends there is
+//! [`ParseError::Incomplete`], and a reader asks for more.
+//! `if … then … [elif … then …] [else …] fi`, `while … do … done`,
+//! `until … do … done` and `for NAME [in WORD…] do … done` are compound
+//! commands, their words keywords only unquoted, whole and where a command
+//! name would stand (and `in` and `do` where a `for` takes them; after `fi`
+//! or `done`, only a keyword or an operator may follow); one cannot stand
+//! in a pipeline of several or before `&`, and redirections after its end
+//! hold for all of it (§7.4), after which only an operator may come. A
+//! `for`'s header takes no operator but the `;` or newline that ends its
+//! words. bash's other reserved words (`case`, `{`, …) are refused where a
+//! command name would stand.
 //! Every other shell feature is refused: an unquoted `*`, `?`, `` ` ``, `(`
 //! or `)` is an error naming the character, instead of being passed on as
 //! if it were plain text; so is `|&` (the errors into the pipe too).
@@ -849,14 +850,6 @@ impl Parts {
         let Some(w) = core::mem::take(word).finish(line) else {
             return Ok(None);
         };
-        // After a compound command, as in bash, only a keyword that closes
-        // or goes on with the one around it may come (`fi fi`, `fi then`).
-        if self.compound.is_some() {
-            return match w.keyword() {
-                Some(k) if k.opens().is_none() => Ok(Some(k)),
-                _ => Err(ParseError::Unexpected(w.typed)),
-            };
-        }
         match self.pending.take() {
             Some(Pending::Read) => self.redirects.push(Redirect {
                 fd: 0,
@@ -882,6 +875,16 @@ impl Parts {
                     fd,
                     op: RedirectOp::Copy(copied),
                 });
+            }
+            // After a compound command, as in bash, only a keyword that
+            // closes or goes on with the one around it may come (`fi fi`,
+            // `fi then`), and after its redirections no word at all (`fi >
+            // f fi` is bash's error, probes/p11.txt).
+            None if self.compound.is_some() => {
+                return match w.keyword() {
+                    Some(k) if k.opens().is_none() && self.redirects.is_empty() => Ok(Some(k)),
+                    _ => Err(ParseError::Unexpected(w.typed)),
+                };
             }
             // A `!` before anything of the command negates the pipeline
             // (programmable shell gate §4.1), only the first command's.
@@ -966,16 +969,16 @@ fn end_pipeline(
     pipeline: &mut Vec<Command<Word>>,
     end: &'static str,
 ) -> Result<Option<Pipeline<Word>>, ParseError> {
+    if parts.pending.is_some() {
+        return Err(ParseError::MissingTarget(end));
+    }
     if let Some(c) = parts.compound.take() {
         let p = core::mem::take(parts);
         return Ok(Some(Pipeline {
             negated: p.bangs % 2 == 1,
             run: Run::Compound(Box::new(c)),
-            redirects: Vec::new(),
+            redirects: p.redirects,
         }));
-    }
-    if parts.pending.is_some() {
-        return Err(ParseError::MissingTarget(end));
     }
     if parts.words.is_empty() {
         match (pipeline.is_empty(), parts.redirects.is_empty()) {
@@ -1178,16 +1181,6 @@ impl Parser {
                     if !append && !copy && cur.next_if_eq('|') {
                         return Err(ParseError::Unsupported(">|".into()));
                     }
-                    // Until compound commands can be redirected.
-                    if let Some(c) = &self.parts.compound {
-                        let op = match (append, copy) {
-                            (true, _) => ">>",
-                            (_, true) => ">&",
-                            _ => ">",
-                        };
-                        let end = c.end();
-                        return Err(ParseError::Unsupported(format!("{typed}{op} after {end}")));
-                    }
                     self.parts.pending = Some(if copy {
                         let typed = match typed {
                             "1" => "1>&",
@@ -1262,10 +1255,6 @@ impl Parser {
                         if cur.next_if_eq(c) {
                             return Err(ParseError::Unsupported(op.into()));
                         }
-                    }
-                    // Until compound commands can be redirected.
-                    if let Some(c) = &self.parts.compound {
-                        return Err(ParseError::Unsupported(format!("< after {}", c.end())));
                     }
                     self.parts.pending = Some(Pending::Read);
                 }
@@ -1923,7 +1912,6 @@ mod tests {
             ("for x in a; do b; done | cat", "| after done"),
             ("echo x | for x in a; do b; done", "for after |"),
             ("for x in a; do b; done &", "& after done"),
-            ("for x in a; do b; done > f", "> after done"),
         ] {
             assert_eq!(
                 parse_line(line),
@@ -2013,7 +2001,6 @@ mod tests {
             ("while a; do b; done | cat", "| after done"),
             ("echo x | while a; do b; done", "while after |"),
             ("echo x | until a; do b; done", "until after |"),
-            ("until a; do b; done > f", "> after done"),
             ("while a; do b; done &", "& after done"),
         ] {
             assert_eq!(
@@ -2206,20 +2193,70 @@ mod tests {
     }
 
     #[test]
-    fn an_if_in_a_pipeline_with_ampersand_or_redirected_is_refused() {
-        // bash runs them in a subshell, or redirects all of it (f4–f7).
+    fn an_if_in_a_pipeline_or_with_ampersand_is_refused() {
+        // bash runs them in a subshell (f4–f7).
         for (line, what) in [
             ("if true; then echo a; fi | cat", "| after fi"),
             ("echo x | if true; then cat; fi", "if after |"),
-            ("if true; then echo a; fi > f", "> after fi"),
-            ("if true; then echo a; fi >> f", ">> after fi"),
             ("if true; then echo a; fi &", "& after fi"),
             ("if true; then echo a; fi & b", "& after fi"),
             ("if a; then if b; then c; fi | d; fi", "| after fi"),
+            ("if true; then echo a; fi > f | cat", "| after fi"),
+            ("for x in a; do b; done 2>&1 &", "& after done"),
         ] {
             assert_eq!(
                 parse_line(line),
                 Err(ParseError::Unsupported(what.into())),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_compound_command_takes_redirections_after_its_end() {
+        // Programmable shell gate §7.4, bash 5.2 (tmp/m5p1/probes/p11.txt).
+        let redirects = |line: &str| -> Vec<String> {
+            let first = parse_line(line).unwrap().items.remove(0).and_or.first;
+            assert!(matches!(first.run, Run::Compound(_)), "{line}");
+            first
+                .redirects
+                .iter()
+                .map(|r| match &r.op {
+                    RedirectOp::Read(w) => format!("{}<{}", r.fd, w.typed),
+                    RedirectOp::Write(w) => format!("{}>{}", r.fd, w.typed),
+                    RedirectOp::Append(w) => format!("{}>>{}", r.fd, w.typed),
+                    RedirectOp::Copy(from) => format!("{}>&{from}", r.fd),
+                })
+                .collect()
+        };
+        assert_eq!(redirects("if true; then echo a; fi > f"), ["1>f"]);
+        assert_eq!(redirects("while a; do b; done < f 2>&1"), ["0<f", "2>&1"]);
+        assert_eq!(
+            redirects("for x in a; do b; done >> f 2> e"),
+            ["1>>f", "2>e"]
+        );
+        assert_eq!(redirects("until a; do b; done 2>e"), ["2>e"]);
+        assert!(parse_line("if a; then for x in y; do b; done > f; fi").is_ok());
+        assert!(parse_line("if a; then b; fi > f && c").is_ok());
+        // Only an operator may follow them, and they need their words.
+        for (line, token) in [
+            ("if a; then if b; then c; fi > f fi", "fi"),
+            ("if a; then b; fi > f x", "x"),
+            ("if a; then b; fi 2 > f", "2"),
+        ] {
+            assert_eq!(
+                parse_line(line),
+                Err(ParseError::Unexpected(token.into())),
+                "{line}"
+            );
+        }
+        for (line, token) in [
+            ("if a; then b; fi >", "newline"),
+            ("if a; then b; fi > ; c", ";"),
+        ] {
+            assert_eq!(
+                parse_line(line),
+                Err(ParseError::MissingTarget(token)),
                 "{line}"
             );
         }

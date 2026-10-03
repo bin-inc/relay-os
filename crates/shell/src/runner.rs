@@ -212,12 +212,13 @@ impl Runner for InProcess {
                     (None, None) => {}
                 }
                 // The first stage's `<`.
-                if let Some(node) = input_file(files, fds.0[0]) {
-                    ctx.set_input_file(node);
+                if let Some((node, offset)) = input_file(files, fds.0[0]) {
+                    ctx.set_input_file(node, offset);
                 }
                 ctx.transcript = transcript.take();
                 (command.run)(&mut ctx, args);
                 let _ = ctx.finish();
+                put_offsets(files, &fds, &ctx);
                 let cancelled = ctx.cancelled;
                 *transcript = ctx.transcript.take();
                 if cancelled {
@@ -230,7 +231,9 @@ impl Runner for InProcess {
                     Slot::PipeOut => err_pipe = message.into_bytes(),
                     Slot::File(i) => {
                         if let Handle::Node { node, offset } = files.handle(i) {
-                            crate::fds::write_file(&mut *vfs, node, offset, message.as_bytes());
+                            let message = message.as_bytes();
+                            let (at, _) = crate::fds::write_file(&mut *vfs, node, offset, message);
+                            files.set_offset(i, at);
                         }
                     }
                     _ => {
@@ -501,14 +504,24 @@ impl Spawning<'_> {
     }
 }
 
-/// The in-process runner's file `slot` reads, if it is one.
-fn input_file(files: &Files, slot: Slot) -> Option<Node> {
+/// The in-process runner's file `slot` reads, if it is one, and where.
+fn input_file(files: &Files, slot: Slot) -> Option<(Node, u64)> {
     match slot {
         Slot::File(i) => match files.handle(i) {
-            Handle::Node { node, .. } => Some(node),
+            Handle::Node { node, offset } => Some((node, offset)),
             Handle::Fd(_) => None,
         },
         Slot::Shell(_) | Slot::PipeIn | Slot::PipeOut => None,
+    }
+}
+
+/// The in-process runner's files where `ctx` left them: each fd of `fds`
+/// that is one goes on from there.
+fn put_offsets(files: &mut Files, fds: &Fds, ctx: &Ctx<'_>) {
+    for (slot, offset) in fds.0.iter().zip(ctx.offsets()) {
+        if let (Slot::File(i), Some(offset)) = (slot, offset) {
+            files.set_offset(*i, offset);
+        }
     }
 }
 
@@ -543,14 +556,15 @@ pub(crate) fn run_function<'s>(
     if let Some(input) = parts.input {
         ctx.set_input(input);
     }
-    if let Some(node) = input_file(parts.files, fds.0[0]) {
-        ctx.set_input_file(node);
+    if let Some((node, offset)) = input_file(parts.files, fds.0[0]) {
+        ctx.set_input_file(node, offset);
     }
     ctx.in_script = parts.in_script;
     ctx.status = parts.status;
     ctx.transcript = parts.transcript.take();
     let status = (command.run)(&mut ctx, args);
     let finished = ctx.finish();
+    put_offsets(parts.files, &fds, &ctx);
     let (status, message, own) = if ctx.cancelled {
         (CANCELLED, String::from("^C\n"), false)
     } else if let Err(e) = finished {

@@ -329,8 +329,12 @@ impl<'a> Shell<'a> {
         }
         let status = match &typed.run {
             parser::Run::Commands(commands) => self.run_commands(commands, background),
-            parser::Run::Compound(c) => {
+            parser::Run::Compound(c) if typed.redirects.is_empty() => {
                 self.status = self.run_compound(c);
+                self.status
+            }
+            parser::Run::Compound(c) => {
+                self.status = self.run_redirected(c, &typed.redirects);
                 self.status
             }
         };
@@ -339,6 +343,25 @@ impl<'a> Shell<'a> {
         }
         self.status = i32::from(status == 0);
         self.status
+    }
+
+    /// Runs a compound command with its redirections (programmable shell
+    /// gate §7.4), made once before it starts: every command inside starts
+    /// from the context they make, and the files are closed after its
+    /// last. One that cannot be made runs nothing of it, status 1.
+    fn run_redirected(
+        &mut self,
+        c: &parser::Compound<parser::Word>,
+        redirects: &[parser::Redirect<parser::Word>],
+    ) -> i32 {
+        let Some(fds) = self.make(self.fds, redirects) else {
+            return self.finish(1, String::new());
+        };
+        let outer = core::mem::replace(&mut self.fds, fds);
+        let status = self.run_compound(c);
+        self.fds = outer;
+        self.release(fds);
+        status
     }
 
     /// Runs a compound command (programmable shell gate §5.1).
@@ -608,9 +631,11 @@ impl<'a> Shell<'a> {
         }
         if let Some(pgid) = started.pgid {
             let number = self.jobs.add(pgid, &started.pids, text);
+            // On fd 2 of the context, as bash says it (`for …; do a &
+            // done 2> e` writes it into `e`).
             if self.prompting && !self.in_script {
                 let last = started.pids.last().copied().unwrap_or(pgid);
-                self.say(format!("[{number}] {last}\n").as_bytes());
+                self.say_on(self.fds, format!("[{number}] {last}\n").as_bytes());
             }
         }
         self.finish(started.ran.status, started.ran.message)
@@ -680,7 +705,8 @@ impl<'a> Shell<'a> {
                 }
             }
             Handle::Node { node, offset } => {
-                fds::write_file(&mut *self.vfs, node, offset, bytes);
+                let (at, _) = fds::write_file(&mut *self.vfs, node, offset, bytes);
+                self.files.set_offset(i, at);
             }
         }
     }
@@ -945,9 +971,18 @@ impl<'a> Shell<'a> {
     }
 
     /// Prints `message`, adds the line's output to a running script's
-    /// transcript, syncs, and records `status`.
+    /// transcript, syncs, and records `status`. The message is the shell's
+    /// report, on fd 2 of the context (programmable shell gate §7.5), but
+    /// for a `^C` at its end, the key's echo, which stays on the screen.
     fn finish(&mut self, status: i32, message: String) -> i32 {
-        self.say(message.as_bytes());
+        let (report, ctrl_c) = match message.strip_suffix("^C\n") {
+            Some(report) => (report, true),
+            None => (message.as_str(), false),
+        };
+        self.say_on(self.fds, report.as_bytes());
+        if ctrl_c {
+            self.say(b"^C\n");
+        }
         self.write_transcript();
         self.sync();
         self.status = status;
@@ -3220,6 +3255,142 @@ mod tests {
             (1, "relay-sh: ${1A}: bad substitution\n".into())
         );
         assert!(!h.exists("/tmp/e4"));
+    }
+
+    #[test]
+    fn a_compound_command_s_redirections_hold_for_everything_inside() {
+        // bash 5.2 (tmp/m5p1/probes/p3.txt, p4.txt, p11.txt).
+        let mut h = Harness::new();
+        h.put("/tmp/f", b"l1\nl2\nl3\n");
+        assert_eq!(
+            h.run("for x in a b; do echo $x; cd /nope; done > /tmp/fo 2> /tmp/fe"),
+            (1, String::new())
+        );
+        assert_eq!(h.get("/tmp/fo"), b"a\nb\n");
+        assert_eq!(
+            h.get("/tmp/fe"),
+            b"relay-sh: cd: /nope: No such file or directory\n\
+              relay-sh: cd: /nope: No such file or directory\n"
+        );
+        // One file, whose offset every command inside shares.
+        assert_eq!(
+            h.run("for x in 1 2; do echo s$x; cd /nope 2>&1; echo e$x; done > /tmp/mix"),
+            (0, String::new())
+        );
+        assert_eq!(
+            h.get("/tmp/mix"),
+            b"s1\nrelay-sh: cd: /nope: No such file or directory\ne1\n\
+              s2\nrelay-sh: cd: /nope: No such file or directory\ne2\n"
+        );
+        assert_eq!(
+            h.run("if cat; then echo t; fi < /tmp/f"),
+            (0, "l1\nl2\nl3\nt\n".into())
+        );
+        // Each `head` reads on where the one before stopped.
+        assert_eq!(
+            h.run("for x in 1 2; do head -n 1; done < /tmp/f"),
+            (0, "l1\nl2\n".into())
+        );
+        // A pipeline inside reads on from where the one before stopped.
+        assert_eq!(
+            h.run("for x in 1 2; do head -n 1 | cat; done < /tmp/f"),
+            (0, "l1\nl2\n".into())
+        );
+        // Messages follow one another in the file.
+        assert_eq!(
+            h.run("for x in 1 2; do nope; nope | cat; done 2> /tmp/n"),
+            (0, String::new())
+        );
+        assert_eq!(
+            h.get("/tmp/n"),
+            b"relay-sh: nope: command not found\n".repeat(4)
+        );
+        // Ctrl-C's `^C` is the key's echo, on the screen.
+        h.console.interrupt_after = Some(3);
+        assert_eq!(
+            h.run("while true; do true; done 2> /tmp/c"),
+            (130, "^C\n".into())
+        );
+        assert_eq!(h.get("/tmp/c"), b"");
+        // Two fds that append to one file, each at its end (the prototype's
+        // review, M-1).
+        assert_eq!(
+            h.run("for x in 1 2; do echo out$x; cd /nope; done >> /tmp/ap 2>> /tmp/ap"),
+            (1, String::new())
+        );
+        assert_eq!(
+            h.get("/tmp/ap"),
+            b"out1\nrelay-sh: cd: /nope: No such file or directory\n\
+              out2\nrelay-sh: cd: /nope: No such file or directory\n"
+        );
+        // They end with the construct.
+        assert_eq!(
+            h.run("for x in 1; do echo in; done > /tmp/o; echo after"),
+            (0, "after\n".into())
+        );
+        // A redirection inside goes over them.
+        assert_eq!(
+            h.run("for x in 1; do echo in > /tmp/in; echo out; done > /tmp/o"),
+            (0, String::new())
+        );
+        assert_eq!(
+            (h.get("/tmp/in"), h.get("/tmp/o")),
+            (b"in\n".to_vec(), b"out\n".to_vec())
+        );
+        // The construct's own errors and the shell's go to its fd 2.
+        assert_eq!(
+            h.run("for 1x in a; do echo; done 2> /tmp/ie"),
+            (1, String::new())
+        );
+        assert_eq!(
+            h.get("/tmp/ie"),
+            b"relay-sh: `1x': not a valid identifier\n"
+        );
+        assert_eq!(
+            h.run("for x in 1; do echo ${1A}; done 2> /tmp/be; echo after"),
+            (1, String::new())
+        );
+        assert_eq!(h.get("/tmp/be"), b"relay-sh: ${1A}: bad substitution\n");
+        // One that cannot be made runs nothing of it.
+        assert_eq!(
+            h.run("for x in 1; do echo a; done > /nodir/x"),
+            (1, "relay-sh: /nodir/x: No such file or directory\n".into())
+        );
+        assert_eq!(
+            h.run("while true; do echo a; done < /nope"),
+            (1, "relay-sh: /nope: No such file or directory\n".into())
+        );
+        assert_eq!(h.run("E="), (0, String::new()));
+        assert_eq!(
+            h.run("for x in 1; do echo a; done 2> /tmp/ae > $E"),
+            (1, String::new())
+        );
+        assert_eq!(h.get("/tmp/ae"), b"relay-sh: $E: ambiguous redirect\n");
+        // Under /bin/sh the file is opened once, for every program and
+        // built-in inside, and closed after the last.
+        let mut h = spawning();
+        assert_eq!(
+            h.spawning("for x in 1 2; do t-args; help; done > /tmp/o"),
+            (0, String::new())
+        );
+        assert_eq!(h.programs.opened, [("/tmp/o".into(), false, 4)]);
+        let fds: Vec<_> = h.programs.spawned.iter().map(|s| s.fds).collect();
+        assert_eq!(fds, [[0, 4, 2], [0, 4, 2]]);
+        assert!(
+            h.programs
+                .written_to("/tmp/o")
+                .starts_with(b"Programs in /bin:")
+        );
+        assert_eq!(h.programs.closed, [4]);
+    }
+
+    #[test]
+    fn a_job_s_number_goes_to_the_fd_2_around_it() {
+        // bash 5.2 (tmp/m5p1/probes/p4.txt): `[1] 42` into the file.
+        let mut h = with_jobs();
+        let out = typed(&mut h, &["for x in 1; do t-spin & done 2> /tmp/je"]);
+        assert!(!out.contains("[1]"), "{out}");
+        assert_eq!(h.programs.written_to("/tmp/je"), b"[1] 101\n");
     }
 
     #[test]

@@ -167,6 +167,14 @@ impl Files {
         }
     }
 
+    /// The in-process runner's file `i` has been read or written up to
+    /// `to`, where every fd of it goes on from (an open file's offset).
+    pub fn set_offset(&mut self, i: usize, to: u64) {
+        if let Some(Some((Handle::Node { offset, .. }, _))) = self.open.get_mut(i) {
+            *offset = to;
+        }
+    }
+
     /// The context made from `base` and `redirects`, left to right
     /// (programmable shell gate §7.2), which holds its files until it is
     /// released; a file a later redirection replaces is closed at once.
