@@ -1,7 +1,7 @@
 # Relay OS — Programmable Shell Gate Design (milestones 4 and 5)
 
 - **Date:** 2026-10-02
-- **Status:** Approved 2026-10-02; revised while planning milestone 4's plans 1 to 4 (see §15)
+- **Status:** Approved 2026-10-02; revised while planning milestone 4's plans 1 to 4 and milestone 5's plan 1 (see §15)
 - **Builds on:** the user-space gate (version 0.4.0,
   `docs/superpowers/specs/2026-09-29-user-space-gate-design.md`, cited below
   as "UG §n") and milestone 1 (`2026-09-26-milestone-1-boot-shell-fs-design.md`,
@@ -517,6 +517,9 @@ comments:
   mounted read-only it is true, until milestone 5's ABI 4 says which
   filesystems are read-only (§15 item 3).
 - `:` is not a built-in; `true` is the program for it (§14).
+- A redirection's fd is 0, 1 or 2 written as one digit, and a `>&` takes
+  only a bare `1` or `2`; bash's other fds and its expanded `>&` targets
+  are refused (§15 item 5).
 - A `\` at a line's end is an error, where bash joins the line to the
   next (§15 item 1).
 - The line editor's history keeps each line of a command typed across
@@ -1029,3 +1032,104 @@ does.
      change with it; NUC checks 3 to 6 run on a stick written by `flash
      --full`, and their transcripts replace those edited by hand
      (`check4.nuc.log`) or copied from QEMU (`check6.nuc.log`).
+
+5. **Decisions made while planning milestone 5's plan 1** (redirection):
+   - **The roadmap.** Milestone 5 keeps §12's four plans; no cut line is
+     needed (§1.2): milestone 4 took a few days of the gate's one to two
+     months, and redirection of compound commands is the same fd context
+     that several redirections on one command need. Plan 1 is four pull
+     requests: its plan with milestone 5's roadmap; the forms of §7.1 on
+     a simple command, with the fd context, both runners, the built-ins'
+     error target and `head`'s seek; pipelines and compound commands
+     (§7.3, §7.4) with the scenario `redirect`; the drop scan's gaps. It
+     changes no ABI: `spawn` already maps any of the caller's fds to each
+     of the child's, handing it the caller's open file and its offset.
+     It has no NUC check; plan 4's `check7.sh` runs redirection there.
+   - **The forms** (§7.1). An fd is 0, 1 or 2 written as one unquoted
+     digit, a word of its own before the operator (`a2>f` is the word
+     `a2`, `"2">f` the word `2`), as bash takes it; bash's other numbers
+     (`3>`, `02>`, `10>&1`) are refused, so is an fd 0 with `>` or one of
+     1 or 2 with `<`. `N>&M` copies fd M (1 or 2) as it is then into fd N
+     (1 or 2), `>&2` meaning `1>&2`; a blank may follow `>&`, as bash
+     allows (`2>& 1`), and `1>&1` and `2>&2` change nothing. A `>&` whose
+     target is not a bare `1` or `2` (`2>&"1"`, `2>&$N`, `>&-`, `>&f`) is
+     refused, where bash expands it. `&>`, `<&`, `<>`, `>|`, `<<`, `<<-`
+     and `<<<` stay refused; `2>>&1`, `> &2` and an operator with no word
+     after it are bash's syntax errors naming the token. A line of only
+     redirections makes or opens its files, status 0.
+   - **The fd context** (§7.2, §7.4). The walker carries what fds 0, 1
+     and 2 are: the shell's own, or a file a redirection opened. A
+     command's redirections are made left to right over its context once
+     its words are expanded, each target expanded as it is reached (one
+     that does not expand is told on fd 2 as it stands then, and a bad
+     substitution abandons the line too, as in bash); a compound
+     command's once, before its first command, which with every command
+     inside starts from them, and after them only an operator may follow
+     (`fi > f fi` is bash's syntax error). Files are counted by the fds that
+     hold them and closed when none does, so `> f > g` closes `f` before
+     `g` opens and `2>&1 > f` keeps the old fd 1 as fd 2; a command's are
+     closed when it ends, a construct's after its last command. Under
+     `/bin/sh` a file is an fd of the shell's, opened for the command and
+     mapped to the child's fds 0 to 2 at `spawn`, the shell's own fds 0
+     to 2 never changing; a built-in writes to it through that fd, so it
+     shares the file's offset with the programs around it (`for …; do
+     echo a; help; done > f` keeps its order). In the in-process runner a
+     file is its node and an offset every fd of it shares, one opened with
+     `>>` written at its end each time, as the kernel's append is (the
+     prototype's review). A process has
+     32 fds, so redirections nested past them fail with `Too many open
+     files`, status 1.
+   - **Where messages go** (§7.5), as bash's: a command's own messages
+     (`command not found`, a program that cannot start, a built-in's
+     errors and its `write error`) go to its fd 2 once its redirections
+     are made (`nope 2> e` writes into `e`); a redirection that fails is
+     told on fd 2 as it stands then (`cat 2> e < missing` into `e`, `cat
+     < missing 2> e` on the screen), the command does not run, status 1,
+     and its files are closed; what the shell says of a command (an
+     expansion error, a program killed, a background job's `[1] 42`, a
+     construct's own error such as ``for``'s `not a valid identifier`)
+     goes to fd 2 of the context around it, so inside `for …; done 2> e`
+     into `e`. Syntax errors, `^C`, the reports at the prompt and a failed
+     transcript stay on the screen. Output to a file reaches neither the
+     screen nor a transcript, and a command with `< f` still gets the
+     console's foreground, so Ctrl-C reaches it.
+   - **`sh FILE`** (§7.5). `sh` refuses fd 1 or fd 2 that is not the
+     console (`sh: a script's output cannot be redirected`, status 1):
+     its trace and errors would miss its transcript (the spike's `sh x.sh
+     2> se` wrote its trace into `se`). `< f` is allowed: the script's
+     commands read `f` (the maintainer, 2026-10-03).
+   - **`head` on a file** (§7.4). GNU's `head -n` leaves a standard input
+     it can seek just after the lines it printed, so in `for …; do head
+     -n 1; done < f` each pass reads the next line; `head` here did not,
+     and now seeks back the bytes it read past its last line, a failure
+     (a pipe, the console) changing nothing, as GNU's (the maintainer,
+     2026-10-03). `grep`, `wc`, `cat` and `tail` read to the end, as
+     GNU's do.
+   - **In a pipeline** (§7.3). `<` on a later command is `unsupported
+     syntax: < after |`, `>` and `>>` on an earlier one `> before |` as
+     before; `2>`, `2>>` and the copies may stand on any command, applied
+     over the pipes, so `a 2>&1 | b` sends both of `a`'s outputs into the
+     pipe. A stage whose redirection fails runs nothing and leaves its
+     neighbours an end; the pipeline's status is 1 when it is the last.
+   - **The drop scan** (§15 item 2) reads every new form as bash does: a
+     redirection's target is a word, never a keyword or a here-document's
+     delimiter, and `<<<` has no body; a redirection may follow `fi` and
+     `done`. It also mends milestone 4's gaps: quotes inside `$(…)` inside
+     double quotes start afresh, as bash reads them; `time` with its
+     options and `coproc` (`coproc {`, `coproc NAME {`) are command
+     positions; and a `((` whose first `)` is not followed by another,
+     two subshells to bash, is read on as two subshells when nothing
+     before that `)` could read otherwise (no `<<`, keyword, quote or
+     `$(`), and otherwise drops the rest of the script, as before.
+   - **An input that is the output** (the prototype's review). With `<`,
+     `cat < f >> f` and `grep x < f >> f` read their own output until the
+     disk was full. `cat` and `grep` now take GNU's condition, for
+     standard input and file operands alike: the output is a regular
+     file, the input's file, and the input has bytes left to read (`cat:
+     -: input file is output file`, status 1; `grep: (standard input):
+     input file is also the output`, status 2). So `cat f > f`, whose `>`
+     has emptied `f`, is silent with status 0, as GNU's is, where
+     milestone 1 refused it (the maintainer, 2026-10-03). A shell whose own
+     fd 1 is a file (`X | sh > f`) still writes a built-in's output and
+     its own messages after `2>&1` to the screen, as since milestone 3:
+     plan 4's (the maintainer).
