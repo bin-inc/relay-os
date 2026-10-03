@@ -176,6 +176,7 @@ impl<'v> Expander<'v> {
 
     fn redirect(&mut self, r: &Redirect<Word>) -> Result<Redirect, Error> {
         let op = match &r.op {
+            RedirectOp::Read(path) => RedirectOp::Read(self.target(path)?),
             RedirectOp::Write(path) => RedirectOp::Write(self.target(path)?),
             RedirectOp::Append(path) => RedirectOp::Append(self.target(path)?),
             RedirectOp::Copy(fd) => RedirectOp::Copy(*fd),

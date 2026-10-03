@@ -3107,6 +3107,55 @@ mod tests {
     }
 
     #[test]
+    fn standard_input_may_be_a_file() {
+        // bash 5.2 (tmp/m5p1/probes/p9.txt).
+        let mut h = Harness::new();
+        h.put("/tmp/f", b"l1\nl2\n");
+        assert_eq!(h.run("cat < /tmp/f"), (0, "l1\nl2\n".into()));
+        assert_eq!(h.run("wc -l 0</tmp/f"), (0, "2\n".into()));
+        assert_eq!(h.run("cat < /tmp/f | wc -l"), (0, "2\n".into()));
+        // Read whole, a piece after the other.
+        h.put("/tmp/big", &alloc::vec![b'x'; 10_000]);
+        assert_eq!(h.run("wc -c < /tmp/big"), (0, "10000\n".into()));
+        assert_eq!(
+            h.run("cat < /nope"),
+            (1, "relay-sh: /nope: No such file or directory\n".into())
+        );
+        assert_eq!(h.run("cat 2> /tmp/e < /nope"), (1, String::new()));
+        assert_eq!(
+            h.get("/tmp/e"),
+            b"relay-sh: /nope: No such file or directory\n"
+        );
+        assert_eq!(h.run("cat < /tmp"), (1, "cat: -: Is a directory\n".into()));
+        // Alone it opens the file and runs nothing.
+        assert_eq!(h.run("< /tmp/f"), (0, String::new()));
+        assert_eq!(
+            h.run("< /nope"),
+            (1, "relay-sh: /nope: No such file or directory\n".into())
+        );
+        // Under /bin/sh the program gets the file as fd 0, a pipeline's
+        // first command too.
+        let mut h = spawning();
+        h.programs.known.push(("/bin/cat", WaitStatus::exited(0)));
+        assert_eq!(h.spawning("cat < /tmp/f").0, 0);
+        assert_eq!(h.programs.inputs, [("/tmp/f".into(), 4)]);
+        assert_eq!(h.programs.spawned[0].fds, [4, 1, 2]);
+        assert_eq!(h.spawning("cat < /tmp/g | t-args").0, 3);
+        assert_eq!(h.programs.pipes, [(6, 7)]);
+        assert_eq!(h.programs.spawned[1].fds, [5, 7, 2]);
+        assert_eq!(h.programs.spawned[2].fds, [6, 1, 2]);
+        // The pipe's ends as each stage has them, the files after the
+        // pipeline.
+        assert_eq!(h.programs.closed, [4, 7, 6, 5]);
+        h.programs.open_error = Some(vfs::Errno::ENOENT);
+        assert_eq!(
+            h.spawning("cat < /nope"),
+            (1, "relay-sh: /nope: No such file or directory\n".into())
+        );
+        assert_eq!(h.programs.spawned.len(), 3);
+    }
+
+    #[test]
     fn a_redirection_that_cannot_open_stops_the_command() {
         let mut h = Harness::new();
         assert_eq!(

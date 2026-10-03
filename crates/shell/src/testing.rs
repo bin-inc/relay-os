@@ -197,8 +197,11 @@ pub struct FakePrograms {
     pub known: Vec<(&'static str, WaitStatus)>,
     /// What `spawn` says of a path it does not know (default `ENOENT`).
     pub refusals: Vec<(&'static str, Errno)>,
-    /// Every redirection opened: its path, whether it appends, its fd.
+    /// Every redirection opened for output: its path, whether it appends,
+    /// its fd.
     pub opened: Vec<(String, bool, u32)>,
+    /// Every redirection opened for input: its path and fd.
+    pub inputs: Vec<(String, u32)>,
     /// What `open_output` fails with, if anything.
     pub open_error: Option<Errno>,
     /// Every pipe made, (read end, write end); what `pipe` fails with
@@ -244,6 +247,7 @@ impl FakePrograms {
             known: Vec::new(),
             refusals: Vec::new(),
             opened: Vec::new(),
+            inputs: Vec::new(),
             open_error: None,
             pipes: Vec::new(),
             pipe_error: None,
@@ -307,6 +311,15 @@ impl Programs for FakePrograms {
         self.next_fd += 1;
         let path = String::from_utf8_lossy(path).into_owned();
         self.opened.push((path, append, self.next_fd));
+        Ok(self.next_fd)
+    }
+    fn open_input(&mut self, path: &[u8]) -> Result<u32, Errno> {
+        if let Some(e) = self.open_error {
+            return Err(e);
+        }
+        self.next_fd += 1;
+        let path = String::from_utf8_lossy(path).into_owned();
+        self.inputs.push((path, self.next_fd));
         Ok(self.next_fd)
     }
     fn write(&mut self, fd: u32, bytes: &[u8]) -> Result<(), Errno> {

@@ -26,6 +26,9 @@ pub struct Ctx<'a> {
     err: To,
     /// Standard input; without one, the input ends at once.
     input: Option<&'a mut dyn Stdin>,
+    /// Standard input that is a file the in-process runner opened (`<`),
+    /// and where the next read starts; it comes before `input`.
+    input_file: Option<(Node, u64)>,
     /// The exit status when standard output could not be written (1, as
     /// milestone 1 said; GNU grep's is 2).
     pub(crate) write_error_status: i32,
@@ -167,6 +170,7 @@ impl<'a> Ctx<'a> {
             out,
             err: To::Console,
             input: None,
+            input_file: None,
             write_error_status: 1,
             exit: false,
             cancelled: false,
@@ -190,12 +194,22 @@ impl<'a> Ctx<'a> {
         self.input = Some(input);
     }
 
+    /// Gives the command the file `node` as standard input, from its start.
+    pub(crate) fn set_input_file(&mut self, node: Node) {
+        self.input_file = Some((node, 0));
+    }
+
     /// Reads standard input into `buf`: how many bytes, 0 at its end. What
     /// waits for standard output is written first, so that what came of
     /// the last read reaches a pipe before the next one waits (a line typed
     /// into `cat | cat` reaches the second `cat` at Enter).
     pub fn read_input(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
         self.streams().flush();
+        if let Some((node, offset)) = &mut self.input_file {
+            let n = self.vfs.read_at(*node, *offset, buf)?;
+            *offset += n as u64;
+            return Ok(n);
+        }
         match &mut self.input {
             Some(input) => input.read(buf),
             None => Ok(0),

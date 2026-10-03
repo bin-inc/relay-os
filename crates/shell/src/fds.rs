@@ -77,8 +77,8 @@ pub(crate) fn write_file(
 pub(crate) enum Handle {
     /// `/bin/sh`'s fd.
     Fd(u32),
-    /// The in-process runner's: the file, and where the next write goes
-    /// ([`AT_END`] for one opened with `>>`).
+    /// The in-process runner's: the file, and where the next read or
+    /// write goes ([`AT_END`] for one opened with `>>`).
     Node { node: Node, offset: u64 },
 }
 
@@ -96,6 +96,16 @@ pub(crate) struct Opener<'x> {
 }
 
 impl Opener<'_> {
+    /// Opens `path` for reading.
+    fn open_input(&mut self, path: &str) -> Result<Handle, Errno> {
+        if let Some(programs) = self.programs.as_deref_mut() {
+            return programs.open_input(path.as_bytes()).map(Handle::Fd);
+        }
+        let node = self.vfs.lookup(path.as_bytes())?;
+        Ok(Handle::Node { node, offset: 0 })
+    }
+
+    /// Opens `path` for output, emptied or, with `append`, at its end.
     fn open(&mut self, path: &str, append: bool) -> Result<Handle, Errno> {
         if let Some(programs) = self.programs.as_deref_mut() {
             return programs
@@ -165,9 +175,10 @@ impl Files {
         let mut fds = base;
         self.hold(&fds);
         for r in redirects {
-            let (path, append) = match &r.op {
-                RedirectOp::Write(path) => (path, false),
-                RedirectOp::Append(path) => (path, true),
+            let (path, opened) = match &r.op {
+                RedirectOp::Read(path) => (path, opener.open_input(path)),
+                RedirectOp::Write(path) => (path, opener.open(path, false)),
+                RedirectOp::Append(path) => (path, opener.open(path, true)),
                 // The other fd as it is now, held once more.
                 RedirectOp::Copy(from) => {
                     let slot = fds.0[*from as usize];
@@ -177,7 +188,7 @@ impl Files {
                     continue;
                 }
             };
-            let slot = match opener.open(path, append) {
+            let slot = match opened {
                 Ok(handle) => Slot::File(self.add(handle)),
                 Err(error) => {
                     let path = path.clone();

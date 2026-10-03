@@ -194,6 +194,10 @@ impl Runner for InProcess {
                     (None, Some(first)) => ctx.set_input(&mut **first),
                     (None, None) => {}
                 }
+                // The first stage's `<`.
+                if let Some(node) = input_file(files, stage.fds.0[0]) {
+                    ctx.set_input_file(node);
+                }
                 ctx.transcript = transcript.take();
                 (command.run)(&mut ctx, args);
                 let _ = ctx.finish();
@@ -453,6 +457,17 @@ impl Spawning<'_> {
     }
 }
 
+/// The in-process runner's file `slot` reads, if it is one.
+fn input_file(files: &Files, slot: Slot) -> Option<Node> {
+    match slot {
+        Slot::File(i) => match files.handle(i) {
+            Handle::Node { node, .. } => Some(node),
+            Handle::Fd(_) => None,
+        },
+        Slot::Shell(_) => None,
+    }
+}
+
 /// Where a command the shell runs itself writes for `slot`.
 fn to(files: &Files, slot: Slot) -> To {
     match slot {
@@ -482,6 +497,9 @@ pub(crate) fn run_function<'s>(
     ctx.control = control;
     if let Some(input) = parts.input {
         ctx.set_input(input);
+    }
+    if let Some(node) = input_file(parts.files, fds.0[0]) {
+        ctx.set_input_file(node);
     }
     ctx.in_script = parts.in_script;
     ctx.status = parts.status;

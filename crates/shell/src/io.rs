@@ -136,6 +136,8 @@ pub trait Programs {
     /// Opens a redirection target for writing: created if missing, emptied
     /// or, with `append`, written at its end. Its fd.
     fn open_output(&mut self, path: &[u8], append: bool) -> Result<u32, Errno>;
+    /// Opens a redirection source for reading; its fd.
+    fn open_input(&mut self, path: &[u8]) -> Result<u32, Errno>;
     /// Writes all of `bytes` to the shell's fd `fd`, a file it opened (a
     /// built-in's redirected output); the error that stopped it (`ENOSPC`
     /// for a write that took nothing).

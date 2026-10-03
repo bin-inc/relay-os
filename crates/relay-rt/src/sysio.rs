@@ -9,7 +9,9 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use relay_abi::console::{MODE_LINE, MODE_RAW};
-use relay_abi::file::{KIND_CHAR_DEVICE, OPEN_APPEND, OPEN_CREATE, OPEN_TRUNCATE, OPEN_WRITE};
+use relay_abi::file::{
+    KIND_CHAR_DEVICE, OPEN_APPEND, OPEN_CREATE, OPEN_READ, OPEN_TRUNCATE, OPEN_WRITE,
+};
 use relay_abi::info::LOG_MAX;
 use relay_abi::power::{POWER_FORCE, POWER_POWEROFF, POWER_REBOOT};
 use relay_abi::spawn::{FOREGROUND, NEW_GROUP};
@@ -280,6 +282,10 @@ pub fn command_fds(fds: [u32; 3]) -> [FdMap; 3] {
 impl Programs for SysPrograms {
     fn open_output(&mut self, path: &[u8], append: bool) -> Result<u32, Errno> {
         sys::open(path, output_flags(append)).map_err(Errno::from_number)
+    }
+
+    fn open_input(&mut self, path: &[u8]) -> Result<u32, Errno> {
+        sys::open(path, OPEN_READ).map_err(Errno::from_number)
     }
 
     fn write(&mut self, fd: u32, bytes: &[u8]) -> Result<(), Errno> {
