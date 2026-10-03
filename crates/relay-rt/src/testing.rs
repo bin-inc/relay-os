@@ -280,6 +280,7 @@ impl Calls for FakeCalls {
             avail_blocks: s.avail_blocks,
             files: s.files,
             free_files: s.free_files,
+            flags: 0,
         })
     }
 

@@ -216,6 +216,8 @@ fn spawn(caller: &mut impl Caller, addr: u64) -> Result<u64, Errno> {
         || (new_group && a.pgid != 0)
         || a.fd_count as usize > SPAWN_FDS
         || a.reserved != 0
+        // An environment comes once the kernel lays it on the stack (§8.1).
+        || a.env_len != 0
     {
         return Err(Errno::EINVAL);
     }
@@ -502,6 +504,8 @@ mod tests {
             flags: NEW_GROUP,
             pgid: 0,
             reserved: 0,
+            env: 0,
+            env_len: 0,
         };
         edit(&mut a);
         // SAFETY: `SpawnArgs` is `repr(C)` of integers with no padding.
@@ -683,6 +687,11 @@ mod tests {
             refused(&mut f, b"x\0", |a| a.reserved = 1),
             Err(errno::EINVAL),
             "reserved"
+        );
+        assert_eq!(
+            refused(&mut f, b"x\0", |a| a.env_len = 2),
+            Err(errno::EINVAL),
+            "an environment, until the kernel lays it out"
         );
         assert_eq!(
             refused(&mut f, b"x\0", |a| a.fd_count = 9),

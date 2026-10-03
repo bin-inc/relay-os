@@ -31,11 +31,21 @@ pub use wait::WaitStatus;
 /// Changes whenever a call's meaning or a struct's layout changes; adding
 /// a call does not change it (spec §7.4). Written into `system.img`'s
 /// header and into every program's ELF note, and checked by the kernel.
-/// 3 since `SpawnArgs` gained `pgid` (milestone 3, spec §16 item 8).
-pub const VERSION: u32 = 3;
+/// 3 since `SpawnArgs` gained `pgid` (milestone 3, spec §16 item 8); 4
+/// since it gained `env` and `StatFs` gained `flags` (milestone 5,
+/// programmable shell gate §8.1, §15 item 6).
+pub const VERSION: u32 = 4;
 
 /// The ELF note that names the ABI a program was built for (spec §5.2):
 /// owner `Relay`, type [`NOTE_TYPE`], a 4-byte descriptor holding
 /// [`VERSION`].
 pub const NOTE_NAME: &[u8] = b"Relay";
 pub const NOTE_TYPE: u32 = 1;
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_version_is_4() {
+        assert_eq!(super::VERSION, 4);
+    }
+}

@@ -4,9 +4,9 @@
 # comes back to the same screen.
 system-drop sh
 timeout 30
-expect \[ ok \] system: \d+ programs, ABI 3\n
+expect \[ ok \] system: \d+ programs, ABI 4\n
 expect \*\*\* Relay OS cannot run its shell \*\*\*\n\n/bin/sh cannot start: No such file or directory\n\n--- last kernel log lines ---\n
-expect \[ ok \] system: \d+ programs, ABI 3\n
+expect \[ ok \] system: \d+ programs, ABI 4\n
 expect \nPress any key to reboot\.\n
 # It waits for the key, however long that takes.
 alive 2

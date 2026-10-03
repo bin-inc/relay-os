@@ -247,6 +247,7 @@ pub(super) fn statfs(
         avail_blocks: f.avail_blocks,
         files: f.files,
         free_files: f.free_files,
+        flags: 0,
     };
     caller.write(&slice, 0, &s.to_bytes())?;
     Ok(0)

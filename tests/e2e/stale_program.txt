@@ -1,5 +1,5 @@
 # A program built for another ABI (user-space gate §5.2, §8.5, §12.3):
-# t-abi is t-args whose note says ABI 2, as a program an older build left
+# t-abi is t-args whose note says ABI 3, as a program an older build left
 # on the disk would. spawn refuses it with ENOEXEC, from /bin or copied to
 # /root, the kernel log says why, and the shell carries on.
 timeout 30
@@ -13,7 +13,7 @@ send t-abi
 expect \nrelay-sh: t-abi: Exec format error\n
 expect root@relay:~# $
 send dmesg
-expect \nspawn /root/t-abi: built for ABI 2\n
+expect \nspawn /root/t-abi: built for ABI 3\n
 expect root@relay:~# $
 send t-args still
 expect \n\[1\] still\n

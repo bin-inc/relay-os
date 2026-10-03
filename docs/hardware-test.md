@@ -60,7 +60,7 @@ separated by blanks. Every `flash` writes it, so a `flash --kernel` without
    - `[ ok ] boot info: N MiB usable in M regions, cmdline ''` — N about
      15944 (the check scripts want `159nn`).
    - the lines of checks 1b, 2 and 3, ending with
-     `[ ok ] system: 44 programs, ABI 3`, then the motd
+     `[ ok ] system: 44 programs, ABI 4`, then the motd
      (`Welcome to Relay OS.`) and the prompt `root@relay:~# ` with a solid
      block cursor.
 4. Panic screen: in Mint run `cargo xtask flash --kernel --cmdline panic=pagefault`,
@@ -223,7 +223,7 @@ Every command but the shell's built-ins (`cd`, `exit`, `help`, `jobs`,
    - `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 2.0 GiB` (a
      `14.3 GiB` root is a stick written before 0.3.0, which the check
      scripts refuse: run `flash --full` again)
-   - `[ ok ] system: 44 programs, ABI 3` (the programs of `/bin`, read
+   - `[ ok ] system: 44 programs, ABI 4` (the programs of `/bin`, read
      from `\EFI\RELAY\system.img`)
    - the motd (`Welcome to Relay OS.`), which init prints, and the prompt
      `root@relay:~# ` of the `/bin/sh` it started.

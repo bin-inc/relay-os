@@ -66,6 +66,10 @@ pub struct SpawnArgs {
     pub pgid: u32,
     /// 0.
     pub reserved: u32,
+    /// The child's environment: `NAME=value` entries, each followed by a
+    /// NUL (programmable shell gate §8.1); empty for none.
+    pub env: u64,
+    pub env_len: u64,
 }
 
 impl SpawnArgs {
@@ -96,6 +100,8 @@ impl SpawnArgs {
             flags: u32_at(116),
             pgid: u32_at(120),
             reserved: u32_at(124),
+            env: u64_at(128),
+            env_len: u64_at(136),
         }
     }
 }
@@ -110,7 +116,7 @@ mod tests {
         assert_eq!(size_of::<FdMap>(), 8);
         assert_eq!(offset_of!(FdMap, child), 0);
         assert_eq!(offset_of!(FdMap, parent), 4);
-        assert_eq!(SpawnArgs::SIZE, 128);
+        assert_eq!(SpawnArgs::SIZE, 144);
         assert_eq!(offset_of!(SpawnArgs, path), 0);
         assert_eq!(offset_of!(SpawnArgs, path_len), 8);
         assert_eq!(offset_of!(SpawnArgs, args), 16);
@@ -122,6 +128,8 @@ mod tests {
         assert_eq!(offset_of!(SpawnArgs, flags), 116);
         assert_eq!(offset_of!(SpawnArgs, pgid), 120);
         assert_eq!(offset_of!(SpawnArgs, reserved), 124);
+        assert_eq!(offset_of!(SpawnArgs, env), 128);
+        assert_eq!(offset_of!(SpawnArgs, env_len), 136);
         assert_eq!((NEW_GROUP, WAIT_NOHANG, WAIT_ANY), (1, 1, -1));
         assert_eq!((FOREGROUND, WAIT_CTRL_C), (2, 2));
     }
@@ -147,6 +155,8 @@ mod tests {
             flags: NEW_GROUP,
             pgid: 44,
             reserved: 55,
+            env: 0x40_4000,
+            env_len: 66,
         };
         // SAFETY: `SpawnArgs` is `repr(C)` of integers with no padding.
         let bytes: [u8; SpawnArgs::SIZE] = unsafe { core::mem::transmute(a) };
