@@ -428,6 +428,25 @@ mod tests {
     }
 
     #[test]
+    fn a_device_is_never_the_input_that_is_the_output() {
+        // GNU compares only regular files; /dev/null as both is no
+        // refusal (the prototype's review, M-2).
+        let mut h = Harness::new();
+        h.vfs
+            .mount(b"/dev", alloc::boxed::Box::new(vfs::DevFs::new(0)))
+            .unwrap();
+        for line in [
+            "grep x /dev/null > /dev/null",
+            "grep x < /dev/null > /dev/null",
+            "grep -c x /dev/null >> /dev/null",
+            "cat /dev/null - < /dev/null > /dev/null",
+        ] {
+            let (status, out, err) = host_tool(&["sh", "-c", line], &[], b"");
+            assert_eq!(h.run(line), (status, out + &err), "{line}");
+        }
+    }
+
+    #[test]
     fn grep_never_reads_its_own_output() {
         // GNU's refusal, whatever the redirection left in the file; a disk
         // that fills and a Ctrl-C bound a grep that reads on.

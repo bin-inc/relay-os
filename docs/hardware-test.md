@@ -223,6 +223,7 @@ Every command but the shell's built-ins (`cd`, `exit`, `help`, `jobs`,
    - `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 2.0 GiB` (a
      `14.3 GiB` root is a stick written before 0.3.0, which the check
      scripts refuse: run `flash --full` again)
+   - `[ ok ] dev: /dev/null` (`/dev`, a filesystem of the kernel's)
    - `[ ok ] system: 45 programs, ABI 4` (the programs of `/bin`, read
      from `\EFI\RELAY\system.img`)
    - the motd (`Welcome to Relay OS.`), which init prints, and the prompt

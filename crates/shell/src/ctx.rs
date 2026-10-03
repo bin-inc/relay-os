@@ -12,7 +12,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
-use vfs::{Errno, Node, Vfs};
+use vfs::{Errno, FileType, Node, Vfs};
 
 /// Output to a file is collected up to this size before it is written.
 const FILE_BUFFER: usize = 4096;
@@ -350,10 +350,16 @@ impl<'a> Ctx<'a> {
         )
     }
 
-    /// The file standard output goes to, if any.
-    pub fn output_node(&self) -> Option<Node> {
+    /// The regular file standard output goes to, if any, as relay-rt's
+    /// `SysStdout::node`: GNU's input-is-output checks are for regular
+    /// files, and a device (`/dev/null`) is not one.
+    pub fn output_node(&mut self) -> Option<Node> {
         match &self.out {
-            Output::File { node, .. } => Some(*node),
+            Output::File { node, .. } => {
+                let node = *node;
+                let st = self.vfs.stat(node).ok()?;
+                (st.kind == FileType::Regular).then_some(node)
+            }
             Output::Program { stdout, .. } => stdout.node(),
             Output::Console | Output::Fd { .. } => None,
         }

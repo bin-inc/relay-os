@@ -4,8 +4,8 @@
 # redirections made once for everything inside, a built-in and a program
 # sharing the file's offset, and `head` leaving the file just after its
 # line; `sh FILE` refusing to send its errors to a file but reading one;
-# errors sent to a file kept out of a script's transcript; and Ctrl-C
-# reaching a program whose input is a file.
+# errors sent to a file kept out of a script's transcript; Ctrl-C
+# reaching a program whose input is a file; and /dev/null (plan 2).
 timeout 60
 expect root@relay:~# $
 send echo l1 > r-f; echo l2 >> r-f; echo l3 >> r-f
@@ -56,6 +56,25 @@ send sh r-t.sh
 expect \n\+ ls r-nope 2> r-te\nroot@relay:~# $
 send cat r-t.log r-te
 expect \n\+ ls r-nope 2> r-te\nls: cannot access 'r-nope': No such file or directory\nroot@relay:~# $
+# /dev/null (plan 2, §8.4): what goes to it is gone, a read of it ends at
+# once, it is a character device that is not the console, and nothing
+# else can be made or removed in /dev.
+send ls r-f r-nope 2> /dev/null; echo "status $?"
+expect \nr-f\nstatus 2\nroot@relay:~# $
+send echo gone > /dev/null; echo more >> /dev/null; cat /dev/null; echo "status $?"
+expect \nstatus 0\nroot@relay:~# $
+send wc -c < /dev/null; head -n 1 < /dev/null; echo "status $?"
+expect \n0\nstatus 0\nroot@relay:~# $
+send echo old > r-n; cp /dev/null r-n; wc -c < r-n
+expect \n0\nroot@relay:~# $
+send [ -c /dev/null ] && [ -w /dev/null ] && echo device
+expect \ndevice\nroot@relay:~# $
+send [ -t 1 ] > /dev/null; echo "status $?"; [ -t 1 ]; echo "status $?"
+expect \nstatus 1\nstatus 0\nroot@relay:~# $
+send ls /dev
+expect \nnull\nroot@relay:~# $
+send echo a > /dev/x; rm /dev/null
+expect \nrelay-sh: /dev/x: Operation not permitted\nrm: cannot remove '/dev/null': Operation not permitted\nroot@relay:~# $
 # A program whose input is a file still has the console's foreground.
 send t-spin < r-f
 alive 1
