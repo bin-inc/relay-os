@@ -435,6 +435,22 @@ mod tests {
         );
         // Errors too, which never go into a redirection file.
         assert_eq!(String::from_utf8(h.get("/tmp/s.log")).unwrap(), screen);
+        // Errors sent to a file reach neither the screen nor the
+        // transcript (programmable shell gate §7.5).
+        h.put("/tmp/s.sh", b"cat /tmp/nope 2> /tmp/e\nnope 2>> /tmp/e\n");
+        assert_eq!(
+            h.run("sh /tmp/s.sh"),
+            (127, "+ cat /tmp/nope 2> /tmp/e\n+ nope 2>> /tmp/e\n".into())
+        );
+        assert_eq!(
+            h.get("/tmp/s.log"),
+            b"+ cat /tmp/nope 2> /tmp/e\n+ nope 2>> /tmp/e\n"
+        );
+        assert_eq!(
+            h.get("/tmp/e"),
+            b"cat: /tmp/nope: No such file or directory\n\
+              relay-sh: nope: command not found\n"
+        );
         // Running a script again starts a new transcript.
         h.put("/tmp/s.sh", b"echo again\n");
         h.run("sh /tmp/s.sh");

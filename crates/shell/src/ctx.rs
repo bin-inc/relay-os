@@ -1,8 +1,8 @@
 //! What a command gets to work with: the filesystem, the system, standard
 //! input (none, a program's fd 0, or bytes in memory), standard output
 //! (the screen, a redirection file, `/bin/sh`'s fd for one, or a program's
-//! fd 1) and the screen for errors; plus the helpers every command shares
-//! for options and GNU-style messages.
+//! fd 1) and errors (the screen, or a redirection file); plus the helpers
+//! every command shares for options and GNU-style messages.
 
 use crate::io::{Console, Programs, Stdin, Stdout, System};
 use crate::jobs::Jobs;
@@ -21,6 +21,8 @@ pub struct Ctx<'a> {
     pub system: &'a mut dyn System,
     console: &'a mut dyn Console,
     out: Output<'a>,
+    /// Where errors go (programmable shell gate §7.5).
+    err: To,
     /// Standard input; without one, the input ends at once.
     input: Option<&'a mut dyn Stdin>,
     /// The exit status when standard output could not be written (1, as
@@ -103,12 +105,14 @@ enum Output<'a> {
 }
 
 impl<'a> Ctx<'a> {
-    /// Standard output goes `to` (an fd through `control`'s programs).
+    /// Standard output goes `to` and errors to `err` (an fd through
+    /// `control`'s programs).
     pub(crate) fn new(
         vfs: &'a mut dyn Vfs,
         system: &'a mut dyn System,
         console: &'a mut dyn Console,
         to: To,
+        err: To,
     ) -> Ctx<'a> {
         let out = match to {
             To::Console => Output::Console,
@@ -124,7 +128,9 @@ impl<'a> Ctx<'a> {
                 error: None,
             },
         };
-        Ctx::with_output(vfs, system, console, out)
+        let mut ctx = Ctx::with_output(vfs, system, console, out);
+        ctx.err = err;
+        ctx
     }
 
     /// A command run as a program: standard output is `stdout`, errors go
@@ -156,6 +162,7 @@ impl<'a> Ctx<'a> {
             system,
             console,
             out,
+            err: To::Console,
             input: None,
             write_error_status: 1,
             exit: false,
@@ -212,9 +219,33 @@ impl<'a> Ctx<'a> {
         let _ = self.streams().out(bytes);
     }
 
-    /// Errors always go to the screen, never into a redirection file.
+    /// Errors: to the screen, or where they are redirected. A write that
+    /// fails is lost, as there is nowhere left to say so.
     pub fn err(&mut self, bytes: &[u8]) {
-        self.streams().screen(bytes);
+        match &mut self.err {
+            To::Console => self.streams().screen(bytes),
+            To::File(node, offset) => {
+                let mut done = 0;
+                while done < bytes.len() {
+                    match self.vfs.write_at(*node, *offset, &bytes[done..]) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            done += n;
+                            *offset += n as u64;
+                        }
+                    }
+                }
+            }
+            To::Fd(fd) => {
+                if let Some(programs) = self
+                    .control
+                    .as_mut()
+                    .and_then(|c| c.programs.as_deref_mut())
+                {
+                    let _ = programs.write(*fd, bytes);
+                }
+            }
+        }
     }
 
     /// Whether Ctrl-C has stopped the command. Long loops (reading a file,

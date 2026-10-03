@@ -44,6 +44,10 @@ pub(crate) struct Ran {
     /// What the shell says after it: a write error, `^C`, how a program
     /// was killed.
     pub message: String,
+    /// The message is the command's own (it was not found, could not
+    /// start, could not write), told on its fd 2, where the shell's
+    /// reports go to the fd 2 around it (programmable shell gate §7.5).
+    pub own: bool,
     /// `exit`, or `reboot`/`poweroff` returning: the shell stops.
     pub stop: bool,
     /// It was `exit`, which stops only a script the shell runs itself.
@@ -61,10 +65,19 @@ impl Ran {
         Ran {
             status,
             message,
+            own: false,
             stop: false,
             exited: false,
             script: None,
             cancelled: false,
+        }
+    }
+
+    /// The command's own message.
+    pub fn own(status: i32, message: String) -> Ran {
+        Ran {
+            own: true,
+            ..Ran::said(status, message)
         }
     }
 
@@ -440,8 +453,19 @@ impl Spawning<'_> {
     }
 }
 
-/// Runs a command function on `fds`: its output to the screen, a file or
-/// (under `/bin/sh`, through `control`'s programs) an fd.
+/// Where a command the shell runs itself writes for `slot`.
+fn to(files: &Files, slot: Slot) -> To {
+    match slot {
+        Slot::Shell(_) => To::Console,
+        Slot::File(i) => match files.handle(i) {
+            Handle::Fd(fd) => To::Fd(fd),
+            Handle::Node { node, offset } => To::File(node, offset),
+        },
+    }
+}
+
+/// Runs a command function on `fds`: its output and errors to the screen,
+/// a file or (under `/bin/sh`, through `control`'s programs) an fd.
 pub(crate) fn run_function<'s>(
     parts: Parts<'s>,
     command: &Builtin,
@@ -449,14 +473,9 @@ pub(crate) fn run_function<'s>(
     fds: Fds,
     control: Option<JobControl<'s>>,
 ) -> Ran {
-    let to = match fds.0[1] {
-        Slot::Shell(_) => To::Console,
-        Slot::File(i) => match parts.files.handle(i) {
-            Handle::Fd(fd) => To::Fd(fd),
-            Handle::Node { node, offset } => To::File(node, offset),
-        },
-    };
-    let mut ctx = Ctx::new(parts.vfs, parts.system, parts.console, to);
+    let out = to(parts.files, fds.0[1]);
+    let err = to(parts.files, fds.0[2]);
+    let mut ctx = Ctx::new(parts.vfs, parts.system, parts.console, out, err);
     ctx.control = control;
     if let Some(input) = parts.input {
         ctx.set_input(input);
@@ -464,20 +483,21 @@ pub(crate) fn run_function<'s>(
     ctx.in_script = parts.in_script;
     ctx.status = parts.status;
     ctx.transcript = parts.transcript.take();
-    let mut status = (command.run)(&mut ctx, args);
-    let mut message = String::new();
-    if let Err(e) = ctx.finish() {
-        message = format!("{}: write error: {e}\n", command.name);
-        status = ctx.write_error_status;
-    }
-    if ctx.cancelled {
-        message = String::from("^C\n");
-        status = CANCELLED;
-    }
+    let status = (command.run)(&mut ctx, args);
+    let finished = ctx.finish();
+    let (status, message, own) = if ctx.cancelled {
+        (CANCELLED, String::from("^C\n"), false)
+    } else if let Err(e) = finished {
+        let message = format!("{}: write error: {e}\n", command.name);
+        (ctx.write_error_status, message, true)
+    } else {
+        (status, String::new(), false)
+    };
     *parts.transcript = ctx.transcript.take();
     Ran {
         status,
         message,
+        own,
         stop: ctx.exit,
         exited: ctx.exited,
         script: ctx.script.take().map(Box::new),
@@ -500,11 +520,11 @@ pub(crate) fn cannot_start(name: &str, e: Errno) -> Ran {
     } else {
         CANNOT_RUN
     };
-    Ran::said(status, format!("{NAME}: {name}: {e}\n"))
+    Ran::own(status, format!("{NAME}: {name}: {e}\n"))
 }
 
 pub(crate) fn not_found(name: &str) -> Ran {
-    Ran::said(NOT_FOUND, format!("{NAME}: {name}: command not found\n"))
+    Ran::own(NOT_FOUND, format!("{NAME}: {name}: command not found\n"))
 }
 
 /// The program's path: `/bin/<name>`, or `name` itself when it holds a
@@ -638,7 +658,7 @@ mod tests {
         assert_eq!(h.programs.closed, [4]);
         assert!(!h.exists("/tmp/h"));
         // A write that fails is the built-in's write error.
-        h.programs.write_error = Some(Errno::ENOSPC);
+        h.programs.write_error = Some((5, Errno::ENOSPC));
         assert_eq!(
             h.spawning("help > /tmp/h"),
             (1, "help: write error: No space left on device\n".into())

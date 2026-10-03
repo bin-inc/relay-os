@@ -368,8 +368,8 @@ mod tests {
         let mut r = Reader::new();
         assert_eq!(r.add("a &&"), Ok(None));
         assert_eq!(
-            r.add("b 2> f &&"),
-            Err(ParseError::Unsupported("2>".into()))
+            r.add("b 3> f &&"),
+            Err(ParseError::Unsupported("3>".into()))
         );
         assert!(r.reading(), "still inside the dropped command");
         assert_eq!(r.add("c"), Ok(None), "its last line, dropped");

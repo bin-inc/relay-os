@@ -208,8 +208,8 @@ pub struct FakePrograms {
     pub closed: Vec<u32>,
     /// Every write to an fd the shell opened: the fd and the bytes.
     pub written: Vec<(u32, Vec<u8>)>,
-    /// What `write` fails with, if anything.
-    pub write_error: Option<Errno>,
+    /// The fd whose writes fail, and with what.
+    pub write_error: Option<(u32, Errno)>,
     pub spawned: Vec<Spawned>,
     /// The programs that run on through this many rounds of `collect` (a
     /// round ends when it finds nothing), by path; the others end at once.
@@ -310,7 +310,9 @@ impl Programs for FakePrograms {
         Ok(self.next_fd)
     }
     fn write(&mut self, fd: u32, bytes: &[u8]) -> Result<(), Errno> {
-        if let Some(e) = self.write_error {
+        if let Some((bad, e)) = self.write_error
+            && bad == fd
+        {
             return Err(e);
         }
         self.written.push((fd, bytes.to_vec()));
