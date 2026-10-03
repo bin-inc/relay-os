@@ -19,7 +19,7 @@ expect \n  PID  PPID STATE      MEM  TIME CMD\n    1     0 wait         0  0:00 
 expect \A +\d+     2 sleep +\d+  0:00 /bin/sleep\n +\d+     2 (ready|run) +\d+  0:0\d /bin/t-spin\n +\d+     2 run +\d+  0:00 /bin/ps\n
 # Ctrl-C at the prompt only cancels the line typed: the jobs run on.
 expect root@relay:~# $
-key echo nope{ctrl-c}
+type echo nope{ctrl-c}
 expect \^C\n
 expect root@relay:~# $
 send jobs
@@ -36,14 +36,14 @@ send wait %1
 expect \n\[1\]\+  Done                    sleep 4\n
 expect root@relay:~# $
 send jobs
-expect jobs\nroot@relay:~# $
+expect \Ajobs\nroot@relay:~# $
 # Ctrl-C ends a wait at the prompt; the job runs on until it is killed.
 send t-spin &
 expect \n\[1\] \d+\n
 expect root@relay:~# $
 send wait
 alive 1
-key-ahead {ctrl-c}
+type-ahead {ctrl-c}
 expect \n\^C\n
 expect root@relay:~# $
 send jobs

@@ -61,7 +61,7 @@ expect root@relay:~# $
 send echo $?
 expect \n127\n
 expect root@relay:~# $
-key echo no{ctrl-c}
+type echo no{ctrl-c}
 expect \^C\n
 expect root@relay:~# $
 send echo $?

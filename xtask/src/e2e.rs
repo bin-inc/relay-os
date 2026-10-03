@@ -23,7 +23,10 @@
 //! send <text>                      (types <text> + Enter over serial)
 //! send-crlf <text>                 (as send, ending with CR LF)
 //! key <text>                       (types <text> + Enter on the USB keyboard,
-//!                                   QMP send-key; {up}, {ctrl-c}: see keys.rs)
+//!                                   QMP send-key; {up}, {ctrl-c}: see keys.rs;
+//!                                   not ending with {ctrl-c} or {ctrl-d},
+//!                                   after which the Enter would come late:
+//!                                   type it)
 //! type <text>                      (as key, without the Enter)
 //! send-ahead <text>                (as send, while something runs on purpose:
 //!                                   input for a program, a line typed ahead;
@@ -312,6 +315,19 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
             "send-crlf" | "send-crlf-ahead" => Step::SendCrLf(rest.to_string()),
             "key" | "key-ahead" => {
                 keys::presses(rest).with_context(|| format!("{name}:{line_no}"))?;
+                // A Ctrl-C or a Ctrl-D ends what reads it, and the next
+                // expect matches the prompt that brings before QEMU has
+                // delivered the Enter, which then lands wherever the shell
+                // reads next.
+                let last = keys::typed(rest)?.pop();
+                if let Some(["ctrl", c @ ("c" | "d")]) = last.as_deref() {
+                    bail!(
+                        "{name}:{line_no}: {word} presses Enter after its last key, \
+                         {{ctrl-{c}}}, and that Enter comes after the prompt the key \
+                         brings: use {}",
+                        word.replacen("key", "type", 1)
+                    );
+                }
                 Step::Key(rest.to_string())
             }
             "type" | "type-ahead" => {
@@ -1162,17 +1178,60 @@ mod tests {
     }
 
     #[test]
+    fn a_key_step_does_not_end_with_ctrl_c_or_ctrl_d() {
+        // Plan 3's empty prompt after `wait`: `key` presses Enter after its
+        // text, and after a Ctrl-C that Enter came once the scenario had
+        // moved on, to land wherever the shell read next. A Ctrl-D that
+        // ends a program's input is the same (the prototype's review).
+        for (text, word, key, instead) in [
+            (
+                "expect root@relay:~# $\nkey echo no{ctrl-c}\n",
+                "key",
+                "ctrl-c",
+                "type",
+            ),
+            ("key-ahead {ctrl-c}\n", "key-ahead", "ctrl-c", "type-ahead"),
+            ("key-ahead a{ctrl-d}\n", "key-ahead", "ctrl-d", "type-ahead"),
+            (
+                "expect root@relay:~# $\nkey {ctrl-d}\n",
+                "key",
+                "ctrl-d",
+                "type",
+            ),
+        ] {
+            let e = parse_scenario("x", text).unwrap_err().to_string();
+            assert!(
+                e.ends_with(&format!(
+                    "{word} presses Enter after its last key, {{{key}}}, and that Enter \
+                     comes after the prompt the key brings: use {instead}"
+                )),
+                "{e}"
+            );
+        }
+        for ok in [
+            "key-ahead {ctrl-c}x\n",
+            "key-ahead {ctrl-d}x\n",
+            "key-ahead a{ctrl-e}\n",
+            "type-ahead {ctrl-c}\n",
+            "type-ahead {ctrl-d}\n",
+            "expect root@relay:~# $\ntype echo no{ctrl-c}\n",
+        ] {
+            assert!(parse_scenario("x", ok).is_ok(), "{ok:?}");
+        }
+    }
+
+    #[test]
     fn input_typed_ahead_is_sent_as_other_input_is() {
         let s = parse_scenario(
             "x",
-            "send-ahead a b\nkey-ahead {ctrl-c}\ntype-ahead q\nsend-crlf-ahead c\n",
+            "send-ahead a b\nkey-ahead {ctrl-c}x\ntype-ahead q\nsend-crlf-ahead c\n",
         )
         .unwrap();
         assert_eq!(
             s.steps,
             vec![
                 (1, Step::Send("a b".into())),
-                (2, Step::Key("{ctrl-c}".into())),
+                (2, Step::Key("{ctrl-c}x".into())),
                 (3, Step::Type("q".into())),
                 (4, Step::SendCrLf("c".into())),
             ]

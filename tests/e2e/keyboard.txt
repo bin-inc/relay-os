@@ -33,7 +33,7 @@ key {up}{up}{up}
 expect \nABC1def\n
 # Ctrl-C drops the line being typed.
 expect root@relay:~# $
-key echo nope{ctrl-c}
+type echo nope{ctrl-c}
 expect \^C\n
 # The keyboard and the serial line type into the same shell.
 expect root@relay:~# $

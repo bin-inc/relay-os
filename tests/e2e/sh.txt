@@ -61,8 +61,8 @@ type echo no{ctrl-c}
 expect \Aecho no\^C\nroot@relay:~# $
 send t-spin
 alive 1
-key-ahead {ctrl-c}
-expect \n\^C\nroot@relay:~# 
+type-ahead {ctrl-c}
+expect \n\^C\nroot@relay:~# $
 # Scripts: the transcript gets what the screen gets, a script's programs'
 # output and a nested script's lines too.
 send echo 'echo one' > /root/s.sh
@@ -104,8 +104,8 @@ send sh /root/j.sh
 expect \+ sh\nroot@relay:~# $
 send t-spin
 alive 1
-key-ahead {ctrl-c}
-expect \^C\nroot@relay:~# 
+type-ahead {ctrl-c}
+expect \^C\nroot@relay:~# $
 send echo back
 expect \nback\n
 # Ctrl-C ends a script with its command.
@@ -114,8 +114,8 @@ send echo t-spin > /root/spin.sh
 expect root@relay:~# $
 send sh /root/spin.sh
 alive 1
-key-ahead {ctrl-c}
-expect \+ t-spin\n(pid \d+ \(/bin/(t-spin|sh)\): killed: Ctrl-C\n){2}\^C\nroot@relay:~# 
+type-ahead {ctrl-c}
+expect \+ t-spin\n(pid \d+ \(/bin/(t-spin|sh)\): killed: Ctrl-C\n){2}\^C\nroot@relay:~# $
 # Orphans that end while init waits for its shell are collected as they
 # end (a Ctrl-C'd script leaves its command's zombie to process 1 too):
 # the table is as empty the second time, with two shells in it now.
