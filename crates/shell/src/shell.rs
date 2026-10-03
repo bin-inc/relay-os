@@ -1207,6 +1207,16 @@ mod tests {
             b"t-args a && (\nt-args ran\n)\nt-args next\n",
             b"f() {\nt-args ran\n}\nt-args next\n",
             b"t-args a || {\nt-args ran\nexit 1\n}\nt-args next\n",
+            // The final review: a `)` whose `(` opened no subshell, the
+            // `function f {` form, and a stray keyword's closer.
+            b"function f {\nt-args ran\n}\nt-args next\n",
+            b"t-args a || function f {\nt-args ran\n}\nt-args next\n",
+            b"t-args a || (\narr=(x y)\nt-args ran\n)\nt-args next\n",
+            b"t-args a || (\n[[ ( -f x ) ]] && t-args x\nt-args ran\n)\nt-args next\n",
+            b"t-args a || (\nf() { t-args x; }\nt-args ran\n)\nt-args next\n",
+            b"t-args a || (\nls @(a|b)\nt-args ran\n)\nt-args next\n",
+            b"t-args a || {\nfunction g {\nt-args g\n}\nt-args ran\n}\nt-args next\n",
+            b"t-args a || {\nfi\nt-args ran\n}\nt-args next\n",
         ] {
             assert_eq!(piped(text), ["next"], "{}", String::from_utf8_lossy(text));
         }
