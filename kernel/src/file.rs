@@ -1,7 +1,10 @@
 //! Files of the VFS as processes have them open (user-space gate §7.3,
 //! §16 item 4): a node, what the file was opened for, and an offset that
 //! every fd sharing the open file shares (the fds `spawn` hands a child);
-//! each `open` makes a new one with an offset of its own, as on Linux.
+//! each `open` makes a new one with an offset of its own, as on Linux. A
+//! character device's `seek` gives 0, whatever it is asked, as Linux's
+//! `/dev/null`'s does (programmable shell gate §8.4); its reads and writes
+//! ignore the offset.
 //!
 //! `open`'s flags and their errors are Linux's where they apply. `seek`
 //! may go past the end (a write there leaves a hole). `read_dir` gives a
@@ -34,6 +37,8 @@ pub struct OpenFile {
     write: bool,
     append: bool,
     dir: bool,
+    /// A character device: `seek` gives 0.
+    device: bool,
     state: Mutex<State>,
 }
 
@@ -77,7 +82,12 @@ pub fn open(vfs: &mut dyn Vfs, path: &[u8], flags: u32) -> Result<OpenFile, Errn
         Err(Errno::ENOENT) if has(OPEN_CREATE) => (vfs.create(path)?, true),
         Err(e) => return Err(e),
     };
-    let dir = !created && vfs.stat(node)?.kind == FileType::Directory;
+    let kind = if created {
+        FileType::Regular
+    } else {
+        vfs.stat(node)?.kind
+    };
+    let dir = kind == FileType::Directory;
     // Linux's rule: a directory is neither written nor created by `open`.
     if dir && (has(OPEN_WRITE) || has(OPEN_CREATE)) {
         return Err(Errno::EISDIR);
@@ -94,6 +104,7 @@ pub fn open(vfs: &mut dyn Vfs, path: &[u8], flags: u32) -> Result<OpenFile, Errn
         write: has(OPEN_WRITE),
         append: has(OPEN_APPEND),
         dir,
+        device: kind == FileType::CharDev,
         state: Mutex::new(State {
             offset: 0,
             after: None,
@@ -215,9 +226,13 @@ impl OpenFile {
     /// Moves the offset (spec §7.3): from the start, the offset or the end.
     /// Past the end is allowed; before the start, past 2^63 − 1 and an
     /// unknown `whence` are `EINVAL`. A directory only goes back to its
-    /// start, where `read_dir` begins again.
+    /// start, where `read_dir` begins again; a character device's `seek`
+    /// gives 0.
     pub fn seek(&self, vfs: &mut dyn Vfs, offset: i64, whence: u32) -> Result<u64, Errno> {
         let at = self.offset()?;
+        if self.device {
+            return Ok(0);
+        }
         if self.dir {
             if (offset, whence) != (0, SEEK_START) {
                 return Err(Errno::EINVAL);
@@ -504,6 +519,28 @@ mod tests {
             "unchanged"
         );
         assert_eq!(f.write(&mut t, b"x"), Err(Errno::EFBIG));
+    }
+
+    #[test]
+    fn a_character_device_s_seek_gives_0() {
+        // As Linux's /dev/null: every seek gives 0, after writes too
+        // (programmable shell gate §8.4).
+        let mut t = table();
+        t.mount(b"/dev", Box::new(vfs::DevFs::new(1_000))).unwrap();
+        let f = open(&mut t, b"/dev/null", RW | OPEN_TRUNCATE).unwrap();
+        assert_eq!(f.write(&mut t, b"gone"), Ok(4));
+        assert_eq!(f.seek(&mut t, 0, SEEK_CURRENT), Ok(0));
+        assert_eq!(f.seek(&mut t, 100, SEEK_START), Ok(0));
+        assert_eq!(f.seek(&mut t, -5, SEEK_END), Ok(0));
+        assert_eq!(f.seek(&mut t, 0, 9), Ok(0), "whatever is asked");
+        let mut buf = [0u8; 8];
+        assert_eq!(f.read(&mut t, &mut buf), Ok(0));
+        let a = open(&mut t, b"/dev/null", OPEN_WRITE | OPEN_APPEND).unwrap();
+        assert_eq!(a.write(&mut t, b"more"), Ok(4));
+        assert_eq!(a.seek(&mut t, 0, SEEK_CURRENT), Ok(0));
+        // A regular file's moves as before.
+        let g = open(&mut t, b"/root/f", OPEN_READ).unwrap();
+        assert_eq!(g.seek(&mut t, 100, SEEK_START), Ok(100));
     }
 
     #[test]
