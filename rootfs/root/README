@@ -9,3 +9,6 @@ Pipes and jobs:
 Scripts and variables:
   sh FILE a b    the script reads $0, $1 to $9, ${10}, $#, "$@" and $?
   NAME=value     then $NAME or ${NAME}; a value is never split into words
+Control flow (help shows the forms):
+  a; b    a && b    a || b    ! a    if [ -f FILE ]; then a; else b; fi
+  while test -f FILE; do a; done    for x in one two; do echo $x; done

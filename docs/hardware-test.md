@@ -6,9 +6,9 @@ Kingston DataTraveler 3.0 test stick (serial `08606E6D413FB27127135F8E`).
 The NUC also runs Linux Mint, which is where the stick is written.
 
 Checks 1, 1b and 2 test the boot, the display and the keyboard, and are run by
-hand. Checks 3, 4 and 5 are one run of four scripts on the stick, with a
-few steps by hand; it is the check every release gets. The results log at
-the end records each run.
+hand. Checks 3 to 6 are one run of five scripts on the stick, with a few
+steps by hand; it is the check every release gets. The results log at the
+end records each run.
 
 ## One-time setup (in Linux Mint)
 
@@ -186,15 +186,17 @@ The NUC has no serial port, so a keyboard that does not work cannot run
 | `[FAIL] keyboard: no USB keyboard found` and no `port 3` line | The K120 connected after the boot's wait, or not at all | Type anyway: a late keyboard is set up when it appears. If nothing works, `debug=usb`: a `port 3: connected` line means it appeared late, none means the port never saw it; the `ports settled` line shows the wait |
 | Keys show up twice or not at all | Firmware still emulating a keyboard (handoff) | `debug=usb`: the `legacy support` line |
 
-## Checks 3, 4 and 5 — files, programs, pipes and jobs
+## Checks 3 to 6 — files, programs, pipes, jobs and control flow
 
-The full checklist of the milestone 1 spec's §9.4 and the user-space gate
-spec's §12.4, in one run. The K120 and the stick sit on the ports of
-check 2 (the stick on bus 4 port 3 in Mint's `lsusb -t`).
+The full checklist of the milestone 1 spec's §9.4, the user-space gate
+spec's §12.4 and the programmable shell gate spec's §11.4, in one run.
+The K120 and the stick sit on the ports of check 2 (the stick on bus 4
+port 3 in Mint's `lsusb -t`).
 
-Most of the run is four scripts on the stick, in `/root/checks/` (in the
+Most of the run is five scripts on the stick, in `/root/checks/` (in the
 repository under `rootfs/root/checks/`): `check3-a.sh` and `check3-b.sh`
-(check 3, either side of a restart), `check4.sh` and `check5.sh`. The
+(check 3, either side of a restart), `check4.sh`, `check5.sh` and
+`check6.sh`. The
 `/bin/sh` that init (process 1) starts as process 2 runs them: `sh FILE`
 runs each line as if it were typed, shows it as `+ <command>` before its
 output, and writes everything it shows into a transcript next to the
@@ -308,33 +310,68 @@ Every command but the shell's built-ins (`cd`, `exit`, `help`, `jobs`,
    prompt `root@relay:~# ` come at once, without the motd: the shell is a
    program, and process 1 starts another. Photograph the screen.
 
+### Check 6 — control flow
+
+9. Type `sh checks/check6.sh`. It runs for a few seconds:
+   - `if`, `elif` and `else` written across lines inside a `for`, and an
+     `if` that takes no branch (status 0);
+   - a `while` and an `until` loop, each ended by a file it removes or
+     makes;
+   - `for` over words, and over `"$@"` in a script it writes and runs
+     with three arguments, one empty and one with two blanks
+     (`for a in "$@"` and `for a do`);
+   - the statuses of `&&`, `||` and `!`;
+   - `test` and `[` on the stick's files: `/bin` is read-only
+     (`[ -w /bin/ls ]` is false) and `/root` is not, `-nt` and `-ot` of
+     two files made a second apart, and an invalid integer
+     (`[: invalid integer 'x'`, status 2);
+   - 100 programs (`true`) in two nested `for` loops of 10 words between
+     two `date` lines. Note both times for the results log: more than
+     10 s apart means that a sync after every command is too slow on the
+     stick (the programmable shell gate's §13), so say so.
+
+   The prompt comes back after `+ done` and the second `date`.
+
+   Then three steps by hand:
+   - `for x in a b c` and Enter: the prompt `> ` asks for more. Then
+     `do echo $x` (`> ` again) and `done`: `a`, `b` and `c`, each on a
+     line of its own.
+   - `if true` and Enter, then Ctrl-C at `> `: `^C` and the prompt
+     `root@relay:~# `; `echo $?` prints `130`.
+   - `while true; do sleep 1; done`, and after a few seconds Ctrl-C: `^C`
+     and the prompt come back at once; `echo $?` prints `130`.
+
+   Photograph the screen.
+
 ### The error screen, power off and verify-usb
 
-9. The error screen: `reboot`, and choose the stick again with F10, so
-   that the kernel log's last lines are the boot's. At the prompt type
-   `exit` three times within 10 s. After the first two, init's line and a
-   new prompt; after the third, `init: /bin/sh (pid <n>) exited with
-   <status>` (0 unless the command before `exit` failed) and the error
-   screen: `*** Relay OS cannot run its shell ***`,
-   `/bin/sh ended 3 times within 10 s`, the kernel log's last 20 lines,
-   from the `xhci 00:14.0: port 15:` lines to init's three, and
-   `Press any key to reboot.`
-   The line `xhci 00:14.0: slot 4: interface 0 class 8/6/80, …` is wider
-   than the screen and takes two rows, and the heading stays at the top.
-   Photograph it, wait a few seconds (it waits for the key, however long),
-   then press a key on the K120: the NUC restarts. Choose the stick again
-   with F10: the motd and the prompt.
-10. `poweroff`: the NUC switches itself off (`relay: powering off`). If the
+10. The error screen: `reboot`, and choose the stick again with F10, so
+    that the kernel log's last lines are the boot's. At the prompt type
+    `exit` three times within 10 s. After the first two, init's line and
+    a new prompt; after the third, `init: /bin/sh (pid <n>) exited with
+    <status>` (0 unless the command before `exit` failed) and the error
+    screen: `*** Relay OS cannot run its shell ***`,
+    `/bin/sh ended 3 times within 10 s`, the kernel log's last 20 lines,
+    from the `xhci 00:14.0: port 15:` lines to init's three, and
+    `Press any key to reboot.`
+    The line `xhci 00:14.0: slot 4: interface 0 class 8/6/80, …` is wider
+    than the screen and takes two rows, and the heading stays at the top.
+    Photograph it, wait a few seconds (it waits for the key, however
+    long), then press a key on the K120: the NUC restarts. Choose the
+    stick again with F10: the motd and the prompt.
+11. `poweroff`: the NUC switches itself off (`relay: powering off`). If the
     screen says `System halted. It is now safe to power off.` instead, note
     the `relay:` line above it and hold the power button.
-11. Boot Mint and run `cargo xtask verify-usb`: `e2fsck: clean`, the tree
+12. Boot Mint and run `cargo xtask verify-usb`: `e2fsck: clean`, the tree
     lists `/root/notes/a`, `/root/notes/big` (8388608 bytes) and
     `/root/notes/t`, and the last lines are `system.img: built <time>`,
     `/root/checks/check3-a.sh: ok, 84 of 84 commands as expected (run <time>)`,
     `/root/checks/check3-b.sh: ok, 5 of 5 commands as expected (run <time>)`,
-    `/root/checks/check4.sh: ok, 33 of 33 commands as expected (run <time>)`
-    and `/root/checks/check5.sh: ok, 29 of 29 commands as expected (run <time>)`,
-    with the UTC times of the four runs. A transcript older than the
+    `/root/checks/check4.sh: ok, 33 of 33 commands as expected (run <time>)`,
+    `/root/checks/check5.sh: ok, 29 of 29 commands as expected (run <time>)`
+    and `/root/checks/check6.sh: ok, 46 of 46 commands as expected (run <time>)`
+    (each line of a loop written across lines counts), with the UTC times
+    of the five runs. A transcript older than the
     stick's `system.img` (a run before the last `flash --kernel`, which
     keeps the transcripts; `flash --full` erases them) fails. A `FAILED`
     line is followed by the script line, the expectation that failed and
@@ -359,6 +396,10 @@ Every command but the shell's built-ins (`cd`, `exit`, `help`, `jobs`,
 | `check5.sh` stops after a pipeline's `+` line: no output, no prompt | A pipe's reader or writer was not woken on this machine | Photograph the screen, then Ctrl-C: the prompt comes back, and `dmesg` ends with a `pid <n> (…): killed: Ctrl-C` line for each process of the pipeline still there (and the script's `/bin/sh`) |
 | `check5.sh` stops after `+ wait %1` | `kill %1` did not end the job, so the `t-spin` that `wait` waits for spins on | Photograph the screen, then Ctrl-C: it ends the script but not the job, which runs in its own group; `dmesg` shows no `pid <n> (/bin/t-spin): killed: kill` line, and `ps` shows the `t-spin`: end it with `kill <pid>` |
 | `check5.sh`: `ps \| grep -c t-spin` prints another count than 1 before `kill %1`, or than 0 after `wait %1` | A `t-spin` of an earlier command still runs, or the job's did not start | `verify-usb` names the line; `ps` at the prompt lists the processes |
+| `check6.sh` prints `while once` or `until once` over and over, with an `rm` or `touch` error | The loop's file was not removed or made, so the loop runs on | Photograph the screen, then Ctrl-C: `^C` and the prompt come back; `ls /root/check6-go /root/check6-stop` shows which file is left |
+| `check6.sh`'s two `date` lines are more than 10 s apart | A sync after every command is slow on the stick | Note both times in the results log: a later plan syncs once per command line instead (the programmable shell gate's §13) |
+| Ctrl-C at `> ` by hand gives no `^C`, or no prompt | The line editor did not get the K120's Ctrl-C | Photograph the screen; Enter, or a second Ctrl-C, shows whether the shell still reads the keyboard |
+| Ctrl-C in the `while` loop by hand gives no `^C`, or no prompt | The Ctrl-C reached neither `sleep` nor the shell's check between its own commands (`wait` for a Ctrl-C), or was lost after `sleep` ended | Photograph the screen; a second Ctrl-C shows whether the loop can end; `dmesg` after it shows a `pid <n> (/bin/sleep): killed: Ctrl-C` line if the first reached `sleep` |
 | The error screen with `/bin/sh cannot start: …` or `/bin/sh ended 3 times within 10 s` | The shell cannot be loaded, or ends as soon as it starts (its `init: /bin/sh (pid N) …` lines, in the log's lines on the screen, say how) | Photograph the screen; a key restarts the machine |
 | A key on the K120 at the error screen does nothing | The keyboard is not polled while init waits (the idle task polls it) | Photograph the screen and hold the power button |
 | The error screen's heading has scrolled away, or a program's line shows under `Press any key` | A log line takes more rows than counted, or a process still ran | Photograph the screen |
