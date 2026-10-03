@@ -8,7 +8,7 @@ a  big  t
 + tail -n 1 /root/notes/big
 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde
 + dmesg
-Relay OS 0.4.0
+Relay OS 0.5.0
 [[32m ok [0m] console 1920x1200 (120x33 cells)
 [[32m ok [0m] cpu tables
 cpu: SMEP on, SMAP on
