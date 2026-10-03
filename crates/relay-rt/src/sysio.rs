@@ -77,6 +77,10 @@ impl Console for SysConsole {
         sys::console_size().0 as usize
     }
 
+    fn is_screen(&self) -> bool {
+        sys::fstat(2).is_ok_and(|st| is_console(&st))
+    }
+
     /// Only an interactive shell keeps the console in raw mode while its
     /// own commands run, a Ctrl-C there being input to ask the kernel for;
     /// another program's group has it in line mode, where Ctrl-C kills it.

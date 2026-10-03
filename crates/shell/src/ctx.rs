@@ -284,6 +284,11 @@ impl<'a> Ctx<'a> {
         self.console.columns()
     }
 
+    /// Whether errors go to the screen.
+    pub fn err_is_tty(&self) -> bool {
+        self.err == To::Console && self.console.is_screen()
+    }
+
     /// Whether standard output is the screen (`ls` then lays out columns).
     pub fn is_tty(&self) -> bool {
         match self.out {

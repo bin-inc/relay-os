@@ -36,6 +36,9 @@ pub struct TestConsole {
     asked: usize,
     /// How many times the shell took the console back.
     pub taken_back: usize,
+    /// What is written goes elsewhere than the screen (a program's fd 2
+    /// sent to a file).
+    pub redirected: bool,
 }
 
 impl TestConsole {
@@ -48,6 +51,7 @@ impl TestConsole {
             interrupt_after: None,
             asked: 0,
             taken_back: 0,
+            redirected: false,
         }
     }
 
@@ -77,6 +81,9 @@ impl Console for TestConsole {
     }
     fn columns(&self) -> usize {
         self.columns
+    }
+    fn is_screen(&self) -> bool {
+        !self.redirected
     }
     fn take_back(&mut self) {
         self.taken_back += 1;

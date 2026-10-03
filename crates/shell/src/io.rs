@@ -19,6 +19,12 @@ pub trait Console {
     fn write(&mut self, bytes: &[u8]);
     /// The screen's width in characters.
     fn columns(&self) -> usize;
+    /// Whether what `write` writes reaches the screen: a program's errors
+    /// are its fd 2, which its shell may have sent to a file (`sh FILE 2>
+    /// e`). The default is the screen.
+    fn is_screen(&self) -> bool {
+        true
+    }
     /// Whether Ctrl-C was pressed while a command runs. Long commands ask
     /// between pieces of work, so it must not wait for input. The default
     /// never interrupts.

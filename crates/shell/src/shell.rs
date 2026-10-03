@@ -503,14 +503,18 @@ impl<'a> Shell<'a> {
             self.say_on(fds, message.as_bytes());
             message.clear();
         }
-        self.release(fds);
         self.stopped = ran.stop;
         self.exited = ran.exited;
         self.cancelled |= ran.cancelled;
         let mut status = ran.status;
+        // A script `sh` read runs with its redirections: its commands read
+        // a file it was given as input.
         if let Some(script) = ran.script {
+            let outer = core::mem::replace(&mut self.fds, fds);
             status = self.run_script(*script);
+            self.fds = outer;
         }
+        self.release(fds);
         self.finish(status, message)
     }
 
