@@ -542,12 +542,10 @@ free
 
     /// The real check scripts against a transcript of each machine: QEMU's
     /// from the `checks` scenario, the NUC's as the NUC wrote them in the
-    /// last NUC run of checks 3, 4 and 5 (`docs/hardware-test.md`'s results
-    /// log), copied off the stick unchanged but for check 4's `ls /bin`,
-    /// which has `[` and `test` by hand until the next NUC run (spec §15
-    /// item 3). A `#nuc>` line must
-    /// not need a line of its own next to the `#>` line for the same
-    /// output, which QEMU alone cannot show.
+    /// last NUC run of checks 3 to 6 (`docs/hardware-test.md`'s results
+    /// log), copied off the stick unchanged. A `#nuc>` line must not need
+    /// a line of its own next to the `#>` line for the same output, which
+    /// QEMU alone cannot show.
     #[test]
     fn the_check_scripts_pass_on_both_machines() {
         let parts = [
@@ -574,6 +572,12 @@ free
                 include_str!("../../rootfs/root/checks/check5.sh"),
                 include_str!("../fixtures/checks/check5.qemu.log"),
                 include_str!("../fixtures/checks/check5.nuc.log"),
+            ),
+            (
+                "check6.sh",
+                include_str!("../../rootfs/root/checks/check6.sh"),
+                include_str!("../fixtures/checks/check6.qemu.log"),
+                include_str!("../fixtures/checks/check6.nuc.log"),
             ),
         ];
         // Every check script on the stick has its two transcripts here.

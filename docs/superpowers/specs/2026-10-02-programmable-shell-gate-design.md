@@ -1013,10 +1013,12 @@ does.
      function body, so a dropped `a || {` ended its drop at once and the
      group's lines ran without their guard (`exit 1` included), since
      plan 2. It now also counts `{` and `}` where a command name stands,
-     a function's body (`f() {`) among them, and the `(` and `)` of a
-     subshell, and keeps the kind of each construct open: a `)` closes a
-     subshell, ends a `case` pattern, or closes nothing, as in bash, and
-     `}` closes only a group.
+     a function's body (`f() {`, `function f {`) among them, and each `(`
+     with its `)`, a subshell's or another's (an array's, `f()`'s,
+     `[[ ( … ) ]]`'s, an extglob's, a `case` pattern's), and keeps the
+     kind of each construct open: a `)` closes only a `(`, a `}` only a
+     group, and `fi`, `done` and `esac` only a keyword's construct, so
+     that none of them ends a drop early (the final review).
    - **Milestone 3's deferred minors.** `verify-usb` names mcopy's reason
      when it cannot read the stick's `system.img`; the test that every
      check script has its transcripts considers only `*.sh` files of

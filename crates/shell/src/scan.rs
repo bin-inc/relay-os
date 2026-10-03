@@ -8,7 +8,8 @@
 //! refusal, so it reads what the parser refuses as bash reads it: `$(…)`
 //! and backquotes whole, a command name's place after `time`, `{` and `}`,
 //! `select` and `case` opening constructs, a `case` pattern before `)`,
-//! groups (`{ … }`, a function's body too) and subshells (`( … )`),
+//! groups (`{ … }`, a function's body too, `function f {` among them)
+//! and subshells (`( … )`), each `(` paired with its `)`,
 //! arithmetic (`((…))`) whole, and a here-document's body, data up to its
 //! delimiter's line.
 
@@ -23,8 +24,8 @@ enum For {
     AfterName,
 }
 
-/// The longest keyword the scan looks for, `select`.
-const KEYWORD_MAX: usize = 6;
+/// The longest keyword the scan looks for, `function`.
+const KEYWORD_MAX: usize = 8;
 
 /// The most here-documents the scan keeps that one line starts; the
 /// bodies of any more are read as lines.
@@ -83,15 +84,20 @@ const LEVELS_KEPT: usize = 64;
 /// The words that open a construct.
 const OPENERS: &[&[u8]] = &[b"if", b"while", b"until", b"for", b"select", b"case"];
 
-/// What an open construct is: a `)` closes a subshell (in a `case`, it
-/// ends a pattern), and a `}` closes a group.
+/// What an open construct is: a keyword's closer closes only a keyword's
+/// construct, a `}` only a group, and a `)` only a subshell or another
+/// `(`; in a `case` a `)` with no `(` ends a pattern.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
-    /// `if`, `while`, `until`, `for`, `select` and `case`, closed by their
-    /// keyword.
+    /// `if`, `while`, `until`, `for` and `select`, closed by their keyword.
     Keyword,
+    /// `case`, closed by `esac`; a `(` right in it is a pattern's.
+    Case,
     Group,
     Subshell,
+    /// Any other `(`: an array's, a function's `f()`, `[[ ( … ) ]]`'s, an
+    /// extglob's, a pattern's.
+    Paren,
 }
 
 /// How many open constructs the scan knows the kind of; a `)` or `}`
@@ -133,6 +139,9 @@ pub(crate) struct Scan {
     /// The `(` before stood where a command name would: a `(` right after
     /// it starts arithmetic.
     paren: bool,
+    /// After `function`: the next word is the function's name, and a
+    /// command name's place follows it.
+    function: bool,
     /// The open levels are arithmetic's (`((`), until its first `)` shows
     /// whether bash reads them so: the byte after it decides
     /// (`arithmetic_check`).
@@ -184,6 +193,7 @@ impl Scan {
             cases: 0,
             last: b'\n',
             paren: false,
+            function: false,
             arithmetic: false,
             arithmetic_check: false,
             lost: false,
@@ -302,9 +312,13 @@ impl Scan {
             b')' => {
                 self.command = false;
                 self.operator();
-                if self.top() == Some(Kind::Subshell) {
-                    self.close();
-                    self.closed = true;
+                match self.top() {
+                    Some(Kind::Subshell) => {
+                        self.close();
+                        self.closed = true;
+                    }
+                    Some(Kind::Paren) => self.close(),
+                    _ => {}
                 }
             }
             // `((` where a command name stands is bash's arithmetic
@@ -324,8 +338,10 @@ impl Scan {
                 self.end_word();
                 self.paren = self.command;
                 self.operator();
-                if self.paren {
+                if self.paren && self.top() != Some(Kind::Case) {
                     self.open(Kind::Subshell);
+                } else {
+                    self.open(Kind::Paren);
                 }
             }
             b';' | b'&' => self.operator(),
@@ -483,6 +499,10 @@ impl Scan {
             }
             For::No => {}
         }
+        if core::mem::take(&mut self.function) {
+            self.command = true;
+            return;
+        }
         if !self.command {
             return;
         }
@@ -497,13 +517,17 @@ impl Scan {
             // Its word and `in` are no command's name; a pattern is
             // followed by `)`.
             b"case" => {
-                self.open(Kind::Keyword);
+                self.open(Kind::Case);
                 self.command = false;
             }
             b"fi" | b"done" | b"esac" => {
-                self.close();
+                // Not a group's or a parenthesis's (bash's error).
+                if !matches!(self.top(), Some(Kind::Group | Kind::Subshell | Kind::Paren)) {
+                    self.close();
+                }
                 self.closed = true;
             }
+            b"function" => self.function = true,
             b"}" => {
                 if self.top() == Some(Kind::Group) {
                     self.close();
@@ -972,9 +996,10 @@ mod tests {
             [false, false, true, true]
         );
         // After `a(` a command name stands, so the second `(` opens a
-        // subshell (bash's syntax error): the drop goes on to its `)`.
+        // subshell (bash's syntax error): the drop goes on to the `)` of
+        // each.
         assert_eq!(
-            done_after(&["a((b <<EOF", "EOF", ")", "c"]),
+            done_after(&["a((b <<EOF", "EOF", "))", "c"]),
             [false, false, true, true]
         );
         // Right after a keyword, with no blank, too (the prototype's
@@ -1001,7 +1026,7 @@ mod tests {
         // After its `))`, a `$(…)` nested in a word is a word's again.
         assert_eq!(done_after(&["(( 1 )); echo $($(a) b)", "c"]), [true, true]);
         assert_eq!(
-            done_after(&["echo ((b <<EOF", "EOF", ")", "c"]),
+            done_after(&["echo ((b <<EOF", "EOF", "))", "c"]),
             [false, false, true, true]
         );
     }
@@ -1038,6 +1063,32 @@ mod tests {
         assert_eq!(
             done_after(&["case x in", "x) {", "a; }", "esac"]),
             [false, false, false, true]
+        );
+        // The final review: every `(` the scan does not take for a
+        // subshell is counted too, so that its `)` closes no subshell
+        // around it; `function f {` opens a group; a keyword's closer
+        // closes no group or subshell (bash's syntax error).
+        for lines in [
+            &["(", "x=(a b)", "c", ")", "d"][..],
+            &["(", "f() { a; }", "c", ")", "d"],
+            &["(", "[[ ( -f x ) ]] && a", "c", ")", "d"],
+            &["(", "ls @(a|b) <(c)", "c", ")", "d"],
+            &["function f {", "a", "}", "b"],
+            &["function f() {", "a", "}", "b"],
+            &["{", "function g {", "a", "}", "b", "}", "c"],
+            &["{", "fi", "a", "}", "b"],
+            &["(", "done", "a", ")", "b"],
+        ] {
+            let mut want = vec![false; lines.len()];
+            want[lines.len() - 2..].fill(true);
+            assert_eq!(done_after(lines), want, "{lines:?}");
+        }
+        assert_eq!(done_after(&["{ if a; then b; fi; }", "c"]), [true, true]);
+        // A `(` right in a `case` is a pattern's, after which a command
+        // name stands.
+        assert_eq!(
+            done_after(&["case y in", "x) a;;", "(y) if b; then c; fi;;", "esac", "d"]),
+            [false, false, false, true, true]
         );
         // After its `)` a keyword may follow, as after `fi`, and an opener
         // is bash's error.

@@ -23,12 +23,20 @@ with `grep`, `seq`, `sleep`, `true` and `false`; jobs in the background
 (`t-spin &`), with `jobs`, `wait`, `kill %1` and `ps`; and scripts with
 arguments and variables (`sh FILE a b`, `$1`, `"$@"`, `$?`, `NAME=value`).
 
-Milestone 1 is version 0.2.0, milestone 2 version 0.3.0 and milestone 3
-version 0.4.0, which ends the user-space gate.
+Milestone 4 makes the shell one to program in: lists (`a; b`,
+`a && b`, `a || b`, `! a`, `a & b`), commands typed across lines with
+bash's `> ` prompt, `if`, `while`, `until` and `for`, and `test` and `[`
+(`[ -f FILE ]`) as programs, with `grep -q`.
+
+Milestone 1 is version 0.2.0, milestone 2 version 0.3.0, milestone 3
+version 0.4.0, which ends the user-space gate, and milestone 4 version
+0.5.0.
 
 Design: `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`
-(milestone 1) and `docs/superpowers/specs/2026-09-29-user-space-gate-design.md`
-(milestones 2 and 3: the shell and its commands as programs in ring 3).
+(milestone 1), `docs/superpowers/specs/2026-09-29-user-space-gate-design.md`
+(milestones 2 and 3: the shell and its commands as programs in ring 3)
+and `docs/superpowers/specs/2026-10-02-programmable-shell-gate-design.md`
+(milestones 4 and 5: control flow, redirection and the environment).
 
 ## Quick start
 
@@ -48,8 +56,8 @@ has the whole checklist):
 3. Reboot, press F10 and choose the UEFI entry for the Kingston stick. Every
    startup line says `[ ok ]` and the prompt `root@relay:~# ` follows.
 4. Type `sh checks/check3-a.sh`, then `reboot`, boot the stick again, type
-   `sh checks/check3-b.sh`, `sh checks/check4.sh` and `sh checks/check5.sh`,
-   then `poweroff`.
+   `sh checks/check3-b.sh`, `sh checks/check4.sh`, `sh checks/check5.sh`
+   and `sh checks/check6.sh`, then `poweroff`.
 5. Back in Linux Mint: `cargo xtask verify-usb` checks the filesystem and
    the output of every script.
 
