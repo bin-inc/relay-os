@@ -1198,6 +1198,21 @@ mod tests {
     }
 
     #[test]
+    fn a_dropped_group_runs_none_of_it() {
+        // The prototype's review: a refused `a || {`, `a && (` or `f() {`
+        // ended its drop at once, so the lines of its body ran without
+        // their guard, `exit` among them. bash runs none of them here.
+        for text in [
+            &b"t-args a && {\nt-args ran\n}\nt-args next\n"[..],
+            b"t-args a && (\nt-args ran\n)\nt-args next\n",
+            b"f() {\nt-args ran\n}\nt-args next\n",
+            b"t-args a || {\nt-args ran\nexit 1\n}\nt-args next\n",
+        ] {
+            assert_eq!(piped(text), ["next"], "{}", String::from_utf8_lossy(text));
+        }
+    }
+
+    #[test]
     fn an_if_dropped_any_way_runs_none_of_it() {
         // Plan 1's lesson: its worst defects ran part of a command without
         // its guard. However an `if` is dropped, none of it runs, the line
