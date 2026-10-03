@@ -34,10 +34,13 @@
 //! Every `send`, `send-crlf`, `key` and `type` waits for the prompt: since
 //! the input before it (or the start, a reboot or a reset), an expect must
 //! have ended at one (`root@relay:~# `, `root@relay:~# $` or `> $`), or the
-//! scenario is refused. A line sent while a command runs is echoed twice,
-//! by the line discipline and by the shell's editor, and lands inside the
-//! output an expect waits for (programmable shell gate §15 item 3); input
-//! sent while something runs on purpose is marked `-ahead`.
+//! scenario is refused. So do `poweroff`, `reboot` and `reset <text>`,
+//! which type a command line; a bare `reset` and `reset-key` press a key
+//! at the error screen, where no prompt comes. A line sent while a command
+//! runs is echoed twice, by the line discipline and by the shell's editor,
+//! and lands inside the output an expect waits for (programmable shell gate
+//! §15 item 3); input sent while something runs on purpose is marked
+//! `-ahead`.
 //!
 //! ```text
 //! screenshot-nonblank              (QMP screendump; top rows not one colour)
@@ -216,11 +219,20 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
         let rest = rest.trim();
         let input = matches!(word, "send" | "send-crlf" | "key" | "type");
         let ahead = AHEAD.contains(&word);
+        // These type a command line too; a bare `reset` presses a key at
+        // the error screen, where no prompt comes.
+        let command = matches!(word, "poweroff" | "reboot") || word == "reset" && !rest.is_empty();
         if input && !paced {
             bail!(
                 "{name}:{line_no}: {word} does not wait for the prompt: an expect that \
                  ends at it must come first, or it is {word}-ahead (sent while \
                  something runs)"
+            );
+        }
+        if command && !paced {
+            bail!(
+                "{name}:{line_no}: {word} does not wait for the prompt: an expect that \
+                 ends at it must come first"
             );
         }
         if ahead && paced {
@@ -1104,6 +1116,38 @@ mod tests {
                 "{e}"
             );
         }
+        // A step that types a command line waits for the prompt too: it
+        // has no form typed ahead. A bare `reset` or `reset-key` presses a
+        // key at the error screen, where no prompt comes (plan 3's final
+        // review).
+        for ok in [
+            "expect root@relay:~# $\npoweroff\n",
+            "expect root@relay:~# $\npoweroff t-sys poweroff\n",
+            "expect root@relay:~# $\nreboot\n",
+            "expect root@relay:~# $\nreboot relay: .*\n",
+            "expect root@relay:~# $\nreset reboot -f\n",
+            "expect x\nreset\n",
+            "expect x\nreset-key\n",
+        ] {
+            assert_eq!(at_prompt(ok), Ok(()), "{ok:?}");
+        }
+        for text in [
+            "expect x\npoweroff\n",
+            "expect x\npoweroff t-sys poweroff\n",
+            "expect x\nreboot\n",
+            "expect x\nreboot relay: .*\n",
+            "expect x\nreset reboot -f\n",
+            "expect root@relay:~# $\nsend a\npoweroff\n",
+        ] {
+            let e = at_prompt(text).unwrap_err();
+            let word = text.lines().last().unwrap().split(' ').next().unwrap();
+            assert!(
+                e.ends_with(&format!(
+                    "{word} does not wait for the prompt: an expect that ends at it must come first"
+                )),
+                "{text:?}: {e}"
+            );
+        }
         // Only the four marks are marks: a misspelt one is an unknown step,
         // wherever it stands (plan 3's final review).
         for text in ["expect root@relay:~# $\nsned-ahead a\n", "sned-ahead a\n"] {
@@ -1179,10 +1223,14 @@ mod tests {
 
     #[test]
     fn parses_the_check_script_step() {
-        let s = parse_scenario("x", "poweroff\ncheck-script /root/checks/a.sh").unwrap();
+        let s = parse_scenario(
+            "x",
+            "expect root@relay:~# $\npoweroff\ncheck-script /root/checks/a.sh",
+        )
+        .unwrap();
         assert_eq!(
-            s.steps[1],
-            (2, Step::CheckScript("/root/checks/a.sh".into()))
+            s.steps[2],
+            (3, Step::CheckScript("/root/checks/a.sh".into()))
         );
         assert!(parse_scenario("x", "check-script").is_err());
         assert!(parse_scenario("x", "check-script root/a.sh").is_err());
@@ -1252,24 +1300,30 @@ mod tests {
 
     #[test]
     fn parses_reboot_and_poweroff_steps() {
-        let s = parse_scenario(
-            "x",
-            "reboot\nreboot relay: restarting\npoweroff\npoweroff t-sys poweroff\nreset\nreset reboot -f\nreset-key",
-        )
-        .unwrap();
+        let p = "expect root@relay:~# $";
+        let text = format!(
+            "{p}\nreboot\n{p}\nreboot relay: restarting\n{p}\npoweroff\n{p}\npoweroff t-sys poweroff\nreset\n{p}\nreset reboot -f\nreset-key"
+        );
+        let s = parse_scenario("x", &text).unwrap();
+        let steps: Vec<_> = s
+            .steps
+            .into_iter()
+            .filter(|(_, step)| !matches!(step, Step::Expect(_)))
+            .collect();
         assert_eq!(
-            s.steps,
+            steps,
             vec![
-                (1, Step::Reboot(None)),
-                (2, Step::Reboot(Some("relay: restarting".into()))),
-                (3, Step::Poweroff("poweroff".into())),
-                (4, Step::Poweroff("t-sys poweroff".into())),
-                (5, Step::Reset(String::new())),
-                (6, Step::Reset("reboot -f".into())),
-                (7, Step::ResetKey)
+                (2, Step::Reboot(None)),
+                (4, Step::Reboot(Some("relay: restarting".into()))),
+                (6, Step::Poweroff("poweroff".into())),
+                (8, Step::Poweroff("t-sys poweroff".into())),
+                (9, Step::Reset(String::new())),
+                (11, Step::Reset("reboot -f".into())),
+                (12, Step::ResetKey)
             ]
         );
-        assert!(parse_scenario("x", "reboot (").is_err());
+        let bad = parse_scenario("x", &format!("{p}\nreboot (")).unwrap_err();
+        assert!(bad.to_string().contains("bad regex"), "{bad}");
         assert!(
             parse_scenario("x", "reset-key x").is_err(),
             "Enter alone: after the first key the machine is gone"

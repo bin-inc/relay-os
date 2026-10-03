@@ -107,4 +107,5 @@ expect \n +total +used +free\nMem: +\d+ +\d+ +\d+\nHeap: +\d+ +\d+ +\d+\n
 expect root@relay:~# $
 send free
 expect-same mem \nMem:\s+\d+\s+(\d+)\s
+expect root@relay:~# $
 poweroff /bin/poweroff

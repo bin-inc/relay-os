@@ -31,12 +31,14 @@ expect root@relay:~# $
 # Its root was not shut down cleanly, and mounts all the same.
 send echo after
 expect \nafter\n
+expect root@relay:~# $
 reset reboot -f
 expect Relay OS \d+\.\d+\.\d+
 expect \[ ok \] mount /: ext2 on .*
 expect root@relay:~# $
 send cat /root/f
 expect \nbefore\n
+expect root@relay:~# $
 unplug
 expect port \d: slot \d+ released
 poweroff poweroff -f

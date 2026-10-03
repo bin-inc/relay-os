@@ -77,4 +77,5 @@ expect \nrm: cannot remove '/': Is a directory\n
 expect root@relay:~# $
 send ls /
 expect \nbin  dev  etc  home  lost\+found  root  tmp  usr  var\n
+expect root@relay:~# $
 poweroff

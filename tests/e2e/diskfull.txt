@@ -85,4 +85,5 @@ send echo more > more
 expect root@relay:~# $
 send cat more
 expect \nmore\n
+expect root@relay:~# $
 poweroff
