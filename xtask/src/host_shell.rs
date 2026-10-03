@@ -1,8 +1,9 @@
 //! `cargo xtask host-shell <img>`: the Relay shell on the host, over the
 //! ext2 root partition of an image file (spec §9.1), through a file-backed
-//! `BlockDevice`. For trying the filesystem and the shell's commands
-//! without a machine: the in-process runner runs the command functions
-//! (no programs, no `&`). It changes the image in place.
+//! `BlockDevice`, with the kernel's `/dev` mounted over the image's. For
+//! trying the filesystem and the shell's commands without a machine: the
+//! in-process runner runs the command functions (no programs, no `&`). It
+//! changes the image in place.
 
 use crate::image;
 use crate::util::run_stdout;
@@ -17,7 +18,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use vfs::{BlockDevice, Env, IoError, MountTable, Vfs, check_request};
+use vfs::{BlockDevice, DevFs, Env, IoError, MountTable, Vfs, check_request};
 
 const SECTOR: usize = 512;
 
@@ -239,6 +240,10 @@ pub fn session(img: &Path, console: &mut dyn Console) -> Result<()> {
     // Mount warnings (such as a read-only fallback) are the boot messages.
     console.write(&log.contents());
     let mut vfs = MountTable::new(Box::new(fs));
+    // The kernel's /dev (programmable shell gate §8.4), over the image's.
+    if let Err(e) = vfs.mount(b"/dev", Box::new(DevFs::new(now()))) {
+        console.write(format!("cannot mount /dev: {e}\n").as_bytes());
+    }
     let mut system = HostSystem(log);
     let mut shell = Shell::new(&mut vfs, console, &mut system);
     shell.greet();
@@ -297,7 +302,8 @@ mod tests {
         image::make_ext2(&img, layout.root, &staging).unwrap();
 
         let mut console = Script {
-            input: b"mkdir /root/notes\recho hello > /root/notes/a\rcat /root/notes/a\rpoweroff\r"
+            input: b"mkdir /root/notes\recho hello > /root/notes/a\rcat /root/notes/a\r\
+                echo gone > /dev/null\r[ -c /dev/null ] && echo device\rpoweroff\r"
                 .iter()
                 .copied()
                 .collect(),
@@ -311,12 +317,16 @@ mod tests {
             screen.contains("root@relay:~# cat /root/notes/a\nhello\n"),
             "{screen}"
         );
+        // /dev/null is the kernel's DevFs here too, not a file of the image.
+        assert!(screen.contains("&& echo device\ndevice\n"), "{screen}");
 
         image::fsck(&img, layout.root).unwrap();
         let target = image::e2fs_target(&img, layout.root);
         let cat =
             run_stdout(Command::new("debugfs").args(["-R", "cat /root/notes/a", &target])).unwrap();
         assert_eq!(cat, "hello\n");
+        let ls = run_stdout(Command::new("debugfs").args(["-R", "ls /dev", &target])).unwrap();
+        assert!(!ls.contains("null"), "{ls}");
         let header = run_stdout(Command::new("dumpe2fs").args(["-h", &target])).unwrap();
         assert!(
             header.contains("Filesystem state:         clean"),
