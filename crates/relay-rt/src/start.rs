@@ -78,12 +78,7 @@ mod on_relay {
         };
         let args = Args::new(bytes, count);
         set_name(args.name());
-        let env_bytes: &'static [u8] = if env.is_null() {
-            &[]
-        } else {
-            unsafe { core::slice::from_raw_parts(env, env_len) }
-        };
-        env::set(env::Block::new(env_bytes, env_count));
+        unsafe { env::set(env, env_len, env_count) };
         let code = unsafe { __relay_main(args) };
         sys::exit(code)
     }

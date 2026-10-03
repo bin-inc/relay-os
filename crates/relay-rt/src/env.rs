@@ -44,17 +44,33 @@ impl Block {
     }
 }
 
-/// The program's block, set before `main` runs.
+/// The program's block, as the registers gave it before `main` ran.
 static PTR: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
 static LEN: AtomicUsize = AtomicUsize::new(0);
 static COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Keeps the block's address, length and count as `start` got them.
 /// Off Relay OS only the tests set it.
+///
+/// # Safety
+/// `ptr` is null, or it and `len` describe memory that stays readable for
+/// the whole run.
 #[cfg_attr(not(target_os = "none"), allow(dead_code))]
-pub(crate) fn set(b: Block) {
-    PTR.store(b.bytes.as_ptr().cast_mut(), Ordering::Relaxed);
-    LEN.store(b.bytes.len(), Ordering::Relaxed);
-    COUNT.store(b.count, Ordering::Relaxed);
+pub(crate) unsafe fn set(ptr: *const u8, len: usize, count: usize) {
+    PTR.store(ptr.cast_mut(), Ordering::Relaxed);
+    LEN.store(len, Ordering::Relaxed);
+    COUNT.store(count, Ordering::Relaxed);
+}
+
+/// The address, length and count the program started with, as they were
+/// (all 0 for no environment): for a test of the entry state.
+pub fn raw() -> (usize, usize, usize) {
+    let p = PTR.load(Ordering::Relaxed);
+    (
+        p as usize,
+        LEN.load(Ordering::Relaxed),
+        COUNT.load(Ordering::Relaxed),
+    )
 }
 
 /// The program's environment.
@@ -63,7 +79,7 @@ pub fn program() -> Block {
     let bytes: &'static [u8] = if p.is_null() {
         &[]
     } else {
-        // SAFETY: set from a `&'static [u8]` in `set`.
+        // SAFETY: as `set` was promised.
         unsafe { core::slice::from_raw_parts(p, LEN.load(Ordering::Relaxed)) }
     };
     Block::new(bytes, COUNT.load(Ordering::Relaxed))
@@ -142,7 +158,15 @@ mod tests {
     fn the_program_s_block_is_empty_until_set() {
         assert_eq!(block(), b"");
         assert_eq!(var(b"HOME"), None);
-        set(Block::new(b"HOME=/root\0X=1\0", 2));
+        assert_eq!(raw(), (0, 0, 0));
+        let b: &'static [u8] = b"HOME=/root\0X=1\0";
+        // SAFETY: a static block.
+        unsafe { set(b.as_ptr(), b.len(), 2) };
+        assert_eq!(
+            raw(),
+            (b.as_ptr() as usize, 15, 2),
+            "as the registers gave them"
+        );
         assert_eq!(block(), b"HOME=/root\0X=1\0");
         assert_eq!(var(b"X"), Some(&b"1"[..]));
         assert_eq!(vars().count(), 2);

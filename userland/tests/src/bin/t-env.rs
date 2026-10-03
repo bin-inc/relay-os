@@ -4,10 +4,13 @@
 //! exactly what `spawn` passed. More kinds:
 //!
 //! - `t-env var NAME` prints `relay_rt::env::var(NAME)`, or `unset`;
+//! - `t-env raw` prints whether the address register was 0, the length and
+//!   the count;
 //! - `t-env sizes` prints its arguments' count and length and its
 //!   environment's;
 //! - `t-env child` starts `t-env` with an environment of non-ASCII text,
-//!   an entry without `=` and an empty one; `t-env none` with none;
+//!   an entry without `=` and an empty one; `t-env none` starts `t-env raw`
+//!   with none;
 //! - `t-env limits` starts `t-env sizes` with 64 KiB of environment, then
 //!   one byte more (`E2BIG`), then 64 KiB of arguments as well, then a
 //!   block without its final NUL (`EINVAL`);
@@ -61,12 +64,18 @@ fn main(args: Args) -> u8 {
             }
             None => return usage(),
         },
+        Some(b"raw") => {
+            let (at, len, count) = relay_rt::env::raw();
+            let at = if at == 0 { "no address" } else { "an address" };
+            let _ = writeln!(Fd(1), "{at}, {len} bytes, {count} entries");
+            Ok(())
+        }
         Some(b"sizes") => {
             sizes(&args);
             Ok(())
         }
         Some(b"child") => run(b"A=1\0B=two words\0C=\xc3\xa9t\xc3\xa9\0none\0\0", None),
-        Some(b"none") => run(b"", None),
+        Some(b"none") => run(b"", Some(b"raw")),
         Some(b"limits") => limits(),
         Some(b"sh") => sh(),
         Some(b"deep") => match args.get(2) {
@@ -87,7 +96,7 @@ fn main(args: Args) -> u8 {
 fn usage() -> u8 {
     let _ = sys::write_all(
         2,
-        b"usage: t-env [var NAME|sizes|child|none|limits|sh|deep FILE]\n",
+        b"usage: t-env [var NAME|raw|sizes|child|none|limits|sh|deep FILE]\n",
     );
     2
 }
@@ -97,18 +106,11 @@ fn entries(n: usize) -> &'static str {
     if n == 1 { "entry" } else { "entries" }
 }
 
-/// The count and length, then each entry.
+/// The count and length the registers gave, then each entry.
 fn show() {
-    let env = relay_rt::env::program();
-    let all: Vec<&[u8]> = env.entries().collect();
-    let n = all.len();
-    let _ = writeln!(
-        Fd(1),
-        "{n} {}, {} bytes",
-        entries(n),
-        relay_rt::env::block().len()
-    );
-    for (i, e) in all.iter().enumerate() {
+    let (_, len, n) = relay_rt::env::raw();
+    let _ = writeln!(Fd(1), "{n} {}, {len} bytes", entries(n));
+    for (i, e) in relay_rt::env::program().entries().enumerate() {
         let _ = write!(Fd(1), "[{i}] ");
         let _ = sys::write_all(1, e);
         let _ = sys::write_all(1, b"\n");
@@ -117,13 +119,12 @@ fn show() {
 
 fn sizes(args: &Args) {
     let len: usize = args.iter().map(|a| a.len() + 1).sum();
-    let n = relay_rt::env::program().entries().count();
+    let (_, env_len, n) = relay_rt::env::raw();
     let _ = writeln!(
         Fd(1),
-        "{} arguments, {len} bytes; {n} {}, {} bytes",
+        "{} arguments, {len} bytes; {n} {}, {env_len} bytes",
         args.len(),
-        entries(n),
-        relay_rt::env::block().len()
+        entries(n)
     );
 }
 

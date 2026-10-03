@@ -14,7 +14,7 @@ expect \n/root\nunset\nroot@relay:~# $
 send t-env child
 expect \n5 entries, 30 bytes\n\[0\] A=1\n\[1\] B=two words\n\[2\] C=été\n\[3\] none\n\[4\] \nroot@relay:~# $
 send t-env none
-expect \n0 entries, 0 bytes\nroot@relay:~# $
+expect \nno address, 0 bytes, 0 entries\nroot@relay:~# $
 send t-env limits
 expect \n64 KiB: 2 arguments, 12 bytes; 1 entry, 65536 bytes\none byte more: E2BIG\n64 KiB of each: 3 arguments, 65536 bytes; 1 entry, 65536 bytes\nno final NUL: EINVAL\nroot@relay:~# $
 send t-env sh
