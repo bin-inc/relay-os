@@ -22,8 +22,8 @@
 //! `/root`, as bash's is; an assignment before a command, which would give
 //! bash's command an environment, and bash's `NAME+=value` are refused.
 //!
-//! `> file` and `>> file` redirect standard output (at most one per
-//! command). An unquoted `~` alone, or before `/` in the same unquoted
+//! `> file` and `>> file` redirect standard output, any number of them per
+//! command, made left to right. An unquoted `~` alone, or before `/` in the same unquoted
 //! piece, at the start of a word means `/root`, as in Linux. An unquoted
 //! `#` at the start of a word begins a comment, which runs to the end of
 //! the line. An unquoted `|` joins commands into a pipeline (user-space
@@ -813,9 +813,6 @@ impl Parts {
             };
         }
         match self.pending.take() {
-            Some(_) if !self.redirects.is_empty() => {
-                return Err(ParseError::Unsupported(">".into()));
-            }
             Some(append) => {
                 let op = if append {
                     RedirectOp::Append(w)
@@ -2501,10 +2498,23 @@ mod tests {
     fn redirection_errors() {
         assert_eq!(one("echo >"), Err(ParseError::MissingTarget("newline")));
         assert_eq!(one("echo > > f"), Err(ParseError::MissingTarget(">")));
+        // Several are made left to right (programmable shell gate §7.2).
+        let c = one("echo > a >> b x").unwrap();
+        assert_eq!(c.words, ["echo", "x"]);
         assert_eq!(
-            one("echo > a > b"),
-            Err(ParseError::Unsupported(">".into()))
+            c.redirects,
+            [
+                Redirect {
+                    fd: 1,
+                    op: RedirectOp::Write("a".into())
+                },
+                Redirect {
+                    fd: 1,
+                    op: RedirectOp::Append("b".into())
+                }
+            ]
         );
+        assert_eq!(c.output(), Some((&"b".into(), true)));
         // Other streams are not supported; a quoted or spaced digit is a word.
         assert_eq!(
             one("cat f 2>err"),

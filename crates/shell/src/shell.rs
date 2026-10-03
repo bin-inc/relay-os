@@ -2866,6 +2866,40 @@ mod tests {
     }
 
     #[test]
+    fn several_redirections_are_made_left_to_right() {
+        // bash 5.2: each file is made, and the command writes to the last
+        // (tmp/m5p1/probes/p1.txt).
+        let mut h = Harness::new();
+        h.put("/tmp/f", b"old\n");
+        assert_eq!(h.run("echo a > /tmp/f > /tmp/g"), (0, String::new()));
+        assert_eq!(
+            (h.get("/tmp/f"), h.get("/tmp/g")),
+            (b"".to_vec(), b"a\n".to_vec())
+        );
+        assert_eq!(h.run("echo b >> /tmp/g > /tmp/f"), (0, String::new()));
+        assert_eq!(
+            (h.get("/tmp/f"), h.get("/tmp/g")),
+            (b"b\n".to_vec(), b"a\n".to_vec())
+        );
+        // One that cannot be made stops the command, after those before.
+        assert_eq!(
+            h.run("echo c > /tmp/h > /nodir/x > /tmp/i"),
+            (1, "relay-sh: /nodir/x: No such file or directory\n".into())
+        );
+        assert!(h.exists("/tmp/h") && !h.exists("/tmp/i"));
+        // Under /bin/sh each file a later one replaces is closed at once,
+        // and the program gets the last.
+        let mut h = spawning();
+        assert_eq!(h.spawning("t-args > /tmp/a > /tmp/b").0, 3);
+        assert_eq!(
+            h.programs.closed[0], 4,
+            "the first, which the second replaced"
+        );
+        assert_eq!(h.programs.spawned[0].fds, [0, 5, 2]);
+        assert_eq!(h.programs.closed, [4, 5]);
+    }
+
+    #[test]
     fn errors_go_to_the_screen_not_into_the_file() {
         let mut h = Harness::new();
         assert_eq!(
