@@ -5,7 +5,7 @@
 //! `UserStr`) and leaves the rest to the `Caller`, the kernel's side of
 //! the process. The file calls are in `files`, the pipe's in `pipes`.
 
-use crate::exec::ARGS_MAX;
+use crate::exec::{ARGS_MAX, ENV_MAX};
 use crate::fd::{FdTable, File};
 use crate::mm::paging::PAGE;
 use crate::mm::user::{UserSlice, UserStr};
@@ -40,6 +40,10 @@ pub struct Spawn {
     pub group: Group,
     /// The new group gets the console (`FOREGROUND`).
     pub foreground: bool,
+    /// The environment, each entry followed by a NUL, and how many entries
+    /// there are; empty for none (programmable shell gate §8.1).
+    pub env: Vec<u8>,
+    pub envc: u64,
 }
 
 /// Which child `wait` waits for.
@@ -203,8 +207,8 @@ pub fn dispatch(caller: &mut impl Caller, number: u64, args: [u64; 6]) -> Outcom
 }
 
 /// `spawn(&SpawnArgs)` (spec §7.3): the struct, then the path, the
-/// arguments and the working directory it points at, each checked and
-/// copied in before anything starts.
+/// arguments, the working directory and the environment it points at, each
+/// checked and copied in before anything starts.
 fn spawn(caller: &mut impl Caller, addr: u64) -> Result<u64, Errno> {
     let mut raw = [0u8; SpawnArgs::SIZE];
     caller.read(&UserSlice::new(addr, raw.len() as u64)?, 0, &mut raw)?;
@@ -216,8 +220,6 @@ fn spawn(caller: &mut impl Caller, addr: u64) -> Result<u64, Errno> {
         || (new_group && a.pgid != 0)
         || a.fd_count as usize > SPAWN_FDS
         || a.reserved != 0
-        // An environment comes once the kernel lays it on the stack (§8.1).
-        || a.env_len != 0
     {
         return Err(Errno::EINVAL);
     }
@@ -239,6 +241,13 @@ fn spawn(caller: &mut impl Caller, addr: u64) -> Result<u64, Errno> {
         PATH_MAX,
         Errno::ENAMETOOLONG,
     )?)?;
+    // At most 64 KiB apart from the arguments, and each entry ends with
+    // its NUL (programmable shell gate §8.1).
+    let env = caller.read_str(&UserStr::new(a.env, a.env_len, ENV_MAX, Errno::E2BIG)?)?;
+    if !env.is_empty() && env.last() != Some(&0) {
+        return Err(Errno::EINVAL);
+    }
+    let envc = env.iter().filter(|&&b| b == 0).count() as u64;
     let s = Spawn {
         path,
         args,
@@ -251,6 +260,8 @@ fn spawn(caller: &mut impl Caller, addr: u64) -> Result<u64, Errno> {
             g => Group::Join(g),
         },
         foreground,
+        env,
+        envc,
     };
     caller.spawn(&s).map(u64::from)
 }
@@ -476,13 +487,19 @@ mod tests {
     use relay_abi::errno;
     use relay_abi::wait::{ACCESS_READ, FAULT_PAGE};
 
+    /// The environment `spawn_args` stores, which a test gives the child
+    /// by setting `env_len`.
+    const ENV: &[u8] = b"HOME=/root\0A=\xc3\xa9\0";
+
     /// A `SpawnArgs` at `W` naming a path, arguments and a working
-    /// directory stored after it; `edit` changes it first.
+    /// directory stored after it, and no environment; `edit` changes it
+    /// first.
     fn spawn_args(f: &mut Fake, args: &[u8], edit: impl FnOnce(&mut SpawnArgs)) -> u64 {
         let (path, cwd) = (b"/bin/t-args", b"sub");
         put(f, W + 200, path);
         put(f, W + 300, cwd);
         put(f, W + 400, args);
+        put(f, W + 800, ENV);
         let mut fds = [FdMap::default(); SPAWN_FDS];
         fds[0] = FdMap {
             child: 1,
@@ -504,7 +521,7 @@ mod tests {
             flags: NEW_GROUP,
             pgid: 0,
             reserved: 0,
-            env: 0,
+            env: W + 800,
             env_len: 0,
         };
         edit(&mut a);
@@ -623,6 +640,8 @@ mod tests {
                 ],
                 group: Group::New,
                 foreground: false,
+                env: Vec::new(),
+                envc: 0,
             }]
         );
         let a = spawn_args(&mut f, b"x\0", |a| {
@@ -645,6 +664,10 @@ mod tests {
         });
         assert_eq!(call(&mut f, Call::Spawn, [a, 0, 0]), Ok(104));
         assert_eq!(f.spawned[3].group, Group::Join(102));
+        // An environment, counted by its NULs.
+        let a = spawn_args(&mut f, b"x\0", |a| a.env_len = ENV.len() as u64);
+        assert_eq!(call(&mut f, Call::Spawn, [a, 0, 0]), Ok(105));
+        assert_eq!((&f.spawned[4].env[..], f.spawned[4].envc), (ENV, 2));
         // The caller's refusal.
         let a = spawn_args(&mut f, b"x\0", |a| a.path_len = 7);
         put(&mut f, W + 200, b"missing");
@@ -689,9 +712,22 @@ mod tests {
             "reserved"
         );
         assert_eq!(
-            refused(&mut f, b"x\0", |a| a.env_len = 2),
+            refused(&mut f, b"x\0", |a| a.env_len = 4),
             Err(errno::EINVAL),
-            "an environment, until the kernel lays it out"
+            "an environment that does not end with a NUL"
+        );
+        assert_eq!(
+            refused(&mut f, b"x\0", |a| a.env_len = ENV_MAX as u64 + 1),
+            Err(errno::E2BIG),
+            "an environment past 64 KiB, apart from the arguments"
+        );
+        assert_eq!(
+            refused(&mut f, b"x\0", |a| {
+                a.env = 0;
+                a.env_len = 2;
+            }),
+            Err(errno::EFAULT),
+            "an environment at null"
         );
         assert_eq!(
             refused(&mut f, b"x\0", |a| a.fd_count = 9),

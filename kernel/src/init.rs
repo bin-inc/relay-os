@@ -103,6 +103,8 @@ fn start_shell() -> Result<u32, Errno> {
         fds: fds.to_vec(),
         group: Group::New,
         foreground: true,
+        env: Vec::new(),
+        envc: 0,
     })
 }
 

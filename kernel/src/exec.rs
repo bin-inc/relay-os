@@ -1,8 +1,9 @@
 //! A program in its address space (user-space gate §5.1–§5.3): its
 //! segments on pages with their permissions, a 1 MiB stack below the top
 //! of the lower half with an unmapped guard page beneath it, and its
-//! arguments at the top of the stack. Architecture-neutral; the registers
-//! the entry state goes into are the `arch` module's business.
+//! arguments at the top of the stack with its environment just below them
+//! (programmable shell gate §8.1). Architecture-neutral; the registers the
+//! entry state goes into are the `arch` module's business.
 
 use crate::mm::paging::{MapError, PAGE, Perm, PhysMem};
 use crate::mm::space::AddressSpace;
@@ -24,11 +25,15 @@ pub fn in_guard_page(address: u64) -> bool {
 
 /// The most argument bytes a program gets (spec §5.3).
 pub const ARGS_MAX: usize = 64 * 1024;
+/// The most environment bytes a program gets, counted apart from the
+/// arguments (programmable shell gate §8.1).
+pub const ENV_MAX: usize = 64 * 1024;
 
 /// Where a program starts: its first instruction, its stack pointer (16-byte
-/// aligned, below the arguments), and its arguments' address, length and
-/// count (spec §5.3). `arch::user::enter` reads it (`repr(C)`) and puts
-/// each where its architecture says.
+/// aligned, below the arguments and the environment), its arguments'
+/// address, length and count (spec §5.3), and its environment's, all 0
+/// for none (programmable shell gate §8.2). `arch::user::enter` reads it
+/// (`repr(C)`) and puts each where its architecture says.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Entry {
@@ -37,6 +42,9 @@ pub struct Entry {
     pub args: u64,
     pub args_len: u64,
     pub argc: u64,
+    pub env: u64,
+    pub env_len: u64,
+    pub envc: u64,
 }
 
 fn perm(access: Access) -> Perm {
@@ -56,17 +64,33 @@ fn errno(e: MapError) -> Errno {
     }
 }
 
+/// Strings for the new stack, the arguments or the environment: `count` of
+/// them, each followed by a NUL, in `bytes`.
+#[derive(Clone, Copy, Debug)]
+pub struct Strings<'a> {
+    pub bytes: &'a [u8],
+    pub count: u64,
+}
+
+impl Strings<'_> {
+    /// No strings: no environment.
+    pub const NONE: Strings<'static> = Strings {
+        bytes: &[],
+        count: 0,
+    };
+}
+
 /// Maps `program` (read from `file`, checked by `elf::check`) and its stack
-/// into `space` with `args` (`argc` of them, each ending in its NUL) at the top
-/// of the stack. On an error the caller destroys `space`, which gives
-/// back whatever was mapped.
+/// into `space` with `args` at the top of the stack and `env` just below
+/// them. On an error the caller destroys `space`, which gives back whatever
+/// was mapped.
 pub fn load(
     space: &mut AddressSpace,
     mem: &mut impl PhysMem,
     file: &[u8],
     program: &Program,
-    args: &[u8],
-    argc: u64,
+    args: Strings<'_>,
+    env: Strings<'_>,
 ) -> Result<Entry, Errno> {
     for s in &program.segments {
         let first = s.vaddr & !(PAGE - 1);
@@ -84,17 +108,22 @@ pub fn load(
     space
         .map_zeroed(mem, STACK_BOTTOM, STACK_PAGES, Perm::ReadWrite)
         .map_err(errno)?;
-    if args.len() > ARGS_MAX {
+    if args.bytes.len() > ARGS_MAX || env.bytes.len() > ENV_MAX {
         return Err(Errno::E2BIG);
     }
-    let at = STACK_TOP - args.len() as u64;
-    space.fill(mem, at, args).map_err(errno)?;
+    let at = STACK_TOP - args.bytes.len() as u64;
+    space.fill(mem, at, args.bytes).map_err(errno)?;
+    let env_at = at - env.bytes.len() as u64;
+    space.fill(mem, env_at, env.bytes).map_err(errno)?;
     Ok(Entry {
         ip: program.entry,
-        sp: at & !15,
+        sp: env_at & !15,
         args: at,
-        args_len: args.len() as u64,
-        argc,
+        args_len: args.bytes.len() as u64,
+        argc: args.count,
+        env: if env.bytes.is_empty() { 0 } else { env_at },
+        env_len: env.bytes.len() as u64,
+        envc: env.count,
     })
 }
 
@@ -111,6 +140,10 @@ mod tests {
         args.iter()
             .flat_map(|a| a.iter().copied().chain([0]))
             .collect()
+    }
+
+    fn strings(bytes: &[u8], count: u64) -> Strings<'_> {
+        Strings { bytes, count }
     }
 
     fn space(m: &mut FakeMem) -> AddressSpace {
@@ -156,7 +189,7 @@ mod tests {
         let mut s = space(&mut m);
         let (file, p) = program();
         let args = arg_bytes(&[b"/bin/t"]);
-        load(&mut s, &mut m, &file, &p, &args, 1).unwrap();
+        load(&mut s, &mut m, &file, &p, strings(&args, 1), Strings::NONE).unwrap();
         // Code from 0x401010, zeroes before it on its page.
         assert_eq!(read(&mut m, &s, 0x40_1000, 0x10), vec![0; 0x10]);
         assert_eq!(read(&mut m, &s, 0x40_1010, 4), [0x10, 0x11, 0x12, 0x13]);
@@ -181,7 +214,15 @@ mod tests {
         let mut m = FakeMem::new();
         let mut s = space(&mut m);
         let (file, p) = program();
-        load(&mut s, &mut m, &file, &p, &arg_bytes(&[b"x"]), 1).unwrap();
+        load(
+            &mut s,
+            &mut m,
+            &file,
+            &p,
+            strings(&arg_bytes(&[b"x"]), 1),
+            Strings::NONE,
+        )
+        .unwrap();
         assert_eq!(STACK_BOTTOM, 0x7FFF_FFF0_0000);
         assert_eq!(
             s.user_page(&mut m, STACK_BOTTOM).unwrap().1,
@@ -212,13 +253,41 @@ mod tests {
         let (file, p) = program();
         let args = arg_bytes(&[b"/bin/t-args", b"a", b"b c", b""]);
         assert_eq!(args, b"/bin/t-args\0a\0b c\0\0");
-        let e = load(&mut s, &mut m, &file, &p, &args, 4).unwrap();
+        let e = load(&mut s, &mut m, &file, &p, strings(&args, 4), Strings::NONE).unwrap();
         assert_eq!(e.ip, 0x40_1010);
         assert_eq!((e.args_len, e.argc), (19, 4));
         assert_eq!(e.args + e.args_len, STACK_TOP);
         assert_eq!(read(&mut m, &s, e.args, 19), args);
         assert_eq!(e.sp % 16, 0);
         assert!(e.sp <= e.args && e.args - e.sp < 16);
+        // No environment: its address, length and count are all 0.
+        assert_eq!((e.env, e.env_len, e.envc), (0, 0, 0));
+        s.destroy(&mut m);
+    }
+
+    #[test]
+    fn the_environment_is_just_below_the_arguments() {
+        let mut m = FakeMem::new();
+        let mut s = space(&mut m);
+        let (file, p) = program();
+        let args = arg_bytes(&[b"/bin/t-env", b"x"]);
+        let env = arg_bytes(&[b"HOME=/root", "A=\u{e9}t\u{e9}".as_bytes(), b""]);
+        let e = load(
+            &mut s,
+            &mut m,
+            &file,
+            &p,
+            strings(&args, 2),
+            strings(&env, 3),
+        )
+        .unwrap();
+        assert_eq!(e.args + e.args_len, STACK_TOP, "the arguments keep the top");
+        assert_eq!((e.env_len, e.envc), (env.len() as u64, 3));
+        assert_eq!(e.env + e.env_len, e.args, "just below them");
+        assert_eq!(read(&mut m, &s, e.env, env.len()), env);
+        assert_eq!(read(&mut m, &s, e.args, args.len()), args);
+        assert_eq!(e.sp % 16, 0);
+        assert!(e.sp <= e.env && e.env - e.sp < 16);
         s.destroy(&mut m);
     }
 
@@ -231,13 +300,64 @@ mod tests {
         let mut m = FakeMem::new();
         let mut s = space(&mut m);
         let (file, p) = program();
-        let e = load(&mut s, &mut m, &file, &p, &args, 2).unwrap();
+        let e = load(&mut s, &mut m, &file, &p, strings(&args, 2), Strings::NONE).unwrap();
         assert_eq!(e.args, STACK_TOP - ARGS_MAX as u64);
         assert_eq!(read(&mut m, &s, STACK_TOP - 2, 2), b"x\0");
         let too_many = vec![1; ARGS_MAX + 1];
         let mut s2 = space(&mut m);
         assert_eq!(
-            load(&mut s2, &mut m, &file, &p, &too_many, 1),
+            load(
+                &mut s2,
+                &mut m,
+                &file,
+                &p,
+                strings(&too_many, 1),
+                Strings::NONE
+            ),
+            Err(Errno::E2BIG)
+        );
+        s.destroy(&mut m);
+        s2.destroy(&mut m);
+    }
+
+    #[test]
+    fn both_blocks_at_64_kib_leave_the_stack_its_room() {
+        let long = vec![b'x'; ARGS_MAX - 3];
+        let args = arg_bytes(&[b"p", &long]);
+        let entry = [&b"A="[..], &vec![b'v'; ENV_MAX - 3]].concat();
+        let env = arg_bytes(&[&entry]);
+        assert_eq!((args.len(), env.len()), (ARGS_MAX, ENV_MAX));
+        let mut m = FakeMem::new();
+        let mut s = space(&mut m);
+        let (file, p) = program();
+        let e = load(
+            &mut s,
+            &mut m,
+            &file,
+            &p,
+            strings(&args, 2),
+            strings(&env, 1),
+        )
+        .unwrap();
+        assert_eq!(e.args, STACK_TOP - ARGS_MAX as u64);
+        assert_eq!(e.env, e.args - ENV_MAX as u64);
+        assert_eq!(read(&mut m, &s, e.env, 3), b"A=v");
+        assert_eq!(read(&mut m, &s, e.args - 2, 4), b"v\0p\0");
+        // 892 KiB below them: /bin/sh at its nesting bound used 40 KiB
+        // (programmable shell gate §15 item 6).
+        assert_eq!(e.sp, e.env);
+        assert_eq!(e.sp - STACK_BOTTOM, 892 * 1024);
+        let mut s2 = space(&mut m);
+        let too_much = vec![1; ENV_MAX + 1];
+        assert_eq!(
+            load(
+                &mut s2,
+                &mut m,
+                &file,
+                &p,
+                strings(&args, 2),
+                strings(&too_much, 0)
+            ),
             Err(Errno::E2BIG)
         );
         s.destroy(&mut m);
@@ -251,7 +371,14 @@ mod tests {
         let (file, p) = program();
         let args = arg_bytes(&[b"p"]);
         assert_eq!(
-            load(&mut s, &mut m, &file[..0x3000], &p, &args, 1),
+            load(
+                &mut s,
+                &mut m,
+                &file[..0x3000],
+                &p,
+                strings(&args, 1),
+                Strings::NONE
+            ),
             Err(Errno::ENOEXEC)
         );
         s.destroy(&mut m);
@@ -267,14 +394,14 @@ mod tests {
         let before = m.frames();
         // Every limit from nothing up to what the whole program needs.
         let mut s = AddressSpace::new(&mut m, &k).unwrap();
-        load(&mut s, &mut m, &file, &p, &args, 1).unwrap();
+        load(&mut s, &mut m, &file, &p, strings(&args, 1), Strings::NONE).unwrap();
         let needed = m.frames() - before;
         s.destroy(&mut m);
         for limit in (1..needed).step_by(7) {
             m.limit = before + limit;
             let mut s = AddressSpace::new(&mut m, &k).unwrap();
             assert_eq!(
-                load(&mut s, &mut m, &file, &p, &args, 1),
+                load(&mut s, &mut m, &file, &p, strings(&args, 1), Strings::NONE),
                 Err(Errno::ENOMEM)
             );
             s.destroy(&mut m);

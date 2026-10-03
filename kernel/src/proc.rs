@@ -480,7 +480,20 @@ pub fn spawn(s: &Spawn) -> Result<u32, Errno> {
     let stack = mm::alloc_kernel_stack().map_err(kstack::StackError::errno)?;
     let loaded = mm::with_user_memory(|mem, kernel| {
         let mut space = AddressSpace::new(mem, kernel).map_err(memory_error)?;
-        match exec::load(&mut space, mem, &file, &program, &s.args, s.argc) {
+        match exec::load(
+            &mut space,
+            mem,
+            &file,
+            &program,
+            exec::Strings {
+                bytes: &s.args,
+                count: s.argc,
+            },
+            exec::Strings {
+                bytes: &s.env,
+                count: s.envc,
+            },
+        ) {
             Ok(entry) => Ok((space, entry)),
             Err(e) => {
                 space.destroy(mem);
