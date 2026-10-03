@@ -6,7 +6,7 @@ use crate::commands::{self, SCRIPT_MAX, Script};
 use crate::ctx::{Ctx, JobControl, quote_if_needed};
 use crate::editor::{Feed, LineEditor};
 use crate::expand::{self, Vars};
-use crate::fds::{Fds, Files, Handle, Opener, Slot};
+use crate::fds::{self, Fds, Files, Handle, Opener, Slot};
 use crate::io::{Console, Programs, Stdin, Stdout, System};
 use crate::jobs::Jobs;
 use crate::parser::{self, HOME};
@@ -644,17 +644,8 @@ impl<'a> Shell<'a> {
                     let _ = programs.write(fd, bytes);
                 }
             }
-            Handle::Node { node, mut offset } => {
-                let mut done = 0;
-                while done < bytes.len() {
-                    match self.vfs.write_at(node, offset, &bytes[done..]) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            done += n;
-                            offset += n as u64;
-                        }
-                    }
-                }
+            Handle::Node { node, offset } => {
+                fds::write_file(&mut *self.vfs, node, offset, bytes);
             }
         }
     }
@@ -2989,6 +2980,37 @@ mod tests {
             (1, "relay-sh: /nodir/x: No such file or directory\n".into())
         );
         assert!(!h.exists("/tmp/e5"));
+    }
+
+    #[test]
+    fn a_file_appended_to_is_written_at_its_end_each_time() {
+        // The prototype's review (M-1): two fds that append to one file, as
+        // the kernel's append does (bash 5.2, tmp/m5p1/probes/p14.txt).
+        let mut h = Harness::new();
+        h.put("/tmp/f", b"x\n");
+        h.put("/tmp/g", b"old\n");
+        assert_eq!(
+            h.run("ls /tmp/f /nope >> /tmp/g 2>> /tmp/g"),
+            (2, String::new())
+        );
+        assert_eq!(
+            h.get("/tmp/g"),
+            b"old\nls: cannot access '/nope': No such file or directory\n/tmp/f\n"
+        );
+        // Each write of one fd at the end too.
+        h.put("/tmp/g2", b"old\n");
+        assert_eq!(h.run("ls /nope /nope2 2>> /tmp/g2"), (2, String::new()));
+        assert_eq!(
+            h.get("/tmp/g2"),
+            b"old\nls: cannot access '/nope': No such file or directory\n\
+              ls: cannot access '/nope2': No such file or directory\n"
+        );
+        // Wherever another fd wrote meanwhile.
+        assert_eq!(h.run("cd /nope >> /tmp/g 2>> /tmp/g"), (1, String::new()));
+        assert!(
+            h.get("/tmp/g")
+                .ends_with(b"/tmp/f\nrelay-sh: cd: /nope: No such file or directory\n")
+        );
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! fd 1) and errors (the screen, or a redirection file); plus the helpers
 //! every command shares for options and GNU-style messages.
 
+use crate::fds;
 use crate::io::{Console, Programs, Stdin, Stdout, System};
 use crate::jobs::Jobs;
 use crate::transcript::Transcript;
@@ -225,16 +226,7 @@ impl<'a> Ctx<'a> {
         match &mut self.err {
             To::Console => self.streams().screen(bytes),
             To::File(node, offset) => {
-                let mut done = 0;
-                while done < bytes.len() {
-                    match self.vfs.write_at(*node, *offset, &bytes[done..]) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            done += n;
-                            *offset += n as u64;
-                        }
-                    }
-                }
+                *offset = fds::write_file(&mut *self.vfs, *node, *offset, bytes).0;
             }
             To::Fd(fd) => {
                 if let Some(programs) = self
@@ -375,18 +367,10 @@ impl Streams<'_, '_> {
                 buf,
                 error,
             } => {
-                let mut done = 0;
-                while error.is_none() && done < buf.len() {
-                    match self.vfs.write_at(*node, *offset, &buf[done..]) {
-                        // Nothing written would loop forever; the contract
-                        // says that is ENOSPC.
-                        Ok(0) => *error = Some(Errno::ENOSPC),
-                        Ok(n) => {
-                            done += n;
-                            *offset += n as u64;
-                        }
-                        Err(e) => *error = Some(e),
-                    }
+                if error.is_none() {
+                    let (at, failed) = fds::write_file(&mut *self.vfs, *node, *offset, buf);
+                    *offset = at;
+                    *error = failed;
                 }
                 buf.clear();
             }

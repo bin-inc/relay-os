@@ -33,12 +33,52 @@ impl Fds {
     pub const SHELL: Fds = Fds([Slot::Shell(0), Slot::Shell(1), Slot::Shell(2)]);
 }
 
+/// The in-process runner's offset of a file opened with `>>`: every write
+/// goes to its end, as the kernel's append does, wherever another fd of it
+/// has written.
+pub(crate) const AT_END: u64 = u64::MAX;
+
+/// Writes all of `bytes` to the in-process runner's file `node` at
+/// `offset`, or at its end for [`AT_END`]: where the next write goes, and
+/// the error that stopped it (`ENOSPC` for a write that took nothing).
+pub(crate) fn write_file(
+    vfs: &mut dyn Vfs,
+    node: Node,
+    offset: u64,
+    bytes: &[u8],
+) -> (u64, Option<Errno>) {
+    let mut at = offset;
+    let mut done = 0;
+    while done < bytes.len() {
+        let pos = if offset == AT_END {
+            match vfs.stat(node) {
+                Ok(st) => st.size,
+                Err(e) => return (at, Some(e)),
+            }
+        } else {
+            at
+        };
+        match vfs.write_at(node, pos, &bytes[done..]) {
+            Ok(0) => return (at, Some(Errno::ENOSPC)),
+            Ok(n) => {
+                done += n;
+                if offset != AT_END {
+                    at += n as u64;
+                }
+            }
+            Err(e) => return (at, Some(e)),
+        }
+    }
+    (at, None)
+}
+
 /// A file a redirection opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Handle {
     /// `/bin/sh`'s fd.
     Fd(u32),
-    /// The in-process runner's: the file, and where the next write goes.
+    /// The in-process runner's: the file, and where the next write goes
+    /// ([`AT_END`] for one opened with `>>`).
     Node { node: Node, offset: u64 },
 }
 
@@ -94,7 +134,7 @@ fn open_output(vfs: &mut dyn Vfs, path: &str, append: bool) -> Result<(Node, u64
         Err(Errno::ENOENT) => vfs.create(path)?,
         Err(e) => return Err(e),
     };
-    let offset = if append { vfs.stat(node)?.size } else { 0 };
+    let offset = if append { AT_END } else { 0 };
     Ok((node, offset))
 }
 
@@ -299,7 +339,7 @@ mod tests {
         let Handle::Node { offset, .. } = files.handle(0) else {
             unreachable!()
         };
-        assert_eq!(offset, 5);
+        assert_eq!(offset, AT_END, "written at its end each time");
         files.release(fds, &mut opener);
         let fds = files
             .redirect(Fds::SHELL, &[write(1, "/tmp/a")], &mut opener)
