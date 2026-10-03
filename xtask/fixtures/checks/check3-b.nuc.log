@@ -12,13 +12,13 @@ Relay OS 0.5.0
 [[32m ok [0m] console 1920x1200 (120x33 cells)
 [[32m ok [0m] cpu tables
 cpu: SMEP on, SMAP on
-[[32m ok [0m] boot info: 15944 MiB usable in 32 regions, cmdline ''
-[[32m ok [0m] memory: 15909 MiB free of 15944 MiB, heap 32 MiB
+[[32m ok [0m] boot info: 15943 MiB usable in 32 regions, cmdline ''
+[[32m ok [0m] memory: 15909 MiB free of 15943 MiB, heap 32 MiB
 acpi: tables FACP FIDT SSDT SSDT SSDT SSDT SSDT HPET APIC MCFG SSDT SSDT UEFI NHLT LPIT WDAT SSDT SSDT DBGP DBG2 DMAR FPDT SSDT SSDT SSDT SSDT TPM2 BGRT PHAT WSMT
 acpi: FADT reset io 0xcf9 <- 0x6, PM1a_CNT io 0x1804, PM1b_CNT none, century register 0x32
 [[32m ok [0m] acpi: 30 tables, ECAM 0xc0000000 buses 0-255, HPET 0xfed00000, S5 7/0
 [[32m ok [0m] timer: TSC 2496.000 MHz (CPUID 0x15), 1000 Hz tick (xAPIC)
-[[32m ok [0m] rtc: 2026-10-02 00:52:29 UTC
+[[32m ok [0m] rtc: 2026-10-03 03:41:56 UTC
 pci: 00:00.0 8086:4621 060000 host bridge
 pci: 00:02.0 8086:46a6 030000 display, bar0 mem64 0x603c000000 16M, bar2 mem64 0x4000000000 256M pf, bar4 io 0x3000 64
 pci: 00:06.0 8086:464d 060400 PCI bridge
@@ -101,6 +101,6 @@ usb: 00:14.0 port 15: 0951:1666 SuperSpeed, disk Kingston DataTraveler 3.0, 14.4
 [[32m ok [0m] usb: 2 controllers, 4 devices
 [[32m ok [0m] keyboard: 2 keyboards
 storage: 00:14.0 port 15: GPT with 2 partitions
-storage: root on 00:14.0 port 15, the disk with the boot partition 5633C56C-4287-44C3-8F57-E87023A1CDFC
+storage: root on 00:14.0 port 15, the disk with the boot partition 9858E054-BE73-450A-A06C-759240E49CF4
 [[32m ok [0m] mount /: ext2 on 00:14.0 port 15 partition 2, 2.0 GiB
-[[32m ok [0m] system: 42 programs, ABI 3
+[[32m ok [0m] system: 44 programs, ABI 3
