@@ -270,6 +270,16 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Moves standard input back `n` bytes, where it can be (a file), so
+    /// that the next command reads them (GNU's `head`, programmable shell
+    /// gate §15 item 5).
+    pub fn seek_input_back(&mut self, n: u64) -> Result<(), Errno> {
+        match &mut self.input {
+            Some(input) => input.seek_back(n),
+            None => Err(Errno::EINVAL),
+        }
+    }
+
     /// Whether Ctrl-C has stopped the command. Long loops (reading a file,
     /// copying, removing a tree) ask between pieces and give up; the shell
     /// then prints `^C` and the exit status is 130. Once true it stays true.

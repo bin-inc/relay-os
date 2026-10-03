@@ -191,6 +191,13 @@ impl Stdin for SysStdin {
         let at = sys::seek(0, 0, SEEK_CURRENT).ok()?;
         Some((node_of(&st), at, st.size))
     }
+
+    fn seek_back(&mut self, n: u64) -> Result<(), Errno> {
+        let back = i64::try_from(n).map_err(|_| Errno::EINVAL)?;
+        sys::seek(0, -back, SEEK_CURRENT)
+            .map(|_| ())
+            .map_err(Errno::from_number)
+    }
 }
 
 /// Standard output: fd 1, the console or the file the shell opened.

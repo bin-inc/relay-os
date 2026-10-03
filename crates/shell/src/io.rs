@@ -88,6 +88,12 @@ pub trait Stdin {
     fn file(&mut self) -> Option<(Node, u64, u64)> {
         None
     }
+    /// Moves back `n` bytes, so that what was read past is read again by
+    /// whoever reads next: a file can, a pipe or the console cannot
+    /// (`EINVAL`, the kernel's answer there, the default).
+    fn seek_back(&mut self, _n: u64) -> Result<(), Errno> {
+        Err(Errno::EINVAL)
+    }
 }
 
 /// Standard input that is bytes in memory: what a test gives a command, or

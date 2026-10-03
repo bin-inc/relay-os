@@ -190,7 +190,10 @@ pub fn head(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
 }
 
 /// `head` of standard input: no more of it is read once the lines are out,
-/// so a pipe's writer gets `EPIPE` once `head` has ended.
+/// so a pipe's writer gets `EPIPE` once `head` has ended. Input it can
+/// seek (a file) it leaves just after its last line, as GNU's `head` does,
+/// so that the next command reads on from there; elsewhere what it read
+/// past its lines is lost, as with GNU's.
 fn head_input(ctx: &mut Ctx<'_>, mut left: u64) -> i32 {
     let mut buf = vec![0; CHUNK];
     while left > 0 && !ctx.interrupted() && !ctx.out_failed() {
@@ -199,6 +202,9 @@ fn head_input(ctx: &mut Ctx<'_>, mut left: u64) -> i32 {
             Ok(n) => {
                 let end = within(&buf[..n], &mut left);
                 ctx.out(&buf[..end]);
+                if end < n {
+                    let _ = ctx.seek_input_back((n - end) as u64);
+                }
             }
             Err(e) => return ctx.fail("head", format_args!("error reading 'standard input': {e}")),
         }
@@ -825,6 +831,59 @@ mod tests {
         h.stdin = numbered(20_000).into_bytes();
         h.console.interrupt_after = Some(1);
         assert_eq!(h.run("tail -n 1"), (130, "^C\n".into()));
+    }
+
+    #[test]
+    fn head_leaves_a_file_just_after_its_lines() {
+        // GNU's `head -n` seeks standard input back to just after the
+        // lines it printed when it can (tmp/m5p1/probes/p5.txt), so the
+        // next command reads on from there.
+        struct File {
+            data: &'static [u8],
+            at: usize,
+            seeks: bool,
+        }
+        impl crate::Stdin for File {
+            fn read(&mut self, buf: &mut [u8]) -> Result<usize, vfs::Errno> {
+                let n = (self.data.len() - self.at).min(buf.len());
+                buf[..n].copy_from_slice(&self.data[self.at..self.at + n]);
+                self.at += n;
+                Ok(n)
+            }
+            fn seek_back(&mut self, n: u64) -> Result<(), vfs::Errno> {
+                if !self.seeks {
+                    return Err(vfs::Errno::EINVAL);
+                }
+                self.at -= n as usize;
+                Ok(())
+            }
+        }
+        let mut h = Harness::new();
+        for (lines, seeks, out_text, at) in [
+            ("1", true, "one\n", 4),
+            ("2", true, "one\ntwo\n", 8),
+            ("9", true, "one\ntwo\nthree", 13),
+            // A pipe's bytes are gone, with no message.
+            ("1", false, "one\n", 13),
+        ] {
+            let mut input = File {
+                data: b"one\ntwo\nthree",
+                at: 0,
+                seeks,
+            };
+            let mut out = crate::testing::FakeStdout::file(None);
+            let io = crate::CommandIo {
+                vfs: &mut h.vfs,
+                console: &mut h.console,
+                system: &mut h.system,
+                stdin: &mut input,
+                stdout: &mut out,
+            };
+            let args = [String::from("-n"), String::from(lines)];
+            assert_eq!(crate::run_command("head", super::head, &args, io), 0);
+            assert_eq!((out.text().as_str(), input.at), (out_text, at), "{lines}");
+        }
+        assert_eq!(h.console.take(), "");
     }
 
     #[test]
