@@ -1366,6 +1366,20 @@ mod tests {
     }
 
     #[test]
+    fn a_group_after_time_s_options_or_coproc_is_dropped_whole() {
+        // Milestone 4's deferred gap: the scan took `{` after `time -p` or
+        // `coproc` for a word, so the group's lines ran without their
+        // guard.
+        for text in [
+            &b"t-args 3> x &&\ntime -p {\nt-args body\n}\nt-args next\n"[..],
+            b"t-args 3> x &&\ncoproc {\nt-args body\n}\nt-args next\n",
+            b"t-args 3> x &&\ncoproc N {\nt-args body\n}\nt-args next\n",
+        ] {
+            assert_eq!(piped(text), ["next"], "{}", String::from_utf8_lossy(text));
+        }
+    }
+
+    #[test]
     fn a_quote_in_a_substitution_in_double_quotes_ends_no_drop() {
         // Milestone 4's deferred gap: the scan took the `"` inside `$(…)`
         // for the end of the outer quotes, so the `fi` in the string ended

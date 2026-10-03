@@ -7,8 +7,9 @@
 //! too long to keep, or not text, still counts whole. It runs after a
 //! refusal, so it reads what the parser refuses as bash reads it: `$(…)`
 //! and backquotes whole, in double quotes too, where quotes inside `$(…)`
-//! and `${…}` start afresh, a command name's place after `time`, `{` and
-//! `}`, `select` and `case` opening constructs, a `case` pattern before
+//! and `${…}` start afresh, a command name's place after `time` and its
+//! options `-p` and `--`, after `coproc` and after its name, and after `{`
+//! and `}`, `select` and `case` opening constructs, a `case` pattern before
 //! `)`, groups (`{ … }`, a function's body too, `function f {` among them)
 //! and subshells (`( … )`), each `(` paired with its `)`, arithmetic
 //! (`((…))`) whole, and a here-document's body, data up to its delimiter's
@@ -147,6 +148,13 @@ pub(crate) struct Scan {
     /// After `function`: the next word is the function's name, and a
     /// command name's place follows it.
     function: bool,
+    /// After `time`: its options `-p` and `--` keep the command name's
+    /// place for the word after them.
+    time: bool,
+    /// After `coproc`: a word that is no keyword is the coprocess's name
+    /// or command, and the word after it stands where a command name
+    /// would, as bash reads `coproc NAME {`.
+    coproc: bool,
     /// The open levels are arithmetic's (`((`), until its first `)` shows
     /// whether bash reads them so: the byte after it decides
     /// (`arithmetic_check`).
@@ -201,6 +209,8 @@ impl Scan {
             last: b'\n',
             paren: false,
             function: false,
+            time: false,
+            coproc: false,
             arithmetic: false,
             arithmetic_check: false,
             lost: false,
@@ -467,6 +477,8 @@ impl Scan {
         self.command = true;
         self.target = false;
         self.closed = false;
+        self.time = false;
+        self.coproc = false;
         self.for_ = For::No;
     }
 
@@ -475,6 +487,8 @@ impl Scan {
         self.last = b'\n';
         self.lt = 0;
         self.command = true;
+        self.time = false;
+        self.coproc = false;
         // The here-documents the line started take the next lines.
         if self.pending > 0 {
             self.body = Some(0);
@@ -528,6 +542,8 @@ impl Scan {
             return;
         }
         let closed = core::mem::take(&mut self.closed);
+        let after_time = core::mem::take(&mut self.time);
+        let after_coproc = core::mem::take(&mut self.coproc);
         match word {
             _ if closed && OPENERS.contains(&word) => self.command = false,
             b"if" | b"while" | b"until" => self.open(Kind::Keyword),
@@ -556,8 +572,11 @@ impl Scan {
                 self.closed = true;
             }
             b"{" => self.open(Kind::Group),
-            b"then" | b"elif" | b"else" | b"do" | b"!" | b"time" => {}
-            _ => self.command = false,
+            b"time" => self.time = true,
+            b"-p" | b"--" if after_time => self.time = true,
+            b"coproc" => self.coproc = true,
+            b"then" | b"elif" | b"else" | b"do" | b"!" => {}
+            _ => self.command = after_coproc,
         }
     }
 
@@ -875,6 +894,25 @@ mod tests {
             // A command name stands after `time`, `{` and `}`; a `{`
             // opens a group too (the prototype's review).
             (&["time if a; then"][..], 1),
+            // And after `time`'s options, and after `coproc` and its name
+            // (bash 5.2, tmp/m5p1/probes/p13.txt; milestone 4's deferred
+            // gap).
+            (&["time -p { a"], 1),
+            (&["time -- while a"], 1),
+            (&["time -p -- if a"], 1),
+            (&["time -x {"], 0),
+            (&["time a {"], 0),
+            (&["coproc { a"], 1),
+            (&["coproc N { a"], 1),
+            (&["coproc N if a; then"], 1),
+            (&["coproc N ( a"], 1),
+            (&["coproc echo if"], 1),
+            (&["coproc cat file {"], 0),
+            (&["coproc N; {"], 1),
+            (&["time; -p {"], 0),
+            (&["coproc; a {"], 0),
+            (&["time", "-p {"], 0),
+            (&["coproc", "a {"], 0),
             (&["{ while a; do"], 2),
             (&["while a; do { b; } done"], 0),
             // `select` opens as `for` does, `case` as `esac` closes.
