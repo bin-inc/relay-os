@@ -8,7 +8,8 @@
 //! refusal, so it reads what the parser refuses as bash reads it: `$(…)`
 //! and backquotes whole, a command name's place after `time`, `{` and `}`,
 //! `select` and `case` opening constructs, a `case` pattern before `)`,
-//! and a here-document's body, data up to its delimiter's line.
+//! arithmetic (`((…))`) whole, and a here-document's body, data up to its
+//! delimiter's line.
 
 /// Where a `for` is, while its name and words are read.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -110,6 +111,17 @@ pub(crate) struct Scan {
     cases: usize,
     /// The byte before, outside quotes.
     last: u8,
+    /// The `(` before stood where a command name would: a `(` right after
+    /// it starts arithmetic.
+    paren: bool,
+    /// The open levels are arithmetic's (`((`), until its first `)` shows
+    /// whether bash reads them so: the byte after it decides
+    /// (`arithmetic_check`).
+    arithmetic: bool,
+    arithmetic_check: bool,
+    /// What was read cannot be told apart any more: the drop goes on to the
+    /// end of the input.
+    lost: bool,
     /// The word being read: its first bytes, and how many it has. A quote
     /// or a `\` is one of them, so a word with one is no keyword.
     word: [u8; KEYWORD_MAX],
@@ -151,6 +163,10 @@ impl Scan {
             inner_command: true,
             cases: 0,
             last: b'\n',
+            paren: false,
+            arithmetic: false,
+            arithmetic_check: false,
+            lost: false,
             word: [0; KEYWORD_MAX],
             len: 0,
             in_word: false,
@@ -181,6 +197,13 @@ impl Scan {
         }
         if self.reading.is_some() && self.delim_byte(b) {
             return;
+        }
+        // An arithmetic `((` whose first `)` is not followed by another is
+        // two subshells, as bash reads it, which the scan read as words:
+        // a here-document or a keyword in them went unseen.
+        if core::mem::take(&mut self.arithmetic_check) && b != b')' {
+            self.arithmetic = false;
+            self.lost = true;
         }
         if b == b'\n' {
             // As bash reads on (the final review): a `\` before it joins
@@ -258,7 +281,23 @@ impl Scan {
                 self.command = false;
                 self.operator();
             }
-            b';' | b'&' | b'(' => self.operator(),
+            // `((` where a command name stands is bash's arithmetic
+            // command, read to its `))` as `$((…))` is: a `<<` in it is a
+            // shift, no here-document. After it a keyword may follow, as
+            // after `fi`.
+            b'(' if last == b'(' && self.paren => {
+                self.open_level(false);
+                self.open_level(false);
+                self.closed = true;
+                self.arithmetic = true;
+            }
+            b'(' => {
+                // A keyword before it (`for((`, `!((`) ends here.
+                self.end_word();
+                self.paren = self.command;
+                self.operator();
+            }
+            b';' | b'&' => self.operator(),
             b'>' => {
                 self.end_word();
                 self.target = true;
@@ -450,6 +489,7 @@ impl Scan {
     /// does not end after `|`, `&&` or `||`.
     pub fn done(&self) -> bool {
         self.depth == 0
+            && !self.lost
             && !self.open
             && self.body.is_none()
             && self.quote.is_none()
@@ -504,6 +544,10 @@ impl Scan {
                     self.inner_command = true;
                 } else {
                     self.nested -= 1;
+                }
+                if self.arithmetic {
+                    self.arithmetic_check = self.nested == 1;
+                    self.arithmetic = self.nested > 0;
                 }
             }
             b' ' | b'\t' => self.inner_end(),
@@ -840,6 +884,65 @@ mod tests {
         let head = alloc::format!("cat <<{long}");
         let other = alloc::format!("{long}y");
         assert_eq!(done_after(&[&head, &other, &long]), [false, false, true]);
+    }
+
+    #[test]
+    fn arithmetic_holds_no_here_document() {
+        // Plan 2's deferred minor: `((` where a command name stands is
+        // bash's arithmetic command, read to its `))` as `$((…))` is, so a
+        // `<<` in it is a shift.
+        assert_eq!(done_after(&["(( x = 1 << 2 ))", "b"]), [true, true]);
+        assert_eq!(done_after(&["echo $(( 1 << 2 ))", "b"]), [true, true]);
+        assert_eq!(done_after(&["a && (( (1) << 2 ))", "b"]), [true, true]);
+        assert_eq!(
+            done_after(&["if (( 1 << 2 )); then", "b", "fi"]),
+            [false, false, true]
+        );
+        assert_eq!(
+            done_after(&["for ((i = 0; i << 1; i++))", "do b", "done"]),
+            [false, false, true]
+        );
+        // It may go on across lines, as bash's does.
+        assert_eq!(done_after(&["((", "1 << 2 ))", "b"]), [false, true, true]);
+        // After its `))` a keyword may follow, as after `fi`, and an
+        // opener is bash's error.
+        assert_eq!(done_after(&["if a; then (( 1 )) fi", "b"]), [true, true]);
+        assert_eq!(done_after(&["(( 1 )) if a", "b"]), [true, true]);
+        assert_eq!(done_after(&["while (( 0 )) do b; done", "c"]), [true, true]);
+        // Two `(` apart, after a word or where no command name stands, are
+        // no arithmetic.
+        assert_eq!(
+            done_after(&["( (cat <<EOF", "EOF", "b"]),
+            [false, true, true]
+        );
+        assert_eq!(done_after(&["a((b <<EOF", "EOF", "c"]), [false, true, true]);
+        // Right after a keyword, with no blank, too (the prototype's
+        // review).
+        assert_eq!(
+            done_after(&["for((i = 0; i << 1; i++)); do", "b", "done", "c"]),
+            [false, false, true, true]
+        );
+        assert_eq!(
+            done_after(&["if((1 << 2)); then", "b", "fi"]),
+            [false, false, true]
+        );
+        assert_eq!(done_after(&["!((x = 1 << 2))", "b"]), [true, true]);
+        // A `((` whose first `)` is not followed by another is two
+        // subshells, as bash reads it (`((cat <<EOF)`), which the scan
+        // cannot read again: the drop goes on to the end (the prototype's
+        // review).
+        assert_eq!(
+            done_after(&["((cat <<EOF)", ")", "ran", "EOF", ")", "b"]),
+            [false; 6]
+        );
+        assert_eq!(done_after(&["((a) << 1)", "b", "1", "c"]), [false; 4]);
+        assert_eq!(done_after(&["((a) )", "b"]), [false, false]);
+        // After its `))`, a `$(…)` nested in a word is a word's again.
+        assert_eq!(done_after(&["(( 1 )); echo $($(a) b)", "c"]), [true, true]);
+        assert_eq!(
+            done_after(&["echo ((b <<EOF", "EOF", "c"]),
+            [false, true, true]
+        );
     }
 
     #[test]
