@@ -220,6 +220,12 @@ impl<'a> Ctx<'a> {
         [self.input_file.map(|(_, offset)| offset), out, err]
     }
 
+    /// Writes what waits for standard output, so that a file it goes to
+    /// has it (`cat a - < f >> f` compares its input with that size).
+    pub fn flush_output(&mut self) {
+        self.streams().flush();
+    }
+
     /// The regular file standard input is, where it has been read up to and
     /// its size, if it is one.
     pub fn input_file(&mut self) -> Option<(Node, u64, u64)> {

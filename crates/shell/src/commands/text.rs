@@ -66,10 +66,14 @@ pub fn cat(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
         };
         // `cat f >> f` would read its own output forever: GNU's check, the
         // output the same regular file and something left to read in it
-        // (`cat f > f` has emptied `f` and reads nothing).
-        if ctx.output_node() == Some(node) && ctx.vfs.stat(node).is_ok_and(|st| st.size > 0) {
-            status = ctx.fail("cat", format_args!("{name}: input file is output file"));
-            continue;
+        // (`cat f > f` has emptied `f` and reads nothing), counting what
+        // this `cat` has written of earlier operands.
+        if ctx.output_node() == Some(node) {
+            ctx.flush_output();
+            if ctx.vfs.stat(node).is_ok_and(|st| st.size > 0) {
+                status = ctx.fail("cat", format_args!("{name}: input file is output file"));
+                continue;
+            }
         }
         if let Err(e) = stream(ctx, node, 0, |ctx, bytes| {
             ctx.out(bytes);
@@ -85,6 +89,8 @@ pub fn cat(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
 /// shell reports). A file that is the output, with bytes left to read, is
 /// refused, as for an operand (`cat < f >> f`).
 fn cat_input(ctx: &mut Ctx<'_>) -> i32 {
+    // What waits for the output counts, as GNU's `cat` has written it.
+    ctx.flush_output();
     if let Some((node, at, size)) = ctx.input_file()
         && ctx.output_node() == Some(node)
         && at < size
@@ -684,6 +690,27 @@ mod tests {
         h.put("/tmp/a", b"one\n");
         assert_eq!(h.run("cat /tmp/a > /tmp/a"), (0, String::new()));
         assert_eq!(h.get("/tmp/a"), b"");
+        // What `cat` wrote of an earlier operand counts, though it waits
+        // in its buffer (the final review, I-1: `cat a - < f >> f` read its
+        // own output until the disk was full; GNU 9.4 refuses both). A
+        // Ctrl-C bounds a `cat` that reads on.
+        h.console.interrupt_after = Some(200);
+        h.put("/tmp/a", b"x\n");
+        for redirect in [">>", ">"] {
+            h.put("/tmp/h", b"");
+            assert_eq!(
+                h.run(&alloc::format!("cat /tmp/a - < /tmp/h {redirect} /tmp/h")),
+                (1, "cat: -: input file is output file\n".into()),
+                "{redirect}"
+            );
+            assert_eq!(h.get("/tmp/h"), b"x\n", "{redirect}");
+        }
+        h.put("/tmp/m", b"");
+        assert_eq!(
+            h.run("cat /tmp/a /tmp/m > /tmp/m"),
+            (1, "cat: /tmp/m: input file is output file\n".into())
+        );
+        assert_eq!(h.get("/tmp/m"), b"x\n");
     }
 
     #[test]

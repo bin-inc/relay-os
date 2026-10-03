@@ -83,4 +83,8 @@ expect root@relay:~# $
 send echo abc > io; cat < io >> io; echo "status $?"; grep a < io >> io; echo "status $?"; wc -c io
 expect \ncat: -: input file is output file\nstatus 1\ngrep: \(standard input\): input file is also the output\nstatus 2\n4 io\n
 expect root@relay:~# $
+# What `cat` wrote of an earlier operand counts (the final review).
+send echo x > io-a; true > io-h; cat io-a - < io-h >> io-h; echo "status $?"; wc -c io-h
+expect \ncat: -: input file is output file\nstatus 1\n2 io-h\n
+expect root@relay:~# $
 poweroff
