@@ -375,7 +375,20 @@ fn copy(ctx: &mut Ctx<'_>, src: &str, dst: &[u8]) -> Result<(), ()> {
             );
             return Err(());
         }
-        Ok((node, _)) => node,
+        // A character device is read only where its filesystem can (DevFs's
+        // `null`): an empty read asks before the destination is touched.
+        Ok((node, st)) => {
+            if st.kind == FileType::CharDev
+                && let Err(e) = ctx.vfs.read_at(node, 0, &mut [])
+            {
+                ctx.fail(
+                    "cp",
+                    format_args!("cannot open {} for reading: {e}", quote(src)),
+                );
+                return Err(());
+            }
+            node
+        }
         Err(e) => {
             ctx.fail("cp", format_args!("cannot stat {}: {e}", quote(src)));
             return Err(());
@@ -508,7 +521,7 @@ pub fn mv(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
 mod tests {
     use crate::testing::{Harness, host_tool, memfs};
     use alloc::string::String;
-    use vfs::Errno;
+    use vfs::{Errno, FileSystem, FileType};
 
     #[test]
     fn touch_creates_files_and_updates_times() {
@@ -798,6 +811,26 @@ mod tests {
         assert_eq!(h.get("/tmp/b"), b"alpha", "the target is emptied first");
         h.run("cp /tmp/long /tmp/copy");
         assert_eq!(h.get("/tmp/copy"), [7u8; 150_000]);
+    }
+
+    #[test]
+    fn cp_from_an_unreadable_device_leaves_the_destination() {
+        // A device only DevFs can read: another filesystem's (a node put
+        // on the disk from elsewhere) is refused before the destination is
+        // touched (the final review, m-1).
+        let mut fs = memfs();
+        let root = fs.root();
+        fs.special(root, b"c", FileType::CharDev).unwrap();
+        let mut h = Harness::on(fs);
+        h.put("/tmp/keep", b"precious");
+        assert_eq!(
+            h.run("cp /c /tmp/keep"),
+            (
+                1,
+                "cp: cannot open '/c' for reading: Invalid argument\n".into()
+            )
+        );
+        assert_eq!(h.get("/tmp/keep"), b"precious", "left alone");
     }
 
     #[test]
