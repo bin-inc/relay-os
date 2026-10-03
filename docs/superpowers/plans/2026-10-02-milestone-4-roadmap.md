@@ -2,7 +2,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-02-programmable-shell-gate-design.md` (the programmable shell gate; milestone 4 is its first half, "Control flow", version 0.5.0)
 
-**Status:** Plans 1 to 3 are done (#99–#101, #103–#106, #107–#111); plan 4 is planned and lands with these notes.
+**Status:** Done. All four plans were executed; milestone 4 ended at version 0.5.0 (tag `v0.5.0`).
 
 Milestone 4 makes `/bin/sh` a shell one can program in: lists (`;`, `&&`, `||`, `!`, `&` mid-line), commands read across lines with bash's `> ` prompt, the compound commands `if`, `while`, `until` and `for`, and `test` and `[` as programs (spec §4–§6). It is split into the four plans of spec §12, named `m4-plan-1` to `m4-plan-4` (their files `docs/superpowers/plans/<date>-m4-plan-<n>-<name>.md`, their branches `m4p<n>/…`). Each one ends with software that can be tested by itself. Each plan is written just before it is executed, so it builds on the code that actually exists and on what the previous plan's checks showed.
 

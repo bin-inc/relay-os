@@ -12,15 +12,16 @@ UEFI machines. Its test machine is an Intel NUC 12 Pro booting from a USB
 stick; QEMU with OVMF runs everything else. A later aim is an ARM
 handheld, so the system-call ABI must stay free of x86 detail.
 
-Status: milestones 1 to 3 are done, at version 0.4.0 (tag `v0.4.0`). The
+Status: milestones 1 to 4 are done, at version 0.5.0 (tag `v0.5.0`). The
 kernel boots, drives xHCI (keyboard and USB storage), mounts an ext2 root
 and runs programs in ring 3 from a read-only `/bin` (`system.img`).
 Process 1 is the kernel's init, which runs `/bin/sh`; the shell has
-pipes, background jobs, scripts with arguments and variables, and six
-built-ins (`cd`, `exit`, `help`, `jobs`, `kill`, `wait`). Every other
-command is a program. The next gate, being designed, is the programmable
-shell: milestone 4 (control flow, 0.5.0) and milestone 5 (redirection and
-environment, 0.6.0). The aarch64 port comes later.
+pipes, background jobs, scripts with arguments and variables, lists
+(`;`, `&&`, `||`, `!`), `if`, `while`, `until` and `for`, commands read
+across lines with bash's `> ` prompt, and six built-ins (`cd`, `exit`,
+`help`, `jobs`, `kill`, `wait`). Every other command is a program, `test`
+and `[` too. The programmable shell gate goes on with milestone 5
+(redirection and environment, 0.6.0). The aarch64 port comes later.
 
 ## Where to read
 
