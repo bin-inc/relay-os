@@ -1366,6 +1366,40 @@ mod tests {
     }
 
     #[test]
+    fn two_subshells_dropped_as_arithmetic_end_their_drop() {
+        // Milestone 4's deferred minor M-2: `((a); b)`, two subshells to
+        // bash, dropped the rest of the input.
+        assert_eq!(piped(b"((t-args a); t-args b)\nt-args next\n"), ["next"]);
+        assert_eq!(
+            piped(b"t-args 3> x &&\n((t-args a) ; if t-args b\nfi )\nt-args next\n"),
+            ["next"]
+        );
+    }
+
+    #[test]
+    fn a_group_after_time_s_options_or_coproc_is_dropped_whole() {
+        // Milestone 4's deferred gap: the scan took `{` after `time -p` or
+        // `coproc` for a word, so the group's lines ran without their
+        // guard.
+        for text in [
+            &b"t-args 3> x &&\ntime -p {\nt-args body\n}\nt-args next\n"[..],
+            b"t-args 3> x &&\ncoproc {\nt-args body\n}\nt-args next\n",
+            b"t-args 3> x &&\ncoproc N {\nt-args body\n}\nt-args next\n",
+        ] {
+            assert_eq!(piped(text), ["next"], "{}", String::from_utf8_lossy(text));
+        }
+    }
+
+    #[test]
+    fn a_quote_in_a_substitution_in_double_quotes_ends_no_drop() {
+        // Milestone 4's deferred gap: the scan took the `"` inside `$(…)`
+        // for the end of the outer quotes, so the `fi` in the string ended
+        // the drop and the line after it ran.
+        let text = b"if true; then\nt-args 3> x\necho \"$(echo \"\nfi\nt-args body\n\")\"\nfi\nt-args next\n";
+        assert_eq!(piped(text), ["next"]);
+    }
+
+    #[test]
     fn a_here_document_s_body_does_not_run() {
         // The prototype's review: `cat > x <<EOF`, refused, then ran each
         // line of its body as a command.
