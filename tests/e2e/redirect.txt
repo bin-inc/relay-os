@@ -1,0 +1,63 @@
+# Redirection under /bin/sh (programmable shell gate §7; milestone 5,
+# plan 1): `<`, `2>`, `2>>`, both orders of `2>&1`, `a 2>&1 | b`; a
+# command's own messages on its fd 2, a built-in's too; a construct's
+# redirections made once for everything inside, a built-in and a program
+# sharing the file's offset, and `head` leaving the file just after its
+# line; `sh FILE` refusing to send its errors to a file but reading one;
+# errors sent to a file kept out of a script's transcript; and Ctrl-C
+# reaching a program whose input is a file.
+timeout 60
+expect root@relay:~# $
+send echo l1 > r-f; echo l2 >> r-f; echo l3 >> r-f
+expect root@relay:~# $
+send cat < r-f
+expect \nl1\nl2\nl3\nroot@relay:~# $
+send cat < r-nope; echo "status $?"
+expect \nrelay-sh: r-nope: No such file or directory\nstatus 1\nroot@relay:~# $
+send ls r-f r-nope 2> r-e
+expect \nr-f\nroot@relay:~# $
+send ls r-f r-nope 2>> r-e; cat r-e
+expect \nr-f\nls: cannot access 'r-nope': No such file or directory\nls: cannot access 'r-nope': No such file or directory\nroot@relay:~# $
+# Both outputs into the file, or the errors where the output was.
+send ls r-f r-nope > r-o 2>&1; cat r-o
+expect \nls: cannot access 'r-nope': No such file or directory\nr-f\nroot@relay:~# $
+send ls r-f r-nope 2>&1 > r-o2
+expect \nls: cannot access 'r-nope': No such file or directory\nroot@relay:~# $
+send cat r-o2
+expect \nr-f\nroot@relay:~# $
+send ls r-f r-nope 2>&1 | wc -l
+expect \n2\nroot@relay:~# $
+send nope 2> r-e2; cd /nope 2>> r-e2; cat r-e2
+expect \nrelay-sh: nope: command not found\nrelay-sh: cd: /nope: No such file or directory\nroot@relay:~# $
+# A construct's redirections, made once: help (a built-in) and echo (a
+# program) write one after the other into the one file.
+send for x in a b; do echo $x; help; done > r-mix
+expect root@relay:~# $
+send grep -n '^[ab]$' r-mix
+expect \n1:a\n\d+:b\nroot@relay:~# $
+send for x in 1 2; do head -n 1; done < r-f
+expect \nl1\nl2\nroot@relay:~# $
+send if grep -q l2; then echo found; fi < r-f
+expect \nfound\nroot@relay:~# $
+send for x in 1; do nope; done 2> r-e3; cat r-e3
+expect \nrelay-sh: nope: command not found\nroot@relay:~# $
+# A script's errors hold its trace: refused; its input may be a file.
+send echo echo hi > r-s.sh
+expect root@relay:~# $
+send sh r-s.sh 2> r-se; echo "status $?"; cat r-se
+expect \nstatus 1\nsh: a script's output cannot be redirected\nroot@relay:~# $
+send echo cat > r-in.sh
+expect root@relay:~# $
+send sh r-in.sh < r-f
+expect \n\+ cat\nl1\nl2\nl3\nroot@relay:~# $
+send echo 'ls r-nope 2> r-te' > r-t.sh
+expect root@relay:~# $
+send sh r-t.sh
+expect \n\+ ls r-nope 2> r-te\nroot@relay:~# $
+send cat r-t.log r-te
+expect \n\+ ls r-nope 2> r-te\nls: cannot access 'r-nope': No such file or directory\nroot@relay:~# $
+# A program whose input is a file still has the console's foreground.
+send t-spin < r-f
+alive 1
+type-ahead {ctrl-c}
+expect \n\^C\nroot@relay:~# $

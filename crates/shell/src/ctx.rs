@@ -74,7 +74,8 @@ impl JobControl<'_> {
 /// Where a command the shell runs itself writes (programmable shell gate
 /// §7.5): the screen, a file of the in-process runner's at an offset, an
 /// fd of `/bin/sh`'s, which its `Programs` write, or (errors) where the
-/// output goes, when fd 2 is a copy of fd 1's file or the other way.
+/// output goes, when fd 2 is a copy of fd 1's file or pipe or the other
+/// way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum To {
     Console,
@@ -194,9 +195,29 @@ impl<'a> Ctx<'a> {
         self.input = Some(input);
     }
 
-    /// Gives the command the file `node` as standard input, from its start.
-    pub(crate) fn set_input_file(&mut self, node: Node) {
-        self.input_file = Some((node, 0));
+    /// Errors go to `err`.
+    pub(crate) fn set_err(&mut self, err: To) {
+        self.err = err;
+    }
+
+    /// Gives the command the file `node` as standard input, from
+    /// `offset`.
+    pub(crate) fn set_input_file(&mut self, node: Node, offset: u64) {
+        self.input_file = Some((node, offset));
+    }
+
+    /// Where the in-process runner's files have got to: the output's, the
+    /// errors' and the input's, for their shared offsets.
+    pub(crate) fn offsets(&self) -> [Option<u64>; 3] {
+        let out = match &self.out {
+            Output::File { offset, .. } => Some(*offset),
+            _ => None,
+        };
+        let err = match self.err {
+            To::File(_, offset) => Some(offset),
+            _ => None,
+        };
+        [self.input_file.map(|(_, offset)| offset), out, err]
     }
 
     /// The regular file standard input is, where it has been read up to and
@@ -274,6 +295,10 @@ impl<'a> Ctx<'a> {
     /// that the next command reads them (GNU's `head`, programmable shell
     /// gate §15 item 5).
     pub fn seek_input_back(&mut self, n: u64) -> Result<(), Errno> {
+        if let Some((_, offset)) = &mut self.input_file {
+            *offset = offset.checked_sub(n).ok_or(Errno::EINVAL)?;
+            return Ok(());
+        }
         match &mut self.input {
             Some(input) => input.seek_back(n),
             None => Err(Errno::EINVAL),

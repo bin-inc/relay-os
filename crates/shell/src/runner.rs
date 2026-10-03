@@ -90,11 +90,13 @@ impl Ran {
     }
 }
 
-/// A command of a pipeline: its words, and the fds its context and
-/// redirections give it, the pipes aside.
+/// A command of a pipeline: its words, and the fds the pipes around it,
+/// its context and its redirections give it; none when a redirection of
+/// it could not be made (programmable shell gate §7.3), and it runs
+/// nothing.
 pub(crate) struct Stage<'c> {
     pub words: &'c [String],
-    pub fds: Fds,
+    pub fds: Option<Fds>,
 }
 
 /// Runs the commands that are not the shell's own (`commands::BUILTINS`).
@@ -157,10 +159,12 @@ impl Runner for InProcess {
         }
     }
 
-    /// Each stage runs to its end before the next starts, its output kept
-    /// as the next one's input; a stage that is not found, or whose words
-    /// expanded to nothing, gives the next one nothing, as bash's does (the
-    /// first says so). Ctrl-C stops the rest.
+    /// Each stage runs to its end before the next starts, what it sends
+    /// into the pipe (its output, its errors after `2>&1`) kept as the
+    /// next one's input; a stage that is not found, whose words expanded
+    /// to nothing or whose redirection failed gives the next one nothing,
+    /// as bash's does (the first says so on its fd 2). Ctrl-C stops the
+    /// rest.
     fn pipeline(&mut self, parts: Parts<'_>, stages: &[Stage<'_>]) -> Ran {
         // `sh` reads a script for this shell to run after the command.
         if stages
@@ -183,39 +187,72 @@ impl Runner for InProcess {
         let mut piped: Option<Bytes> = None;
         for stage in before {
             let mut out = Collected(Vec::new());
-            let Some((name, args)) = stage.words.split_first() else {
+            let (Some(fds), Some((name, args))) = (stage.fds, stage.words.split_first()) else {
                 piped = Some(Bytes::new(out.0));
                 continue;
             };
+            let mut err_pipe = Vec::new();
             if let Some(command) = commands::find(name) {
-                let mut ctx = Ctx::program(&mut *vfs, &mut *system, &mut *console, &mut out);
+                let mut ctx = match fds.0[1] {
+                    Slot::PipeOut => Ctx::program(&mut *vfs, &mut *system, &mut *console, &mut out),
+                    slot => {
+                        let to = to(files, slot);
+                        Ctx::new(&mut *vfs, &mut *system, &mut *console, to, To::Console)
+                    }
+                };
+                // Into the pipe only with the output: `>` before `|` is
+                // refused (§7.3).
+                ctx.set_err(match fds.0[2] {
+                    slot if slot == fds.0[1] => To::Output,
+                    slot => to(files, slot),
+                });
                 match (&mut piped, &mut input) {
                     (Some(bytes), _) => ctx.set_input(bytes),
                     (None, Some(first)) => ctx.set_input(&mut **first),
                     (None, None) => {}
                 }
                 // The first stage's `<`.
-                if let Some(node) = input_file(files, stage.fds.0[0]) {
-                    ctx.set_input_file(node);
+                if let Some((node, offset)) = input_file(files, fds.0[0]) {
+                    ctx.set_input_file(node, offset);
                 }
                 ctx.transcript = transcript.take();
                 (command.run)(&mut ctx, args);
                 let _ = ctx.finish();
+                put_offsets(files, &fds, &ctx);
                 let cancelled = ctx.cancelled;
                 *transcript = ctx.transcript.take();
                 if cancelled {
                     return Ran::cancelled();
                 }
             } else {
+                // On its fd 2: the screen, a file, or the pipe.
                 let message = not_found(name).message;
-                console.write(message.as_bytes());
-                if let Some(t) = transcript.as_mut() {
-                    let _ = t.add(&mut *vfs, message.as_bytes());
+                match fds.0[2] {
+                    Slot::PipeOut => err_pipe = message.into_bytes(),
+                    Slot::File(i) => {
+                        if let Handle::Node { node, offset } = files.handle(i) {
+                            let message = message.as_bytes();
+                            let (at, _) = crate::fds::write_file(&mut *vfs, node, offset, message);
+                            files.set_offset(i, at);
+                        }
+                    }
+                    _ => {
+                        console.write(message.as_bytes());
+                        if let Some(t) = transcript.as_mut() {
+                            let _ = t.add(&mut *vfs, message.as_bytes());
+                        }
+                    }
                 }
             }
-            piped = Some(Bytes::new(out.0));
+            let mut bytes = out.0;
+            bytes.extend_from_slice(&err_pipe);
+            piped = Some(Bytes::new(bytes));
         }
         let mut piped = piped.expect("a stage before the last");
+        let Some(fds) = last.fds else {
+            // Its redirection failed: bash's status 1.
+            return Ran::said(1, String::new());
+        };
         let Some((name, args)) = last.words.split_first() else {
             return Ran::said(0, String::new());
         };
@@ -229,7 +266,7 @@ impl Runner for InProcess {
             input: Some(&mut piped),
             files,
         };
-        self.run(parts, name, args, last.fds)
+        self.run(parts, name, args, fds)
     }
 
     fn background(&mut self, _: Parts<'_>, _: &[Stage<'_>]) -> Started {
@@ -275,14 +312,17 @@ pub(crate) struct Spawning<'a> {
     pub programs: &'a mut dyn Programs,
 }
 
-/// The shell's fd that `slot` is: its own, or a file it opened.
-fn shell_fd(files: &Files, slot: Slot) -> u32 {
+/// The shell's fd that `slot` is: its own, a file it opened, or in a
+/// pipeline the pipe before (`pipe_in`) or after (`pipe_out`).
+fn shell_fd(files: &Files, slot: Slot, pipe_in: Option<u32>, pipe_out: Option<u32>) -> u32 {
     match slot {
         Slot::Shell(fd) => fd,
         Slot::File(i) => match files.handle(i) {
             Handle::Fd(fd) => fd,
             Handle::Node { .. } => unreachable!("/bin/sh opens its files as fds"),
         },
+        Slot::PipeIn => pipe_in.unwrap_or(0),
+        Slot::PipeOut => pipe_out.unwrap_or(1),
     }
 }
 
@@ -300,7 +340,7 @@ impl Runner for Spawning<'_> {
         } else {
             Group::New
         };
-        let fds = fds.0.map(|slot| shell_fd(parts.files, slot));
+        let fds = fds.0.map(|slot| shell_fd(parts.files, slot, None, None));
         match self.programs.spawn(path.as_bytes(), &argv, fds, group) {
             Ok(pid) => match self.programs.wait(pid) {
                 Ok(w) => ended(name, &w),
@@ -406,13 +446,16 @@ impl Spawning<'_> {
                     }
                 }
             };
-            let Some((name, args)) = stage.words.split_first() else {
-                // Its words expanded to nothing: it runs nothing, and its
-                // neighbours see an end.
+            let (Some(fds), Some((name, args))) = (stage.fds, stage.words.split_first()) else {
+                // Its words expanded to nothing or a redirection of it
+                // failed: it runs nothing, and its neighbours see an end.
                 for fd in [stdin, stdout].into_iter().flatten() {
                     self.programs.close(fd);
                 }
                 stdin = next;
+                if is_last && stage.fds.is_none() {
+                    ran.status = 1;
+                }
                 continue;
             };
             let mut argv: Vec<&[u8]> = alloc::vec![name.as_bytes()];
@@ -424,18 +467,10 @@ impl Spawning<'_> {
                 (_, _, Some(pgid)) => Group::Join(pgid),
             };
             let path = program_path(name);
-            let mut fds = stage.fds.0.map(|slot| shell_fd(parts.files, slot));
-            if let Some(fd) = stdin {
-                fds[0] = fd;
-            }
-            if let Some(fd) = stdout {
-                fds[1] = fd;
-            }
-            let pid = self.programs.spawn(path.as_bytes(), &argv, fds, group);
-            for fd in [stdin, stdout].into_iter().flatten() {
-                self.programs.close(fd);
-            }
-            stdin = next;
+            let shell_fds = fds.0.map(|slot| shell_fd(parts.files, slot, stdin, stdout));
+            let pid = self
+                .programs
+                .spawn(path.as_bytes(), &argv, shell_fds, group);
             match pid {
                 Ok(pid) => {
                     first.get_or_insert(pid);
@@ -445,33 +480,56 @@ impl Spawning<'_> {
                     }
                 }
                 Err(e) => {
+                    // On its fd 2, the pipe after it too (`nope 2>&1 | b`).
                     let refused = cannot_start(name, e);
-                    parts.console.write(refused.message.as_bytes());
+                    match fds.0[2] {
+                        Slot::Shell(_) => parts.console.write(refused.message.as_bytes()),
+                        _ => {
+                            let _ = self
+                                .programs
+                                .write(shell_fds[2], refused.message.as_bytes());
+                        }
+                    }
                     if is_last {
                         ran.status = refused.status;
                     }
                 }
             }
+            for fd in [stdin, stdout].into_iter().flatten() {
+                self.programs.close(fd);
+            }
+            stdin = next;
         }
         (started, ran)
     }
 }
 
-/// The in-process runner's file `slot` reads, if it is one.
-fn input_file(files: &Files, slot: Slot) -> Option<Node> {
+/// The in-process runner's file `slot` reads, if it is one, and where.
+fn input_file(files: &Files, slot: Slot) -> Option<(Node, u64)> {
     match slot {
         Slot::File(i) => match files.handle(i) {
-            Handle::Node { node, .. } => Some(node),
+            Handle::Node { node, offset } => Some((node, offset)),
             Handle::Fd(_) => None,
         },
-        Slot::Shell(_) => None,
+        Slot::Shell(_) | Slot::PipeIn | Slot::PipeOut => None,
     }
 }
 
-/// Where a command the shell runs itself writes for `slot`.
+/// The in-process runner's files where `ctx` left them: each fd of `fds`
+/// that is one goes on from there.
+fn put_offsets(files: &mut Files, fds: &Fds, ctx: &Ctx<'_>) {
+    for (slot, offset) in fds.0.iter().zip(ctx.offsets()) {
+        if let (Slot::File(i), Some(offset)) = (slot, offset) {
+            files.set_offset(*i, offset);
+        }
+    }
+}
+
+/// Where a command the shell runs itself writes for `slot` (a pipe is the
+/// pipeline's to make).
 fn to(files: &Files, slot: Slot) -> To {
     match slot {
-        Slot::Shell(_) => To::Console,
+        Slot::Shell(_) | Slot::PipeIn | Slot::PipeOut => To::Console,
         Slot::File(i) => match files.handle(i) {
             Handle::Fd(fd) => To::Fd(fd),
             Handle::Node { node, offset } => To::File(node, offset),
@@ -498,14 +556,15 @@ pub(crate) fn run_function<'s>(
     if let Some(input) = parts.input {
         ctx.set_input(input);
     }
-    if let Some(node) = input_file(parts.files, fds.0[0]) {
-        ctx.set_input_file(node);
+    if let Some((node, offset)) = input_file(parts.files, fds.0[0]) {
+        ctx.set_input_file(node, offset);
     }
     ctx.in_script = parts.in_script;
     ctx.status = parts.status;
     ctx.transcript = parts.transcript.take();
     let status = (command.run)(&mut ctx, args);
     let finished = ctx.finish();
+    put_offsets(parts.files, &fds, &ctx);
     let (status, message, own) = if ctx.cancelled {
         (CANCELLED, String::from("^C\n"), false)
     } else if let Err(e) = finished {
@@ -906,14 +965,17 @@ mod tests {
         let mut closed = h.programs.closed.clone();
         closed.sort();
         assert_eq!(closed, [4, 5, 6], "the redirection and both ends");
-        // A redirection that cannot be opened starts nothing.
+        // A redirection that cannot be opened starts nothing of its
+        // command, whose neighbours see an end, as in bash (programmable
+        // shell gate §15 item 5).
         let mut h = with_stages();
         h.programs.open_error = Some(Errno::EISDIR);
         assert_eq!(
             h.spawning("cat | wc > /tmp"),
             (1, "relay-sh: /tmp: Is a directory\n".into())
         );
-        assert!(h.programs.spawned.is_empty() && h.programs.pipes.is_empty());
+        assert_eq!(h.programs.spawned.len(), 1);
+        assert_eq!(h.programs.spawned[0].path, "/bin/cat");
     }
 
     #[test]

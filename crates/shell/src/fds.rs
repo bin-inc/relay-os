@@ -22,6 +22,10 @@ pub(crate) enum Slot {
     Shell(u32),
     /// A file a redirection opened, by its place in [`Files`].
     File(usize),
+    /// In a pipeline, the pipe from the command before.
+    PipeIn,
+    /// In a pipeline, the pipe to the command after.
+    PipeOut,
 }
 
 /// A command's fds 0, 1 and 2.
@@ -160,6 +164,14 @@ impl Files {
         match self.open.get(i) {
             Some(Some((handle, _))) => *handle,
             _ => unreachable!("a slot names an open file"),
+        }
+    }
+
+    /// The in-process runner's file `i` has been read or written up to
+    /// `to`, where every fd of it goes on from (an open file's offset).
+    pub fn set_offset(&mut self, i: usize, to: u64) {
+        if let Some(Some((Handle::Node { offset, .. }, _))) = self.open.get_mut(i) {
+            *offset = to;
         }
     }
 
