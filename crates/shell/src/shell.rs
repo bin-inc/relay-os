@@ -3060,6 +3060,26 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_of_an_fd_onto_itself_keeps_its_file() {
+        // The prototype's review (M-5): a copy holds its file before the
+        // slot it replaces lets it go, or `> f 1>&1` would close `f` before
+        // the command writes it (bash 5.2: a copy onto itself changes
+        // nothing).
+        let mut h = Harness::new();
+        assert_eq!(h.run("echo a > /tmp/f 1>&1"), (0, String::new()));
+        assert_eq!(h.get("/tmp/f"), b"a\n");
+        assert_eq!(h.run("ls /nope 2> /tmp/e 2>&2"), (2, String::new()));
+        assert_eq!(
+            h.get("/tmp/e"),
+            b"ls: cannot access '/nope': No such file or directory\n"
+        );
+        let mut h = spawning();
+        assert_eq!(h.spawning("t-args > /tmp/o 1>&1").0, 3);
+        assert_eq!(h.programs.spawned[0].fds, [0, 4, 2]);
+        assert_eq!(h.programs.closed, [4]);
+    }
+
+    #[test]
     fn bin_sh_gives_a_program_a_file_as_fd_2() {
         let mut h = spawning();
         assert_eq!(h.spawning("t-args 2> /tmp/e").0, 3);
