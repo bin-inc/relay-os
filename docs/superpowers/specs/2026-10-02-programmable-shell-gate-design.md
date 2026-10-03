@@ -1,7 +1,7 @@
 # Relay OS — Programmable Shell Gate Design (milestones 4 and 5)
 
 - **Date:** 2026-10-02
-- **Status:** Approved 2026-10-02; revised while planning milestone 4's plans 1 to 4 and milestone 5's plan 1 (see §15)
+- **Status:** Approved 2026-10-02; revised while planning milestone 4's plans 1 to 4 and milestone 5's plans 1 and 2 (see §15)
 - **Builds on:** the user-space gate (version 0.4.0,
   `docs/superpowers/specs/2026-09-29-user-space-gate-design.md`, cited below
   as "UG §n") and milestone 1 (`2026-09-26-milestone-1-boot-shell-fs-design.md`,
@@ -513,9 +513,10 @@ comments:
 - An environment entry without a valid name is dropped, where bash passes
   it on (§8.5).
 - `test`'s file operators do not follow symbolic links (§6.2).
-- `test -w` is false only on `/bin`'s filesystem, so on a root the kernel
-  mounted read-only it is true, until milestone 5's ABI 4 says which
-  filesystems are read-only (§15 item 3).
+- `ls -l` and `stat` show a device's size, 0, where GNU shows its device
+  numbers (`1, 3` for `/dev/null`): `Stat` has none (§15 item 6).
+- `sh FILE` runs only a regular file: `sh /dev/null` fails, status 1, where
+  bash runs nothing (§15 item 6).
 - `:` is not a built-in; `true` is the program for it (§14).
 - A redirection's fd is 0, 1 or 2 written as one digit, and a `>&` takes
   only a bare `1` or `2`; bash's other fds and its expanded `>&` targets
@@ -1133,3 +1134,98 @@ does.
      fd 1 is a file (`X | sh > f`) still writes a built-in's output and
      its own messages after `2>&1` to the screen, as since milestone 3:
      plan 4's (the maintainer).
+6. **Decisions made while planning milestone 5's plan 2** (ABI 4 and
+   `/dev`):
+   - **The pull requests.** Plan 2 is three: its plan; ABI 4 (the bump, the
+     environment from `spawn` to `relay_rt::env`, init's `HOME`, `t-env`,
+     and the read-only flag with `test -w`); and `/dev/null`. A spike bumped
+     `VERSION` alone and ran everything: only the version's text failed (the
+     startup line `ABI 3` in four scenarios and check 3, `kernel wants 3`,
+     `t-abi`'s `built for ABI 2`), in 13 files. It has no NUC check: check
+     3's `ABI 4` and `dev` lines reach its NUC transcript by hand until plan
+     4's run.
+   - **One bump.** `SpawnArgs` gains `env` and `env_len` (offsets 128 and
+     136; 144 bytes) and `StatFs` a `flags` field (offset 48; 56 bytes)
+     whose bit `STATFS_READ_ONLY`, 1 as Linux's `ST_RDONLY`, says the
+     filesystem is read-only: one `VERSION` 4 in one `!` commit with the
+     version's ripples, the code that fills them in following in commits of
+     their own.
+   - **The block on the stack** (§8.1, §13). The kernel copies the
+     environment just below the arguments, which keep the top of the stack,
+     and the stack pointer goes 16-byte aligned below both; with no
+     environment `rcx`, `r8` and `r9` are 0. Each entry is counted by its
+     NUL; the kernel checks only §8.1's size and NUL, so an empty entry or
+     one without `=` passes. The stack stays 255 pages: the spike logged
+     each program's deepest stack at its end over every scenario and
+     `/bin/sh` at the nesting bound with pipelines and redirections inside,
+     and the deepest was `/bin/sh`'s 40 KiB, against the 892 KiB both full
+     blocks leave. A kernel test loads both at 64 KiB, and `t-env` starts
+     `sh` at the nesting bound with both full.
+   - **`relay_rt::env`** (§8.3). `var(name)` and `vars()` read the block as
+     glibc and Rust's `std` do: an entry is split at its first `=` after its
+     first byte, one without is skipped, and the first of two equal names
+     wins; `block()` gives it whole, and `raw()` the three registers as they
+     came. `sys::spawn` still starts a child with no environment, its
+     callers unchanged, and `sys::spawn_env` gives one; `SysPrograms` passes
+     the program's own, so `/bin/sh` hands its whole environment to every
+     command until plan 3's export decides what goes. The test double of
+     §8.3 comes with plan 3, the first to use it; plan 2 tests the block as
+     `Args` is tested.
+   - **`t-env`** (§11.3). It prints the block it got, `[n] entry` per entry,
+     after a line with the count and length the registers gave (the
+     prototype's review: a count the entries did not show went unseen), and
+     a child started with none shows all three registers 0; its kinds start
+     a child with a given block (non-ASCII text, an entry without `=`, an
+     empty one), with none, with 64 KiB and with one byte more (`E2BIG`),
+     with 64 KiB of arguments as well, with no final NUL (`EINVAL`), `sh`
+     reading `t-env` from a pipe (a grandchild), and `sh deep.sh` with both
+     blocks full. From the prompt it shows init's `HOME=/root`. `/bin` holds
+     45 programs.
+   - **The read-only flag** (§15 item 3). ext2 says read-only when it was
+     mounted so (after an `EIO`) or shut down, `MemFs` when made so,
+     `system.img` always, `/dev` never. `test -w` is false on any filesystem
+     `statfs` says is read-only, so on a root mounted read-only too, ending
+     §10's difference, but for a device, a FIFO or a socket, as Linux's
+     `access` answers GNU's `test`; a test compares each kind with GNU's on
+     a read-only bind mount in `unshare -rm` (the prototype's review). A
+     `/bin` that is a directory of the root (`host-shell`) is writable, as
+     before.
+   - **`/dev/null`** (§8.4). `vfs::DevFs` holds a root directory (`0755`)
+     and `null`, a character device (`0666`, user and group 0, its times the
+     mount's): a read gives the end of input, a write takes everything,
+     truncating and `touch` succeed and change nothing. Creating, removing
+     or renaming anything in `/dev` is `EPERM` (`Operation not permitted`),
+     as on a Linux filesystem that has no such operation (Linux says
+     `EACCES` for a file, which `vfs` lacks). The kernel mounts it right
+     after `/`, before `/bin` (so `/dev` is filesystem 2 and `/bin` 3), with
+     `[ ok ] dev: /dev/null`, or `[FAIL] dev: cannot mount /dev: <reason>`
+     and the boot goes on. A character device's `seek` gives 0 for any
+     offset, after refusing an unknown `whence` as Linux does (the
+     prototype's review). Its `dev` is its mount's number, never 0, so
+     `relay_rt::sysio::is_console` does not take it for the console:
+     `[ -t 1 ] > /dev/null` is false, `[ -c /dev/null ]` and
+     `[ -w /dev/null ]` true. `host-shell` mounts it too, where
+     `> /dev/null` wrote a file into the image. `cp` reads a character
+     device as a source, so `cp /dev/null f` empties `f` as GNU's does,
+     where milestone 1 refused every source but a regular file; and the
+     in-process runner's `grep` takes an input for its output only when it
+     is a regular file, as GNU does (the prototype's review).
+   - **`df` lists only `/`** (§8.4, §11.5). GNU's `df` 9.4 leaves `/dev`
+     (devtmpfs) out unless given `-a`, and a filesystem of no blocks too, so
+     `df` stays as it is and nothing of it ripples (the maintainer,
+     2026-10-03).
+   - **No device numbers.** `Stat` has no `rdev`, so `ls -l /dev/null` shows
+     its size, 0, where GNU shows `1, 3` (§10).
+   - **`sh` and `/dev/null`.** `sh FILE 2> /dev/null` stays refused (§15
+     item 5): the rule is the fd, not the file. `sh` runs only a regular
+     file, so `sh /dev/null` is `sh: /dev/null: Invalid argument`, status 1,
+     where bash runs nothing, status 0; its transcript, `/dev/null.log`,
+     could not be made either (the maintainer, 2026-10-03; §10).
+   - **Plan 1's deferred minors.** §15 item 5's input that is the output:
+     `cat` refuses an input that has bytes left to read, but `grep`, as
+     GNU's 3.11, refuses the output's file whatever is left of it, and not
+     with `-c` or `-q`, which write no line. A failed redirection on a
+     pipeline's earlier stage after `2>&1` (`cat 2>&1 < /nope | wc -l`)
+     tells its message on the screen, not into the pipe, and a refusal drops
+     an explicit default fd (`1> f | cat` says `> before |`): both go to
+     plan 4.
