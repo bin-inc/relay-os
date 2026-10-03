@@ -54,6 +54,7 @@ usb: 00:02.0 port 5: 0627:0001 high-speed, keyboard
 storage: 00:02.0 port 2: GPT with 2 partitions
 storage: root on 00:02.0 port 2, the disk with the boot partition 52454C41-5900-4000-8000-000000000002
 [ ok ] mount /: ext2 on 00:02.0 port 2 partition 2, 190 MiB
+[ ok ] dev: /dev/null
 [ ok ] system: 1 program, ABI 4
 + ls -l /bin
 total 20

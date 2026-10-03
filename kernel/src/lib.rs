@@ -10,6 +10,7 @@ pub mod arch;
 pub mod block;
 pub mod cmdline;
 pub mod console;
+pub mod dev;
 pub mod error_screen;
 pub mod exec;
 pub mod fd;
@@ -151,6 +152,7 @@ pub fn kernel_main(info: &'static BootInfo) -> ! {
     usb::init(cmdline.debug_usb);
     let root = storage::mount_root(info.boot_partition_guid());
     let mut vfs = vfs::MountTable::new(root);
+    dev::mount(&mut vfs);
     if let Err(e) = system::mount(info, &mut vfs) {
         init::system_failed(e);
     }

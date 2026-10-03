@@ -1,14 +1,15 @@
 # No usable root (spec §10): the ext2 superblock's magic is zeroed before
 # boot, so mounting / fails with its reason on the status line, and the
 # shell starts on the empty read-only /, where only the programs of /bin
-# are (user-space gate spec §4.4). Afterwards the runner puts the
-# magic back and e2fsck finds the filesystem untouched.
+# are (user-space gate spec §4.4), and /dev (programmable shell gate
+# §8.4). Afterwards the runner puts the magic back and e2fsck finds the
+# filesystem untouched.
 break-root
 timeout 30
 expect \[FAIL\] mount /: ext2 on 00:02\.0 port 2 partition 2, 190 MiB: Invalid argument
 expect root@relay:/# $
 send ls -a /
-expect \n\.\s+\.\.\s+bin\n
+expect \n\.\s+\.\.\s+bin\s+dev\n
 expect root@relay:/# $
 send touch /f
 expect \ntouch: cannot touch '/f': Read-only file system\n
