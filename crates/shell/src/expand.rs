@@ -7,7 +7,7 @@
 //! after it to the last, as bash's `"$@"` does; an empty argument is kept
 //! only in quotes.
 
-use crate::parser::{Command, Param, Piece, Redirect, Word};
+use crate::parser::{Command, Param, Piece, Redirect, RedirectOp, Word};
 use alloc::borrow::Cow;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -167,22 +167,28 @@ impl<'v> Expander<'v> {
         for w in &c.words {
             words.extend(self.word(w)?);
         }
-        let redirect = match &c.redirect {
-            Some(r) => Some(self.redirect(r)?),
-            None => None,
-        };
-        Ok(Command { words, redirect })
+        let mut redirects = Vec::new();
+        for r in &c.redirects {
+            redirects.push(self.redirect(r)?);
+        }
+        Ok(Command { words, redirects })
     }
 
     fn redirect(&mut self, r: &Redirect<Word>) -> Result<Redirect, Error> {
-        let mut fields = self.word(&r.path)?;
+        let op = match &r.op {
+            RedirectOp::Write(path) => RedirectOp::Write(self.target(path)?),
+            RedirectOp::Append(path) => RedirectOp::Append(self.target(path)?),
+        };
+        Ok(Redirect { fd: r.fd, op })
+    }
+
+    /// A redirection's file, which must expand to one word.
+    fn target(&mut self, path: &Word) -> Result<String, Error> {
+        let mut fields = self.word(path)?;
         if fields.len() != 1 {
-            return Err(Error::AmbiguousRedirect(r.path.typed.clone()));
+            return Err(Error::AmbiguousRedirect(path.typed.clone()));
         }
-        Ok(Redirect {
-            path: fields.remove(0),
-            append: r.append,
-        })
+        Ok(fields.remove(0))
     }
 
     /// The words `word` gives: one, none, or one an argument for `$@`.
@@ -465,9 +471,8 @@ mod tests {
     #[test]
     fn a_redirection_target_must_expand_to_one_word() {
         let v = script();
-        let target = |line: &str| {
-            expand(&typed(line), &v, 0).map(|mut c| c.remove(0).redirect.unwrap().path)
-        };
+        let target =
+            |line: &str| expand(&typed(line), &v, 0).map(|c| c[0].output().unwrap().0.clone());
         assert_eq!(target("echo > $1.txt").unwrap(), "one.txt");
         assert_eq!(target("echo > $A").unwrap(), "a  b");
         assert_eq!(target(r#"echo > "$E""#).unwrap(), "");

@@ -11,7 +11,7 @@ use crate::commands::{self, Builtin, Script};
 use crate::ctx::{Ctx, JobControl};
 use crate::io::{Bytes, Console, Group, Programs, Stdin, Stdout, System};
 use crate::killed;
-use crate::parser::{Command, Redirect};
+use crate::parser::Command;
 use crate::shell::{CANCELLED, CANNOT_RUN, NAME, NOT_FOUND, SYNTAX};
 use crate::transcript::Transcript;
 use alloc::boxed::Box;
@@ -76,14 +76,14 @@ impl Ran {
 
 /// Runs the commands that are not the shell's own (`commands::BUILTINS`).
 pub(crate) trait Runner {
-    /// Runs `name` with `args`, its standard output going to `redirect`
-    /// if there is one.
+    /// Runs `name` with `args`, its standard output going to `output` (a
+    /// file, and whether it is appended to) if there is one.
     fn run(
         &mut self,
         parts: Parts<'_>,
         name: &str,
         args: &[String],
-        redirect: Option<&Redirect>,
+        output: Option<(&String, bool)>,
     ) -> Ran;
 
     /// Runs a pipeline of two or more commands, none of them a built-in,
@@ -140,9 +140,9 @@ impl Runner for InProcess {
         parts: Parts<'_>,
         name: &str,
         args: &[String],
-        redirect: Option<&Redirect>,
+        output: Option<(&String, bool)>,
     ) -> Ran {
-        let file = match redirect_to(&mut *parts.vfs, redirect) {
+        let file = match redirect_to(&mut *parts.vfs, output) {
             Ok(file) => file,
             Err(ran) => return ran,
         };
@@ -207,7 +207,7 @@ impl Runner for InProcess {
         }
         let mut piped = piped.expect("a stage before the last");
         let Some((name, args)) = last.words.split_first() else {
-            return match redirect_to(&mut *vfs, last.redirect.as_ref()) {
+            return match redirect_to(&mut *vfs, last.output()) {
                 Ok(_) => Ran::said(0, String::new()),
                 Err(ran) => ran,
             };
@@ -221,7 +221,7 @@ impl Runner for InProcess {
             status,
             input: Some(&mut piped),
         };
-        self.run(parts, name, args, last.redirect.as_ref())
+        self.run(parts, name, args, last.output())
     }
 
     fn background(&mut self, _: Parts<'_>, _: &[Command]) -> Started {
@@ -278,12 +278,12 @@ impl Runner for Spawning<'_> {
         parts: Parts<'_>,
         name: &str,
         args: &[String],
-        redirect: Option<&Redirect>,
+        output: Option<(&String, bool)>,
     ) -> Ran {
-        let stdout = match redirect {
-            Some(r) => match self.programs.open_output(r.path.as_bytes(), r.append) {
+        let stdout = match output {
+            Some((path, append)) => match self.programs.open_output(path.as_bytes(), append) {
                 Ok(fd) => Some(fd),
-                Err(e) => return Ran::said(1, format!("{NAME}: {}: {e}\n", r.path)),
+                Err(e) => return Ran::said(1, format!("{NAME}: {path}: {e}\n")),
             },
             None => None,
         };
@@ -389,10 +389,10 @@ impl Spawning<'_> {
             pids: Vec::new(),
             last: None,
         };
-        let last_out = match &last.redirect {
-            Some(r) => match self.programs.open_output(r.path.as_bytes(), r.append) {
+        let last_out = match last.output() {
+            Some((path, append)) => match self.programs.open_output(path.as_bytes(), append) {
                 Ok(fd) => Some(fd),
-                Err(e) => return (started, Ran::said(1, format!("{NAME}: {}: {e}\n", r.path))),
+                Err(e) => return (started, Ran::said(1, format!("{NAME}: {path}: {e}\n"))),
             },
             None => None,
         };
@@ -464,27 +464,27 @@ impl Spawning<'_> {
 /// the command.
 pub(crate) fn redirect_to(
     vfs: &mut dyn Vfs,
-    redirect: Option<&Redirect>,
+    output: Option<(&String, bool)>,
 ) -> Result<Option<(Node, u64)>, Ran> {
-    match redirect {
-        Some(r) => match open_redirect(vfs, r) {
+    match output {
+        Some((path, append)) => match open_redirect(vfs, path, append) {
             Ok(file) => Ok(Some(file)),
-            Err(e) => Err(Ran::said(1, format!("{NAME}: {}: {e}\n", r.path))),
+            Err(e) => Err(Ran::said(1, format!("{NAME}: {path}: {e}\n"))),
         },
         None => Ok(None),
     }
 }
 
 /// Opens a redirection target: created if missing, emptied for `>`,
-/// written at its end for `>>`.
-fn open_redirect(vfs: &mut dyn Vfs, r: &Redirect) -> Result<(Node, u64), Errno> {
-    let path = r.path.as_bytes();
+/// written at its end for `>>` (`append`).
+fn open_redirect(vfs: &mut dyn Vfs, path: &str, append: bool) -> Result<(Node, u64), Errno> {
+    let path = path.as_bytes();
     let node = match vfs.lookup(path) {
         Ok(node) => {
             if vfs.stat(node)?.kind == FileType::Directory {
                 return Err(Errno::EISDIR);
             }
-            if !r.append {
+            if !append {
                 vfs.truncate(node, 0)?;
             }
             node
@@ -492,7 +492,7 @@ fn open_redirect(vfs: &mut dyn Vfs, r: &Redirect) -> Result<(Node, u64), Errno> 
         Err(Errno::ENOENT) => vfs.create(path)?,
         Err(e) => return Err(e),
     };
-    let offset = if r.append { vfs.stat(node)?.size } else { 0 };
+    let offset = if append { vfs.stat(node)?.size } else { 0 };
     Ok((node, offset))
 }
 

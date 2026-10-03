@@ -451,7 +451,7 @@ impl<'a> Shell<'a> {
             return self.pipeline(&pipeline);
         }
         let cmd = pipeline.remove(0);
-        if cmd.words.is_empty() && cmd.redirect.is_none() {
+        if cmd.words.is_empty() && cmd.redirects.is_empty() {
             // Its words expanded to nothing: bash's status 0.
             return self.finish(0, String::new());
         }
@@ -475,22 +475,19 @@ impl<'a> Shell<'a> {
                         programs: self.runner.programs(),
                         report: self.prompting && !self.in_script,
                     };
-                    match runner::redirect_to(&mut *parts.vfs, cmd.redirect.as_ref()) {
+                    match runner::redirect_to(&mut *parts.vfs, cmd.output()) {
                         Ok(file) => runner::run_function(parts, builtin, args, file, Some(control)),
                         Err(ran) => ran,
                     }
                 }
                 None => {
-                    let ran = self
-                        .runner
-                        .get()
-                        .run(parts, name, args, cmd.redirect.as_ref());
+                    let ran = self.runner.get().run(parts, name, args, cmd.output());
                     self.console.take_back();
                     ran
                 }
             },
             // A bare `> file` just creates or empties the file.
-            None => match runner::redirect_to(&mut *parts.vfs, cmd.redirect.as_ref()) {
+            None => match runner::redirect_to(&mut *parts.vfs, cmd.output()) {
                 Ok(_) => Ran::said(0, String::new()),
                 Err(ran) => ran,
             },
@@ -516,14 +513,18 @@ impl<'a> Shell<'a> {
                 return self.not_expanded(e, true);
             }
         }
-        let redirect = match cmd.redirect.as_ref() {
-            Some(r) => match expand::redirect(r, &self.vars, self.status) {
-                Ok(r) => Some(r),
+        let mut redirects = Vec::new();
+        for r in &cmd.redirects {
+            match expand::redirect(r, &self.vars, self.status) {
+                Ok(r) => redirects.push(r),
                 Err(e) => return self.not_expanded(e, true),
-            },
-            None => None,
+            }
+        }
+        let output = parser::Command {
+            words: Vec::new(),
+            redirects,
         };
-        match runner::redirect_to(&mut *self.vfs, redirect.as_ref()) {
+        match runner::redirect_to(&mut *self.vfs, output.output()) {
             Ok(_) => self.finish(0, String::new()),
             Err(ran) => self.finish(ran.status, ran.message),
         }
