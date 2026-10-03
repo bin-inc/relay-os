@@ -5,9 +5,11 @@ timeout 30
 expect root@relay:~# $
 send echo before
 expect \nbefore\n
+expect root@relay:~# $
 reboot relay: restarting through the FADT reset register
 expect Relay OS \d+\.\d+\.\d+
 expect root@relay:~# $
 send echo after
 expect \nafter\n
+expect root@relay:~# $
 poweroff

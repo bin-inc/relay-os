@@ -11,4 +11,5 @@ expect \nRelay relay \d+\.\d+\.\d+ x86_64\n
 expect root@relay:~# $
 send t-sys log
 expect \n\d+ bytes, the first line: Relay OS \d+\.\d+\.\d+\nthe newest 16 bytes: 16 of them, the log's end: true\n
+expect root@relay:~# $
 poweroff t-sys poweroff

@@ -89,13 +89,13 @@ send echo ls /etc | sh
 expect \nhostname  motd\nroot@relay:~# $
 send t-spin | sh
 alive 1
-key-ahead {ctrl-c}
-expect \^C\nroot@relay:~# 
+type-ahead {ctrl-c}
+expect \^C\nroot@relay:~# $
 # Ctrl-C ends every stage of the pipeline, and the shell says so once.
 send t-spin | cat | cat
 alive 1
-key-ahead {ctrl-c}
-expect \^C\nroot@relay:~# 
+type-ahead {ctrl-c}
+expect \^C\nroot@relay:~# $
 send dmesg
 # The stages end in the order they run again: in any order here.
 expect \n(pid \d+ \(/bin/(t-spin|cat)\): killed: Ctrl-C\n){3}

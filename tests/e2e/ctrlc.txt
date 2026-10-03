@@ -17,8 +17,8 @@ expect \ntyped-while-it-spins\n
 expect root@relay:~# $
 send t-spin
 alive 1
-key-ahead {ctrl-c}
-expect \n\^C\nroot@relay:~# 
+type-ahead {ctrl-c}
+expect \n\^C\nroot@relay:~# $
 send dmesg
 expect \npid \d+ \(/bin/t-spin\): killed: Ctrl-C\n
 # A program that spends its time in system calls, where a tick only
@@ -27,9 +27,9 @@ expect \npid \d+ \(/bin/t-spin\): killed: Ctrl-C\n
 expect root@relay:~# $
 send t-mem churn
 alive 1
-key-ahead {ctrl-c}
+type-ahead {ctrl-c}
 timeout 3
-expect \n\^C\nroot@relay:~# 
+expect \n\^C\nroot@relay:~# $
 timeout 30
 send dmesg
 expect \npid \d+ \(/bin/t-mem\): killed: Ctrl-C\n
@@ -38,18 +38,18 @@ expect \npid \d+ \(/bin/t-mem\): killed: Ctrl-C\n
 # while dmesg's group still had the console, the line would be dmesg's.)
 expect root@relay:~# $
 send t-spin
-key-ahead {ctrl-c}
-expect \n\^C\nroot@relay:~# 
+type-ahead {ctrl-c}
+expect \n\^C\nroot@relay:~# $
 # Ctrl-C ends a group that waits in the kernel: t-spawn blocked in wait
 # for a child in a group of its own, and three children in sleep. Each ends
 # on its way out of the kernel, the parent's wait cut short by the kill
 # alone, and the shell says `^C` at once; the child apart sleeps on.
 send t-spawn sleepers
 alive 1
-key-ahead {ctrl-c}
-expect t-spawn sleepers\n(pid \d+ \(/bin/t-spawn\): killed: Ctrl-C\n){4}\^C\nroot@relay:~# 
+type-ahead {ctrl-c}
+expect t-spawn sleepers\n(pid \d+ \(/bin/t-spawn\): killed: Ctrl-C\n){4}\^C\nroot@relay:~# $
 # At the prompt, Ctrl-C only cancels the line being typed.
-key echo nope{ctrl-c}
+type echo nope{ctrl-c}
 expect \^C\n
 expect root@relay:~# $
 send echo still here

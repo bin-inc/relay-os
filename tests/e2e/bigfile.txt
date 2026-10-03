@@ -67,6 +67,7 @@ send rm t m
 expect root@relay:~# $
 send ls -l big copy
 expect \n-rw-r--r-- 1 root root 8388608 .* big\n-rw-r--r-- 1 root root 8388608 .* copy\n
+expect root@relay:~# $
 poweroff
 file-lines /root/big 8388608 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde
 file-lines /root/copy 8388608 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde

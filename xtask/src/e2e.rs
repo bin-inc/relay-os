@@ -23,7 +23,10 @@
 //! send <text>                      (types <text> + Enter over serial)
 //! send-crlf <text>                 (as send, ending with CR LF)
 //! key <text>                       (types <text> + Enter on the USB keyboard,
-//!                                   QMP send-key; {up}, {ctrl-c}: see keys.rs)
+//!                                   QMP send-key; {up}, {ctrl-c}: see keys.rs;
+//!                                   not ending with {ctrl-c} or {ctrl-d},
+//!                                   after which the Enter would come late:
+//!                                   type it)
 //! type <text>                      (as key, without the Enter)
 //! send-ahead <text>                (as send, while something runs on purpose:
 //!                                   input for a program, a line typed ahead;
@@ -34,10 +37,13 @@
 //! Every `send`, `send-crlf`, `key` and `type` waits for the prompt: since
 //! the input before it (or the start, a reboot or a reset), an expect must
 //! have ended at one (`root@relay:~# `, `root@relay:~# $` or `> $`), or the
-//! scenario is refused. A line sent while a command runs is echoed twice,
-//! by the line discipline and by the shell's editor, and lands inside the
-//! output an expect waits for (programmable shell gate §15 item 3); input
-//! sent while something runs on purpose is marked `-ahead`.
+//! scenario is refused. So do `poweroff`, `reboot` and `reset <text>`,
+//! which type a command line; a bare `reset` and `reset-key` press a key
+//! at the error screen, where no prompt comes. A line sent while a command
+//! runs is echoed twice, by the line discipline and by the shell's editor,
+//! and lands inside the output an expect waits for (programmable shell gate
+//! §15 item 3); input sent while something runs on purpose is marked
+//! `-ahead`.
 //!
 //! ```text
 //! screenshot-nonblank              (QMP screendump; top rows not one colour)
@@ -195,6 +201,9 @@ pub struct Scenario {
     pub steps: Vec<(usize, Step)>,
 }
 
+/// The steps that send input typed ahead, while something runs.
+const AHEAD: [&str; 4] = ["send-ahead", "send-crlf-ahead", "key-ahead", "type-ahead"];
+
 pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
     let mut cmdline = DEFAULT_CMDLINE.to_string();
     let mut small_disk = false;
@@ -212,6 +221,10 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
         let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
         let rest = rest.trim();
         let input = matches!(word, "send" | "send-crlf" | "key" | "type");
+        let ahead = AHEAD.contains(&word);
+        // These type a command line too; a bare `reset` presses a key at
+        // the error screen, where no prompt comes.
+        let command = matches!(word, "poweroff" | "reboot") || word == "reset" && !rest.is_empty();
         if input && !paced {
             bail!(
                 "{name}:{line_no}: {word} does not wait for the prompt: an expect that \
@@ -219,14 +232,20 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
                  something runs)"
             );
         }
-        if word.ends_with("-ahead") && paced {
+        if command && !paced {
+            bail!(
+                "{name}:{line_no}: {word} does not wait for the prompt: an expect that \
+                 ends at it must come first"
+            );
+        }
+        if ahead && paced {
             bail!(
                 "{name}:{line_no}: {word} after an expect of the prompt: it waits for \
                  nothing, so it is {}",
                 word.trim_end_matches("-ahead")
             );
         }
-        if input || word.ends_with("-ahead") || matches!(word, "reboot" | "reset" | "reset-key") {
+        if input || matches!(word, "reboot" | "reset" | "reset-key") {
             paced = false;
         }
         if matches!(word, "expect" | "expect-same") && ends_at_prompt(rest) {
@@ -296,6 +315,19 @@ pub fn parse_scenario(name: &str, text: &str) -> Result<Scenario> {
             "send-crlf" | "send-crlf-ahead" => Step::SendCrLf(rest.to_string()),
             "key" | "key-ahead" => {
                 keys::presses(rest).with_context(|| format!("{name}:{line_no}"))?;
+                // A Ctrl-C or a Ctrl-D ends what reads it, and the next
+                // expect matches the prompt that brings before QEMU has
+                // delivered the Enter, which then lands wherever the shell
+                // reads next.
+                let last = keys::typed(rest)?.pop();
+                if let Some(["ctrl", c @ ("c" | "d")]) = last.as_deref() {
+                    bail!(
+                        "{name}:{line_no}: {word} presses Enter after its last key, \
+                         {{ctrl-{c}}}, and that Enter comes after the prompt the key \
+                         brings: use {}",
+                        word.replacen("key", "type", 1)
+                    );
+                }
                 Step::Key(rest.to_string())
             }
             "type" | "type-ahead" => {
@@ -1093,6 +1125,51 @@ mod tests {
                 "{e}"
             );
         }
+        for word in ["send-ahead", "send-crlf-ahead", "key-ahead", "type-ahead"] {
+            let e = at_prompt(&format!("{prompt}{word} a\n")).unwrap_err();
+            assert!(
+                e.contains(&format!("{word} after an expect of the prompt")),
+                "{e}"
+            );
+        }
+        // A step that types a command line waits for the prompt too: it
+        // has no form typed ahead. A bare `reset` or `reset-key` presses a
+        // key at the error screen, where no prompt comes (plan 3's final
+        // review).
+        for ok in [
+            "expect root@relay:~# $\npoweroff\n",
+            "expect root@relay:~# $\npoweroff t-sys poweroff\n",
+            "expect root@relay:~# $\nreboot\n",
+            "expect root@relay:~# $\nreboot relay: .*\n",
+            "expect root@relay:~# $\nreset reboot -f\n",
+            "expect x\nreset\n",
+            "expect x\nreset-key\n",
+        ] {
+            assert_eq!(at_prompt(ok), Ok(()), "{ok:?}");
+        }
+        for text in [
+            "expect x\npoweroff\n",
+            "expect x\npoweroff t-sys poweroff\n",
+            "expect x\nreboot\n",
+            "expect x\nreboot relay: .*\n",
+            "expect x\nreset reboot -f\n",
+            "expect root@relay:~# $\nsend a\npoweroff\n",
+        ] {
+            let e = at_prompt(text).unwrap_err();
+            let word = text.lines().last().unwrap().split(' ').next().unwrap();
+            assert!(
+                e.ends_with(&format!(
+                    "{word} does not wait for the prompt: an expect that ends at it must come first"
+                )),
+                "{text:?}: {e}"
+            );
+        }
+        // Only the four marks are marks: a misspelt one is an unknown step,
+        // wherever it stands (plan 3's final review).
+        for text in ["expect root@relay:~# $\nsned-ahead a\n", "sned-ahead a\n"] {
+            let e = at_prompt(text).unwrap_err();
+            assert!(e.ends_with("unknown step 'sned-ahead'"), "{e}");
+        }
     }
 
     #[test]
@@ -1101,17 +1178,60 @@ mod tests {
     }
 
     #[test]
+    fn a_key_step_does_not_end_with_ctrl_c_or_ctrl_d() {
+        // Plan 3's empty prompt after `wait`: `key` presses Enter after its
+        // text, and after a Ctrl-C that Enter came once the scenario had
+        // moved on, to land wherever the shell read next. A Ctrl-D that
+        // ends a program's input is the same (the prototype's review).
+        for (text, word, key, instead) in [
+            (
+                "expect root@relay:~# $\nkey echo no{ctrl-c}\n",
+                "key",
+                "ctrl-c",
+                "type",
+            ),
+            ("key-ahead {ctrl-c}\n", "key-ahead", "ctrl-c", "type-ahead"),
+            ("key-ahead a{ctrl-d}\n", "key-ahead", "ctrl-d", "type-ahead"),
+            (
+                "expect root@relay:~# $\nkey {ctrl-d}\n",
+                "key",
+                "ctrl-d",
+                "type",
+            ),
+        ] {
+            let e = parse_scenario("x", text).unwrap_err().to_string();
+            assert!(
+                e.ends_with(&format!(
+                    "{word} presses Enter after its last key, {{{key}}}, and that Enter \
+                     comes after the prompt the key brings: use {instead}"
+                )),
+                "{e}"
+            );
+        }
+        for ok in [
+            "key-ahead {ctrl-c}x\n",
+            "key-ahead {ctrl-d}x\n",
+            "key-ahead a{ctrl-e}\n",
+            "type-ahead {ctrl-c}\n",
+            "type-ahead {ctrl-d}\n",
+            "expect root@relay:~# $\ntype echo no{ctrl-c}\n",
+        ] {
+            assert!(parse_scenario("x", ok).is_ok(), "{ok:?}");
+        }
+    }
+
+    #[test]
     fn input_typed_ahead_is_sent_as_other_input_is() {
         let s = parse_scenario(
             "x",
-            "send-ahead a b\nkey-ahead {ctrl-c}\ntype-ahead q\nsend-crlf-ahead c\n",
+            "send-ahead a b\nkey-ahead {ctrl-c}x\ntype-ahead q\nsend-crlf-ahead c\n",
         )
         .unwrap();
         assert_eq!(
             s.steps,
             vec![
                 (1, Step::Send("a b".into())),
-                (2, Step::Key("{ctrl-c}".into())),
+                (2, Step::Key("{ctrl-c}x".into())),
                 (3, Step::Type("q".into())),
                 (4, Step::SendCrLf("c".into())),
             ]
@@ -1162,10 +1282,14 @@ mod tests {
 
     #[test]
     fn parses_the_check_script_step() {
-        let s = parse_scenario("x", "poweroff\ncheck-script /root/checks/a.sh").unwrap();
+        let s = parse_scenario(
+            "x",
+            "expect root@relay:~# $\npoweroff\ncheck-script /root/checks/a.sh",
+        )
+        .unwrap();
         assert_eq!(
-            s.steps[1],
-            (2, Step::CheckScript("/root/checks/a.sh".into()))
+            s.steps[2],
+            (3, Step::CheckScript("/root/checks/a.sh".into()))
         );
         assert!(parse_scenario("x", "check-script").is_err());
         assert!(parse_scenario("x", "check-script root/a.sh").is_err());
@@ -1235,24 +1359,30 @@ mod tests {
 
     #[test]
     fn parses_reboot_and_poweroff_steps() {
-        let s = parse_scenario(
-            "x",
-            "reboot\nreboot relay: restarting\npoweroff\npoweroff t-sys poweroff\nreset\nreset reboot -f\nreset-key",
-        )
-        .unwrap();
+        let p = "expect root@relay:~# $";
+        let text = format!(
+            "{p}\nreboot\n{p}\nreboot relay: restarting\n{p}\npoweroff\n{p}\npoweroff t-sys poweroff\nreset\n{p}\nreset reboot -f\nreset-key"
+        );
+        let s = parse_scenario("x", &text).unwrap();
+        let steps: Vec<_> = s
+            .steps
+            .into_iter()
+            .filter(|(_, step)| !matches!(step, Step::Expect(_)))
+            .collect();
         assert_eq!(
-            s.steps,
+            steps,
             vec![
-                (1, Step::Reboot(None)),
-                (2, Step::Reboot(Some("relay: restarting".into()))),
-                (3, Step::Poweroff("poweroff".into())),
-                (4, Step::Poweroff("t-sys poweroff".into())),
-                (5, Step::Reset(String::new())),
-                (6, Step::Reset("reboot -f".into())),
-                (7, Step::ResetKey)
+                (2, Step::Reboot(None)),
+                (4, Step::Reboot(Some("relay: restarting".into()))),
+                (6, Step::Poweroff("poweroff".into())),
+                (8, Step::Poweroff("t-sys poweroff".into())),
+                (9, Step::Reset(String::new())),
+                (11, Step::Reset("reboot -f".into())),
+                (12, Step::ResetKey)
             ]
         );
-        assert!(parse_scenario("x", "reboot (").is_err());
+        let bad = parse_scenario("x", &format!("{p}\nreboot (")).unwrap_err();
+        assert!(bad.to_string().contains("bad regex"), "{bad}");
         assert!(
             parse_scenario("x", "reset-key x").is_err(),
             "Enter alone: after the first key the machine is gone"

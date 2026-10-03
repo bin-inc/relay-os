@@ -12,6 +12,11 @@ pub fn flush_all() {
     x86_64::instructions::tlb::flush_all();
 }
 
+/// The loader's reader of a source file's code without its comments.
+#[cfg(test)]
+#[path = "../../../boot/src/code.rs"]
+mod code;
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -31,10 +36,11 @@ mod tests {
         }
     }
 
-    /// Whether `code` names the TLB other than through `arch::tlb`: a
-    /// `tlb` path however it is imported, or the `invlpg` or `invpcid`
-    /// instruction in any case.
-    fn flushes_the_tlb(code: &str) -> bool {
+    /// Whether `src` names the TLB other than through `arch::tlb` in its
+    /// code, not its comments: a `tlb` path however it is imported, or the
+    /// `invlpg` or `invpcid` instruction in any case.
+    fn flushes_the_tlb(src: &str) -> bool {
+        let code = &super::code::code(src);
         let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
         let lower = code.to_ascii_lowercase();
         lower.contains("invlpg")
@@ -86,6 +92,10 @@ mod tests {
             "arch::tlb::flush(virt);",
             "arch::tlb::flush_all();",
             "let tlbs = 1;",
+            // Milestone 3's deferred minor: a comment is no code, whatever
+            // it names.
+            "// INVPCID would drop them all.\nlet x = 1;",
+            "/// Like `invlpg`, through the tlb module.\nfn f() {}",
         ] {
             assert!(!flushes_the_tlb(code), "{code}");
         }

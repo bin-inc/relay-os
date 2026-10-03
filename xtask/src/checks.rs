@@ -514,6 +514,32 @@ free
         );
     }
 
+    /// The check scripts in `dir`, sorted: its `*.sh` files, as
+    /// `verify-usb` takes them.
+    fn scripts_in(dir: &str) -> Vec<String> {
+        let mut scripts: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|f| f.ends_with(".sh"))
+            .collect();
+        scripts.sort();
+        scripts
+    }
+
+    #[test]
+    fn the_check_scripts_are_the_sh_files() {
+        // Milestone 3's deferred minor: an editor's swap file beside the
+        // scripts was taken for one, and failed the test of their
+        // transcripts with a confusing list.
+        let dir = crate::util::out_dir().join("checks-selftest-scripts");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["b.sh", ".b.sh.swp", "a.sh", "notes.txt"] {
+            std::fs::write(dir.join(f), "").unwrap();
+        }
+        assert_eq!(scripts_in(dir.to_str().unwrap()), ["a.sh", "b.sh"]);
+    }
+
     /// The real check scripts against a transcript of each machine: QEMU's
     /// from the `checks` scenario, the NUC's as the NUC wrote them in the
     /// last NUC run of checks 3, 4 and 5 (`docs/hardware-test.md`'s results
@@ -552,11 +578,7 @@ free
         ];
         // Every check script on the stick has its two transcripts here.
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../rootfs/root/checks");
-        let mut scripts: Vec<String> = std::fs::read_dir(dir)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().into_string().unwrap())
-            .collect();
-        scripts.sort();
+        let scripts = scripts_in(dir);
         let named: Vec<&str> = parts.iter().map(|p| p.0).collect();
         assert_eq!(scripts, named);
         for (i, (_, script, qemu, nuc)) in parts.iter().enumerate() {
@@ -579,13 +601,7 @@ free
         // The prototype's review: the README's quick start ran three of
         // the four scripts, and `verify-usb` fails a script left unrun.
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
-        let dir = format!("{root}/rootfs/root/checks");
-        let mut scripts: Vec<String> = std::fs::read_dir(&dir)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().into_string().unwrap())
-            .filter(|f| f.ends_with(".sh"))
-            .collect();
-        scripts.sort();
+        let scripts = scripts_in(&format!("{root}/rootfs/root/checks"));
         assert!(scripts.len() >= 4, "{scripts:?}");
         for doc in ["README.md", "docs/hardware-test.md"] {
             let text = std::fs::read_to_string(format!("{root}/{doc}")).unwrap();

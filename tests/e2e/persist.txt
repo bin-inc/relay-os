@@ -12,6 +12,7 @@ send touch /root/notes/b
 expect root@relay:~# $
 send ls /root/notes
 expect \na  b\n
+expect root@relay:~# $
 reboot
 expect \[ ok \] mount /
 expect root@relay:~# $
@@ -20,4 +21,5 @@ expect \nremember me\nand me\n
 expect root@relay:~# $
 send ls /root/notes
 expect \na  b\n
+expect root@relay:~# $
 poweroff
