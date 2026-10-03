@@ -186,6 +186,7 @@ impl FileSystem for SysImgFs {
             avail_blocks: 0,
             files,
             free_files: 0,
+            read_only: true,
         })
     }
 
@@ -334,6 +335,7 @@ mod tests {
                 avail_blocks: 0,
                 files: 4,
                 free_files: 0,
+                read_only: true,
             })
         );
     }

@@ -10,7 +10,7 @@ use core::cell::{Cell, RefCell};
 use relay_abi::file::{
     KIND_BLOCK_DEVICE, KIND_CHAR_DEVICE, KIND_DIRECTORY, KIND_FIFO, KIND_REGULAR, KIND_SOCKET,
     KIND_SYMLINK, OPEN_CREATE, OPEN_DIRECTORY, OPEN_EXCLUSIVE, OPEN_TRUNCATE, OPEN_WRITE,
-    put_dir_entry,
+    STATFS_READ_ONLY, put_dir_entry,
 };
 use vfs::{Env, Errno, FileType, MemFs, MountTable, Node, Vfs};
 
@@ -280,7 +280,7 @@ impl Calls for FakeCalls {
             avail_blocks: s.avail_blocks,
             files: s.files,
             free_files: s.free_files,
-            flags: 0,
+            flags: if s.read_only { STATFS_READ_ONLY } else { 0 },
         })
     }
 

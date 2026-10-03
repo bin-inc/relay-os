@@ -562,6 +562,7 @@ impl FileSystem for MemFs {
             avail_blocks: free,
             files: self.nodes.len() as u64,
             free_files: u32::MAX as u64 - self.nodes.len() as u64,
+            read_only: self.read_only,
         })
     }
 
@@ -866,7 +867,9 @@ mod tests {
     fn a_read_only_filesystem_refuses_every_change_first() {
         let mut fs = fs();
         let f = fs.create(ROOT, b"f").unwrap();
+        assert!(!fs.statfs().unwrap().read_only);
         let mut fs = fs.read_only();
+        assert!(fs.statfs().unwrap().read_only, "statfs says so");
         assert_eq!(fs.create(ROOT, b"f"), Err(Errno::EROFS));
         assert_eq!(fs.mkdir(ROOT, b""), Err(Errno::EROFS));
         assert_eq!(fs.write_at(f, 0, b""), Err(Errno::EROFS));
@@ -901,5 +904,6 @@ mod tests {
         let mut fs = fs();
         fs.shutdown().unwrap();
         assert_eq!(fs.create(ROOT, b"f"), Err(Errno::EROFS));
+        assert!(fs.statfs().unwrap().read_only);
     }
 }

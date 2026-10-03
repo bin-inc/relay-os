@@ -210,7 +210,8 @@ impl<D: BlockDevice> Ext2<D> {
     }
 
     /// Like Linux's ext2: sizes without the metadata, and space reserved
-    /// for root is free but not available.
+    /// for root is free but not available; read-only when mounted so (an
+    /// unsupported feature, or the kernel after an error) or shut down.
     fn fs_stat(&self) -> StatFs {
         let free = self.sb.free_blocks_count() as u64;
         StatFs {
@@ -220,6 +221,7 @@ impl<D: BlockDevice> Ext2<D> {
             avail_blocks: free.saturating_sub(self.sb.r_blocks_count() as u64),
             files: self.geo.inodes_count as u64,
             free_files: self.sb.free_inodes_count() as u64,
+            read_only: self.read_only,
         }
     }
 

@@ -62,6 +62,8 @@ pub struct StatFs {
     pub avail_blocks: u64,
     pub files: u64,
     pub free_files: u64,
+    /// Every change is refused (`EROFS`): mounted so, or shut down.
+    pub read_only: bool,
 }
 
 /// What a filesystem needs from its surroundings.
