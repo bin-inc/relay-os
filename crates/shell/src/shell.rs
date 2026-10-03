@@ -6,6 +6,7 @@ use crate::commands::{self, SCRIPT_MAX, Script};
 use crate::ctx::{Ctx, JobControl, quote_if_needed};
 use crate::editor::{Feed, LineEditor};
 use crate::expand::{self, Vars};
+use crate::fds::{self, Fds, Files, Handle, Opener, Slot};
 use crate::io::{Console, Programs, Stdin, Stdout, System};
 use crate::jobs::Jobs;
 use crate::parser::{self, HOME};
@@ -64,6 +65,11 @@ pub struct Shell<'a> {
     /// A command of the line ended with Ctrl-C (spec §6.4), whatever a
     /// `!` made of its status; a status of 130 alone is none.
     cancelled: bool,
+    /// What fds 0, 1 and 2 are where the walker stands (programmable shell
+    /// gate §7.4).
+    fds: Fds,
+    /// The files redirections have open.
+    files: Files,
 }
 
 impl<'a> Shell<'a> {
@@ -113,6 +119,8 @@ impl<'a> Shell<'a> {
             vars: Vars::new(NAME),
             abandoned: false,
             cancelled: false,
+            fds: Fds::SHELL,
+            files: Files::default(),
         }
     }
 
@@ -451,10 +459,13 @@ impl<'a> Shell<'a> {
             return self.pipeline(&pipeline);
         }
         let cmd = pipeline.remove(0);
-        if cmd.words.is_empty() && cmd.redirect.is_none() {
+        if cmd.words.is_empty() && cmd.redirects.is_empty() {
             // Its words expanded to nothing: bash's status 0.
             return self.finish(0, String::new());
         }
+        let Some(fds) = self.redirect(self.fds, &cmd.redirects) else {
+            return self.finish(1, String::new());
+        };
         let parts = Parts {
             vfs: &mut *self.vfs,
             console: &mut *self.console,
@@ -466,6 +477,7 @@ impl<'a> Shell<'a> {
                 Some(input) => Some(&mut **input),
                 None => None,
             },
+            files: &mut self.files,
         };
         let ran = match cmd.words.split_first() {
             Some((name, args)) => match commands::builtin(name) {
@@ -475,34 +487,35 @@ impl<'a> Shell<'a> {
                         programs: self.runner.programs(),
                         report: self.prompting && !self.in_script,
                     };
-                    match runner::redirect_to(&mut *parts.vfs, cmd.redirect.as_ref()) {
-                        Ok(file) => runner::run_function(parts, builtin, args, file, Some(control)),
-                        Err(ran) => ran,
-                    }
+                    runner::run_function(parts, builtin, args, fds, Some(control))
                 }
                 None => {
-                    let ran = self
-                        .runner
-                        .get()
-                        .run(parts, name, args, cmd.redirect.as_ref());
+                    let ran = self.runner.get().run(parts, name, args, fds);
                     self.console.take_back();
                     ran
                 }
             },
             // A bare `> file` just creates or empties the file.
-            None => match runner::redirect_to(&mut *parts.vfs, cmd.redirect.as_ref()) {
-                Ok(_) => Ran::said(0, String::new()),
-                Err(ran) => ran,
-            },
+            None => Ran::said(0, String::new()),
         };
+        let mut message = ran.message;
+        if ran.own {
+            self.say_on(fds, message.as_bytes());
+            message.clear();
+        }
         self.stopped = ran.stop;
         self.exited = ran.exited;
         self.cancelled |= ran.cancelled;
         let mut status = ran.status;
+        // A script `sh` read runs with its redirections: its commands read
+        // a file it was given as input.
         if let Some(script) = ran.script {
+            let outer = core::mem::replace(&mut self.fds, fds);
             status = self.run_script(*script);
+            self.fds = outer;
         }
-        self.finish(status, ran.message)
+        self.release(fds);
+        self.finish(status, message)
     }
 
     /// A line of assignments (spec §9.4): each sets its variable in turn,
@@ -516,16 +529,19 @@ impl<'a> Shell<'a> {
                 return self.not_expanded(e, true);
             }
         }
-        let redirect = match cmd.redirect.as_ref() {
-            Some(r) => match expand::redirect(r, &self.vars, self.status) {
-                Ok(r) => Some(r),
+        let mut redirects = Vec::new();
+        for r in &cmd.redirects {
+            match expand::redirect(r, &self.vars, self.status) {
+                Ok(r) => redirects.push(r),
                 Err(e) => return self.not_expanded(e, true),
-            },
-            None => None,
-        };
-        match runner::redirect_to(&mut *self.vfs, redirect.as_ref()) {
-            Ok(_) => self.finish(0, String::new()),
-            Err(ran) => self.finish(ran.status, ran.message),
+            }
+        }
+        match self.redirect(self.fds, &redirects) {
+            Some(fds) => {
+                self.release(fds);
+                self.finish(0, String::new())
+            }
+            None => self.finish(1, String::new()),
         }
     }
 
@@ -536,6 +552,10 @@ impl<'a> Shell<'a> {
             let ran = runner::in_a_pipeline(name);
             return self.finish(ran.status, ran.message);
         }
+        let Some(all) = self.stage_fds(stages) else {
+            return self.finish(1, String::new());
+        };
+        let staged = runner_stages(stages, &all);
         let parts = Parts {
             vfs: &mut *self.vfs,
             console: &mut *self.console,
@@ -547,8 +567,12 @@ impl<'a> Shell<'a> {
                 Some(input) => Some(&mut **input),
                 None => None,
             },
+            files: &mut self.files,
         };
-        let ran = self.runner.get().pipeline(parts, stages);
+        let ran = self.runner.get().pipeline(parts, &staged);
+        for fds in all {
+            self.release(fds);
+        }
         self.console.take_back();
         self.cancelled |= ran.cancelled;
         self.finish(ran.status, ran.message)
@@ -563,6 +587,10 @@ impl<'a> Shell<'a> {
             let message = format!("{NAME}: {name}: cannot be used in the background\n");
             return self.finish(1, message);
         }
+        let Some(all) = self.stage_fds(stages) else {
+            return self.finish(1, String::new());
+        };
+        let staged = runner_stages(stages, &all);
         let parts = Parts {
             vfs: &mut *self.vfs,
             console: &mut *self.console,
@@ -571,8 +599,12 @@ impl<'a> Shell<'a> {
             in_script: self.in_script,
             status: self.status,
             input: None,
+            files: &mut self.files,
         };
-        let started = self.runner.get().background(parts, stages);
+        let started = self.runner.get().background(parts, &staged);
+        for fds in all {
+            self.release(fds);
+        }
         if let Some(pgid) = started.pgid {
             let number = self.jobs.add(pgid, &started.pids, text);
             if self.prompting && !self.in_script {
@@ -581,6 +613,73 @@ impl<'a> Shell<'a> {
             }
         }
         self.finish(started.ran.status, started.ran.message)
+    }
+
+    /// The context `redirects` make over `base` (programmable shell gate
+    /// §7.2). One that cannot be made is told on fd 2 as it stands then,
+    /// as bash tells it (`cat 2> e < missing` writes into `e`), and what
+    /// was made of it is closed.
+    fn redirect(&mut self, base: Fds, redirects: &[parser::Redirect]) -> Option<Fds> {
+        let mut opener = Opener {
+            vfs: &mut *self.vfs,
+            programs: self.runner.programs(),
+        };
+        match self.files.redirect(base, redirects, &mut opener) {
+            Ok(fds) => Some(fds),
+            Err(failed) => {
+                let message = format!("{NAME}: {}: {}\n", failed.path, failed.error);
+                self.say_on(failed.fds, message.as_bytes());
+                self.release(failed.fds);
+                None
+            }
+        }
+    }
+
+    /// Writes where fd 2 of `fds` goes: the screen (and a running
+    /// script's transcript), or a file. A write that fails is lost, as
+    /// there is nowhere left to say so.
+    fn say_on(&mut self, fds: Fds, bytes: &[u8]) {
+        let Slot::File(i) = fds.0[2] else {
+            return self.say(bytes);
+        };
+        match self.files.handle(i) {
+            Handle::Fd(fd) => {
+                if let Some(programs) = self.runner.programs() {
+                    let _ = programs.write(fd, bytes);
+                }
+            }
+            Handle::Node { node, offset } => {
+                fds::write_file(&mut *self.vfs, node, offset, bytes);
+            }
+        }
+    }
+
+    /// A context made by `redirect` ends: the files it held last are
+    /// closed.
+    fn release(&mut self, fds: Fds) {
+        let mut opener = Opener {
+            vfs: &mut *self.vfs,
+            programs: self.runner.programs(),
+        };
+        self.files.release(fds, &mut opener);
+    }
+
+    /// Each stage's fds, its redirections made over the context; none if
+    /// one cannot be made.
+    fn stage_fds(&mut self, stages: &[parser::Command]) -> Option<Vec<Fds>> {
+        let mut all = Vec::new();
+        for stage in stages {
+            match self.redirect(self.fds, &stage.redirects) {
+                Some(fds) => all.push(fds),
+                None => {
+                    for fds in all {
+                        self.release(fds);
+                    }
+                    return None;
+                }
+            }
+        }
+        Some(all)
     }
 
     /// Collects the background jobs' processes that have ended.
@@ -827,6 +926,18 @@ impl<'a> Shell<'a> {
             self.say(format!("{NAME}: sync failed: {e}\n").as_bytes());
         }
     }
+}
+
+/// A pipeline's stages for the runner: each one's words and fds.
+fn runner_stages<'c>(stages: &'c [parser::Command], fds: &[Fds]) -> Vec<runner::Stage<'c>> {
+    stages
+        .iter()
+        .zip(fds)
+        .map(|(c, fds)| runner::Stage {
+            words: &c.words,
+            fds: *fds,
+        })
+        .collect()
 }
 
 /// Whether `list` is one pipeline of simple commands, and nothing else.
@@ -1406,7 +1517,7 @@ mod tests {
         let mut h = spawning();
         h.put(
             "/tmp/s.sh",
-            b"t-args a 2> log &&\nt-args tail\nt-args next\n",
+            b"t-args a 3> log &&\nt-args tail\nt-args next\n",
         );
         let mut out = FakeStdout::console();
         h.sh(&["/tmp/s.sh"], &mut out);
@@ -2260,7 +2371,7 @@ mod tests {
         );
         let groups: Vec<crate::Group> = h.programs.spawned.iter().map(|s| s.group).collect();
         assert_eq!(groups, [crate::Group::Background, crate::Group::Join(101)]);
-        assert_eq!(h.programs.spawned[1].stdout, Some(4), "the redirection");
+        assert_eq!(h.programs.spawned[1].fds[1], 4, "the redirection");
         let (r, w) = h.programs.pipes[0];
         assert!(
             [r, w, 4].iter().all(|fd| h.programs.closed.contains(fd)),
@@ -2626,7 +2737,7 @@ mod tests {
         let s = &h.programs.spawned[0];
         assert_eq!((s.args.len(), s.group), (1, crate::Group::New));
         let (r, w) = h.programs.pipes[0];
-        assert_eq!(s.stdin, Some(r), "the pipe it reads");
+        assert_eq!(s.fds[0], r, "the pipe it reads");
         assert!(h.programs.closed.contains(&w), "with no writer");
         assert_eq!(h.spawning("t-args | $E > /tmp/o"), (0, "".into()));
         let (path, append, fd) = h.programs.opened.last().unwrap();
@@ -2784,6 +2895,40 @@ mod tests {
     }
 
     #[test]
+    fn several_redirections_are_made_left_to_right() {
+        // bash 5.2: each file is made, and the command writes to the last
+        // (tmp/m5p1/probes/p1.txt).
+        let mut h = Harness::new();
+        h.put("/tmp/f", b"old\n");
+        assert_eq!(h.run("echo a > /tmp/f > /tmp/g"), (0, String::new()));
+        assert_eq!(
+            (h.get("/tmp/f"), h.get("/tmp/g")),
+            (b"".to_vec(), b"a\n".to_vec())
+        );
+        assert_eq!(h.run("echo b >> /tmp/g > /tmp/f"), (0, String::new()));
+        assert_eq!(
+            (h.get("/tmp/f"), h.get("/tmp/g")),
+            (b"b\n".to_vec(), b"a\n".to_vec())
+        );
+        // One that cannot be made stops the command, after those before.
+        assert_eq!(
+            h.run("echo c > /tmp/h > /nodir/x > /tmp/i"),
+            (1, "relay-sh: /nodir/x: No such file or directory\n".into())
+        );
+        assert!(h.exists("/tmp/h") && !h.exists("/tmp/i"));
+        // Under /bin/sh each file a later one replaces is closed at once,
+        // and the program gets the last.
+        let mut h = spawning();
+        assert_eq!(h.spawning("t-args > /tmp/a > /tmp/b").0, 3);
+        assert_eq!(
+            h.programs.closed[0], 4,
+            "the first, which the second replaced"
+        );
+        assert_eq!(h.programs.spawned[0].fds, [0, 5, 2]);
+        assert_eq!(h.programs.closed, [4, 5]);
+    }
+
+    #[test]
     fn errors_go_to_the_screen_not_into_the_file() {
         let mut h = Harness::new();
         assert_eq!(
@@ -2794,6 +2939,224 @@ mod tests {
             )
         );
         assert_eq!(h.get("/tmp/out"), b"");
+    }
+
+    #[test]
+    fn standard_error_may_go_to_a_file() {
+        // bash 5.2 (tmp/m5p1/probes/p1.txt): a command's own messages go to
+        // its fd 2, a built-in's and the shell's of it alike.
+        let mut h = Harness::new();
+        assert_eq!(h.run("cd /missing 2> /tmp/e"), (1, String::new()));
+        assert_eq!(
+            h.get("/tmp/e"),
+            b"relay-sh: cd: /missing: No such file or directory\n"
+        );
+        assert_eq!(h.run("nope 2>> /tmp/e"), (127, String::new()));
+        assert_eq!(
+            h.get("/tmp/e"),
+            b"relay-sh: cd: /missing: No such file or directory\n\
+              relay-sh: nope: command not found\n"
+        );
+        assert_eq!(h.run("ls /tmp/e /nope 2> /tmp/e2"), (2, "/tmp/e\n".into()));
+        assert_eq!(
+            h.get("/tmp/e2"),
+            b"ls: cannot access '/nope': No such file or directory\n"
+        );
+        // Each error after the one before.
+        assert_eq!(h.run("ls /nope /nope2 2> /tmp/e2"), (2, String::new()));
+        assert_eq!(
+            h.get("/tmp/e2"),
+            b"ls: cannot access '/nope': No such file or directory\n\
+              ls: cannot access '/nope2': No such file or directory\n"
+        );
+        // Output stays where it was; an fd 2 with nothing to say is made.
+        assert_eq!(h.run("echo a 2> /tmp/e3"), (0, "a\n".into()));
+        assert_eq!(h.get("/tmp/e3"), b"");
+        // A redirection that cannot be made is told on fd 2 as it stands
+        // then.
+        assert_eq!(h.run("echo a 2> /tmp/e4 > /nodir/x"), (1, String::new()));
+        assert_eq!(
+            h.get("/tmp/e4"),
+            b"relay-sh: /nodir/x: No such file or directory\n"
+        );
+        assert_eq!(
+            h.run("echo a > /nodir/x 2> /tmp/e5"),
+            (1, "relay-sh: /nodir/x: No such file or directory\n".into())
+        );
+        assert!(!h.exists("/tmp/e5"));
+    }
+
+    #[test]
+    fn a_file_appended_to_is_written_at_its_end_each_time() {
+        // The prototype's review (M-1): two fds that append to one file, as
+        // the kernel's append does (bash 5.2, tmp/m5p1/probes/p14.txt).
+        let mut h = Harness::new();
+        h.put("/tmp/f", b"x\n");
+        h.put("/tmp/g", b"old\n");
+        assert_eq!(
+            h.run("ls /tmp/f /nope >> /tmp/g 2>> /tmp/g"),
+            (2, String::new())
+        );
+        assert_eq!(
+            h.get("/tmp/g"),
+            b"old\nls: cannot access '/nope': No such file or directory\n/tmp/f\n"
+        );
+        // Each write of one fd at the end too.
+        h.put("/tmp/g2", b"old\n");
+        assert_eq!(h.run("ls /nope /nope2 2>> /tmp/g2"), (2, String::new()));
+        assert_eq!(
+            h.get("/tmp/g2"),
+            b"old\nls: cannot access '/nope': No such file or directory\n\
+              ls: cannot access '/nope2': No such file or directory\n"
+        );
+        // Wherever another fd wrote meanwhile.
+        assert_eq!(h.run("cd /nope >> /tmp/g 2>> /tmp/g"), (1, String::new()));
+        assert!(
+            h.get("/tmp/g")
+                .ends_with(b"/tmp/f\nrelay-sh: cd: /nope: No such file or directory\n")
+        );
+    }
+
+    #[test]
+    fn one_output_may_be_made_a_copy_of_the_other() {
+        // bash 5.2 (tmp/m5p1/probes/p1.txt, p2.txt): the copy is of the
+        // fd as it is at that point.
+        let mut h = Harness::new();
+        h.put("/tmp/f", b"");
+        assert_eq!(h.run("ls /tmp/f /nope > /tmp/o 2>&1"), (2, String::new()));
+        assert_eq!(
+            h.get("/tmp/o"),
+            b"ls: cannot access '/nope': No such file or directory\n/tmp/f\n"
+        );
+        assert_eq!(
+            h.run("ls /tmp/f /nope 2>&1 > /tmp/o2"),
+            (
+                2,
+                "ls: cannot access '/nope': No such file or directory\n".into()
+            )
+        );
+        assert_eq!(h.get("/tmp/o2"), b"/tmp/f\n");
+        // Output to fd 2.
+        assert_eq!(h.run("echo a 2> /tmp/e >&2"), (0, String::new()));
+        assert_eq!(h.get("/tmp/e"), b"a\n");
+        assert_eq!(h.run("echo a >&2 2> /tmp/e2"), (0, "a\n".into()));
+        assert_eq!(h.get("/tmp/e2"), b"");
+        // A built-in's errors and output, in order.
+        assert_eq!(h.run("cd /nope > /tmp/c 2>&1"), (1, String::new()));
+        assert_eq!(
+            h.get("/tmp/c"),
+            b"relay-sh: cd: /nope: No such file or directory\n"
+        );
+        // Under /bin/sh both fds are the one file, opened once.
+        let mut h = spawning();
+        assert_eq!(h.spawning("t-args > /tmp/o 2>&1").0, 3);
+        assert_eq!(h.programs.spawned[0].fds, [0, 4, 4]);
+        assert_eq!(h.spawning("t-args 2>&1 > /tmp/o").0, 3);
+        assert_eq!(h.programs.spawned[1].fds, [0, 5, 1]);
+        assert_eq!(h.spawning("t-args 2> /tmp/e 1>&2 2>&1").0, 3);
+        assert_eq!(h.programs.spawned[2].fds, [0, 6, 6]);
+        assert_eq!(h.programs.closed, [4, 5, 6], "each once, after the program");
+        assert_eq!(h.spawning("nope > /tmp/n 2>&1"), (127, String::new()));
+        assert_eq!(
+            h.programs.written_to("/tmp/n"),
+            b"relay-sh: nope: command not found\n"
+        );
+    }
+
+    #[test]
+    fn a_copy_of_an_fd_onto_itself_keeps_its_file() {
+        // The prototype's review (M-5): a copy holds its file before the
+        // slot it replaces lets it go, or `> f 1>&1` would close `f` before
+        // the command writes it (bash 5.2: a copy onto itself changes
+        // nothing).
+        let mut h = Harness::new();
+        assert_eq!(h.run("echo a > /tmp/f 1>&1"), (0, String::new()));
+        assert_eq!(h.get("/tmp/f"), b"a\n");
+        assert_eq!(h.run("ls /nope 2> /tmp/e 2>&2"), (2, String::new()));
+        assert_eq!(
+            h.get("/tmp/e"),
+            b"ls: cannot access '/nope': No such file or directory\n"
+        );
+        let mut h = spawning();
+        assert_eq!(h.spawning("t-args > /tmp/o 1>&1").0, 3);
+        assert_eq!(h.programs.spawned[0].fds, [0, 4, 2]);
+        assert_eq!(h.programs.closed, [4]);
+    }
+
+    #[test]
+    fn bin_sh_gives_a_program_a_file_as_fd_2() {
+        let mut h = spawning();
+        assert_eq!(h.spawning("t-args 2> /tmp/e").0, 3);
+        assert_eq!(h.programs.spawned[0].fds, [0, 1, 4]);
+        assert_eq!(h.programs.closed, [4]);
+        // Its own messages, and a built-in's errors, go through the fd.
+        assert_eq!(h.spawning("nope 2> /tmp/e"), (127, String::new()));
+        assert_eq!(
+            h.programs.written_to("/tmp/e"),
+            b"relay-sh: nope: command not found\n"
+        );
+        assert_eq!(h.spawning("cd /missing 2>> /tmp/f"), (1, String::new()));
+        assert_eq!(
+            h.programs.written_to("/tmp/f"),
+            b"relay-sh: cd: /missing: No such file or directory\n"
+        );
+        // A built-in's write error is its own message too.
+        h.programs.write_error = Some((7, Errno::ENOSPC));
+        assert_eq!(h.spawning("help > /tmp/h 2> /tmp/g"), (1, String::new()));
+        assert_eq!(h.programs.opened[3], ("/tmp/h".into(), false, 7));
+        assert_eq!(
+            h.programs.written_to("/tmp/g"),
+            b"help: write error: No space left on device\n"
+        );
+    }
+
+    #[test]
+    fn standard_input_may_be_a_file() {
+        // bash 5.2 (tmp/m5p1/probes/p9.txt).
+        let mut h = Harness::new();
+        h.put("/tmp/f", b"l1\nl2\n");
+        assert_eq!(h.run("cat < /tmp/f"), (0, "l1\nl2\n".into()));
+        assert_eq!(h.run("wc -l 0</tmp/f"), (0, "2\n".into()));
+        assert_eq!(h.run("cat < /tmp/f | wc -l"), (0, "2\n".into()));
+        // Read whole, a piece after the other.
+        h.put("/tmp/big", &alloc::vec![b'x'; 10_000]);
+        assert_eq!(h.run("wc -c < /tmp/big"), (0, "10000\n".into()));
+        assert_eq!(
+            h.run("cat < /nope"),
+            (1, "relay-sh: /nope: No such file or directory\n".into())
+        );
+        assert_eq!(h.run("cat 2> /tmp/e < /nope"), (1, String::new()));
+        assert_eq!(
+            h.get("/tmp/e"),
+            b"relay-sh: /nope: No such file or directory\n"
+        );
+        assert_eq!(h.run("cat < /tmp"), (1, "cat: -: Is a directory\n".into()));
+        // Alone it opens the file and runs nothing.
+        assert_eq!(h.run("< /tmp/f"), (0, String::new()));
+        assert_eq!(
+            h.run("< /nope"),
+            (1, "relay-sh: /nope: No such file or directory\n".into())
+        );
+        // Under /bin/sh the program gets the file as fd 0, a pipeline's
+        // first command too.
+        let mut h = spawning();
+        h.programs.known.push(("/bin/cat", WaitStatus::exited(0)));
+        assert_eq!(h.spawning("cat < /tmp/f").0, 0);
+        assert_eq!(h.programs.inputs, [("/tmp/f".into(), 4)]);
+        assert_eq!(h.programs.spawned[0].fds, [4, 1, 2]);
+        assert_eq!(h.spawning("cat < /tmp/g | t-args").0, 3);
+        assert_eq!(h.programs.pipes, [(6, 7)]);
+        assert_eq!(h.programs.spawned[1].fds, [5, 7, 2]);
+        assert_eq!(h.programs.spawned[2].fds, [6, 1, 2]);
+        // The pipe's ends as each stage has them, the files after the
+        // pipeline.
+        assert_eq!(h.programs.closed, [4, 7, 6, 5]);
+        h.programs.open_error = Some(vfs::Errno::ENOENT);
+        assert_eq!(
+            h.spawning("cat < /nope"),
+            (1, "relay-sh: /nope: No such file or directory\n".into())
+        );
+        assert_eq!(h.programs.spawned.len(), 3);
     }
 
     #[test]

@@ -22,12 +22,19 @@
 //! `/root`, as bash's is; an assignment before a command, which would give
 //! bash's command an environment, and bash's `NAME+=value` are refused.
 //!
-//! `> file` and `>> file` redirect standard output (at most one per
-//! command). An unquoted `~` alone, or before `/` in the same unquoted
-//! piece, at the start of a word means `/root`, as in Linux. An unquoted
-//! `#` at the start of a word begins a comment, which runs to the end of
-//! the line. An unquoted `|` joins commands into a pipeline (user-space
-//! gate §9.1); each has a name, only the last may redirect its output, and
+//! `> file` and `>> file` redirect standard output, and `2> file` and
+//! `2>> file` standard error (programmable shell gate §7.1), any number of
+//! them per command, made left to right; a word of digits just before the
+//! operator is its fd, and only 1 and 2 are taken. `2>&1`, `1>&2` and `>&2`
+//! make one of them a copy of the other as it is at that point; any other
+//! word after `>&` is refused, as are bash's `&>` and `>|`. `< file` and
+//! `0< file` read the file as standard input; bash's other fds,
+//! here-documents, `<&` and `<>` are refused. An unquoted `~` alone, or
+//! before `/` in the same unquoted piece, at the start of a word means
+//! `/root`, as in Linux. An unquoted `#` at the start of a word begins a
+//! comment, which runs to the end of the line. An unquoted `|` joins
+//! commands into a pipeline (user-space gate §9.1); each has a name, only
+//! the last may redirect its output and only the first its input, and
 //! bash's syntax errors name a `|` with no command before it or none after.
 //! A line is a [`List`] (programmable shell gate §4.1): an unquoted `;`
 //! ends one of its items, and an unquoted `&` ends one that runs in the
@@ -47,10 +54,9 @@
 //! operator but the `;` or newline that ends its words. bash's other
 //! reserved words (`case`, `{`, …) are refused where a command name would
 //! stand.
-//! Every other shell feature is refused: an unquoted `*`, `?`, `<`,
-//! `` ` ``, `(` or `)` is an error naming the character, instead of being
-//! passed on as if it were plain text; so are `|&` (the errors into the
-//! pipe too), `>&` and `2>` (another stream).
+//! Every other shell feature is refused: an unquoted `*`, `?`, `` ` ``, `(`
+//! or `)` is an error naming the character, instead of being passed on as
+//! if it were plain text; so is `|&` (the errors into the pipe too).
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -111,6 +117,8 @@ pub enum Connector {
 pub struct Pipeline<W = String> {
     pub negated: bool,
     pub run: Run<W>,
+    /// A compound command's redirections; a simple command holds its own.
+    pub redirects: Vec<Redirect<W>>,
 }
 
 /// What a pipeline runs (programmable shell gate §4.1): one command, or
@@ -190,20 +198,46 @@ impl<W> Compound<W> {
     }
 }
 
-/// One command: its words and where its output goes. The parser gives
-/// them as typed ([`Word`]), and expansion as the strings a command gets.
+/// One command: its words and its redirections, in the order typed. The
+/// parser gives them as typed ([`Word`]), and expansion as the strings a
+/// command gets.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Command<W = String> {
     /// The command name first, then its arguments. Empty for a blank line.
     pub words: Vec<W>,
-    pub redirect: Option<Redirect<W>>,
+    pub redirects: Vec<Redirect<W>>,
 }
 
-/// `> path` (truncate) or `>> path` (append).
+impl<W> Command<W> {
+    /// The file its standard output goes to, and whether it is appended
+    /// to.
+    pub fn output(&self) -> Option<(&W, bool)> {
+        self.redirects.iter().rev().find_map(|r| match &r.op {
+            RedirectOp::Write(path) if r.fd == 1 => Some((path, false)),
+            RedirectOp::Append(path) if r.fd == 1 => Some((path, true)),
+            _ => None,
+        })
+    }
+}
+
+/// A redirection (programmable shell gate §7.1): what fd `fd` becomes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Redirect<W = String> {
-    pub path: W,
-    pub append: bool,
+    pub fd: u32,
+    pub op: RedirectOp<W>,
+}
+
+/// What a redirection makes of its fd.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RedirectOp<W = String> {
+    /// `< path`: the file, read from its start.
+    Read(W),
+    /// `> path`: the file, created or emptied, written from its start.
+    Write(W),
+    /// `>> path`: the file, created if missing, written at its end.
+    Append(W),
+    /// `>&N`: a copy of fd N (1 or 2) as it is at that point.
+    Copy(u32),
 }
 
 /// A word as typed: its pieces of text, each quoted (or escaped) or not,
@@ -360,7 +394,7 @@ impl fmt::Display for ParseError {
     }
 }
 
-const UNSUPPORTED: &[char] = &['*', '?', '<', '`', '(', ')'];
+const UNSUPPORTED: &[char] = &['*', '?', '`', '(', ')'];
 
 /// bash's other reserved words, and its loop built-ins `break` and
 /// `continue`, refused where a command name could stand (programmable
@@ -663,14 +697,11 @@ fn value_tildes(text: &str, first: bool, last: bool) -> String {
     out
 }
 
-/// A command of `words` and `redirect`. An assignment before a command,
+/// A command of `words` and `redirects`. An assignment before a command,
 /// which gives bash's command an environment, is not supported: programs
 /// get none (user-space gate §9.4); nor is bash's `NAME+=value`, which
 /// appends.
-fn command(
-    words: Vec<Word>,
-    redirect: Option<Redirect<Word>>,
-) -> Result<Command<Word>, ParseError> {
+fn command(words: Vec<Word>, redirects: Vec<Redirect<Word>>) -> Result<Command<Word>, ParseError> {
     let mut leading = words
         .iter()
         .take_while(|w| w.assignment().is_some() || w.appends());
@@ -686,7 +717,7 @@ fn command(
             first.typed
         )));
     }
-    Ok(Command { words, redirect })
+    Ok(Command { words, redirects })
 }
 
 /// A word being built.
@@ -757,9 +788,9 @@ impl Building {
 #[derive(Default)]
 struct Parts {
     words: Vec<Word>,
-    redirect: Option<Redirect<Word>>,
-    /// A `>` (false) or `>>` (true) seen, waiting for its file name.
-    pending: Option<bool>,
+    redirects: Vec<Redirect<Word>>,
+    /// A redirection waiting for its word.
+    pending: Option<Pending>,
     /// How many `!` stood before the pipeline's first command.
     bangs: usize,
     /// The command is not the pipeline's first, so a `!` cannot stand
@@ -770,10 +801,21 @@ struct Parts {
     compound: Option<Compound<Word>>,
 }
 
+/// A redirection operator waiting for its word.
+#[derive(Clone, Copy)]
+enum Pending {
+    /// `<` on fd 0: a file name.
+    Read,
+    /// `>` or `>>` (`append`) on `fd`: a file name.
+    File { fd: u32, append: bool },
+    /// `>&` on `fd`, as typed (`2>&` or `>&`): the fd it copies.
+    Copy { fd: u32, typed: &'static str },
+}
+
 impl Parts {
     /// Nothing of a command has been read (a `!` may have been).
     fn is_empty(&self) -> bool {
-        self.words.is_empty() && self.redirect.is_none() && self.compound.is_none()
+        self.words.is_empty() && self.redirects.is_empty() && self.compound.is_none()
     }
 
     /// Ends a word: it becomes the pending redirection's target or the next
@@ -792,17 +834,40 @@ impl Parts {
             };
         }
         match self.pending.take() {
-            Some(_) if self.redirect.is_some() => return Err(ParseError::Unsupported(">".into())),
-            Some(append) => self.redirect = Some(Redirect { path: w, append }),
+            Some(Pending::Read) => self.redirects.push(Redirect {
+                fd: 0,
+                op: RedirectOp::Read(w),
+            }),
+            Some(Pending::File { fd, append }) => {
+                let op = if append {
+                    RedirectOp::Append(w)
+                } else {
+                    RedirectOp::Write(w)
+                };
+                self.redirects.push(Redirect { fd, op });
+            }
+            // Only a bare `1` or `2`: bash expands the word, and takes a
+            // file, `-` or another fd too (§15 item 5).
+            Some(Pending::Copy { fd, typed }) => {
+                let copied = match w.digits() {
+                    Some("1") => 1,
+                    Some("2") => 2,
+                    _ => return Err(ParseError::Unsupported(format!("{typed}{}", w.typed))),
+                };
+                self.redirects.push(Redirect {
+                    fd,
+                    op: RedirectOp::Copy(copied),
+                });
+            }
             // A `!` before anything of the command negates the pipeline
             // (programmable shell gate §4.1), only the first command's.
-            None if w.is_bang() && self.words.is_empty() && self.redirect.is_none() => {
+            None if w.is_bang() && self.words.is_empty() && self.redirects.is_empty() => {
                 if self.later {
                     return Err(ParseError::MissingTarget("!"));
                 }
                 self.bangs += 1;
             }
-            None if self.words.is_empty() && self.redirect.is_none() => {
+            None if self.words.is_empty() && self.redirects.is_empty() => {
                 if let Some(k) = w.keyword() {
                     return Ok(Some(k));
                 }
@@ -824,16 +889,21 @@ impl Parts {
         if let Some(c) = &self.compound {
             return Err(ParseError::Unsupported(format!("| after {}", c.end())));
         }
-        if self.pending.is_some() || (self.words.is_empty() && self.redirect.is_none()) {
+        if self.pending.is_some() || (self.words.is_empty() && self.redirects.is_empty()) {
             return Err(ParseError::MissingTarget("|"));
         }
-        if self.redirect.is_some() {
+        // `<` may stand on the first command only (programmable shell gate
+        // §7.3).
+        if self.later && self.redirects.iter().any(|r| r.fd == 0) {
+            return Err(ParseError::Unsupported("< after |".into()));
+        }
+        if self.words.is_empty() || self.redirects.iter().any(|r| r.fd != 0) {
             return Err(ParseError::Unsupported("> before |".into()));
         }
         let p = core::mem::take(self);
         self.bangs = p.bangs;
         self.later = true;
-        command(p.words, None)
+        command(p.words, p.redirects)
     }
 }
 
@@ -847,7 +917,7 @@ pub fn parse(line: &str) -> Result<Vec<Command>, ParseError> {
     let Some(item) = list.items.first() else {
         return Ok(alloc::vec![Command {
             words: Vec::new(),
-            redirect: None,
+            redirects: Vec::new(),
         }]);
     };
     let Run::Commands(commands) = &item.and_or.first.run else {
@@ -868,26 +938,30 @@ fn end_pipeline(
         return Ok(Some(Pipeline {
             negated: p.bangs % 2 == 1,
             run: Run::Compound(Box::new(c)),
+            redirects: Vec::new(),
         }));
     }
     if parts.pending.is_some() {
         return Err(ParseError::MissingTarget(end));
     }
     if parts.words.is_empty() {
-        match (pipeline.is_empty(), &parts.redirect) {
+        match (pipeline.is_empty(), parts.redirects.is_empty()) {
             // `!` alone is a command that does nothing, negated.
-            (true, None) if parts.bangs == 0 => return Ok(None),
-            (true, None) => {}
-            (true, Some(_)) => {}
-            (false, None) => return Err(ParseError::MissingTarget(end)),
-            (false, Some(_)) => return Err(ParseError::Unsupported("| >".into())),
+            (true, true) if parts.bangs == 0 => return Ok(None),
+            (true, _) => {}
+            (false, true) => return Err(ParseError::MissingTarget(end)),
+            (false, false) => return Err(ParseError::Unsupported("| >".into())),
         }
     }
     let p = core::mem::take(parts);
-    pipeline.push(command(p.words, p.redirect)?);
+    if !pipeline.is_empty() && p.redirects.iter().any(|r| r.fd == 0) {
+        return Err(ParseError::Unsupported("< after |".into()));
+    }
+    pipeline.push(command(p.words, p.redirects)?);
     Ok(Some(Pipeline {
         negated: p.bangs % 2 == 1,
         run: Run::Commands(core::mem::take(pipeline)),
+        redirects: Vec::new(),
     }))
 }
 
@@ -1020,8 +1094,9 @@ impl Parser {
             // The word before an operator ends at it (the `>` arm first
             // looks for an fd, as in `2>`); in a `for`'s header, which that
             // word may open or end, the operator is the header's.
-            if matches!(c, '>' | '|' | ';' | '&' | '\n') {
-                if c != '>' || !(self.word.started && self.word.word.digits().is_some()) {
+            if matches!(c, '>' | '<' | '|' | ';' | '&' | '\n') {
+                let redirection = matches!(c, '>' | '<');
+                if !redirection || !(self.word.started && self.word.word.digits().is_some()) {
                     self.end_word(line, at)?;
                 }
                 if let Some(stage) = self.for_header() {
@@ -1033,28 +1108,45 @@ impl Parser {
             match c {
                 ' ' | '\t' => self.end_word(line, at)?,
                 '>' => {
-                    // `2>` redirects another stream in a real shell.
-                    if self.word.started
-                        && let Some(digits) = self.word.word.digits()
-                    {
-                        return Err(ParseError::Unsupported(format!("{digits}>")));
-                    }
+                    // A word of digits just before it is its fd, as in bash,
+                    // even where a file name is awaited (`>2>f` is bash's
+                    // error naming the `2`); only 1 and 2 are taken.
+                    let (fd, typed) = match self.fd_word()? {
+                        Some(digits) => match digits.as_str() {
+                            "1" => (1, "1"),
+                            "2" => (2, "2"),
+                            _ => return Err(ParseError::Unsupported(format!("{digits}>"))),
+                        },
+                        None => (1, ""),
+                    };
                     self.end_word(line, at)?;
                     if self.parts.pending.is_some() {
                         return Err(ParseError::MissingTarget(">"));
                     }
                     let append = cur.next_if_eq('>');
+                    // `>&N` copies fd N; `>>&` and `> &` are bash's syntax
+                    // errors (the `&` then meets a redirection without its
+                    // word). bash's `>|` ignores `noclobber`.
+                    let copy = !append && cur.next_if_eq('&');
+                    if !append && !copy && cur.next_if_eq('|') {
+                        return Err(ParseError::Unsupported(">|".into()));
+                    }
                     // Until compound commands can be redirected.
                     if let Some(c) = &self.parts.compound {
-                        let op = if append { ">>" } else { ">" };
-                        return Err(ParseError::Unsupported(format!("{op} after {}", c.end())));
+                        let op = match (append, copy) {
+                            (true, _) => ">>",
+                            (_, true) => ">&",
+                            _ => ">",
+                        };
+                        let end = c.end();
+                        return Err(ParseError::Unsupported(format!("{typed}{op} after {end}")));
                     }
-                    // `>&2` and `>& f` send output elsewhere in bash; `>>&` and
-                    // `> &` are its syntax errors.
-                    if !append && cur.peek() == Some('&') {
-                        return Err(ParseError::Unsupported(">&".into()));
-                    }
-                    self.parts.pending = Some(append);
+                    self.parts.pending = Some(if copy {
+                        let typed = if typed == "2" { "2>&" } else { ">&" };
+                        Pending::Copy { fd, typed }
+                    } else {
+                        Pending::File { fd, append }
+                    });
                 }
                 '|' if cur.next_if_eq('|') => {
                     self.end_word(line, at)?;
@@ -1099,6 +1191,37 @@ impl Parser {
                         Connector::And,
                     )?;
                 }
+                '<' => {
+                    // As at `>`: `0<` is fd 0; bash's `1<`, `2<` and others
+                    // are refused, as are its here-documents, `<&` and `<>`.
+                    if let Some(digits) = self.fd_word()?
+                        && digits != "0"
+                    {
+                        return Err(ParseError::Unsupported(format!("{digits}<")));
+                    }
+                    self.end_word(line, at)?;
+                    if self.parts.pending.is_some() {
+                        return Err(ParseError::MissingTarget("<"));
+                    }
+                    if cur.next_if_eq('<') {
+                        let op = if cur.next_if_eq('<') { "<<<" } else { "<<" };
+                        return Err(ParseError::Unsupported(op.into()));
+                    }
+                    for (c, op) in [('&', "<&"), ('>', "<>")] {
+                        if cur.next_if_eq(c) {
+                            return Err(ParseError::Unsupported(op.into()));
+                        }
+                    }
+                    // Until compound commands can be redirected.
+                    if let Some(c) = &self.parts.compound {
+                        return Err(ParseError::Unsupported(format!("< after {}", c.end())));
+                    }
+                    self.parts.pending = Some(Pending::Read);
+                }
+                // bash's `&>` sends both outputs to a file.
+                '&' if cur.peek() == Some('>') => {
+                    return Err(ParseError::Unsupported("&>".into()));
+                }
                 '&' => {
                     self.end_word(line, at)?;
                     // bash runs it in a subshell of its own.
@@ -1106,7 +1229,7 @@ impl Parser {
                         return Err(ParseError::Unsupported(format!("& after {}", c.end())));
                     }
                     if self.parts.pending.is_some()
-                        || self.parts.words.is_empty() && self.parts.redirect.is_none()
+                        || self.parts.words.is_empty() && self.parts.redirects.is_empty()
                     {
                         return Err(ParseError::MissingTarget("&"));
                     }
@@ -1226,6 +1349,30 @@ impl Parser {
         Ok(())
     }
 
+    /// The word being read, if it is all unquoted digits and so the fd of
+    /// the redirection operator after it (programmable shell gate §7.1);
+    /// it is taken. After an operator that awaits its file name it is
+    /// bash's syntax error naming it.
+    fn fd_word(&mut self) -> Result<Option<String>, ParseError> {
+        if !self.word.started {
+            return Ok(None);
+        }
+        let Some(digits) = self.word.word.digits() else {
+            return Ok(None);
+        };
+        let digits = String::from(digits);
+        match self.parts.pending {
+            // The fd a `>&` copies (`2>&1>f`).
+            Some(Pending::Copy { .. }) => return Ok(None),
+            Some(Pending::File { .. } | Pending::Read) => {
+                return Err(ParseError::Unexpected(digits));
+            }
+            None => {}
+        }
+        self.word = Building::default();
+        Ok(Some(digits))
+    }
+
     /// The stage of the `for` whose header is being read.
     fn for_header(&self) -> Option<Stage> {
         self.open.last().map(|o| o.stage).filter(|s| {
@@ -1286,8 +1433,10 @@ impl Parser {
             '|' if cur.next_if_eq('|') => "||",
             '&' if cur.next_if_eq('&') => "&&",
             '>' if cur.next_if_eq('>') => ">>",
+            '<' if cur.next_if_eq('<') => "<<",
             '|' => "|",
             '&' => "&",
+            '<' => "<",
             _ => ">",
         };
         let next = match (stage, token) {
@@ -1457,7 +1606,7 @@ impl Parser {
         if parts.pending.is_some() {
             return Err(ParseError::MissingTarget("newline"));
         }
-        if !pipeline.is_empty() && parts.words.is_empty() && parts.redirect.is_none() {
+        if !pipeline.is_empty() && parts.words.is_empty() && parts.redirects.is_empty() {
             return Err(ParseError::Incomplete);
         }
         // Nothing after the last `;` (or at all) is no item.
@@ -1889,10 +2038,9 @@ mod tests {
         let (_, i) = if_of("if a > then; then b; fi");
         assert_eq!(
             i.branches[0].0.items[0].and_or.first.commands()[0]
-                .redirect
-                .as_ref()
+                .output()
                 .unwrap()
-                .path
+                .0
                 .typed,
             "then"
         );
@@ -2044,7 +2192,7 @@ mod tests {
 
     fn words(line: &str) -> Vec<String> {
         let c = one(line).unwrap();
-        assert_eq!(c.redirect, None);
+        assert_eq!(c.redirects, []);
         c.words
     }
 
@@ -2091,7 +2239,7 @@ mod tests {
         );
         let c = one("echo x > f # to f").unwrap();
         assert_eq!(c.words, ["echo", "x"]);
-        assert_eq!(c.redirect.unwrap().path, "f");
+        assert_eq!(c.output().unwrap().0, "f");
     }
 
     #[test]
@@ -2120,7 +2268,7 @@ mod tests {
         );
         let c = &typed("echo >'o'ut")[0];
         assert_eq!(
-            c.redirect.as_ref().unwrap().path.pieces,
+            c.output().unwrap().0.pieces,
             [text("o", true), text("ut", false)]
         );
     }
@@ -2430,7 +2578,7 @@ mod tests {
         let c = &typed(r#"echo  a"b c"$D  > '$f'x# 2"#)[0];
         let typed: Vec<&str> = c.words.iter().map(|w| w.typed.as_str()).collect();
         assert_eq!(typed, ["echo", r#"a"b c"$D"#, "2"]);
-        assert_eq!(c.redirect.as_ref().unwrap().path.typed, "'$f'x#");
+        assert_eq!(c.output().unwrap().0.typed, "'$f'x#");
     }
 
     #[test]
@@ -2447,43 +2595,181 @@ mod tests {
         let c = one("echo hi > out.txt").unwrap();
         assert_eq!(c.words, ["echo", "hi"]);
         assert_eq!(
-            c.redirect,
-            Some(Redirect {
-                path: "out.txt".into(),
-                append: false
-            })
+            c.redirects,
+            [Redirect {
+                fd: 1,
+                op: RedirectOp::Write("out.txt".into())
+            }]
         );
         let c = one("echo hi>>'my log'").unwrap();
         assert_eq!(
-            c.redirect,
-            Some(Redirect {
-                path: "my log".into(),
-                append: true
-            })
+            c.redirects,
+            [Redirect {
+                fd: 1,
+                op: RedirectOp::Append("my log".into())
+            }]
         );
         // The redirection can come first.
         let c = one(">f echo x").unwrap();
         assert_eq!(c.words, ["echo", "x"]);
-        assert_eq!(c.redirect.unwrap().path, "f");
+        assert_eq!(c.output(), Some((&"f".into(), false)));
     }
 
     #[test]
     fn redirection_errors() {
         assert_eq!(one("echo >"), Err(ParseError::MissingTarget("newline")));
         assert_eq!(one("echo > > f"), Err(ParseError::MissingTarget(">")));
+        // Several are made left to right (programmable shell gate §7.2).
+        let c = one("echo > a >> b x").unwrap();
+        assert_eq!(c.words, ["echo", "x"]);
         assert_eq!(
-            one("echo > a > b"),
-            Err(ParseError::Unsupported(">".into()))
+            c.redirects,
+            [
+                Redirect {
+                    fd: 1,
+                    op: RedirectOp::Write("a".into())
+                },
+                Redirect {
+                    fd: 1,
+                    op: RedirectOp::Append("b".into())
+                }
+            ]
         );
-        // Other streams are not supported; a quoted or spaced digit is a word.
+        assert_eq!(c.output(), Some((&"b".into(), true)));
+        // A word of digits just before the operator is its fd, 1 or 2
+        // (programmable shell gate §7.1); a quoted or spaced digit, or one
+        // in a longer word, is a word.
+        for (line, fd, op) in [
+            ("cat f 2>err", 2, RedirectOp::Write("err".into())),
+            ("echo a 2>>g", 2, RedirectOp::Append("g".into())),
+            ("echo a 1> g", 1, RedirectOp::Write("g".into())),
+            ("echo a 1>>g", 1, RedirectOp::Append("g".into())),
+        ] {
+            assert_eq!(
+                one(line).unwrap().redirects,
+                [Redirect { fd, op }],
+                "{line}"
+            );
+        }
+        for (line, refused) in [
+            ("echo a 3> g", "3>"),
+            ("echo a 0> g", "0>"),
+            ("echo a 02> g", "02>"),
+            ("echo a 10> g", "10>"),
+        ] {
+            assert_eq!(
+                one(line),
+                Err(ParseError::Unsupported(refused.into())),
+                "{line}"
+            );
+        }
+        // Even where a file name is awaited (bash 5.2, probes/p8.txt).
+        for line in ["echo a >2>f", "echo a 2>2>f", "cat <2>f"] {
+            assert_eq!(
+                one(line).unwrap_err().to_string(),
+                "syntax error near unexpected token `2'",
+                "{line}"
+            );
+        }
+        assert_eq!(one("echo a 2> >f"), Err(ParseError::MissingTarget(">")));
+        // `>&` copies fd 1 or 2, a blank before the fd or not (bash 5.2,
+        // probes/p1.txt, p6.txt).
+        let copy = |fd, from| Redirect {
+            fd,
+            op: RedirectOp::Copy(from),
+        };
+        for (line, redirects) in [
+            ("echo a 2>&1", alloc::vec![copy(2, 1)]),
+            ("echo a 1>&2", alloc::vec![copy(1, 2)]),
+            ("echo a >&2", alloc::vec![copy(1, 2)]),
+            ("echo a >& 2", alloc::vec![copy(1, 2)]),
+            ("echo a 2>& 1", alloc::vec![copy(2, 1)]),
+            ("echo a 2>&2 1>&1", alloc::vec![copy(2, 2), copy(1, 1)]),
+        ] {
+            let c = one(line).unwrap();
+            assert_eq!(
+                (c.words, c.redirects),
+                (words("echo a"), redirects),
+                "{line}"
+            );
+        }
+        let c = one("echo a 2>&1>f").unwrap();
         assert_eq!(
-            one("cat f 2>err"),
-            Err(ParseError::Unsupported("2>".into()))
+            c.redirects,
+            [
+                copy(2, 1),
+                Redirect {
+                    fd: 1,
+                    op: RedirectOp::Write("f".into())
+                }
+            ]
         );
-        assert_eq!(
-            one("echo a 2>>g"),
-            Err(ParseError::Unsupported("2>".into()))
-        );
+        // Anything else bash takes there is refused: another fd, a file,
+        // `-`, a word quoted or expanded.
+        for (line, refused) in [
+            ("echo a 2>&3", "2>&3"),
+            ("echo a >&0", ">&0"),
+            ("echo a 0>&1", "0>"),
+            ("echo a >&-", ">&-"),
+            ("echo a >&f", ">&f"),
+            ("echo a 2>&1x", "2>&1x"),
+            ("echo a 2>&01", "2>&01"),
+            ("echo a 2>&\"1\"", "2>&\"1\""),
+            ("echo a 2>&$N", "2>&$N"),
+            ("echo a &> f", "&>"),
+            ("echo a >| f", ">|"),
+        ] {
+            assert_eq!(
+                one(line),
+                Err(ParseError::Unsupported(refused.into())),
+                "{line}"
+            );
+        }
+        // `<` and `0<` read a file as fd 0 (bash 5.2, probes/p9.txt).
+        let read = |path: &str| Redirect {
+            fd: 0,
+            op: RedirectOp::Read(path.into()),
+        };
+        for line in ["cat < f", "cat 0< f", "cat <f", "<f cat", "cat 0<f"] {
+            let c = one(line).unwrap();
+            assert_eq!(
+                (c.words, c.redirects),
+                (words("cat"), alloc::vec![read("f")]),
+                "{line}"
+            );
+        }
+        assert_eq!(parse("cat < f | wc -l").unwrap()[0].redirects, [read("f")]);
+        for (line, refused) in [
+            ("cat 1< f", "1<"),
+            ("cat 2< f", "2<"),
+            ("cat 00< f", "00<"),
+            ("cat << EOF", "<<"),
+            ("cat <<-EOF", "<<"),
+            ("cat <<< x", "<<<"),
+            ("cat <&0", "<&"),
+            ("cat <> f", "<>"),
+            // Only a pipeline's first command reads a file (§7.3).
+            ("cat | cat < f", "< after |"),
+            ("cat | cat < f | wc", "< after |"),
+        ] {
+            assert_eq!(
+                parse_line(line),
+                Err(ParseError::Unsupported(refused.into())),
+                "{line}"
+            );
+        }
+        // bash's syntax errors.
+        for (line, token) in [
+            ("cat < < f", "<"),
+            ("cat <", "newline"),
+            ("for x in a < b; do echo; done", "<"),
+            ("echo a 2>>&1", "&"),
+            ("echo a > &2", "&"),
+            ("echo a 2>&", "newline"),
+        ] {
+            assert_eq!(one(line), Err(ParseError::MissingTarget(token)), "{line}");
+        }
+        assert_eq!(one("echo a 2>>"), Err(ParseError::MissingTarget("newline")));
         assert_eq!(one("echo 2 > g").unwrap().words, ["echo", "2"]);
         assert_eq!(one("echo '2'> g").unwrap().words, ["echo", "2"]);
         assert_eq!(one("echo x2> g").unwrap().words, ["echo", "x2"]);
@@ -2498,15 +2784,14 @@ mod tests {
         for (line, c) in [
             ("ls *.txt", '*'),
             ("ls file?", '?'),
-            ("cat < f", '<'),
             ("echo `x`", '`'),
             ("(ls)", '('),
         ] {
             assert_eq!(one(line), Err(ParseError::Unsupported(c.into())), "{line}");
         }
         assert_eq!(
-            one("echo a 2>f").unwrap_err().to_string(),
-            "unsupported syntax: 2>"
+            one("echo a 3>f").unwrap_err().to_string(),
+            "unsupported syntax: 3>"
         );
     }
 
@@ -2810,8 +3095,8 @@ mod tests {
             words,
             [&["cat", "f"][..], &["grep", "-c", "a | b"], &["wc", "-l"]]
         );
-        assert_eq!(p[0].redirect, None);
-        assert_eq!(p[2].redirect.as_ref().unwrap().path, "out");
+        assert_eq!(p[0].redirects, []);
+        assert_eq!(p[2].output().unwrap().0, "out");
         // Quoted, escaped or in a comment it is a character.
         assert_eq!(
             parse(r#"echo '|' "|" \| # | x"#).unwrap()[0].words,
@@ -2821,7 +3106,7 @@ mod tests {
             parse("").unwrap(),
             [Command {
                 words: Vec::new(),
-                redirect: None
+                redirects: Vec::new()
             }]
         );
     }
@@ -2898,7 +3183,7 @@ mod tests {
         }
         let p = parse("cat f | wc -l > out &").unwrap();
         assert_eq!(p.len(), 2);
-        assert_eq!(p[1].redirect.as_ref().unwrap().path, "out");
+        assert_eq!(p[1].output().unwrap().0, "out");
         // Quoted, escaped or in a comment it is a character.
         for line in ["echo '&' \"&\" \\&", "echo a # &", "echo a"] {
             assert_eq!(background(line), None, "{line}");
@@ -2962,10 +3247,9 @@ mod tests {
         // bash runs `> f &`; it is not supported.
         for (line, what) in [
             ("> f &", "> &"),
-            // bash runs these (the review found them called its syntax
-            // error).
-            ("echo hi >&2", ">&"),
-            ("echo hi >& f", ">&"),
+            // bash runs this (the review found it called its syntax
+            // error); `>&2` copies fd 2 (programmable shell gate §7.1).
+            ("echo hi >& f", ">&f"),
         ] {
             assert_eq!(
                 parse_line(line),
@@ -2989,7 +3273,7 @@ mod tests {
             ["ls", "/root/notes", "a~", "~x", "~", "~"]
         );
         let c = one("echo x > ~/out").unwrap();
-        assert_eq!(c.redirect.unwrap().path, "/root/out");
+        assert_eq!(c.output().unwrap().0, "/root/out");
         // As bash's: a quoted `/` after it, or a parameter, keeps it.
         assert_eq!(
             words(r#"echo ~"/x" ~\/x ~$E ~"""#),

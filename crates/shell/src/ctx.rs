@@ -1,9 +1,10 @@
 //! What a command gets to work with: the filesystem, the system, standard
 //! input (none, a program's fd 0, or bytes in memory), standard output
-//! (the screen, a redirection file, or a program's fd 1) and the screen
-//! for errors; plus the helpers every command shares for options and
-//! GNU-style messages.
+//! (the screen, a redirection file, `/bin/sh`'s fd for one, or a program's
+//! fd 1) and errors (the screen, or a redirection file); plus the helpers
+//! every command shares for options and GNU-style messages.
 
+use crate::fds;
 use crate::io::{Console, Programs, Stdin, Stdout, System};
 use crate::jobs::Jobs;
 use crate::transcript::Transcript;
@@ -21,8 +22,13 @@ pub struct Ctx<'a> {
     pub system: &'a mut dyn System,
     console: &'a mut dyn Console,
     out: Output<'a>,
+    /// Where errors go (programmable shell gate §7.5).
+    err: To,
     /// Standard input; without one, the input ends at once.
     input: Option<&'a mut dyn Stdin>,
+    /// Standard input that is a file the in-process runner opened (`<`),
+    /// and where the next read starts; it comes before `input`.
+    input_file: Option<(Node, u64)>,
     /// The exit status when standard output could not be written (1, as
     /// milestone 1 said; GNU grep's is 2).
     pub(crate) write_error_status: i32,
@@ -65,8 +71,27 @@ impl JobControl<'_> {
     }
 }
 
+/// Where a command the shell runs itself writes (programmable shell gate
+/// §7.5): the screen, a file of the in-process runner's at an offset, an
+/// fd of `/bin/sh`'s, which its `Programs` write, or (errors) where the
+/// output goes, when fd 2 is a copy of fd 1's file or the other way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum To {
+    Console,
+    File(Node, u64),
+    Fd(u32),
+    Output,
+}
+
 enum Output<'a> {
     Console,
+    /// An fd of `/bin/sh`'s, written through its `Programs` in pieces of
+    /// 4 KiB, so that a built-in shares the file's offset with programs.
+    Fd {
+        fd: u32,
+        buf: Vec<u8>,
+        error: Option<Errno>,
+    },
     File {
         node: Node,
         offset: u64,
@@ -86,23 +111,32 @@ enum Output<'a> {
 }
 
 impl<'a> Ctx<'a> {
-    /// `file`: the redirection target and the offset to write at.
+    /// Standard output goes `to` and errors to `err` (an fd through
+    /// `control`'s programs).
     pub(crate) fn new(
         vfs: &'a mut dyn Vfs,
         system: &'a mut dyn System,
         console: &'a mut dyn Console,
-        file: Option<(Node, u64)>,
+        to: To,
+        err: To,
     ) -> Ctx<'a> {
-        let out = match file {
-            Some((node, offset)) => Output::File {
+        let out = match to {
+            To::Console | To::Output => Output::Console,
+            To::File(node, offset) => Output::File {
                 node,
                 offset,
                 buf: Vec::new(),
                 error: None,
             },
-            None => Output::Console,
+            To::Fd(fd) => Output::Fd {
+                fd,
+                buf: Vec::new(),
+                error: None,
+            },
         };
-        Ctx::with_output(vfs, system, console, out)
+        let mut ctx = Ctx::with_output(vfs, system, console, out);
+        ctx.err = err;
+        ctx
     }
 
     /// A command run as a program: standard output is `stdout`, errors go
@@ -134,7 +168,9 @@ impl<'a> Ctx<'a> {
             system,
             console,
             out,
+            err: To::Console,
             input: None,
+            input_file: None,
             write_error_status: 1,
             exit: false,
             cancelled: false,
@@ -158,12 +194,32 @@ impl<'a> Ctx<'a> {
         self.input = Some(input);
     }
 
+    /// Gives the command the file `node` as standard input, from its start.
+    pub(crate) fn set_input_file(&mut self, node: Node) {
+        self.input_file = Some((node, 0));
+    }
+
+    /// The regular file standard input is, where it has been read up to and
+    /// its size, if it is one.
+    pub fn input_file(&mut self) -> Option<(Node, u64, u64)> {
+        if let Some((node, offset)) = self.input_file {
+            let size = self.vfs.stat(node).ok()?.size;
+            return Some((node, offset, size));
+        }
+        self.input.as_mut()?.file()
+    }
+
     /// Reads standard input into `buf`: how many bytes, 0 at its end. What
     /// waits for standard output is written first, so that what came of
     /// the last read reaches a pipe before the next one waits (a line typed
     /// into `cat | cat` reaches the second `cat` at Enter).
     pub fn read_input(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
         self.streams().flush();
+        if let Some((node, offset)) = &mut self.input_file {
+            let n = self.vfs.read_at(*node, *offset, buf)?;
+            *offset += n as u64;
+            return Ok(n);
+        }
         match &mut self.input {
             Some(input) => input.read(buf),
             None => Ok(0),
@@ -177,6 +233,10 @@ impl<'a> Ctx<'a> {
             console: &mut *self.console,
             out: &mut self.out,
             transcript: &mut self.transcript,
+            programs: self
+                .control
+                .as_mut()
+                .and_then(|c| c.programs.as_deref_mut()),
         }
     }
 
@@ -186,9 +246,38 @@ impl<'a> Ctx<'a> {
         let _ = self.streams().out(bytes);
     }
 
-    /// Errors always go to the screen, never into a redirection file.
+    /// Errors: to the screen, or where they are redirected. A write that
+    /// fails is lost, as there is nowhere left to say so.
     pub fn err(&mut self, bytes: &[u8]) {
-        self.streams().screen(bytes);
+        match &mut self.err {
+            To::Console => self.streams().screen(bytes),
+            // In order with the output, through its buffer and offset.
+            To::Output => {
+                let _ = self.streams().out(bytes);
+            }
+            To::File(node, offset) => {
+                *offset = fds::write_file(&mut *self.vfs, *node, *offset, bytes).0;
+            }
+            To::Fd(fd) => {
+                if let Some(programs) = self
+                    .control
+                    .as_mut()
+                    .and_then(|c| c.programs.as_deref_mut())
+                {
+                    let _ = programs.write(*fd, bytes);
+                }
+            }
+        }
+    }
+
+    /// Moves standard input back `n` bytes, where it can be (a file), so
+    /// that the next command reads them (GNU's `head`, programmable shell
+    /// gate §15 item 5).
+    pub fn seek_input_back(&mut self, n: u64) -> Result<(), Errno> {
+        match &mut self.input {
+            Some(input) => input.seek_back(n),
+            None => Err(Errno::EINVAL),
+        }
     }
 
     /// Whether Ctrl-C has stopped the command. Long loops (reading a file,
@@ -205,11 +294,16 @@ impl<'a> Ctx<'a> {
         self.console.columns()
     }
 
+    /// Whether errors go to the screen.
+    pub fn err_is_tty(&self) -> bool {
+        self.err == To::Console && self.console.is_screen()
+    }
+
     /// Whether standard output is the screen (`ls` then lays out columns).
     pub fn is_tty(&self) -> bool {
         match self.out {
             Output::Console => true,
-            Output::File { .. } => false,
+            Output::File { .. } | Output::Fd { .. } => false,
             Output::Program { tty, .. } => tty,
         }
     }
@@ -219,7 +313,9 @@ impl<'a> Ctx<'a> {
     pub fn out_failed(&self) -> bool {
         matches!(
             self.out,
-            Output::File { error: Some(_), .. } | Output::Program { error: Some(_), .. }
+            Output::File { error: Some(_), .. }
+                | Output::Fd { error: Some(_), .. }
+                | Output::Program { error: Some(_), .. }
         )
     }
 
@@ -228,7 +324,7 @@ impl<'a> Ctx<'a> {
         match &self.out {
             Output::File { node, .. } => Some(*node),
             Output::Program { stdout, .. } => stdout.node(),
-            Output::Console => None,
+            Output::Console | Output::Fd { .. } => None,
         }
     }
 
@@ -236,7 +332,9 @@ impl<'a> Ctx<'a> {
     pub(crate) fn finish(&mut self) -> Result<(), Errno> {
         self.streams().flush();
         match self.out {
-            Output::File { error: Some(e), .. } | Output::Program { error: Some(e), .. } => Err(e),
+            Output::File { error: Some(e), .. }
+            | Output::Fd { error: Some(e), .. }
+            | Output::Program { error: Some(e), .. } => Err(e),
             _ => Ok(()),
         }
     }
@@ -254,6 +352,8 @@ struct Streams<'s, 'a> {
     console: &'s mut dyn Console,
     out: &'s mut Output<'a>,
     transcript: &'s mut Option<Transcript>,
+    /// `/bin/sh`'s, for `Output::Fd`.
+    programs: Option<&'s mut (dyn Programs + 'a)>,
 }
 
 impl Streams<'_, '_> {
@@ -273,7 +373,9 @@ impl Streams<'_, '_> {
                     *error = Some(e);
                 }
             }
-            Output::File { buf, error, .. } | Output::Program { buf, error, .. } => {
+            Output::File { buf, error, .. }
+            | Output::Fd { buf, error, .. }
+            | Output::Program { buf, error, .. } => {
                 if let Some(e) = error {
                     return Err(*e);
                 }
@@ -284,7 +386,9 @@ impl Streams<'_, '_> {
             }
         }
         match &*self.out {
-            Output::File { error: Some(e), .. } | Output::Program { error: Some(e), .. } => Err(*e),
+            Output::File { error: Some(e), .. }
+            | Output::Fd { error: Some(e), .. }
+            | Output::Program { error: Some(e), .. } => Err(*e),
             _ => Ok(()),
         }
     }
@@ -308,18 +412,10 @@ impl Streams<'_, '_> {
                 buf,
                 error,
             } => {
-                let mut done = 0;
-                while error.is_none() && done < buf.len() {
-                    match self.vfs.write_at(*node, *offset, &buf[done..]) {
-                        // Nothing written would loop forever; the contract
-                        // says that is ENOSPC.
-                        Ok(0) => *error = Some(Errno::ENOSPC),
-                        Ok(n) => {
-                            done += n;
-                            *offset += n as u64;
-                        }
-                        Err(e) => *error = Some(e),
-                    }
+                if error.is_none() {
+                    let (at, failed) = fds::write_file(&mut *self.vfs, *node, *offset, buf);
+                    *offset = at;
+                    *error = failed;
                 }
                 buf.clear();
             }
@@ -331,6 +427,18 @@ impl Streams<'_, '_> {
                     && let Err(e) = stdout.write(buf)
                 {
                     *error = Some(e);
+                }
+                buf.clear();
+            }
+            Output::Fd { fd, buf, error } => {
+                if error.is_none() && !buf.is_empty() {
+                    let written = match self.programs.as_deref_mut() {
+                        Some(programs) => programs.write(*fd, buf),
+                        None => Err(Errno::EBADF),
+                    };
+                    if let Err(e) = written {
+                        *error = Some(e);
+                    }
                 }
                 buf.clear();
             }

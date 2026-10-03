@@ -66,7 +66,9 @@ pub fn sh(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     if ctx.in_script {
         return ctx.fail("sh", format_args!("a script cannot run another script"));
     }
-    if !ctx.is_tty() {
+    // Its trace and errors would miss its transcript, a copy of the
+    // screen (programmable shell gate §15 item 5); its input may be a file.
+    if !ctx.is_tty() || !ctx.err_is_tty() {
         return ctx.fail("sh", format_args!("a script's output cannot be redirected"));
     }
     let name = quote_if_needed(file);
@@ -157,7 +159,7 @@ fn read(ctx: &mut Ctx<'_>, file: &str) -> Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
-    use crate::testing::Harness;
+    use crate::testing::{FakeStdout, Harness};
     use alloc::string::String;
 
     #[test]
@@ -435,6 +437,22 @@ mod tests {
         );
         // Errors too, which never go into a redirection file.
         assert_eq!(String::from_utf8(h.get("/tmp/s.log")).unwrap(), screen);
+        // Errors sent to a file reach neither the screen nor the
+        // transcript (programmable shell gate §7.5).
+        h.put("/tmp/s.sh", b"cat /tmp/nope 2> /tmp/e\nnope 2>> /tmp/e\n");
+        assert_eq!(
+            h.run("sh /tmp/s.sh"),
+            (127, "+ cat /tmp/nope 2> /tmp/e\n+ nope 2>> /tmp/e\n".into())
+        );
+        assert_eq!(
+            h.get("/tmp/s.log"),
+            b"+ cat /tmp/nope 2> /tmp/e\n+ nope 2>> /tmp/e\n"
+        );
+        assert_eq!(
+            h.get("/tmp/e"),
+            b"cat: /tmp/nope: No such file or directory\n\
+              relay-sh: nope: command not found\n"
+        );
         // Running a script again starts a new transcript.
         h.put("/tmp/s.sh", b"echo again\n");
         h.run("sh /tmp/s.sh");
@@ -503,6 +521,18 @@ mod tests {
     }
 
     #[test]
+    fn a_script_s_input_may_be_a_file() {
+        // Its commands read it (programmable shell gate §15 item 5).
+        let mut h = Harness::new();
+        h.put("/tmp/s.sh", b"cat\n");
+        h.put("/tmp/in", b"one\ntwo\n");
+        assert_eq!(
+            h.run("sh /tmp/s.sh < /tmp/in"),
+            (0, "+ cat\none\ntwo\n".into())
+        );
+    }
+
+    #[test]
     fn sh_errors() {
         let mut h = Harness::new();
         let run = |h: &mut Harness, line: &str| -> (i32, String) { h.run(line) };
@@ -525,6 +555,31 @@ mod tests {
             run(&mut h, "sh /tmp/s.sh > /tmp/out"),
             (1, "sh: a script's output cannot be redirected\n".into())
         );
+        // Nor its errors, which hold its trace (programmable shell gate
+        // §15 item 5): the message goes where they would.
+        assert_eq!(run(&mut h, "sh /tmp/s.sh 2> /tmp/err"), (1, String::new()));
+        assert_eq!(
+            h.get("/tmp/err"),
+            b"sh: a script's output cannot be redirected\n"
+        );
+        assert_eq!(
+            run(&mut h, "sh /tmp/s.sh > /tmp/out 2>&1"),
+            (1, String::new())
+        );
+        assert_eq!(
+            h.get("/tmp/out"),
+            b"sh: a script's output cannot be redirected\n"
+        );
+        // As a program, `/bin/sh FILE` whose fd 2 is not the console.
+        h.put("/tmp/b.sh", b"cd /tmp\n");
+        let mut out = FakeStdout::console();
+        h.console.redirected = true;
+        assert_eq!(
+            h.sh(&["/tmp/b.sh"], &mut out),
+            (1, "sh: a script's output cannot be redirected\n".into())
+        );
+        h.console.redirected = false;
+        assert_eq!(h.sh(&["/tmp/b.sh"], &mut out), (0, "+ cd /tmp\n".into()));
         h.put("/tmp/bin.sh", b"echo \xff\n");
         assert_eq!(
             run(&mut h, "sh /tmp/bin.sh"),

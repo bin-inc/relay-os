@@ -9,7 +9,10 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use relay_abi::console::{MODE_LINE, MODE_RAW};
-use relay_abi::file::{KIND_CHAR_DEVICE, OPEN_APPEND, OPEN_CREATE, OPEN_TRUNCATE, OPEN_WRITE};
+use relay_abi::file::{
+    KIND_CHAR_DEVICE, KIND_REGULAR, OPEN_APPEND, OPEN_CREATE, OPEN_READ, OPEN_TRUNCATE, OPEN_WRITE,
+    SEEK_CURRENT,
+};
 use relay_abi::info::LOG_MAX;
 use relay_abi::power::{POWER_FORCE, POWER_POWEROFF, POWER_REBOOT};
 use relay_abi::spawn::{FOREGROUND, NEW_GROUP};
@@ -72,6 +75,10 @@ impl Console for SysConsole {
 
     fn columns(&self) -> usize {
         sys::console_size().0 as usize
+    }
+
+    fn is_screen(&self) -> bool {
+        sys::fstat(2).is_ok_and(|st| is_console(&st))
     }
 
     /// Only an interactive shell keeps the console in raw mode while its
@@ -176,6 +183,21 @@ impl Stdin for SysStdin {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
         sys::read(0, buf).map_err(Errno::from_number)
     }
+
+    fn file(&mut self) -> Option<(Node, u64, u64)> {
+        let st = sys::fstat(0)
+            .ok()
+            .filter(|st| st.kind == u32::from(KIND_REGULAR))?;
+        let at = sys::seek(0, 0, SEEK_CURRENT).ok()?;
+        Some((node_of(&st), at, st.size))
+    }
+
+    fn seek_back(&mut self, n: u64) -> Result<(), Errno> {
+        let back = i64::try_from(n).map_err(|_| Errno::EINVAL)?;
+        sys::seek(0, -back, SEEK_CURRENT)
+            .map(|_| ())
+            .map_err(Errno::from_number)
+    }
 }
 
 /// Standard output: fd 1, the console or the file the shell opened.
@@ -209,7 +231,7 @@ impl Stdout for SysStdout {
     fn node(&self) -> Option<Node> {
         sys::fstat(1)
             .ok()
-            .filter(|st| st.dev != 0)
+            .filter(|st| st.kind == u32::from(KIND_REGULAR))
             .map(|st| node_of(&st))
     }
 }
@@ -269,16 +291,33 @@ pub fn arg_bytes(args: &[&[u8]]) -> Vec<u8> {
     bytes
 }
 
-/// A command's fds: `stdin` or the shell's 0, `stdout` or the shell's 1,
-/// and the shell's 2.
-pub fn command_fds(stdin: Option<u32>, stdout: Option<u32>) -> [FdMap; 3] {
-    [(0, stdin.unwrap_or(0)), (1, stdout.unwrap_or(1)), (2, 2)]
-        .map(|(child, parent)| FdMap { child, parent })
+/// A command's fds 0, 1 and 2: the shell's `fds`.
+pub fn command_fds(fds: [u32; 3]) -> [FdMap; 3] {
+    [0, 1, 2].map(|child| FdMap {
+        child,
+        parent: fds[child as usize],
+    })
 }
 
 impl Programs for SysPrograms {
     fn open_output(&mut self, path: &[u8], append: bool) -> Result<u32, Errno> {
         sys::open(path, output_flags(append)).map_err(Errno::from_number)
+    }
+
+    fn open_input(&mut self, path: &[u8]) -> Result<u32, Errno> {
+        sys::open(path, OPEN_READ).map_err(Errno::from_number)
+    }
+
+    fn write(&mut self, fd: u32, bytes: &[u8]) -> Result<(), Errno> {
+        let mut done = 0;
+        while done < bytes.len() {
+            match sys::write(fd, &bytes[done..]) {
+                Ok(0) => return Err(Errno::ENOSPC),
+                Ok(n) => done += n,
+                Err(e) => return Err(Errno::from_number(e)),
+            }
+        }
+        Ok(())
     }
 
     fn close(&mut self, fd: u32) {
@@ -293,8 +332,7 @@ impl Programs for SysPrograms {
         &mut self,
         path: &[u8],
         args: &[&[u8]],
-        stdin: Option<u32>,
-        stdout: Option<u32>,
+        fds: [u32; 3],
         group: Group,
     ) -> Result<u32, Errno> {
         let (flags, pgid) = spawn_group(group, self.own_group, self.leader);
@@ -305,7 +343,7 @@ impl Programs for SysPrograms {
             // prompt.
             let _ = sys::console_mode(MODE_LINE);
         }
-        let fds = command_fds(stdin, stdout);
+        let fds = command_fds(fds);
         let pid = sys::spawn(path, &arg_bytes(args), b"", &fds, flags, pgid)
             .map_err(Errno::from_number)?;
         if flags & NEW_GROUP != 0 {
@@ -433,14 +471,10 @@ mod tests {
     }
 
     #[test]
-    fn a_command_gets_the_shell_s_fds_but_its_pipes_and_redirection() {
+    fn a_command_gets_the_shell_s_fds_it_is_given() {
         let pairs = |fds: [FdMap; 3]| fds.map(|f| (f.child, f.parent));
-        assert_eq!(pairs(command_fds(None, None)), [(0, 0), (1, 1), (2, 2)]);
-        assert_eq!(pairs(command_fds(None, Some(5))), [(0, 0), (1, 5), (2, 2)]);
-        assert_eq!(
-            pairs(command_fds(Some(4), Some(7))),
-            [(0, 4), (1, 7), (2, 2)]
-        );
+        assert_eq!(pairs(command_fds([0, 1, 2])), [(0, 0), (1, 1), (2, 2)]);
+        assert_eq!(pairs(command_fds([4, 7, 7])), [(0, 4), (1, 7), (2, 7)]);
         assert_eq!(arg_bytes(&[b"ls", b"", b"a b"]), b"ls\0\0a b\0");
     }
 

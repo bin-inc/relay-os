@@ -36,6 +36,9 @@ pub struct TestConsole {
     asked: usize,
     /// How many times the shell took the console back.
     pub taken_back: usize,
+    /// What is written goes elsewhere than the screen (a program's fd 2
+    /// sent to a file).
+    pub redirected: bool,
 }
 
 impl TestConsole {
@@ -48,6 +51,7 @@ impl TestConsole {
             interrupt_after: None,
             asked: 0,
             taken_back: 0,
+            redirected: false,
         }
     }
 
@@ -77,6 +81,9 @@ impl Console for TestConsole {
     }
     fn columns(&self) -> usize {
         self.columns
+    }
+    fn is_screen(&self) -> bool {
+        !self.redirected
     }
     fn take_back(&mut self) {
         self.taken_back += 1;
@@ -184,10 +191,8 @@ impl System for TestSystem {
 pub struct Spawned {
     pub path: String,
     pub args: Vec<String>,
-    /// What it got as fd 0 (a pipe's read end) and fd 1 (a pipe's write
-    /// end or a redirection), instead of the shell's.
-    pub stdin: Option<u32>,
-    pub stdout: Option<u32>,
+    /// The shell's fds it got as its fds 0, 1 and 2.
+    pub fds: [u32; 3],
     pub group: Group,
 }
 
@@ -199,8 +204,11 @@ pub struct FakePrograms {
     pub known: Vec<(&'static str, WaitStatus)>,
     /// What `spawn` says of a path it does not know (default `ENOENT`).
     pub refusals: Vec<(&'static str, Errno)>,
-    /// Every redirection opened: its path, whether it appends, its fd.
+    /// Every redirection opened for output: its path, whether it appends,
+    /// its fd.
     pub opened: Vec<(String, bool, u32)>,
+    /// Every redirection opened for input: its path and fd.
+    pub inputs: Vec<(String, u32)>,
     /// What `open_output` fails with, if anything.
     pub open_error: Option<Errno>,
     /// Every pipe made, (read end, write end); what `pipe` fails with
@@ -208,6 +216,10 @@ pub struct FakePrograms {
     pub pipes: Vec<(u32, u32)>,
     pub pipe_error: Option<(usize, Errno)>,
     pub closed: Vec<u32>,
+    /// Every write to an fd the shell opened: the fd and the bytes.
+    pub written: Vec<(u32, Vec<u8>)>,
+    /// The fd whose writes fail, and with what.
+    pub write_error: Option<(u32, Errno)>,
     pub spawned: Vec<Spawned>,
     /// The programs that run on through this many rounds of `collect` (a
     /// round ends when it finds nothing), by path; the others end at once.
@@ -242,10 +254,13 @@ impl FakePrograms {
             known: Vec::new(),
             refusals: Vec::new(),
             opened: Vec::new(),
+            inputs: Vec::new(),
             open_error: None,
             pipes: Vec::new(),
             pipe_error: None,
             closed: Vec::new(),
+            written: Vec::new(),
+            write_error: None,
             spawned: Vec::new(),
             lives: Vec::new(),
             children: Vec::new(),
@@ -274,6 +289,21 @@ struct FakeChild {
 }
 
 impl FakePrograms {
+    /// What the shell wrote, through the fds it opened for `path`.
+    pub fn written_to(&self, path: &str) -> Vec<u8> {
+        let fds: Vec<u32> = self
+            .opened
+            .iter()
+            .filter(|o| o.0 == path)
+            .map(|o| o.2)
+            .collect();
+        self.written
+            .iter()
+            .filter(|w| fds.contains(&w.0))
+            .flat_map(|w| w.1.iter().copied())
+            .collect()
+    }
+
     /// The children not yet collected, by pid, with their groups.
     pub fn children(&self) -> Vec<(u32, u32)> {
         self.children.iter().map(|c| (c.pid, c.group)).collect()
@@ -289,6 +319,24 @@ impl Programs for FakePrograms {
         let path = String::from_utf8_lossy(path).into_owned();
         self.opened.push((path, append, self.next_fd));
         Ok(self.next_fd)
+    }
+    fn open_input(&mut self, path: &[u8]) -> Result<u32, Errno> {
+        if let Some(e) = self.open_error {
+            return Err(e);
+        }
+        self.next_fd += 1;
+        let path = String::from_utf8_lossy(path).into_owned();
+        self.inputs.push((path, self.next_fd));
+        Ok(self.next_fd)
+    }
+    fn write(&mut self, fd: u32, bytes: &[u8]) -> Result<(), Errno> {
+        if let Some((bad, e)) = self.write_error
+            && bad == fd
+        {
+            return Err(e);
+        }
+        self.written.push((fd, bytes.to_vec()));
+        Ok(())
     }
     fn close(&mut self, fd: u32) {
         self.closed.push(fd);
@@ -308,8 +356,7 @@ impl Programs for FakePrograms {
         &mut self,
         path: &[u8],
         args: &[&[u8]],
-        stdin: Option<u32>,
-        stdout: Option<u32>,
+        fds: [u32; 3],
         group: Group,
     ) -> Result<u32, Errno> {
         let path = String::from_utf8_lossy(path).into_owned();
@@ -329,8 +376,7 @@ impl Programs for FakePrograms {
                 .iter()
                 .map(|a| String::from_utf8_lossy(a).into_owned())
                 .collect(),
-            stdin,
-            stdout,
+            fds,
             group,
         });
         self.next_pid += 1;

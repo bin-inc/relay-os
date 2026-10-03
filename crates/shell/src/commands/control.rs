@@ -330,7 +330,10 @@ mod tests {
              root@relay:/# jobs > /tmp/j\n\
              root@relay:/# "
         );
-        assert_eq!(h.get("/tmp/j"), b"[1]+  Running                 t-spin &\n");
+        assert_eq!(
+            h.programs.written_to("/tmp/j"),
+            b"[1]+  Running                 t-spin &\n"
+        );
     }
 
     #[test]
@@ -551,7 +554,12 @@ mod tests {
             ),
             "{out}"
         );
-        assert_eq!(h.get("/tmp/w"), b"", "never into the redirection");
+        assert_eq!(
+            h.programs.written_to("/tmp/w"),
+            b"",
+            "never into the redirection"
+        );
+        assert_eq!(h.programs.opened.len(), 1);
     }
 
     #[test]
@@ -564,7 +572,8 @@ mod tests {
             ),
             "{out}"
         );
-        assert_eq!(h.get("/tmp/w"), b"");
+        assert_eq!(h.programs.written_to("/tmp/w"), b"");
+        assert_eq!(h.programs.opened.len(), 1);
     }
 
     #[test]
