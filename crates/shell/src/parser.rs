@@ -208,6 +208,13 @@ pub struct Command<W = String> {
     pub redirects: Vec<Redirect<W>>,
 }
 
+impl<W> Redirect<W> {
+    /// `> file` or `>> file` on fd 1.
+    fn is_output_file(&self) -> bool {
+        self.fd == 1 && matches!(self.op, RedirectOp::Write(_) | RedirectOp::Append(_))
+    }
+}
+
 impl<W> Command<W> {
     /// The file its standard output goes to, and whether it is appended
     /// to.
@@ -892,12 +899,12 @@ impl Parts {
         if self.pending.is_some() || (self.words.is_empty() && self.redirects.is_empty()) {
             return Err(ParseError::MissingTarget("|"));
         }
-        // `<` may stand on the first command only (programmable shell gate
-        // §7.3).
+        // `<` may stand on the first command only, `>` and `>>` on the last
+        // (programmable shell gate §7.3); errors may go anywhere.
         if self.later && self.redirects.iter().any(|r| r.fd == 0) {
             return Err(ParseError::Unsupported("< after |".into()));
         }
-        if self.words.is_empty() || self.redirects.iter().any(|r| r.fd != 0) {
+        if self.words.is_empty() || self.redirects.iter().any(Redirect::is_output_file) {
             return Err(ParseError::Unsupported("> before |".into()));
         }
         let p = core::mem::take(self);
@@ -3135,11 +3142,34 @@ mod tests {
             "unsupported syntax: |&"
         );
         assert_eq!(parse("a|&b"), Err(ParseError::Unsupported("|&".into())));
-        // Only the last command redirects (spec §9.1): bash would send the
-        // first one's output into the file and the second nothing.
+        // Only the last command redirects its output (spec §9.1): bash
+        // would send the first one's output into the file and the second
+        // nothing.
+        for line in ["a > f | b", "a >> f | b", "a 1> f | b", "a 2>&1 > f | b"] {
+            assert_eq!(
+                parse(line).unwrap_err().to_string(),
+                "unsupported syntax: > before |",
+                "{line}"
+            );
+        }
+        // Errors may go anywhere (programmable shell gate §7.3), and a copy
+        // is made over the pipes.
+        for line in [
+            "a 2> e | b",
+            "a 2>> e | b 2> e2",
+            "a 2>&1 | b",
+            "a 1>&2 | b",
+            "a < f 2>&1 | b | c 2>&1 > g",
+        ] {
+            assert!(parse(line).is_ok(), "{line}");
+        }
+        let p = parse("a 2>&1 | b").unwrap();
         assert_eq!(
-            parse("a > f | b").unwrap_err().to_string(),
-            "unsupported syntax: > before |"
+            p[0].redirects,
+            [Redirect {
+                fd: 2,
+                op: RedirectOp::Copy(1)
+            }]
         );
     }
 

@@ -22,6 +22,10 @@ pub(crate) enum Slot {
     Shell(u32),
     /// A file a redirection opened, by its place in [`Files`].
     File(usize),
+    /// In a pipeline, the pipe from the command before.
+    PipeIn,
+    /// In a pipeline, the pipe to the command after.
+    PipeOut,
 }
 
 /// A command's fds 0, 1 and 2.

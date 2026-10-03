@@ -552,9 +552,7 @@ impl<'a> Shell<'a> {
             let ran = runner::in_a_pipeline(name);
             return self.finish(ran.status, ran.message);
         }
-        let Some(all) = self.stage_fds(stages) else {
-            return self.finish(1, String::new());
-        };
+        let all = self.stage_fds(stages);
         let staged = runner_stages(stages, &all);
         let parts = Parts {
             vfs: &mut *self.vfs,
@@ -570,7 +568,7 @@ impl<'a> Shell<'a> {
             files: &mut self.files,
         };
         let ran = self.runner.get().pipeline(parts, &staged);
-        for fds in all {
+        for fds in all.into_iter().flatten() {
             self.release(fds);
         }
         self.console.take_back();
@@ -587,9 +585,7 @@ impl<'a> Shell<'a> {
             let message = format!("{NAME}: {name}: cannot be used in the background\n");
             return self.finish(1, message);
         }
-        let Some(all) = self.stage_fds(stages) else {
-            return self.finish(1, String::new());
-        };
+        let all = self.stage_fds(stages);
         let staged = runner_stages(stages, &all);
         let parts = Parts {
             vfs: &mut *self.vfs,
@@ -602,7 +598,7 @@ impl<'a> Shell<'a> {
             files: &mut self.files,
         };
         let started = self.runner.get().background(parts, &staged);
-        for fds in all {
+        for fds in all.into_iter().flatten() {
             self.release(fds);
         }
         if let Some(pgid) = started.pgid {
@@ -664,22 +660,24 @@ impl<'a> Shell<'a> {
         self.files.release(fds, &mut opener);
     }
 
-    /// Each stage's fds, its redirections made over the context; none if
-    /// one cannot be made.
-    fn stage_fds(&mut self, stages: &[parser::Command]) -> Option<Vec<Fds>> {
+    /// Each stage's fds (programmable shell gate §7.3): the pipe from the
+    /// one before, the pipe to the one after, the context's for the rest,
+    /// its redirections made over them; none for a stage whose redirection
+    /// could not be made, which runs nothing.
+    fn stage_fds(&mut self, stages: &[parser::Command]) -> Vec<Option<Fds>> {
+        let last = stages.len() - 1;
         let mut all = Vec::new();
-        for stage in stages {
-            match self.redirect(self.fds, &stage.redirects) {
-                Some(fds) => all.push(fds),
-                None => {
-                    for fds in all {
-                        self.release(fds);
-                    }
-                    return None;
-                }
-            }
+        for (i, stage) in stages.iter().enumerate() {
+            let input = if i == 0 { self.fds.0[0] } else { Slot::PipeIn };
+            let output = if i == last {
+                self.fds.0[1]
+            } else {
+                Slot::PipeOut
+            };
+            let base = Fds([input, output, self.fds.0[2]]);
+            all.push(self.redirect(base, &stage.redirects));
         }
-        Some(all)
+        all
     }
 
     /// Collects the background jobs' processes that have ended.
@@ -929,7 +927,7 @@ impl<'a> Shell<'a> {
 }
 
 /// A pipeline's stages for the runner: each one's words and fds.
-fn runner_stages<'c>(stages: &'c [parser::Command], fds: &[Fds]) -> Vec<runner::Stage<'c>> {
+fn runner_stages<'c>(stages: &'c [parser::Command], fds: &[Option<Fds>]) -> Vec<runner::Stage<'c>> {
     stages
         .iter()
         .zip(fds)
@@ -3081,6 +3079,80 @@ mod tests {
         assert_eq!(h.spawning("t-args > /tmp/o 1>&1").0, 3);
         assert_eq!(h.programs.spawned[0].fds, [0, 4, 2]);
         assert_eq!(h.programs.closed, [4]);
+    }
+
+    #[test]
+    fn a_pipeline_s_commands_redirect_over_its_pipes() {
+        // bash 5.2 (tmp/m5p1/probes/p10.txt): `2>&1` sends the errors into
+        // the pipe, and a command's own messages go there too.
+        let mut h = Harness::new();
+        h.put("/tmp/f", b"x\n");
+        assert_eq!(h.run("ls /tmp/f /nope 2>&1 | wc -l"), (0, "2\n".into()));
+        assert_eq!(h.run("ls /nope 2> /tmp/e | wc -l"), (0, "0\n".into()));
+        assert_eq!(
+            h.get("/tmp/e"),
+            b"ls: cannot access '/nope': No such file or directory\n"
+        );
+        assert_eq!(h.run("nope 2>&1 | wc -l"), (0, "1\n".into()));
+        // Output sent where the errors go leaves the pipe empty, a file's
+        // too.
+        assert_eq!(
+            h.run("ls /tmp/f /nope 2> /tmp/e2 1>&2 | wc -l"),
+            (0, "0\n".into())
+        );
+        assert_eq!(
+            h.get("/tmp/e2"),
+            b"ls: cannot access '/nope': No such file or directory\n/tmp/f\n"
+        );
+        assert_eq!(
+            h.run("ls /tmp/f /nope 1>&2 | wc -l"),
+            (
+                0,
+                "ls: cannot access '/nope': No such file or directory\n/tmp/f\n0\n".into()
+            )
+        );
+        assert_eq!(
+            h.run("cat /tmp/f | ls /nope 2>&1"),
+            (
+                2,
+                "ls: cannot access '/nope': No such file or directory\n".into()
+            )
+        );
+        // A command whose redirection fails runs nothing and leaves its
+        // neighbours an end; the pipeline fails only when it is the last.
+        assert_eq!(
+            h.run("cat < /nope | wc -l"),
+            (0, "relay-sh: /nope: No such file or directory\n0\n".into())
+        );
+        assert_eq!(
+            h.run("echo a 2> /nodir/y | cat"),
+            (0, "relay-sh: /nodir/y: No such file or directory\n".into())
+        );
+        assert_eq!(
+            h.run("echo a | cat > /nodir/x"),
+            (1, "relay-sh: /nodir/x: No such file or directory\n".into())
+        );
+        // Under /bin/sh: each command gets the pipes and its files.
+        let mut h = spawning();
+        assert_eq!(h.spawning("t-args 2>&1 | t-args 2> /tmp/e").0, 3);
+        assert_eq!(h.programs.pipes, [(5, 6)]);
+        assert_eq!(h.programs.spawned[0].fds, [0, 6, 6]);
+        assert_eq!(h.programs.spawned[1].fds, [5, 1, 4]);
+        assert_eq!(
+            h.spawning("nope 2>&1 | t-args"),
+            (3, String::new()),
+            "the message goes into the pipe"
+        );
+        assert_eq!(
+            h.programs.written,
+            [(8, b"relay-sh: nope: command not found\n".to_vec())]
+        );
+        h.programs.open_error = Some(vfs::Errno::ENOENT);
+        assert_eq!(
+            h.spawning("t-args | t-args > /nodir/x"),
+            (1, "relay-sh: /nodir/x: No such file or directory\n".into())
+        );
+        assert_eq!(h.programs.spawned.len(), 4, "the first ran");
     }
 
     #[test]

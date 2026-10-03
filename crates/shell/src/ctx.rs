@@ -74,7 +74,8 @@ impl JobControl<'_> {
 /// Where a command the shell runs itself writes (programmable shell gate
 /// §7.5): the screen, a file of the in-process runner's at an offset, an
 /// fd of `/bin/sh`'s, which its `Programs` write, or (errors) where the
-/// output goes, when fd 2 is a copy of fd 1's file or the other way.
+/// output goes, when fd 2 is a copy of fd 1's file or pipe or the other
+/// way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum To {
     Console,
@@ -192,6 +193,11 @@ impl<'a> Ctx<'a> {
     /// Gives the command standard input.
     pub(crate) fn set_input(&mut self, input: &'a mut dyn Stdin) {
         self.input = Some(input);
+    }
+
+    /// Errors go to `err`.
+    pub(crate) fn set_err(&mut self, err: To) {
+        self.err = err;
     }
 
     /// Gives the command the file `node` as standard input, from its start.
