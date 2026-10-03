@@ -1338,6 +1338,34 @@ mod tests {
     }
 
     #[test]
+    fn a_dropped_command_s_redirections_end_its_drop_where_bash_s_end() {
+        // Programmable shell gate §15 item 5: the drop scan reads every
+        // form of §7.1, refused or not, as bash does: a redirection after
+        // `fi` or `done` (its fd, `>&`, `<&`, `&>`, `>|`), `<<<` with no
+        // body; a line ending after `&&` or `||` goes on.
+        for text in [
+            &b"if true; then\nt-args 3> x\nfi 2> /tmp/e\nt-args next\n"[..],
+            b"while true; do\nt-args 3> x\ndone < /tmp/f\nt-args next\n",
+            b"for x in a; do\nt-args 3> x\ndone 2>&1\nt-args next\n",
+            b"for x in a; do\nt-args 3> x\ndone >&2\nt-args next\n",
+            b"t-args a <<< x\nt-args next\n",
+            b"if true; then\nt-args <<< x\nt-args body\nfi\nt-args next\n",
+            b"if true; then\nt-args 3> x\nfi 2>&1 > /tmp/o\nt-args next\n",
+            b"if true; then\nt-args 3> x\nfi > /tmp/o 2>&1 &&\nt-args tail\nt-args next\n",
+            b"if true; then\nt-args 3> x\nfi 2>&1 ||\nt-args tail\nt-args next\n",
+            b"t-args 3>&1 &&\nt-args tail\nt-args next\n",
+            b"if true; then\nt-args 3> x\nfi 0<&3\nt-args next\n",
+            b"if true; then\nt-args 3> x\nfi &> /tmp/o\nt-args next\n",
+            b"if true; then\nt-args 3> x\nfi >| /tmp/o\nt-args next\n",
+            // A target is a file's name, never a keyword.
+            b"if true; then\nt-args 3> x\n< fi t-args\nt-args body\nfi\nt-args next\n",
+            b"if true; then\nt-args 3> x\n2> fi t-args\nt-args body\nfi\nt-args next\n",
+        ] {
+            assert_eq!(piped(text), ["next"], "{}", String::from_utf8_lossy(text));
+        }
+    }
+
+    #[test]
     fn a_here_document_s_body_does_not_run() {
         // The prototype's review: `cat > x <<EOF`, refused, then ran each
         // line of its body as a command.
