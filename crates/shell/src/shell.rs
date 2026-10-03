@@ -568,12 +568,21 @@ impl<'a> Shell<'a> {
             files: &mut self.files,
         };
         let ran = self.runner.get().pipeline(parts, &staged);
+        // The last command's own message (the in-process runner's) on its
+        // fd 2, as a lone command's.
+        let mut message = ran.message;
+        if ran.own
+            && let Some(Some(fds)) = all.last()
+        {
+            self.say_on(*fds, message.as_bytes());
+            message.clear();
+        }
         for fds in all.into_iter().flatten() {
             self.release(fds);
         }
         self.console.take_back();
         self.cancelled |= ran.cancelled;
-        self.finish(ran.status, ran.message)
+        self.finish(ran.status, message)
     }
 
     /// Starts `stages` as a background job (user-space gate §9.2), whose
@@ -3094,6 +3103,10 @@ mod tests {
             b"ls: cannot access '/nope': No such file or directory\n"
         );
         assert_eq!(h.run("nope 2>&1 | wc -l"), (0, "1\n".into()));
+        // The last command's own message on its fd 2 (the prototype's
+        // review, M-2).
+        assert_eq!(h.run("echo a | nope 2> /tmp/n"), (127, String::new()));
+        assert_eq!(h.get("/tmp/n"), b"relay-sh: nope: command not found\n");
         // Output sent where the errors go leaves the pipe empty, a file's
         // too.
         assert_eq!(
