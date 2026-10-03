@@ -1,10 +1,13 @@
 //! The bash corpus (programmable shell gate §11.2): every script in
 //! `tests/corpus/` runs under the host's bash 5.2 and under the in-process
 //! runner, read as `X | sh` reads its input (no trace), and must print the
-//! same and end with the same status. A script writes nothing to standard
-//! error under bash (messages are tested against bash apart, as bash names
-//! a script's line in them) and holds no unquoted value with a blank in it
-//! (expansion never splits words here). A missing bash fails the test.
+//! same and end with the same status. Each starts in an empty directory of
+//! its own, where it may make files by relative names: bash's under the
+//! workspace's `target/corpus/`, the runner's `/tmp/corpus`. A script
+//! writes nothing to standard error under bash (messages are tested
+//! against bash apart, as bash names a script's line in them) and holds no
+//! unquoted value with a blank in it (expansion never splits words here).
+//! A missing bash fails the test.
 #![cfg(test)]
 
 use crate::testing::Harness;
@@ -13,6 +16,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use vfs::Vfs;
 
 /// The scripts, sorted by name.
 fn scripts() -> Vec<PathBuf> {
@@ -27,11 +31,18 @@ fn scripts() -> Vec<PathBuf> {
 }
 
 /// What bash 5.2 prints for `script` and its status, in the C locale with
-/// no startup files.
+/// no startup files, in an empty directory.
 fn bash(script: &Path) -> (i32, String) {
+    let name = script.file_stem().unwrap();
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/corpus")
+        .join(std::format!("{}-{}", std::process::id(), name.display()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
     let out = Command::new("bash")
         .args(["--norc", "--noprofile"])
         .arg(script)
+        .current_dir(&dir)
         .env_clear()
         .env("LC_ALL", "C")
         .env("PATH", "/usr/bin:/bin")
@@ -44,12 +55,16 @@ fn bash(script: &Path) -> (i32, String) {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8(out.stdout).expect("bash's output is text");
+    std::fs::remove_dir_all(&dir).unwrap();
     (out.status.code().expect("bash exited"), stdout)
 }
 
-/// What the in-process runner prints for `text` and its status.
+/// What the in-process runner prints for `text` and its status, in an
+/// empty directory.
 fn relay(text: &[u8]) -> (i32, String) {
     let mut h = Harness::new();
+    h.dir("/tmp/corpus");
+    h.vfs.chdir(b"/tmp/corpus").unwrap();
     let mut input = Bytes::new(text.to_vec());
     let status = Shell::new(&mut h.vfs, &mut h.console, &mut h.system).run_input(&mut input);
     (status, h.console.take())
