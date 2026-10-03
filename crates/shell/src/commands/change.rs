@@ -330,7 +330,8 @@ fn targets(
         .collect())
 }
 
-/// `cp src dst`, `cp src… dir`: regular files only.
+/// `cp src dst`, `cp src… dir`: regular files, and character devices
+/// read to their end.
 pub fn cp(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     let opts = match options(ctx, "cp", args, "") {
         Ok(o) => o,
@@ -364,9 +365,10 @@ fn copy(ctx: &mut Ctx<'_>, src: &str, dst: &[u8]) -> Result<(), ()> {
             );
             return Err(());
         }
-        // A symbolic link (not followed in milestone 1) or a special
-        // file cannot be read: say so before the destination is touched.
-        Ok((_, st)) if st.kind != FileType::Regular => {
+        // A symbolic link (not followed in milestone 1) or a special file
+        // but a character device (`/dev/null`, read to its end) cannot be
+        // read: say so before the destination is touched.
+        Ok((_, st)) if !matches!(st.kind, FileType::Regular | FileType::CharDev) => {
             ctx.fail(
                 "cp",
                 format_args!("cannot open {} for reading: {}", quote(src), Errno::EINVAL),
@@ -504,7 +506,7 @@ pub fn mv(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use crate::testing::{Harness, memfs};
+    use crate::testing::{Harness, host_tool, memfs};
     use alloc::string::String;
     use vfs::Errno;
 
@@ -796,6 +798,37 @@ mod tests {
         assert_eq!(h.get("/tmp/b"), b"alpha", "the target is emptied first");
         h.run("cp /tmp/long /tmp/copy");
         assert_eq!(h.get("/tmp/copy"), [7u8; 150_000]);
+    }
+
+    #[test]
+    fn cp_reads_dev_null_as_gnu_s_does() {
+        // A character device is read until its end, so `cp /dev/null f`
+        // empties f (the prototype's review, I-1).
+        let mut h = Harness::new();
+        h.vfs
+            .mount(b"/dev", alloc::boxed::Box::new(vfs::DevFs::new(0)))
+            .unwrap();
+        h.put("/tmp/e", b"old");
+        h.put("/tmp/f", b"kept");
+        let gnu = |line: &str| {
+            let (status, out, err) =
+                host_tool(&["sh", "-c", line], &[("e", b"old"), ("f", b"kept")], b"");
+            (status, out + &err)
+        };
+        h.run("cd /tmp");
+        for line in [
+            "cp /dev/null e",
+            "cp /dev/null new",
+            "cp f /dev/null",
+            "cp /dev/null /dev/null",
+        ] {
+            let (status, said) = h.run(line);
+            assert_eq!((status, said), gnu(line), "{line}");
+        }
+        assert_eq!(h.get("/tmp/e"), b"", "emptied");
+        assert_eq!(h.get("/tmp/new"), b"");
+        assert_eq!(gnu("cp /dev/null e; wc -c < e").0, 0);
+        assert_eq!(gnu("cp /dev/null e; wc -c < e").1, "0\n");
     }
 
     #[test]
