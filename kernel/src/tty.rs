@@ -209,6 +209,12 @@ pub fn has_input() -> bool {
     !INPUT.lock().is_empty()
 }
 
+/// Types `bytes` into the console's input, as `poll` adds what came.
+#[cfg(test)]
+pub fn type_for_test(bytes: &[u8]) {
+    INPUT.lock().push(bytes);
+}
+
 /// Whether the input queue is locked now (for the kernel's checks that no
 /// lock is held across a switch).
 pub fn is_locked() -> bool {

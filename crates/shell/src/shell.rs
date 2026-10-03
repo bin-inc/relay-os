@@ -1180,6 +1180,39 @@ mod tests {
     }
 
     #[test]
+    fn arithmetic_is_dropped_alone() {
+        // Plan 2's deferred minor: `((` is refused, and the drop read its
+        // `<<` as a here-document's, so the rest of the script was dropped
+        // without a word. bash runs `next` after each.
+        for text in [
+            &b"(( x = 1 << 2 ))\nt-args next\n"[..],
+            b"for ((i = 0; i << 1; i++))\ndo t-args body\ndone\nt-args next\n",
+            b"for((i = 0; i << 1; i++)); do\nt-args body\ndone\nt-args next\n",
+        ] {
+            assert_eq!(piped(text), ["next"], "{}", String::from_utf8_lossy(text));
+        }
+        // Two subshells with a here-document (the prototype's review): none
+        // of its body runs, nor anything after it.
+        let text = b"((cat <<EOF)\n)\nt-args ran\nEOF\n)\nt-args next\n";
+        assert!(piped(text).is_empty());
+    }
+
+    #[test]
+    fn a_dropped_group_runs_none_of_it() {
+        // The prototype's review: a refused `a || {`, `a && (` or `f() {`
+        // ended its drop at once, so the lines of its body ran without
+        // their guard, `exit` among them. bash runs none of them here.
+        for text in [
+            &b"t-args a && {\nt-args ran\n}\nt-args next\n"[..],
+            b"t-args a && (\nt-args ran\n)\nt-args next\n",
+            b"f() {\nt-args ran\n}\nt-args next\n",
+            b"t-args a || {\nt-args ran\nexit 1\n}\nt-args next\n",
+        ] {
+            assert_eq!(piped(text), ["next"], "{}", String::from_utf8_lossy(text));
+        }
+    }
+
+    #[test]
     fn an_if_dropped_any_way_runs_none_of_it() {
         // Plan 1's lesson: its worst defects ran part of a command without
         // its guard. However an `if` is dropped, none of it runs, the line

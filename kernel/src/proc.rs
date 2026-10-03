@@ -154,7 +154,7 @@ pub fn kernel_tick() {
 /// kills the foreground group (spec §6.4), and anything typed wakes whoever
 /// waits for input. A group that has ended gets no Ctrl-C: the shell that
 /// takes the console back reads it as raw input.
-fn console_input(t: &mut Table<Res>) {
+fn console_input<R>(t: &mut Table<R>) {
     if let Some(pgid) = tty::ctrl_c(|g| t.has_group(g)) {
         // Refused only for process 1's group, which never has the console
         // in line mode.
@@ -1014,6 +1014,31 @@ mod tests {
         vfs.write_at(elf, 0, b"\x7fELF").unwrap();
         vfs.truncate(elf, 1 << 20).unwrap();
         vfs
+    }
+
+    #[test]
+    fn a_line_mode_ctrl_c_is_for_a_foreground_group_that_is_left() {
+        // Plan 2's deferred minor: the input queue keeps a Ctrl-C for a
+        // group that has ended, as its tests show; this pins the wiring
+        // that asks the process table whether the group is left.
+        use crate::input::INTERRUPT;
+        use relay_abi::wait::KILLED_CTRL_C;
+        let mut t = Table::<()>::new();
+        let init = t.insert(0, Group::New, String::from("init"), ()).unwrap();
+        let cmd = t.insert(init, Group::New, String::from("cmd"), ()).unwrap();
+        tty::set_foreground(cmd);
+        tty::set_line_mode(true);
+        tty::type_for_test(&[INTERRUPT]);
+        console_input(&mut t);
+        assert_eq!(t.get(cmd).unwrap().killed, Some(KILLED_CTRL_C));
+        // Once it has ended, the Ctrl-C waits, as a raw one, for the group
+        // that takes the console back.
+        t.end(cmd, WaitStatus::killed(KILLED_CTRL_C));
+        tty::type_for_test(&[INTERRUPT]);
+        console_input(&mut t);
+        tty::set_line_mode(false);
+        tty::set_foreground(init);
+        assert!(tty::take_raw_ctrl_c());
     }
 
     #[test]
