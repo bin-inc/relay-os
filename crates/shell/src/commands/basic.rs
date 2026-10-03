@@ -123,11 +123,12 @@ pub fn help(ctx: &mut Ctx<'_>, _: &[String]) -> i32 {
     outln!(
         ctx,
         "Send output to a file with `> file` (replace) or `>> file` (append),\n\
-         or into another program with `| cmd` (built-ins cannot be in a\n\
-         pipeline). End a command with `&` to run it in the background, or\n\
-         with `;` to run the next one after it. `a && b` runs b if a\n\
-         succeeds, `a || b` if it fails, and `! a` turns a's status round.\n\
-         `sh FILE ARG...` runs a script, which reads its arguments as\n\
+         errors with `2> file` (both with `> file 2>&1`), or output into\n\
+         another program with `| cmd` (built-ins cannot be in a pipeline);\n\
+         `< file` reads a file as input. End a command with `&` to run it in\n\
+         the background, or with `;` to run the next one after it. `a && b`\n\
+         runs b if a succeeds, `a || b` if it fails, and `! a` turns a's status\n\
+         round. `sh FILE ARG...` runs a script, which reads its arguments as\n\
          `$1`...`$9`, `$#` and \"$@\". `$?` is the last command's status, and\n\
          `NAME=value` sets `$NAME`. `if a; then b; fi` runs b if a succeeds,\n\
          with `elif c; then d;` and `else e;` before `fi` for other cases;\n\
@@ -345,6 +346,9 @@ mod tests {
         for what in [
             "> file",
             ">> file",
+            "2> file",
+            "2>&1",
+            "< file",
             "| ",
             "&",
             "sh FILE",
