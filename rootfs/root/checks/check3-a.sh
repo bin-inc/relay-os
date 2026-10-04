@@ -9,6 +9,9 @@
 # `#nuc>`; `#!> regex` must match no line. A command with no `#>` line
 # must print nothing.
 
+# Run from any directory (programmable shell gate §9.2).
+cd /root
+
 # Start afresh, so the check can be run again.
 rm -rf /root/notes
 

@@ -1,3 +1,4 @@
++ cd /root
 + rm -f /root/check4.list /root/check4-a.sh /root/check4-a.log /root/check4-b.sh /root/check4-b.log
 + t-spawn fill
 filled the table with 60 children

@@ -1,3 +1,4 @@
++ cd /root
 + rm -f /root/check5-a.sh /root/check5-a.log /root/check5-b.sh /root/check5-b.log
 + seq 1000000 | wc -c
 6888896
