@@ -105,6 +105,9 @@ pub(crate) struct Stage<'c> {
     /// variables with them over, made only as it starts, so that a long
     /// pipeline never holds one for every command at once.
     pub assigns: &'c [String],
+    /// The message of its redirection that failed, which goes into the
+    /// pipe after it.
+    pub into_pipe: Option<&'c str>,
 }
 
 /// Runs the commands that are not the shell's own (`commands::BUILTINS`).
@@ -200,7 +203,8 @@ impl Runner for InProcess {
         for stage in before {
             let mut out = Collected(Vec::new());
             let (Some(fds), Some((name, args))) = (stage.fds, stage.words.split_first()) else {
-                piped = Some(Bytes::new(out.0));
+                let message = stage.into_pipe.unwrap_or_default();
+                piped = Some(Bytes::new(message.as_bytes().to_vec()));
                 continue;
             };
             let mut err_pipe = Vec::new();
@@ -472,7 +476,12 @@ impl Spawning<'_> {
             };
             let (Some(fds), Some((name, args))) = (stage.fds, stage.words.split_first()) else {
                 // Its words expanded to nothing or a redirection of it
-                // failed: it runs nothing, and its neighbours see an end.
+                // failed: it runs nothing, its message goes into the pipe
+                // after it if its fd 2 was that (a fresh pipe takes it at
+                // once), and its neighbours see an end.
+                if let (Some(message), Some(fd)) = (stage.into_pipe, stdout) {
+                    let _ = self.programs.write(fd, message.as_bytes());
+                }
                 for fd in [stdin, stdout].into_iter().flatten() {
                     self.programs.close(fd);
                 }

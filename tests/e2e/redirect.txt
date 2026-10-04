@@ -27,6 +27,9 @@ send cat r-o2
 expect \nr-f\nroot@relay:~# $
 send ls r-f r-nope 2>&1 | wc -l
 expect \n2\nroot@relay:~# $
+# A redirection that fails after `2>&1` tells it into the pipe (plan 4).
+send cat 2>&1 < r-nope | wc -l
+expect \n1\nroot@relay:~# $
 send nope 2> r-e2; cd /nope 2>> r-e2; cat r-e2
 expect \nrelay-sh: nope: command not found\nrelay-sh: cd: /nope: No such file or directory\nroot@relay:~# $
 # A construct's redirections, made once: help (a built-in) and echo (a

@@ -32,6 +32,12 @@ pub const CANCELLED: i32 = 130;
 const CONTINUE: &str = "> ";
 /// The most of `/etc/motd` shown at start.
 const MOTD_MAX: usize = 16 * 1024;
+/// The longest message of a failed redirection that goes into the pipe
+/// after its command, before the pipe's reader starts: half of the 16 KiB
+/// a pipe holds, so the write never waits. Any path the vfs takes
+/// (`PATH_MAX`, 4 KiB) fits; a longer one's (`File name too long`) is told
+/// on the screen.
+const PIPED_MESSAGE_MAX: usize = 8 * 1024;
 
 pub struct Shell<'a> {
     vfs: &'a mut dyn Vfs,
@@ -632,12 +638,12 @@ impl<'a> Shell<'a> {
         // fd 2, as a lone command's.
         let mut message = ran.message;
         if ran.own
-            && let Some(Some(fds)) = all.last()
+            && let Some((Some(fds), _)) = all.last()
         {
             self.say_on(*fds, message.as_bytes());
             message.clear();
         }
-        for fds in all.into_iter().flatten() {
+        for fds in all.into_iter().filter_map(|(fds, _)| fds) {
             self.release(fds);
         }
         self.console.take_back();
@@ -669,7 +675,7 @@ impl<'a> Shell<'a> {
             env: &env,
         };
         let started = self.runner.get().background(parts, &staged, &self.vars);
-        for fds in all.into_iter().flatten() {
+        for fds in all.into_iter().filter_map(|(fds, _)| fds) {
             self.release(fds);
         }
         if let Some(pgid) = started.pgid {
@@ -719,19 +725,29 @@ impl<'a> Shell<'a> {
     /// as bash tells it (`cat 2> e < missing` writes into `e`), and what
     /// was made of it is closed.
     fn redirect(&mut self, base: Fds, redirects: &[parser::Redirect]) -> Option<Fds> {
+        match self.made(base, redirects) {
+            Ok(fds) => Some(fds),
+            Err((fds, message)) => {
+                self.say_on(fds, message.as_bytes());
+                self.release(fds);
+                None
+            }
+        }
+    }
+
+    /// The context `redirects` make over `base`, or what was made of it
+    /// when one cannot be made, and its message.
+    fn made(&mut self, base: Fds, redirects: &[parser::Redirect]) -> Result<Fds, (Fds, String)> {
         let mut opener = Opener {
             vfs: &mut *self.vfs,
             programs: self.runner.programs(),
         };
-        match self.files.redirect(base, redirects, &mut opener) {
-            Ok(fds) => Some(fds),
-            Err(failed) => {
+        self.files
+            .redirect(base, redirects, &mut opener)
+            .map_err(|failed| {
                 let message = format!("{NAME}: {}: {}\n", failed.path, failed.error);
-                self.say_on(failed.fds, message.as_bytes());
-                self.release(failed.fds);
-                None
-            }
-        }
+                (failed.fds, message)
+            })
     }
 
     /// Writes where fd 2 of `fds` goes: the screen (and a running
@@ -767,8 +783,10 @@ impl<'a> Shell<'a> {
     /// Each stage's fds (programmable shell gate §7.3): the pipe from the
     /// one before, the pipe to the one after, the context's for the rest,
     /// its redirections made over them; none for a stage whose redirection
-    /// could not be made, which runs nothing.
-    fn stage_fds(&mut self, stages: &[parser::Command]) -> Vec<Option<Fds>> {
+    /// could not be made, which runs nothing. Its message is told on its
+    /// fd 2 as it stood then, which after `2>&1` is the pipe: the runner
+    /// writes it there (`cat 2>&1 < /nope | wc -l`, as bash's).
+    fn stage_fds(&mut self, stages: &[parser::Command]) -> Vec<(Option<Fds>, Option<String>)> {
         let last = stages.len() - 1;
         let mut all = Vec::new();
         for (i, stage) in stages.iter().enumerate() {
@@ -779,7 +797,17 @@ impl<'a> Shell<'a> {
                 Slot::PipeOut
             };
             let base = Fds([input, output, self.fds.0[2]]);
-            all.push(self.redirect(base, &stage.redirects));
+            all.push(match self.made(base, &stage.redirects) {
+                Ok(fds) => (Some(fds), None),
+                Err((fds, message)) => {
+                    let piped = fds.0[2] == Slot::PipeOut && message.len() <= PIPED_MESSAGE_MAX;
+                    if !piped {
+                        self.say_on(fds, message.as_bytes());
+                    }
+                    self.release(fds);
+                    (None, piped.then_some(message))
+                }
+            });
         }
         all
     }
@@ -1049,15 +1077,19 @@ impl<'a> Shell<'a> {
 }
 
 /// A pipeline's stages for the runner: each one's words, fds and
-/// assignments.
-fn runner_stages<'c>(stages: &'c [parser::Command], fds: &[Option<Fds>]) -> Vec<runner::Stage<'c>> {
+/// assignments, and the message it sends into the pipe.
+fn runner_stages<'c>(
+    stages: &'c [parser::Command],
+    fds: &'c [(Option<Fds>, Option<String>)],
+) -> Vec<runner::Stage<'c>> {
     stages
         .iter()
         .zip(fds)
-        .map(|(c, fds)| runner::Stage {
+        .map(|(c, (fds, into_pipe))| runner::Stage {
             words: &c.words,
             fds: *fds,
             assigns: &c.assigns,
+            into_pipe: into_pipe.as_deref(),
         })
         .collect()
 }
@@ -1095,6 +1127,7 @@ fn builtin_in(stages: &[parser::Command]) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    use super::PIPED_MESSAGE_MAX;
     use crate::Shell;
     use crate::testing::{FakeStdout, Harness};
     use alloc::string::String;
@@ -3660,6 +3693,27 @@ mod tests {
             h.run("echo a | cat > /nodir/x"),
             (1, "relay-sh: /nodir/x: No such file or directory\n".into())
         );
+        // After `2>&1` the message goes into the pipe, as bash's does
+        // (probe p1; plan 1's final review, M-1); a failure before `2>&1`
+        // is told where fd 2 was then.
+        assert_eq!(h.run("cat 2>&1 < /nope | wc -l"), (0, "1\n".into()));
+        assert_eq!(
+            h.run("echo a | cat 2>&1 2> /nodir/e | cat"),
+            (0, "relay-sh: /nodir/e: No such file or directory\n".into())
+        );
+        assert_eq!(
+            h.run("cat < /nope 2>&1 | wc -l"),
+            (0, "relay-sh: /nope: No such file or directory\n0\n".into())
+        );
+        // One longer than a pipe takes at once stays on the screen.
+        let long = alloc::format!("/{}", "x".repeat(PIPED_MESSAGE_MAX));
+        assert_eq!(
+            h.run(&alloc::format!("cat 2>&1 < {long} | wc -l")),
+            (
+                0,
+                alloc::format!("relay-sh: {long}: File name too long\n0\n")
+            )
+        );
         // Under /bin/sh: each command gets the pipes and its files.
         let mut h = spawning();
         assert_eq!(h.spawning("t-args 2>&1 | t-args 2> /tmp/e").0, 3);
@@ -3681,6 +3735,30 @@ mod tests {
             (1, "relay-sh: /nodir/x: No such file or directory\n".into())
         );
         assert_eq!(h.programs.spawned.len(), 4, "the first ran");
+        // A failed redirection after `2>&1`: its message into the pipe.
+        h.programs.written.clear();
+        assert_eq!(
+            h.spawning("t-args 2>&1 < /nope | t-args"),
+            (3, String::new())
+        );
+        let (_, write) = *h.programs.pipes.last().unwrap();
+        assert_eq!(
+            h.programs.written,
+            [(
+                write,
+                b"relay-sh: /nope: No such file or directory\n".to_vec()
+            )]
+        );
+        assert!(h.programs.closed.contains(&write));
+        let long = alloc::format!("/{}", "x".repeat(PIPED_MESSAGE_MAX));
+        assert_eq!(
+            h.spawning(&alloc::format!("t-args 2>&1 < {long} | t-args")),
+            (
+                3,
+                alloc::format!("relay-sh: {long}: No such file or directory\n")
+            )
+        );
+        assert_eq!(h.programs.written.len(), 1, "nothing more written");
     }
 
     #[test]
