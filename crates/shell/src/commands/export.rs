@@ -43,9 +43,9 @@ pub fn export(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
 /// `unset [-v] [NAME...]`: removes each variable, exported or not. As in
 /// bash, without `-v` a name that is not one is passed over (bash looks
 /// for a function of that name too); with it, it fails (status 1). `-f`
-/// (functions) is not supported.
+/// (functions) and `-n` (name references) are not supported.
 pub fn unset(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
-    let (letters, names) = match options(ctx, "unset", args, "fv", "f") {
+    let (letters, names) = match options(ctx, "unset", args, "fnv", "fn") {
         Ok(read) => read,
         Err(status) => return status,
     };
@@ -289,6 +289,8 @@ mod tests {
         for (line, status, message) in [
             ("unset -f f", 1, "relay-sh: unset: -f: not supported\n"),
             ("unset -fv A", 1, "relay-sh: unset: -f: not supported\n"),
+            // bash's `-n` (name references) is not supported either.
+            ("unset -n A", 1, "relay-sh: unset: -n: not supported\n"),
             ("unset -x A", 2, "relay-sh: unset: -x: invalid option\n"),
             ("unset -f -x A", 2, "relay-sh: unset: -x: invalid option\n"),
         ] {
