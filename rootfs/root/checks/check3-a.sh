@@ -16,7 +16,7 @@ cd /root
 rm -rf /root/notes
 
 uname -a
-#> Relay relay 0\.5\.0 x86_64
+#> Relay relay 0\.6\.0 x86_64
 date
 #> (Mon|Tue|Wed|Thu|Fri|Sat|Sun) \w{3} [ \d]\d \d\d:\d\d:\d\d UTC 20\d\d
 
