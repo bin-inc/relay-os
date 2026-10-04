@@ -1,6 +1,6 @@
-//! The shell's `Console` and `System`, and a program's standard output,
-//! over system calls (user-space gate §8.1), and the `main` of `/bin`'s
-//! command programs.
+//! The shell's `Console`, `System`, `Stdin`, `Stdout` and `Programs` over
+//! system calls (user-space gate §8.1), and the `main` of `/bin`'s command
+//! programs.
 
 use crate::Args;
 use crate::sys;
