@@ -9,7 +9,8 @@ boot-path bugs are still welcome reports.
 Use a private
 [GitHub security advisory](https://github.com/bin-inc/relay-os/security/advisories/new)
 ("Report a vulnerability" on the Security tab). Please do not open a public
-issue for a vulnerability.
+issue for a vulnerability. If you cannot use GitHub, email the maintainer,
+Hardy Nguyen, at maw.signup@gmail.com.
 
 Include the version (`git describe` or the release tag), how you ran it
 (QEMU or hardware) and the steps to reproduce.

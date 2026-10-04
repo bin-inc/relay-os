@@ -169,7 +169,7 @@ vulnerabilities as described in [SECURITY.md](SECURITY.md). Everyone taking
 part follows the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 If you like the project, you can
-[buy the maintainer a coffee](https://buymeacoffee.com/maw629).
+[buy the maintainer (Hardy Nguyen) a coffee](https://buymeacoffee.com/maw629).
 
 ## Layout
 
