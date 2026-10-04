@@ -205,8 +205,8 @@ against the output the scripts expect (their `#>` lines), so only the boot
 screen and the steps by hand need a look. The QEMU scenario `checks` runs
 the same scripts on every pull request.
 
-Every command but the shell's built-ins (`cd`, `exit`, `help`, `jobs`,
-`kill`, `wait`) is a program in `/bin`.
+Every command but the shell's built-ins (`cd`, `exit`, `export`, `help`,
+`jobs`, `kill`, `unset`, `wait`) is a program in `/bin`, `env` among them.
 
 ### Check 3 — boot, files and programs
 

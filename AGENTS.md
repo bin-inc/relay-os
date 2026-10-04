@@ -18,10 +18,11 @@ and runs programs in ring 3 from a read-only `/bin` (`system.img`).
 Process 1 is the kernel's init, which runs `/bin/sh`; the shell has
 pipes, background jobs, scripts with arguments and variables, lists
 (`;`, `&&`, `||`, `!`), `if`, `while`, `until` and `for`, commands read
-across lines with bash's `> ` prompt, and six built-ins (`cd`, `exit`,
-`help`, `jobs`, `kill`, `wait`). Every other command is a program, `test`
-and `[` too. The programmable shell gate goes on with milestone 5
-(redirection and environment, 0.6.0). The aarch64 port comes later.
+across lines with bash's `> ` prompt, and eight built-ins (`cd`, `exit`,
+`export`, `help`, `jobs`, `kill`, `unset`, `wait`). Every other command is
+a program, `test`, `[` and `env` too. The programmable shell gate goes on
+with milestone 5 (redirection and environment, 0.6.0). The aarch64 port
+comes later.
 
 ## Where to read
 
