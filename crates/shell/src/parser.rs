@@ -214,10 +214,11 @@ pub struct Command<W = String> {
 }
 
 impl<W> Redirect<W> {
-    /// Its operator, as a refusal names it (`<`, `2>>`, `>&2`).
-    fn operator(&self) -> String {
+    /// Its operator, as a refusal names it (`<`, `2>>`, `>&2`): its fd
+    /// too when that was typed (`explicit`) or is not the default.
+    fn operator(&self, explicit: bool) -> String {
         let fd = |default| {
-            if self.fd == default {
+            if self.fd == default && !explicit {
                 String::new()
             } else {
                 format!("{}", self.fd)
@@ -854,6 +855,9 @@ impl Building {
 struct Parts {
     words: Vec<Word>,
     redirects: Vec<Redirect<Word>>,
+    /// Whether each redirection's fd was typed (`1>`, `0<`), which a
+    /// refusal names.
+    explicit: Vec<bool>,
     /// A redirection waiting for its word.
     pending: Option<Pending>,
     /// How many `!` stood before the pipeline's first command.
@@ -869,10 +873,14 @@ struct Parts {
 /// A redirection operator waiting for its word.
 #[derive(Clone, Copy)]
 enum Pending {
-    /// `<` on fd 0: a file name.
-    Read,
-    /// `>` or `>>` (`append`) on `fd`: a file name.
-    File { fd: u32, append: bool },
+    /// `<` on fd 0, which was typed (`explicit`) or not: a file name.
+    Read { explicit: bool },
+    /// `>` or `>>` (`append`) on `fd`, typed or not: a file name.
+    File {
+        fd: u32,
+        append: bool,
+        explicit: bool,
+    },
     /// `>&` on `fd`, as typed (`2>&` or `>&`): the fd it copies.
     Copy { fd: u32, typed: &'static str },
 }
@@ -891,17 +899,25 @@ impl Parts {
             return Ok(None);
         };
         match self.pending.take() {
-            Some(Pending::Read) => self.redirects.push(Redirect {
-                fd: 0,
-                op: RedirectOp::Read(w),
-            }),
-            Some(Pending::File { fd, append }) => {
+            Some(Pending::Read { explicit }) => {
+                self.redirects.push(Redirect {
+                    fd: 0,
+                    op: RedirectOp::Read(w),
+                });
+                self.explicit.push(explicit);
+            }
+            Some(Pending::File {
+                fd,
+                append,
+                explicit,
+            }) => {
                 let op = if append {
                     RedirectOp::Append(w)
                 } else {
                     RedirectOp::Write(w)
                 };
                 self.redirects.push(Redirect { fd, op });
+                self.explicit.push(explicit);
             }
             // Only a bare `1` or `2`: bash expands the word, and takes a
             // file, `-` or another fd too (§15 item 5).
@@ -915,6 +931,7 @@ impl Parts {
                     fd,
                     op: RedirectOp::Copy(copied),
                 });
+                self.explicit.push(typed != ">&");
             }
             // After a compound command, as in bash, only a keyword that
             // closes or goes on with the one around it may come (`fi fi`,
@@ -948,6 +965,13 @@ impl Parts {
         Ok(None)
     }
 
+    /// The operator, as typed, of the first redirection that `which`.
+    fn typed(&self, which: impl Fn(&Redirect<Word>) -> bool) -> Option<String> {
+        let i = self.redirects.iter().position(which)?;
+        let explicit = self.explicit.get(i).is_some_and(|&e| e);
+        Some(self.redirects[i].operator(explicit))
+    }
+
     /// The command so far, ended by a `|`, which needs one before it.
     /// Every command of a pipeline has a name: a redirection alone, which
     /// bash runs, is refused like one on a command before the last.
@@ -961,20 +985,20 @@ impl Parts {
         }
         // `<` may stand on the first command only, `>` and `>>` on the last
         // (programmable shell gate §7.3); errors may go anywhere.
-        if self.later && self.redirects.iter().any(|r| r.fd == 0) {
-            return Err(ParseError::Unsupported("< after |".into()));
+        if self.later
+            && let Some(read) = self.typed(|r| r.fd == 0)
+        {
+            return Err(ParseError::Unsupported(format!("{read} after |")));
         }
         // A redirection alone, which bash runs, is refused like an output
         // file: each names what was typed.
-        let refused = match self.redirects.first() {
-            Some(first) if self.words.is_empty() => Some(first),
-            _ => self.redirects.iter().find(|r| r.is_output_file()),
+        let refused = if self.words.is_empty() {
+            self.typed(|_| true)
+        } else {
+            self.typed(Redirect::is_output_file)
         };
-        if let Some(r) = refused {
-            return Err(ParseError::Unsupported(format!(
-                "{} before |",
-                r.operator()
-            )));
+        if let Some(op) = refused {
+            return Err(ParseError::Unsupported(format!("{op} before |")));
         }
         let p = core::mem::take(self);
         self.bangs = p.bangs;
@@ -1028,7 +1052,7 @@ fn end_pipeline(
             (true, _) => {}
             (false, true) => return Err(ParseError::MissingTarget(end)),
             (false, false) => {
-                let first = parts.redirects.first().map(Redirect::operator);
+                let first = parts.typed(|_| true);
                 return Err(ParseError::Unsupported(format!(
                     "| {}",
                     first.unwrap_or_default()
@@ -1036,10 +1060,12 @@ fn end_pipeline(
             }
         }
     }
-    let p = core::mem::take(parts);
-    if !pipeline.is_empty() && p.redirects.iter().any(|r| r.fd == 0) {
-        return Err(ParseError::Unsupported("< after |".into()));
+    if !pipeline.is_empty()
+        && let Some(read) = parts.typed(|r| r.fd == 0)
+    {
+        return Err(ParseError::Unsupported(format!("{read} after |")));
     }
+    let p = core::mem::take(parts);
     pipeline.push(command(p.words, p.redirects)?);
     Ok(Some(Pipeline {
         negated: p.bangs % 2 == 1,
@@ -1230,7 +1256,11 @@ impl Parser {
                         };
                         Pending::Copy { fd, typed }
                     } else {
-                        Pending::File { fd, append }
+                        Pending::File {
+                            fd,
+                            append,
+                            explicit: !typed.is_empty(),
+                        }
                     });
                 }
                 '|' if cur.next_if_eq('|') => {
@@ -1279,7 +1309,8 @@ impl Parser {
                 '<' => {
                     // As at `>`: `0<` is fd 0; bash's `1<`, `2<` and others
                     // are refused, as are its here-documents, `<&` and `<>`.
-                    if let Some(digits) = self.fd_word()?
+                    let digits = self.fd_word()?;
+                    if let Some(digits) = &digits
                         && digits != "0"
                     {
                         return Err(ParseError::Unsupported(format!("{digits}<")));
@@ -1297,7 +1328,9 @@ impl Parser {
                             return Err(ParseError::Unsupported(op.into()));
                         }
                     }
-                    self.parts.pending = Some(Pending::Read);
+                    self.parts.pending = Some(Pending::Read {
+                        explicit: digits.is_some(),
+                    });
                 }
                 // bash's `&>` sends both outputs to a file.
                 '&' if cur.peek() == Some('>') => {
@@ -1445,7 +1478,7 @@ impl Parser {
         match self.parts.pending {
             // The fd a `>&` copies (`2>&1>f`).
             Some(Pending::Copy { .. }) => return Ok(None),
-            Some(Pending::File { .. } | Pending::Read) => {
+            Some(Pending::File { .. } | Pending::Read { .. }) => {
                 return Err(ParseError::Unexpected(digits));
             }
             None => {}
@@ -2877,6 +2910,8 @@ mod tests {
             // Only a pipeline's first command reads a file (§7.3).
             ("cat | cat < f", "< after |"),
             ("cat | cat < f | wc", "< after |"),
+            ("cat | cat 0< f", "0< after |"),
+            ("cat | cat 0< f | wc", "0< after |"),
         ] {
             assert_eq!(
                 parse_line(line),
@@ -3286,8 +3321,9 @@ mod tests {
         for (line, op) in [
             ("a > f | b", ">"),
             ("a >> f | b", ">>"),
-            ("a 1> f | b", ">"),
+            ("a 1> f | b", "1>"),
             ("a 2>&1 > f | b", ">"),
+            ("a 2>&1 1>> f | b", "1>>"),
         ] {
             assert_eq!(
                 parse(line).unwrap_err().to_string(),
@@ -3332,6 +3368,15 @@ mod tests {
             ("a | < f", "| <"),
             ("a | 2> e", "| 2>"),
             ("a | 2>&1", "| 2>&1"),
+            // An fd typed before its operator is named too, though it is
+            // the default (plan 1's final review, M-3).
+            ("1> f | cat", "1> before |"),
+            ("1>> f | cat", "1>> before |"),
+            ("0< f | cat", "0< before |"),
+            ("1>&2 | cat", "1>&2 before |"),
+            ("a | 1> f", "| 1>"),
+            ("a | 0< f", "| 0<"),
+            ("a | 1>&2", "| 1>&2"),
         ] {
             assert_eq!(
                 parse(line),
