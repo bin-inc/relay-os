@@ -143,6 +143,18 @@ impl<'a> Shell<'a> {
         self
     }
 
+    /// The same `/bin/sh`, its own fd 1 not the screen (`X | sh > f`,
+    /// `X | sh | cat`, `sh > f` at a prompt): fd 1 is then held as a file
+    /// the shell opened, for good, so a built-in's output and the
+    /// messages after `2>&1` go there, as bash's do, where relay-rt's
+    /// console would show them (programmable shell gate §15 item 8).
+    pub fn with_output_redirected(mut self) -> Shell<'a> {
+        if self.runner.programs().is_some() {
+            self.fds.0[1] = Slot::File(self.files.add(Handle::Fd(1)));
+        }
+        self
+    }
+
     /// The same shell, its in-process commands reading `input`.
     pub fn with_input(mut self, input: &'a mut dyn Stdin) -> Shell<'a> {
         self.input = Some(input);
@@ -2546,6 +2558,61 @@ mod tests {
         }
         Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs).run();
         h.console.take()
+    }
+
+    #[test]
+    fn a_shell_whose_output_is_not_the_screen_writes_there() {
+        // `X | sh > f` (plan 1's review, M-3; probe p2): a built-in's
+        // output, and the shell's and a built-in's messages after `2>&1`,
+        // go to the shell's fd 1, as bash's do; its other messages go to
+        // the screen, and a program gets fd 1 as before.
+        let mut h = spawning();
+        h.dir("/d");
+        let mut shell = Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+            .with_output_redirected();
+        for line in [
+            "cd /d; cd /; cd -",
+            "cd /nope 2>&1",
+            "nope 2>&1",
+            "cd /nope",
+            "nope",
+            "t-args",
+            "t-args 2>&1",
+            "nope 2>&1 | t-args",
+        ] {
+            shell.execute(line);
+        }
+        drop(shell);
+        let written: Vec<(u32, String)> = h
+            .programs
+            .written
+            .iter()
+            .map(|(fd, b)| (*fd, String::from_utf8_lossy(b).into_owned()))
+            .collect();
+        let pipe = h.programs.pipes[0].1;
+        assert_eq!(
+            written,
+            [
+                (1, "/d\n".into()),
+                (1, "relay-sh: cd: /nope: No such file or directory\n".into()),
+                (1, "relay-sh: nope: command not found\n".into()),
+                (pipe, "relay-sh: nope: command not found\n".into()),
+            ]
+        );
+        assert_eq!(
+            h.console.take(),
+            "relay-sh: cd: /nope: No such file or directory\n\
+             relay-sh: nope: command not found\n"
+        );
+        let fds: Vec<[u32; 3]> = h.programs.spawned.iter().map(|s| s.fds).collect();
+        assert_eq!(fds, [[0, 1, 2], [0, 1, 1], [pipe - 1, 1, 2]]);
+        // Not redirected, all of it reaches the screen, as before.
+        let mut h = spawning();
+        assert_eq!(
+            h.spawning("cd /nope 2>&1"),
+            (1, "relay-sh: cd: /nope: No such file or directory\n".into())
+        );
+        assert_eq!(h.programs.written, []);
     }
 
     /// `sleep` and `t-spin` run on through `collect`'s first round (the

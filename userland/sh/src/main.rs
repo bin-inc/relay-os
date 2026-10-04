@@ -6,7 +6,9 @@
 //! commands in the shell's own process group and its transcript a console
 //! tee. Every command but the shell's own is a program. Outside a script
 //! `$0` is the shell's argument 0, as bash's is. Every shell imports the
-//! environment it was started with as exported variables.
+//! environment it was started with as exported variables. One whose own
+//! fd 1 is not the console (`X | sh > f`) writes its built-ins' output
+//! there.
 #![no_std]
 #![no_main]
 
@@ -16,7 +18,7 @@ use alloc::string::String;
 use relay_abi::console::MODE_RAW;
 use relay_rt::sysio::words;
 use relay_rt::{Args, SysConsole, SysPrograms, SysStdin, SysStdout, SysSystem, SysVfs, env, sys};
-use shell::Shell;
+use shell::{Shell, Stdout};
 
 relay_rt::main!(main);
 
@@ -35,6 +37,9 @@ fn main(args: Args) -> u8 {
         let mut shell = Shell::spawning(&mut vfs, &mut console, &mut system, &mut programs)
             .with_environment(env::block())
             .named(&name);
+        if !SysStdout::new().is_tty() {
+            shell = shell.with_output_redirected();
+        }
         shell.run_input(&mut SysStdin) as u8
     } else if words.is_empty() {
         // A shell whose group was never given the console (`sh &`, or one
@@ -52,6 +57,9 @@ fn main(args: Args) -> u8 {
         let mut shell = Shell::spawning(&mut vfs, &mut console, &mut system, &mut programs)
             .with_environment(env::block())
             .named(&name);
+        if !SysStdout::new().is_tty() {
+            shell = shell.with_output_redirected();
+        }
         shell.run();
         shell.status() as u8
     } else {
