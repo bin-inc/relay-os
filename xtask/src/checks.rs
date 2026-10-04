@@ -89,7 +89,9 @@ pub fn parse(script: &str, machine: Machine) -> Result<Vec<Command>> {
             // `#word>` looks like an expectation: a typo must not turn one
             // into a comment, or a wrong transcript could pass.
             t if t.chars().all(|c| c.is_ascii_alphabetic() || c == '!') => {
-                bail!("line {n}: `#{t}>` is not an expectation (`#>`, `#!>`, `#nuc>`, `#qemu>`)")
+                bail!(
+                    "line {n}: `#{t}>` is not an expectation (`#>`, `#!>`, `#nuc>`, `#qemu>`, `#same>`)"
+                )
             }
             _ => continue,
         };
@@ -660,7 +662,9 @@ free
             let err = parse(&format!("ls\n#{tag}> x\n"), Machine::Nuc).unwrap_err();
             assert_eq!(
                 err.to_string(),
-                format!("line 2: `#{tag}>` is not an expectation (`#>`, `#!>`, `#nuc>`, `#qemu>`)")
+                format!(
+                    "line 2: `#{tag}>` is not an expectation (`#>`, `#!>`, `#nuc>`, `#qemu>`, `#same>`)"
+                )
             );
         }
     }
