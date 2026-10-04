@@ -11,7 +11,7 @@ use crate::io::{Console, Programs, Stdin, Stdout, System};
 use crate::jobs::Jobs;
 use crate::parser::{self, HOME};
 use crate::reader::Reader;
-use crate::runner::{self, Parts, Ran, Runners};
+use crate::runner::{self, PIPED_MESSAGE_MAX, Parts, Ran, Runners};
 use crate::transcript::{self, Transcript};
 use alloc::format;
 use alloc::string::String;
@@ -139,6 +139,18 @@ impl<'a> Shell<'a> {
         // Said once, as an assignment that does not fit is.
         if let Err(e) = start_variables(&mut self.vars, &mut *self.vfs) {
             self.console.write(format!("{NAME}: {e}\n").as_bytes());
+        }
+        self
+    }
+
+    /// The same `/bin/sh`, its own fd 1 not the screen (`X | sh > f`,
+    /// `X | sh | cat`, `sh > f` at a prompt): fd 1 is then held as a file
+    /// the shell opened, for good, so a built-in's output and the
+    /// messages after `2>&1` go there, as bash's do, where relay-rt's
+    /// console would show them (programmable shell gate §15 item 8).
+    pub fn with_output_redirected(mut self) -> Shell<'a> {
+        if self.runner.programs().is_some() {
+            self.fds.0[1] = Slot::File(self.files.add(Handle::Fd(1)));
         }
         self
     }
@@ -632,12 +644,12 @@ impl<'a> Shell<'a> {
         // fd 2, as a lone command's.
         let mut message = ran.message;
         if ran.own
-            && let Some(Some(fds)) = all.last()
+            && let Some((Some(fds), _)) = all.last()
         {
             self.say_on(*fds, message.as_bytes());
             message.clear();
         }
-        for fds in all.into_iter().flatten() {
+        for fds in all.into_iter().filter_map(|(fds, _)| fds) {
             self.release(fds);
         }
         self.console.take_back();
@@ -669,7 +681,7 @@ impl<'a> Shell<'a> {
             env: &env,
         };
         let started = self.runner.get().background(parts, &staged, &self.vars);
-        for fds in all.into_iter().flatten() {
+        for fds in all.into_iter().filter_map(|(fds, _)| fds) {
             self.release(fds);
         }
         if let Some(pgid) = started.pgid {
@@ -719,19 +731,29 @@ impl<'a> Shell<'a> {
     /// as bash tells it (`cat 2> e < missing` writes into `e`), and what
     /// was made of it is closed.
     fn redirect(&mut self, base: Fds, redirects: &[parser::Redirect]) -> Option<Fds> {
+        match self.made(base, redirects) {
+            Ok(fds) => Some(fds),
+            Err((fds, message)) => {
+                self.say_on(fds, message.as_bytes());
+                self.release(fds);
+                None
+            }
+        }
+    }
+
+    /// The context `redirects` make over `base`, or what was made of it
+    /// when one cannot be made, and its message.
+    fn made(&mut self, base: Fds, redirects: &[parser::Redirect]) -> Result<Fds, (Fds, String)> {
         let mut opener = Opener {
             vfs: &mut *self.vfs,
             programs: self.runner.programs(),
         };
-        match self.files.redirect(base, redirects, &mut opener) {
-            Ok(fds) => Some(fds),
-            Err(failed) => {
+        self.files
+            .redirect(base, redirects, &mut opener)
+            .map_err(|failed| {
                 let message = format!("{NAME}: {}: {}\n", failed.path, failed.error);
-                self.say_on(failed.fds, message.as_bytes());
-                self.release(failed.fds);
-                None
-            }
-        }
+                (failed.fds, message)
+            })
     }
 
     /// Writes where fd 2 of `fds` goes: the screen (and a running
@@ -767,8 +789,10 @@ impl<'a> Shell<'a> {
     /// Each stage's fds (programmable shell gate §7.3): the pipe from the
     /// one before, the pipe to the one after, the context's for the rest,
     /// its redirections made over them; none for a stage whose redirection
-    /// could not be made, which runs nothing.
-    fn stage_fds(&mut self, stages: &[parser::Command]) -> Vec<Option<Fds>> {
+    /// could not be made, which runs nothing. Its message is told on its
+    /// fd 2 as it stood then, which after `2>&1` is the pipe: the runner
+    /// writes it there (`cat 2>&1 < /nope | wc -l`, as bash's).
+    fn stage_fds(&mut self, stages: &[parser::Command]) -> Vec<(Option<Fds>, Option<String>)> {
         let last = stages.len() - 1;
         let mut all = Vec::new();
         for (i, stage) in stages.iter().enumerate() {
@@ -779,7 +803,17 @@ impl<'a> Shell<'a> {
                 Slot::PipeOut
             };
             let base = Fds([input, output, self.fds.0[2]]);
-            all.push(self.redirect(base, &stage.redirects));
+            all.push(match self.made(base, &stage.redirects) {
+                Ok(fds) => (Some(fds), None),
+                Err((fds, message)) => {
+                    let piped = fds.0[2] == Slot::PipeOut && message.len() <= PIPED_MESSAGE_MAX;
+                    if !piped {
+                        self.say_on(fds, message.as_bytes());
+                    }
+                    self.release(fds);
+                    (None, piped.then_some(message))
+                }
+            });
         }
         all
     }
@@ -1049,15 +1083,19 @@ impl<'a> Shell<'a> {
 }
 
 /// A pipeline's stages for the runner: each one's words, fds and
-/// assignments.
-fn runner_stages<'c>(stages: &'c [parser::Command], fds: &[Option<Fds>]) -> Vec<runner::Stage<'c>> {
+/// assignments, and the message it sends into the pipe.
+fn runner_stages<'c>(
+    stages: &'c [parser::Command],
+    fds: &'c [(Option<Fds>, Option<String>)],
+) -> Vec<runner::Stage<'c>> {
     stages
         .iter()
         .zip(fds)
-        .map(|(c, fds)| runner::Stage {
+        .map(|(c, (fds, into_pipe))| runner::Stage {
             words: &c.words,
             fds: *fds,
             assigns: &c.assigns,
+            into_pipe: into_pipe.as_deref(),
         })
         .collect()
 }
@@ -1096,6 +1134,7 @@ fn builtin_in(stages: &[parser::Command]) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use crate::Shell;
+    use crate::runner::PIPED_MESSAGE_MAX;
     use crate::testing::{FakeStdout, Harness};
     use alloc::string::String;
     use relay_abi::WaitStatus;
@@ -2521,6 +2560,61 @@ mod tests {
         h.console.take()
     }
 
+    #[test]
+    fn a_shell_whose_output_is_not_the_screen_writes_there() {
+        // `X | sh > f` (plan 1's review, M-3; probe p2): a built-in's
+        // output, and the shell's and a built-in's messages after `2>&1`,
+        // go to the shell's fd 1, as bash's do; its other messages go to
+        // the screen, and a program gets fd 1 as before.
+        let mut h = spawning();
+        h.dir("/d");
+        let mut shell = Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+            .with_output_redirected();
+        for line in [
+            "cd /d; cd /; cd -",
+            "cd /nope 2>&1",
+            "nope 2>&1",
+            "cd /nope",
+            "nope",
+            "t-args",
+            "t-args 2>&1",
+            "nope 2>&1 | t-args",
+        ] {
+            shell.execute(line);
+        }
+        drop(shell);
+        let written: Vec<(u32, String)> = h
+            .programs
+            .written
+            .iter()
+            .map(|(fd, b)| (*fd, String::from_utf8_lossy(b).into_owned()))
+            .collect();
+        let pipe = h.programs.pipes[0].1;
+        assert_eq!(
+            written,
+            [
+                (1, "/d\n".into()),
+                (1, "relay-sh: cd: /nope: No such file or directory\n".into()),
+                (1, "relay-sh: nope: command not found\n".into()),
+                (pipe, "relay-sh: nope: command not found\n".into()),
+            ]
+        );
+        assert_eq!(
+            h.console.take(),
+            "relay-sh: cd: /nope: No such file or directory\n\
+             relay-sh: nope: command not found\n"
+        );
+        let fds: Vec<[u32; 3]> = h.programs.spawned.iter().map(|s| s.fds).collect();
+        assert_eq!(fds, [[0, 1, 2], [0, 1, 1], [pipe - 1, 1, 2]]);
+        // Not redirected, all of it reaches the screen, as before.
+        let mut h = spawning();
+        assert_eq!(
+            h.spawning("cd /nope 2>&1"),
+            (1, "relay-sh: cd: /nope: No such file or directory\n".into())
+        );
+        assert_eq!(h.programs.written, []);
+    }
+
     /// `sleep` and `t-spin` run on through `collect`'s first round (the
     /// prompt after they start).
     fn with_jobs() -> Harness {
@@ -3660,6 +3754,27 @@ mod tests {
             h.run("echo a | cat > /nodir/x"),
             (1, "relay-sh: /nodir/x: No such file or directory\n".into())
         );
+        // After `2>&1` the message goes into the pipe, as bash's does
+        // (probe p1; plan 1's final review, M-1); a failure before `2>&1`
+        // is told where fd 2 was then.
+        assert_eq!(h.run("cat 2>&1 < /nope | wc -l"), (0, "1\n".into()));
+        assert_eq!(
+            h.run("echo a | cat 2>&1 2> /nodir/e | cat"),
+            (0, "relay-sh: /nodir/e: No such file or directory\n".into())
+        );
+        assert_eq!(
+            h.run("cat < /nope 2>&1 | wc -l"),
+            (0, "relay-sh: /nope: No such file or directory\n0\n".into())
+        );
+        // One longer than a pipe takes at once stays on the screen.
+        let long = alloc::format!("/{}", "x".repeat(PIPED_MESSAGE_MAX));
+        assert_eq!(
+            h.run(&alloc::format!("cat 2>&1 < {long} | wc -l")),
+            (
+                0,
+                alloc::format!("relay-sh: {long}: File name too long\n0\n")
+            )
+        );
         // Under /bin/sh: each command gets the pipes and its files.
         let mut h = spawning();
         assert_eq!(h.spawning("t-args 2>&1 | t-args 2> /tmp/e").0, 3);
@@ -3681,6 +3796,49 @@ mod tests {
             (1, "relay-sh: /nodir/x: No such file or directory\n".into())
         );
         assert_eq!(h.programs.spawned.len(), 4, "the first ran");
+        // A failed redirection after `2>&1`: its message into the pipe.
+        h.programs.written.clear();
+        assert_eq!(
+            h.spawning("t-args 2>&1 < /nope | t-args"),
+            (3, String::new())
+        );
+        let (_, write) = *h.programs.pipes.last().unwrap();
+        assert_eq!(
+            h.programs.written,
+            [(
+                write,
+                b"relay-sh: /nope: No such file or directory\n".to_vec()
+            )]
+        );
+        assert!(h.programs.closed.contains(&write));
+        let long = alloc::format!("/{}", "x".repeat(PIPED_MESSAGE_MAX));
+        assert_eq!(
+            h.spawning(&alloc::format!("t-args 2>&1 < {long} | t-args")),
+            (
+                3,
+                alloc::format!("relay-sh: {long}: No such file or directory\n")
+            )
+        );
+        assert_eq!(h.programs.written.len(), 1, "nothing more written");
+        // So is a stage that cannot start: its message into a pipe whose
+        // reader has not started would block the shell for good (the
+        // prototype's review, I-1).
+        let name = "x".repeat(PIPED_MESSAGE_MAX);
+        assert_eq!(
+            h.spawning(&alloc::format!("{name} 2>&1 | t-args")),
+            (3, alloc::format!("relay-sh: {name}: command not found\n"))
+        );
+        assert_eq!(h.programs.written.len(), 1, "nothing more written");
+        // In the in-process runner too.
+        let mut h = Harness::new();
+        assert_eq!(
+            h.run(&alloc::format!("{name} 2>&1 | wc -c")),
+            (
+                0,
+                alloc::format!("relay-sh: {name}: command not found\n0\n")
+            )
+        );
+        assert_eq!(h.run("nope 2>&1 | wc -c"), (0, "34\n".into()));
     }
 
     #[test]
@@ -3870,7 +4028,7 @@ mod tests {
         assert_eq!(h.programs.opened[3], ("/tmp/h".into(), false, 7));
         assert_eq!(
             h.programs.written_to("/tmp/g"),
-            b"help: write error: No space left on device\n"
+            b"relay-sh: help: write error: No space left on device\n"
         );
     }
 
@@ -3959,6 +4117,16 @@ mod tests {
         assert_eq!(
             h.run("echo x > /tmp/f"),
             (1, "echo: write error: No space left on device\n".into())
+        );
+        // A built-in's is the shell's, as bash 5.2's `bash: export: write
+        // error: …` (the prototype's review, P-1); a program's keeps its
+        // own name, as GNU's.
+        assert_eq!(
+            h.run("export -p > /tmp/f"),
+            (
+                1,
+                "relay-sh: export: write error: No space left on device\n".into()
+            )
         );
     }
 

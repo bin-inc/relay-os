@@ -2,9 +2,10 @@
 //! §16 item 4): a node, what the file was opened for, and an offset that
 //! every fd sharing the open file shares (the fds `spawn` hands a child);
 //! each `open` makes a new one with an offset of its own, as on Linux. A
-//! character device's `seek` gives 0, whatever it is asked, as Linux's
-//! `/dev/null`'s does (programmable shell gate §8.4); its reads and writes
-//! ignore the offset.
+//! character device's `seek` gives 0 for any offset and a known `whence`,
+//! as Linux's `/dev/null`'s does (programmable shell gate §8.4); its reads
+//! and writes move the offset as a file's do, and its filesystem
+//! (`DevFs`) ignores it.
 //!
 //! `open`'s flags and their errors are Linux's where they apply. `seek`
 //! may go past the end (a write there leaves a hole). `read_dir` gives a

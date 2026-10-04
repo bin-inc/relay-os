@@ -257,7 +257,7 @@ impl Files {
     }
 
     /// A file just opened, held by one fd: its place.
-    fn add(&mut self, handle: Handle) -> usize {
+    pub fn add(&mut self, handle: Handle) -> usize {
         let entry = Some((handle, 1));
         match self.open.iter().position(Option::is_none) {
             Some(i) => {

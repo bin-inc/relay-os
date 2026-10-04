@@ -105,6 +105,9 @@ pub(crate) struct Stage<'c> {
     /// variables with them over, made only as it starts, so that a long
     /// pipeline never holds one for every command at once.
     pub assigns: &'c [String],
+    /// The message of its redirection that failed, which goes into the
+    /// pipe after it.
+    pub into_pipe: Option<&'c str>,
 }
 
 /// Runs the commands that are not the shell's own (`commands::BUILTINS`).
@@ -200,7 +203,8 @@ impl Runner for InProcess {
         for stage in before {
             let mut out = Collected(Vec::new());
             let (Some(fds), Some((name, args))) = (stage.fds, stage.words.split_first()) else {
-                piped = Some(Bytes::new(out.0));
+                let message = stage.into_pipe.unwrap_or_default();
+                piped = Some(Bytes::new(message.as_bytes().to_vec()));
                 continue;
             };
             let mut err_pipe = Vec::new();
@@ -246,7 +250,9 @@ impl Runner for InProcess {
                     None => not_found(name).message,
                 };
                 match fds.0[2] {
-                    Slot::PipeOut => err_pipe = message.into_bytes(),
+                    Slot::PipeOut if message.len() <= PIPED_MESSAGE_MAX => {
+                        err_pipe = message.into_bytes()
+                    }
                     Slot::File(i) => {
                         if let Handle::Node { node, offset } = files.handle(i) {
                             let message = message.as_bytes();
@@ -320,6 +326,14 @@ impl Stdout for Collected {
         None
     }
 }
+
+/// The longest message the shell writes into the pipe after a command,
+/// before the pipe's reader starts (a failed redirection's, or that of a
+/// command that cannot start): half of the 16 KiB a pipe holds, so the
+/// write never waits. Any path the vfs takes (`PATH_MAX`, 4 KiB) fits; a
+/// longer message (`File name too long`, a name of 8 KiB) is told on the
+/// screen.
+pub(crate) const PIPED_MESSAGE_MAX: usize = 8 * 1024;
 
 /// A command the shell runs itself, refused in a pipeline (§9.1).
 pub(crate) fn in_a_pipeline(name: &str) -> Ran {
@@ -472,7 +486,12 @@ impl Spawning<'_> {
             };
             let (Some(fds), Some((name, args))) = (stage.fds, stage.words.split_first()) else {
                 // Its words expanded to nothing or a redirection of it
-                // failed: it runs nothing, and its neighbours see an end.
+                // failed: it runs nothing, its message goes into the pipe
+                // after it if its fd 2 was that (a fresh pipe takes it at
+                // once), and its neighbours see an end.
+                if let (Some(message), Some(fd)) = (stage.into_pipe, stdout) {
+                    let _ = self.programs.write(fd, message.as_bytes());
+                }
                 for fd in [stdin, stdout].into_iter().flatten() {
                     self.programs.close(fd);
                 }
@@ -506,10 +525,13 @@ impl Spawning<'_> {
                     }
                 }
                 Err(e) => {
-                    // On its fd 2, the pipe after it too (`nope 2>&1 | b`).
+                    // On its fd 2, the pipe after it too (`nope 2>&1 | b`),
+                    // unless it is too long for that pipe to take at once.
                     let refused = cannot_start(name, e);
+                    let long = refused.message.len() > PIPED_MESSAGE_MAX;
                     match fds.0[2] {
                         Slot::Shell(_) => parts.console.write(refused.message.as_bytes()),
+                        Slot::PipeOut if long => parts.console.write(refused.message.as_bytes()),
                         _ => {
                             let _ = self
                                 .programs
@@ -595,7 +617,13 @@ pub(crate) fn run_function<'s>(
     let (status, message, own) = if ctx.cancelled {
         (CANCELLED, String::from("^C\n"), false)
     } else if let Err(e) = finished {
-        let message = format!("{}: write error: {e}\n", command.name);
+        // A built-in's is the shell's, as bash's (`bash: cd: write
+        // error: …`); a program's its own, as GNU's.
+        let message = if commands::BUILTINS.contains(&command.name) {
+            format!("{NAME}: {}: write error: {e}\n", command.name)
+        } else {
+            format!("{}: write error: {e}\n", command.name)
+        };
         (ctx.write_error_status, message, true)
     } else {
         (status, String::new(), false)
@@ -775,11 +803,15 @@ mod tests {
         );
         assert_eq!(h.programs.closed, [4]);
         assert!(!h.exists("/tmp/h"));
-        // A write that fails is the built-in's write error.
+        // A write that fails is the built-in's write error, named by the
+        // shell as bash names it (the prototype's review, P-1).
         h.programs.write_error = Some((5, Errno::ENOSPC));
         assert_eq!(
             h.spawning("help > /tmp/h"),
-            (1, "help: write error: No space left on device\n".into())
+            (
+                1,
+                "relay-sh: help: write error: No space left on device\n".into()
+            )
         );
     }
 
