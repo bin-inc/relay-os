@@ -501,10 +501,6 @@ impl<'a> Shell<'a> {
                     return self.not_expanded(e, true);
                 }
             }
-        } else if !assigns.is_empty() && commands::builtin(&words[0]).is_some() {
-            let first = &typed.assigns[0].typed;
-            let message = format!("{NAME}: unsupported syntax: {first} before a built-in\n");
-            return self.finish(SYNTAX, message);
         }
         if words.is_empty() && typed.redirects.is_empty() {
             // Its words expanded to nothing: bash's status 0.
@@ -514,6 +510,14 @@ impl<'a> Shell<'a> {
             return self.finish(1, String::new());
         };
         let env = self.vars.environment_with(&assigns);
+        // Before a built-in the assignments are set while it runs.
+        let builtin = words.first().and_then(|name| commands::builtin(name));
+        if builtin.is_some()
+            && let Err(e) = self.vars.hold(&assigns)
+        {
+            self.release(fds);
+            return self.not_expanded(e, true);
+        }
         let parts = Parts {
             vfs: &mut *self.vfs,
             console: &mut *self.console,
@@ -529,7 +533,7 @@ impl<'a> Shell<'a> {
             env: &env,
         };
         let ran = match words.split_first() {
-            Some((name, args)) => match commands::builtin(name) {
+            Some((name, args)) => match builtin {
                 Some(builtin) => {
                     let control = JobControl {
                         jobs: &mut self.jobs,
@@ -548,6 +552,7 @@ impl<'a> Shell<'a> {
             // A bare `> file` just creates or empties the file.
             None => Ran::said(0, String::new()),
         };
+        self.vars.release();
         let mut message = ran.message;
         if ran.own {
             self.say_on(fds, message.as_bytes());
@@ -2817,6 +2822,48 @@ mod tests {
             h.programs.spawned[5].args,
             ["t-args", "2"],
             "the words read the old B"
+        );
+    }
+
+    #[test]
+    fn assignments_before_a_built_in_hold_while_it_runs() {
+        // What bash 5.2 prints for each (programmable shell gate §15 item
+        // 7): a name comes back as it was unless the built-in set or
+        // exported it, and `export -p` lists the values from before.
+        let mut h = Harness::new();
+        let (status, out) = h.lines(&[
+            "A=1 export A",
+            "C=0",
+            "C=1 unset C",
+            "B=1 unset B",
+            "W=1 export W=2",
+            "G=1 cd /tmp > /tmp/o",
+            "export Z=0",
+            "X=1 Z=1 export",
+            "C=1 C=2 cd /",
+            "echo [$A][$B][$C][$W][$G][$Z][$X]",
+        ]);
+        assert_eq!(status, 0);
+        assert_eq!(
+            out,
+            "declare -x A=\"1\"\ndeclare -x W=\"2\"\ndeclare -x Z=\"0\"\n[1][][0][2][][0][]\n"
+        );
+    }
+
+    #[test]
+    fn an_assignment_a_built_in_cannot_hold_runs_nothing() {
+        let mut h = Harness::new();
+        let big = "x".repeat(crate::vars::VARS_MAX - 10);
+        let (status, out) = h.lines(&[
+            &format!("A={big}"),
+            &format!("B={} C=1 cd /tmp", &big[..20]),
+            "pwd",
+            "echo [$C]",
+        ]);
+        assert_eq!(status, 0);
+        assert_eq!(
+            out,
+            "relay-sh: B: the variables would hold more than 64 KiB\n/\n[]\n"
         );
     }
 
