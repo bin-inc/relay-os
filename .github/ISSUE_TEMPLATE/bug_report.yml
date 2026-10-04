@@ -1,0 +1,36 @@
+name: Bug report
+description: Something does not boot, crashes or behaves wrongly
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Release tag or commit (`git describe`)
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where it runs
+      options: [QEMU, Real hardware, Both]
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Commands typed at the prompt, or `cargo xtask` invocations
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Console output or screenshot
+      render: text
