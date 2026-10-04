@@ -377,6 +377,26 @@ mod tests {
     }
 
     #[test]
+    fn a_name_held_for_export_keeps_its_room() {
+        // Plan 3's final review, m-1: `A` comes back after `export`, so `B`
+        // may not take its room, and later assignments still fit.
+        let mut h = Harness::new();
+        let big = "x".repeat(40 * 1024);
+        assert_eq!(
+            h.lines(&[
+                &alloc::format!("A={big}"),
+                &alloc::format!("A= export B={big}"),
+                "C=1",
+                "echo $C $B",
+            ]),
+            (
+                0,
+                "relay-sh: B: the variables would hold more than 64 KiB\n1\n".into()
+            )
+        );
+    }
+
+    #[test]
     fn a_variable_export_cannot_hold_fails() {
         let mut h = Harness::new();
         let big = "x".repeat(crate::vars::VARS_MAX - 100);

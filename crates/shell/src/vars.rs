@@ -298,16 +298,36 @@ impl Vars {
     }
 
     /// Stores `var` as `name`, unless the variables would then hold more
-    /// than `VARS_MAX`.
+    /// than `VARS_MAX`, or would once a built-in releases what it holds.
     fn put(&mut self, name: &str, var: Var) -> Result<(), Error> {
         let old = self.names.get(name).map_or(0, |v| size(name, v));
         let new = self.size - old + size(name, &var);
-        if new > VARS_MAX {
+        if new + self.held_back(name, &var) > VARS_MAX {
             return Err(Error::Full(String::from(name)));
         }
         self.size = new;
         self.names.insert(String::from(name), var);
         Ok(())
+    }
+}
+
+impl Vars {
+    /// What releasing the names a built-in holds would add, were `name` to
+    /// hold `var`: each held name counts the larger of its size before and
+    /// its size now, so that it fits when it comes back.
+    fn held_back(&self, name: &str, var: &Var) -> usize {
+        self.held
+            .iter()
+            .map(|h| {
+                let before = h.before.as_ref().map_or(0, |v| size(&h.name, v));
+                let now = if h.name == name {
+                    size(name, var)
+                } else {
+                    self.names.get(&h.name).map_or(0, |v| size(&h.name, v))
+                };
+                before.saturating_sub(now)
+            })
+            .sum()
     }
 }
 
@@ -446,6 +466,43 @@ mod tests {
             [("E", Some("y")), ("H", Some("/root"))]
         );
         assert_eq!(v.size, "C0H/rootSsetEy".len());
+    }
+
+    #[test]
+    fn a_held_name_keeps_room_for_what_it_held() {
+        // `A=<40K>; A= export B=<40K>` left the variables over `VARS_MAX`
+        // once `A` came back, and nothing more could be set (plan 3's final
+        // review, m-1): while held, a name counts the larger of its sizes.
+        let mut v = Vars::new("sh");
+        let big = "x".repeat(40 * 1024);
+        v.set("A", big.clone()).unwrap();
+        v.hold(&[String::from("A=")]).unwrap();
+        assert_eq!(
+            v.export("B", Some(big.clone())),
+            Err(Error::Full("B".into()))
+        );
+        v.set("B", "x".repeat(VARS_MAX - big.len() - 2)).unwrap();
+        v.release();
+        assert_eq!((v.value("A"), v.size), (Some(big.as_str()), VARS_MAX));
+        // Removed while held, it still comes back.
+        v.unset("B");
+        v.hold(&[String::from("A=")]).unwrap();
+        v.unset("A");
+        assert_eq!(v.set("C", big.clone()), Err(Error::Full("C".into())));
+        v.release();
+        assert_eq!(v.value("A"), Some(big.as_str()));
+        // Given its old value again while held, it fits as it did.
+        v.hold(&[String::from("A=")]).unwrap();
+        v.set("A", big.clone()).unwrap();
+        v.release();
+        assert_eq!(v.value("A"), Some(big.as_str()));
+        // A held name given more counts what it holds now, once: the rest
+        // fits exactly.
+        v.hold(&[alloc::format!("A={big}y")]).unwrap();
+        v.set("D", "x".repeat(VARS_MAX - big.len() - 3)).unwrap();
+        assert_eq!(v.size, VARS_MAX);
+        v.release();
+        assert_eq!((v.value("A"), v.size), (Some(big.as_str()), VARS_MAX - 1));
     }
 
     #[test]
