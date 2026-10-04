@@ -2026,6 +2026,7 @@ mod tests {
         // §5.2: the walker asks before each command, so a list or a
         // loop of built-ins ends too, with `^C` and 130.
         let mut h = Harness::new();
+        h.env = b"HOME=/root\0".to_vec();
         h.console.interrupt_after = Some(1);
         assert_eq!(h.run("cd; cd; cd; echo no"), (130, "^C\n".into()));
         h.console.interrupt_after = Some(1);
@@ -2226,6 +2227,7 @@ mod tests {
     fn ctrl_c_ends_a_loop_of_built_ins_or_of_programs() {
         // A loop a person writes may run forever; Ctrl-C ends it (§5.2).
         let mut h = Harness::new();
+        h.env = b"HOME=/root\0".to_vec();
         h.console.interrupt_after = Some(50);
         assert_eq!(
             h.run("while true; do cd; done; echo no"),
@@ -2845,7 +2847,7 @@ mod tests {
         assert_eq!(status, 0);
         assert_eq!(
             out,
-            "declare -x A=\"1\"\ndeclare -x OLDPWD\ndeclare -x PWD=\"/\"\ndeclare -x W=\"2\"\n\
+            "declare -x A=\"1\"\ndeclare -x OLDPWD=\"/\"\ndeclare -x PWD=\"/tmp\"\ndeclare -x W=\"2\"\n\
              declare -x Z=\"0\"\n[1][][0][2][][0][]\n"
         );
     }

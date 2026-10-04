@@ -1,8 +1,8 @@
 //! `cd`, `exit`, `pwd`, `echo`, `clear`, `help` and `uname`.
 
+use super::export::options;
 use super::{BUILTINS, COMMANDS};
 use crate::ctx::{Ctx, getopt, outln};
-use crate::parser::HOME;
 use crate::shell::NAME;
 use alloc::string::String;
 use vfs::path;
@@ -11,26 +11,49 @@ use vfs::path;
 pub const UNAME: &str = "Relay";
 pub const UNAME_ALL: &str = concat!("Relay relay ", env!("CARGO_PKG_VERSION"), " x86_64");
 
-/// `cd [dir]`: no argument goes to `/root`, an empty one nowhere (as in
-/// bash). `cd -` is not supported.
+/// `cd [-L|-P] [--] [dir]` (programmable shell gate §9.1), as bash 5.2's:
+/// no directory goes to `$HOME`, `-` to `$OLDPWD`, printing it, and an
+/// empty one, or an empty `HOME` or `OLDPWD`, nowhere (`cd -` printing an
+/// empty line). On success `OLDPWD` takes `PWD`'s value, if it has one,
+/// and `PWD` the new directory, each exported or not as it was. `-L` and
+/// `-P` change nothing, as no symbolic link is followed; bash's `-e` is
+/// not supported.
 pub fn cd(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
-    let dir = match args {
-        [] => HOME,
-        [dir] if dir.is_empty() => return 0,
-        [dir] if dir == "-" => {
-            return ctx.fail(NAME, format_args!("cd: -: not supported"));
-        }
-        [dir] if dir.starts_with('-') => {
-            ctx.fail(NAME, format_args!("cd: {dir}: invalid option"));
-            return 2;
-        }
-        [dir] => dir.as_str(),
+    let (_, args) = match options(ctx, "cd", args, "LPe", "e") {
+        Ok(read) => read,
+        Err(status) => return status,
+    };
+    let (dir, show) = match args {
+        [] => match ctx.vars().value("HOME") {
+            None => return ctx.fail(NAME, format_args!("cd: HOME not set")),
+            Some(home) => (String::from(home), false),
+        },
+        [dir] if dir == "-" => match ctx.vars().value("OLDPWD") {
+            None => return ctx.fail(NAME, format_args!("cd: OLDPWD not set")),
+            Some(old) => (String::from(old), true),
+        },
+        [dir] => (dir.clone(), false),
         _ => return ctx.fail(NAME, format_args!("cd: too many arguments")),
     };
-    match ctx.vfs.chdir(dir.as_bytes()) {
-        Ok(()) => 0,
-        Err(e) => ctx.fail(NAME, format_args!("cd: {dir}: {e}")),
+    if dir.is_empty() {
+        if show {
+            outln!(ctx, "");
+        }
+        return 0;
     }
+    if let Err(e) = ctx.vfs.chdir(dir.as_bytes()) {
+        return ctx.fail(NAME, format_args!("cd: {dir}: {e}"));
+    }
+    let cwd = path::display(&ctx.vfs.cwd());
+    let vars = ctx.vars();
+    if let Some(old) = vars.value("PWD").map(String::from) {
+        let _ = vars.set("OLDPWD", old);
+    }
+    let _ = vars.set("PWD", cwd.clone());
+    if show {
+        outln!(ctx, "{cwd}");
+    }
+    0
 }
 
 /// `exit [code]`: the shell stops with `code` (modulo 256), or the last
@@ -173,6 +196,7 @@ mod tests {
     #[test]
     fn cd_goes_home_without_an_argument() {
         let mut h = Harness::new();
+        h.env = b"HOME=/root\0".to_vec();
         assert_eq!(h.run("cd /etc"), (0, "".into()));
         assert_eq!(h.run("pwd").1, "/etc\n");
         assert_eq!(h.run("cd"), (0, "".into()));
@@ -189,6 +213,7 @@ mod tests {
         // argument does nothing; `cd $E` unquoted gets no word and goes
         // home, as `cd` alone.
         let mut h = Harness::new();
+        h.env = b"HOME=/root\0".to_vec();
         assert_eq!(
             h.lines(&["cd /etc", "cd \"\"", "pwd", "cd \"$1\"", "pwd"]),
             (0, "/etc\n/etc\n".into())
@@ -215,15 +240,113 @@ mod tests {
             h.run("cd a b"),
             (1, "relay-sh: cd: too many arguments\n".into())
         );
-        assert_eq!(
-            h.run("cd -"),
-            (1, "relay-sh: cd: -: not supported\n".into())
-        );
-        assert_eq!(
-            h.run("cd -P"),
-            (2, "relay-sh: cd: -P: invalid option\n".into())
-        );
         assert_eq!(h.run("pwd").1, "/\n", "nothing changed the directory");
+    }
+
+    #[test]
+    fn cd_s_options_are_bash_s() {
+        // bash 5.2's, without the usage line; `-@` Ubuntu's bash does not
+        // have, and its `-e` is not supported here.
+        let mut h = Harness::new();
+        for (line, status, said) in [
+            ("cd -x /tmp", 2, "relay-sh: cd: -x: invalid option\n"),
+            ("cd -Lx /tmp", 2, "relay-sh: cd: -x: invalid option\n"),
+            ("cd -@ /tmp", 2, "relay-sh: cd: -@: invalid option\n"),
+            ("cd -e /tmp", 1, "relay-sh: cd: -e: not supported\n"),
+            ("cd -Pe /tmp", 1, "relay-sh: cd: -e: not supported\n"),
+            ("cd -e -x /tmp", 2, "relay-sh: cd: -x: invalid option\n"),
+        ] {
+            assert_eq!(h.run(line), (status, said.into()), "{line}");
+        }
+        assert_eq!(h.run("pwd").1, "/\n");
+        for line in ["cd -L /tmp", "cd -P /etc", "cd -LP -- /tmp", "cd -LL /etc"] {
+            assert_eq!(h.run(line), (0, "".into()), "{line}");
+        }
+        assert_eq!(h.run("pwd").1, "/etc\n");
+    }
+
+    #[test]
+    fn cd_without_home_or_with_it_empty() {
+        let mut h = Harness::new();
+        assert_eq!(
+            h.lines(&["cd /tmp", "cd", "pwd"]),
+            (0, "relay-sh: cd: HOME not set\n/tmp\n".into())
+        );
+        assert_eq!(
+            h.lines(&["HOME=", "cd /tmp", "cd", "echo $?", "pwd"]).1,
+            "0\n/tmp\n"
+        );
+        assert_eq!(h.lines(&["HOME=/etc", "cd --", "pwd"]).1, "/etc\n");
+    }
+
+    #[test]
+    fn cd_dash_goes_back_and_says_where() {
+        // As bash 5.2 in a pty.
+        let mut h = Harness::new();
+        assert_eq!(
+            h.lines(&[
+                "cd -",
+                "echo $?",
+                "cd /tmp",
+                "cd -",
+                "cd -- -",
+                "OLDPWD=",
+                "cd -",
+                "echo $? $PWD",
+                "unset OLDPWD",
+                "cd -",
+            ]),
+            (
+                1,
+                "relay-sh: cd: OLDPWD not set\n1\n/\n/tmp\n\n0 /tmp\n\
+                 relay-sh: cd: OLDPWD not set\n"
+                    .into()
+            )
+        );
+        assert_eq!(
+            h.lines(&["OLDPWD=/nope", "cd -"]),
+            (1, "relay-sh: cd: /nope: No such file or directory\n".into())
+        );
+        assert_eq!(h.run("cd - x").1, "relay-sh: cd: too many arguments\n");
+    }
+
+    #[test]
+    fn cd_sets_oldpwd_and_pwd_keeping_whether_they_are_exported() {
+        let mut h = Harness::new();
+        h.env = b"HOME=/root\0".to_vec();
+        assert_eq!(
+            h.lines(&["cd /root/../tmp", "echo $PWD $OLDPWD", "export"])
+                .1,
+            "/tmp /\n\
+             declare -x HOME=\"/root\"\n\
+             declare -x OLDPWD=\"/\"\n\
+             declare -x PWD=\"/tmp\"\n"
+        );
+        // A failed cd changes neither.
+        assert_eq!(
+            h.lines(&["cd /etc", "cd /nope", "echo $PWD $OLDPWD"]).1,
+            "relay-sh: cd: /nope: No such file or directory\n/etc /tmp\n"
+        );
+        // OLDPWD takes the variable PWD's value, and none without one.
+        assert_eq!(h.lines(&["PWD=/x", "cd /tmp", "echo $OLDPWD"]).1, "/x\n");
+        assert_eq!(
+            h.lines(&["cd /etc", "unset PWD", "cd /tmp", "echo \"[$OLDPWD]\""])
+                .1,
+            "[/tmp]\n",
+            "OLDPWD keeps what it was, not /etc"
+        );
+        // Made by cd, neither is exported (bash's `declare --`).
+        assert_eq!(
+            h.lines(&[
+                "unset PWD OLDPWD",
+                "cd /etc",
+                "cd /tmp",
+                "export",
+                "echo $PWD $OLDPWD"
+            ])
+            .1,
+            "declare -x HOME=\"/root\"\n/tmp /etc\n"
+        );
     }
 
     #[test]

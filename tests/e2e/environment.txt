@@ -62,3 +62,14 @@ send Y=xxxxxxxxxx; Y=$Y$Y; Y=$Y$Y; Y=$Y$Y; Y=$Y$Y; Y=$Y$Y; Y=$Y$Y; Y=$Y$Y; Y=$Y$
 expect root@relay:~# $
 send cat /root/p | sh; echo "status $?"; unset P Q R
 expect \nstatus 0\nroot@relay:~# $
+# cd sets OLDPWD and PWD; cd - goes back and says where; cd follows HOME.
+send cd /tmp; cd -; echo "$PWD $OLDPWD"
+expect \n/root\n/root /tmp\nroot@relay:~# $
+send cd /root/../tmp; echo $PWD; cd
+expect \n/tmp\nroot@relay:~# $
+send HOME=/etc cd; pwd; echo $HOME
+expect \n/etc\n/root\nroot@relay:/etc# $
+send unset HOME; cd; echo $?; export HOME=/root; cd
+expect \nrelay-sh: cd: HOME not set\n1\nroot@relay:~# $
+send cd -e /tmp; cd -x; echo $?
+expect \nrelay-sh: cd: -e: not supported\nrelay-sh: cd: -x: invalid option\n2\nroot@relay:~# $

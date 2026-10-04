@@ -69,7 +69,7 @@ pub fn unset(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
 /// and once all are read a letter not in `known` is bash's `invalid
 /// option` (status 2, without its usage line), else one of `refused`,
 /// which bash knows, is not supported (status 1).
-fn options<'a>(
+pub(super) fn options<'a>(
     ctx: &mut Ctx<'_>,
     name: &str,
     args: &'a [String],
