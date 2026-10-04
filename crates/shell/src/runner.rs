@@ -15,7 +15,7 @@ use crate::io::{Bytes, Console, Group, Programs, Stdin, Stdout, System};
 use crate::killed;
 use crate::shell::{CANCELLED, CANNOT_RUN, NAME, NOT_FOUND, SYNTAX};
 use crate::transcript::Transcript;
-use crate::vars::ENVIRONMENT_MAX;
+use crate::vars::{ENVIRONMENT_MAX, Vars};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
@@ -101,8 +101,10 @@ impl Ran {
 pub(crate) struct Stage<'c> {
     pub words: &'c [String],
     pub fds: Option<Fds>,
-    /// Its environment: the exported variables with its assignments.
-    pub env: &'c [u8],
+    /// Its assignments, `NAME=value` each: its environment is the exported
+    /// variables with them over, made only as it starts, so that a long
+    /// pipeline never holds one for every command at once.
+    pub assigns: &'c [String],
 }
 
 /// Runs the commands that are not the shell's own (`commands::BUILTINS`).
@@ -111,11 +113,11 @@ pub(crate) trait Runner {
     fn run(&mut self, parts: Parts<'_>, name: &str, args: &[String], fds: Fds) -> Ran;
 
     /// Runs a pipeline of two or more commands, none of them a built-in.
-    fn pipeline(&mut self, parts: Parts<'_>, stages: &[Stage<'_>]) -> Ran;
+    fn pipeline(&mut self, parts: Parts<'_>, stages: &[Stage<'_>], vars: &Vars) -> Ran;
 
     /// Starts a pipeline of one or more commands, none of them a built-in,
     /// in the background (spec §9.2), and does not wait for it.
-    fn background(&mut self, parts: Parts<'_>, stages: &[Stage<'_>]) -> Started;
+    fn background(&mut self, parts: Parts<'_>, stages: &[Stage<'_>], vars: &Vars) -> Started;
 }
 
 /// A background job's start.
@@ -174,7 +176,7 @@ impl Runner for InProcess {
     /// to nothing or whose redirection failed gives the next one nothing,
     /// as bash's does (the first says so on its fd 2). Ctrl-C stops the
     /// rest.
-    fn pipeline(&mut self, parts: Parts<'_>, stages: &[Stage<'_>]) -> Ran {
+    fn pipeline(&mut self, parts: Parts<'_>, stages: &[Stage<'_>], vars: &Vars) -> Ran {
         // `sh` reads a script for this shell to run after the command.
         if stages
             .iter()
@@ -202,7 +204,8 @@ impl Runner for InProcess {
                 continue;
             };
             let mut err_pipe = Vec::new();
-            let refused = startable(stage.env).err();
+            let env = vars.environment_with(stage.assigns);
+            let refused = startable(&env).err();
             if let (None, Some(command)) = (refused, commands::find(name)) {
                 let mut ctx = match fds.0[1] {
                     Slot::PipeOut => Ctx::program(&mut *vfs, &mut *system, &mut *console, &mut out),
@@ -279,12 +282,12 @@ impl Runner for InProcess {
             status,
             input: Some(&mut piped),
             files,
-            env: last.env,
+            env: &vars.environment_with(last.assigns),
         };
         self.run(parts, name, args, fds)
     }
 
-    fn background(&mut self, _: Parts<'_>, _: &[Stage<'_>]) -> Started {
+    fn background(&mut self, _: Parts<'_>, _: &[Stage<'_>], _: &Vars) -> Started {
         InProcess::refuse_background()
     }
 }
@@ -379,9 +382,9 @@ impl Runner for Spawning<'_> {
     /// its neighbours an end; the shell then waits for every stage, says
     /// how any killed one ended (a Ctrl-C once), and takes the last one's
     /// status.
-    fn pipeline(&mut self, parts: Parts<'_>, stages: &[Stage<'_>]) -> Ran {
+    fn pipeline(&mut self, parts: Parts<'_>, stages: &[Stage<'_>], vars: &Vars) -> Ran {
         let in_script = parts.in_script;
-        let (started, mut ran) = self.start(parts, stages, in_script, false);
+        let (started, mut ran) = self.start(parts, stages, vars, in_script, false);
         let mut cancelled = false;
         for (name, pid) in &started.pids {
             let ended = match self.programs.wait(*pid) {
@@ -408,8 +411,8 @@ impl Runner for Spawning<'_> {
     /// starts in a new group without the console (at the prompt and in a
     /// script alike, so that Ctrl-C of the script does not reach it), the
     /// others joining it; nothing waits for them.
-    fn background(&mut self, parts: Parts<'_>, stages: &[Stage<'_>]) -> Started {
-        let (started, mut ran) = self.start(parts, stages, false, true);
+    fn background(&mut self, parts: Parts<'_>, stages: &[Stage<'_>], vars: &Vars) -> Started {
+        let (started, mut ran) = self.start(parts, stages, vars, false, true);
         let pgid = started.pids.first().map(|&(_, pid)| pid);
         if pgid.is_some() {
             ran.status = 0;
@@ -440,6 +443,7 @@ impl Spawning<'_> {
         &mut self,
         parts: Parts<'_>,
         stages: &'c [Stage<'c>],
+        vars: &Vars,
         in_script: bool,
         background: bool,
     ) -> (Stages<'c>, Ran) {
@@ -487,9 +491,10 @@ impl Spawning<'_> {
             };
             let path = program_path(name);
             let shell_fds = fds.0.map(|slot| shell_fd(parts.files, slot, stdin, stdout));
-            let pid = startable(stage.env).and_then(|()| {
+            let env = vars.environment_with(stage.assigns);
+            let pid = startable(&env).and_then(|()| {
                 self.programs
-                    .spawn(path.as_bytes(), &argv, stage.env, shell_fds, group)
+                    .spawn(path.as_bytes(), &argv, &env, shell_fds, group)
             });
             match pid {
                 Ok(pid) => {

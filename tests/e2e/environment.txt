@@ -49,3 +49,12 @@ send Y=$X t-env; echo $?
 expect \nrelay-sh: t-env: Argument list too long\n126\nroot@relay:~# $
 send unset X
 expect root@relay:~# $
+# A pipeline's commands each get their environment as they start, not all
+# at once: 16,384 commands that expand to nothing, with 60 KiB exported,
+# would otherwise need a gigabyte (the final review, I-1).
+send X='$E|'; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; echo "${X}true" > /root/p; unset X
+expect root@relay:~# $
+send Y=xxxxxxxxxx; Y=$Y$Y; Y=$Y$Y; Y=$Y$Y; Y=$Y$Y; Y=$Y$Y; Y=$Y$Y; Y=$Y$Y; Y=$Y$Y; Y=$Y$Y; Y=$Y$Y; Y=$Y$Y; P=$Y; Q=$Y; unset Y; R=$P; export P Q R
+expect root@relay:~# $
+send cat /root/p | sh; echo "status $?"; unset P Q R
+expect \nstatus 0\nroot@relay:~# $

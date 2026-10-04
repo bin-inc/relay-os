@@ -601,8 +601,7 @@ impl<'a> Shell<'a> {
             return self.finish(ran.status, ran.message);
         }
         let all = self.stage_fds(stages);
-        let envs = self.stage_environments(stages);
-        let staged = runner_stages(stages, &all, &envs);
+        let staged = runner_stages(stages, &all);
         let env = Vec::new();
         let parts = Parts {
             vfs: &mut *self.vfs,
@@ -618,7 +617,7 @@ impl<'a> Shell<'a> {
             files: &mut self.files,
             env: &env,
         };
-        let ran = self.runner.get().pipeline(parts, &staged);
+        let ran = self.runner.get().pipeline(parts, &staged, &self.vars);
         // The last command's own message (the in-process runner's) on its
         // fd 2, as a lone command's.
         let mut message = ran.message;
@@ -646,8 +645,7 @@ impl<'a> Shell<'a> {
             return self.finish(1, message);
         }
         let all = self.stage_fds(stages);
-        let envs = self.stage_environments(stages);
-        let staged = runner_stages(stages, &all, &envs);
+        let staged = runner_stages(stages, &all);
         let env = Vec::new();
         let parts = Parts {
             vfs: &mut *self.vfs,
@@ -660,7 +658,7 @@ impl<'a> Shell<'a> {
             files: &mut self.files,
             env: &env,
         };
-        let started = self.runner.get().background(parts, &staged);
+        let started = self.runner.get().background(parts, &staged, &self.vars);
         for fds in all.into_iter().flatten() {
             self.release(fds);
         }
@@ -774,15 +772,6 @@ impl<'a> Shell<'a> {
             all.push(self.redirect(base, &stage.redirects));
         }
         all
-    }
-
-    /// Each stage's environment: the exported variables with its own
-    /// assignments (programmable shell gate §8.5).
-    fn stage_environments(&self, stages: &[parser::Command]) -> Vec<Vec<u8>> {
-        stages
-            .iter()
-            .map(|c| self.vars.environment_with(&c.assigns))
-            .collect()
     }
 
     /// Collects the background jobs' processes that have ended.
@@ -1043,20 +1032,16 @@ impl<'a> Shell<'a> {
     }
 }
 
-/// A pipeline's stages for the runner: each one's words and fds.
-fn runner_stages<'c>(
-    stages: &'c [parser::Command],
-    fds: &[Option<Fds>],
-    envs: &'c [Vec<u8>],
-) -> Vec<runner::Stage<'c>> {
+/// A pipeline's stages for the runner: each one's words, fds and
+/// assignments.
+fn runner_stages<'c>(stages: &'c [parser::Command], fds: &[Option<Fds>]) -> Vec<runner::Stage<'c>> {
     stages
         .iter()
         .zip(fds)
-        .zip(envs)
-        .map(|((c, fds), env)| runner::Stage {
+        .map(|(c, fds)| runner::Stage {
             words: &c.words,
             fds: *fds,
-            env,
+            assigns: &c.assigns,
         })
         .collect()
 }
