@@ -38,7 +38,7 @@ pub use text::{cat, head, tail, wc};
 /// name); returns the exit status.
 pub type Run = fn(&mut Ctx<'_>, &[String]) -> i32;
 
-/// One built-in command.
+/// One command of the table: a built-in or a program of `/bin`.
 pub struct Builtin {
     pub name: &'static str,
     /// One line for `help`.

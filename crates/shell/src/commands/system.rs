@@ -1,5 +1,5 @@
-//! `date`, `df`, `free`, `dmesg`, `ps`, `sync`, `reboot` and `poweroff`
-//! (spec §7.3, §7.4, §9.3).
+//! `sleep`, `date`, `df`, `free`, `dmesg`, `ps`, `sync`, `reboot` and
+//! `poweroff` (spec §7.3, §7.4, §9.3).
 
 use crate::ctx::{Ctx, getopt, outln, quote};
 use crate::time;

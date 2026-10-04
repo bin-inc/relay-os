@@ -1,13 +1,14 @@
-//! The Relay shell (spec §7.3): line editor, parser, expansion, pipelines,
-//! jobs and the function of every command.
+//! The Relay shell (spec §7.3): line editor, reader, parser, expansion,
+//! variables and the environment, lists, compound commands, redirection,
+//! pipelines, jobs and the function of every command.
 //!
 //! It reaches the rest of the system only through traits: [`Vfs`] for
 //! files, [`Console`] for the screen and keyboard, [`System`] for the
-//! clock, memory figures, the kernel log, reboot and power-off, and
-//! `Stdin`, `Stdout` and `Programs` for a command's input, its output and
-//! the programs it starts. So the same code runs in `/bin/sh` and every
-//! program of `/bin` (through `relay-rt`), on the host (`cargo xtask
-//! host-shell`) and in tests.
+//! clock, memory figures, the kernel log, the process list, sleeping,
+//! reboot and power-off, and `Stdin`, `Stdout` and `Programs` for a
+//! command's input, its output and the programs it starts. So the same
+//! code runs in `/bin/sh` and every program of `/bin` (through
+//! `relay-rt`), on the host (`cargo xtask host-shell`) and in tests.
 #![cfg_attr(not(test), no_std)]
 
 extern crate alloc;

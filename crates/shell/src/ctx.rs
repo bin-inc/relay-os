@@ -1,7 +1,8 @@
 //! What a command gets to work with: the filesystem, the system, standard
-//! input (none, a program's fd 0, or bytes in memory), standard output
-//! (the screen, a redirection file, `/bin/sh`'s fd for one, or a program's
-//! fd 1) and errors (the screen, or a redirection file); plus the helpers
+//! input (none, a program's fd 0, a file `<` opened, or bytes in memory),
+//! standard output (the screen, a redirection file, `/bin/sh`'s fd for one,
+//! or a program's fd 1) and errors (the screen, a redirection file, an fd
+//! of `/bin/sh`'s, or where the output goes after `2>&1`); plus the helpers
 //! every command shares for options and GNU-style messages.
 
 use crate::fds;
@@ -49,7 +50,8 @@ pub struct Ctx<'a> {
     /// Set by `exit`: in a script the shell runs itself, only the script
     /// stops.
     pub(crate) exited: bool,
-    /// The shell's jobs, for its own commands `jobs`, `wait` and `kill`.
+    /// The shell's jobs and variables, for its own commands (`jobs`,
+    /// `wait`, `kill`, `cd`, `export` and `unset`).
     pub(crate) control: Option<JobControl<'a>>,
     /// The environment the command was given (programmable shell gate
     /// §8.5): entries, each followed by a NUL.

@@ -1,4 +1,5 @@
-//! `cd`, `exit`, `pwd`, `echo`, `clear`, `help` and `uname`.
+//! `cd`, `exit`, `pwd`, `true`, `false`, `echo`, `clear`, `help` and
+//! `uname`.
 
 use super::export::options;
 use super::{BUILTINS, COMMANDS};
