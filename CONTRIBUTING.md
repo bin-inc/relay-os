@@ -37,7 +37,7 @@ another from the footers. Only the subject is required.
 | `perf` | Faster or smaller, same behaviour |
 | `refactor` | Code changes with the same behaviour, including removing dead code |
 | `test` | Tests only: unit tests, e2e scenarios, NUC check scripts and their transcripts |
-| `docs` | Documentation only, including `.github/pull_request_template.md` |
+| `docs` | Documentation only, including `.github/pull_request_template.md`, `.github/ISSUE_TEMPLATE/`, `.github/FUNDING.yml` and the licence files |
 | `build` | Build system, toolchain, image layout |
 | `ci` | `.github/workflows/` and `.github/dependabot.yml` |
 | `chore` | Anything else; a release is `chore(release): 0.4.0` |
@@ -74,6 +74,9 @@ in lowercase.
   a space: `feat(boot,kernel): …`. A commit that changes more than two is
   split, unless it really is repo-wide.
 - A repo-wide change leaves the scope out: `ci: …`, `chore: …`,
+  `docs: …`. So does a change to the top-level files (`README.md`,
+  `AGENTS.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`,
+  `LICENSE-*`) or to the `.github/` templates, which belong to no module:
   `docs: …`.
 
 ### Body
