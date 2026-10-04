@@ -2,7 +2,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-02-programmable-shell-gate-design.md` (the programmable shell gate; milestone 5 is its second half, "Redirection and environment", version 0.6.0)
 
-**Status:** Plans 1 to 3 are done (#116–#127); plan 4 is planned and lands with these notes.
+**Status:** Done. All four plans were executed; milestone 5, and with it the programmable shell gate, ended at version 0.6.0 (tag `v0.6.0`).
 
 Milestone 5 finishes the programmable shell: every standard stream can be redirected, compound commands included (`<`, `2>`, `2>>`, `2>&1`, `1>&2`), programs get an environment (ABI 4), `/dev/null` exists, the shell exports variables and runs `A=1 cmd`, `/bin/env` lists and changes an environment, `cd` follows `HOME`, `PWD` and `OLDPWD` (`cd -`), and the check scripts pass from any directory (spec §7–§9). It is split into the four plans of spec §12, named `m5-plan-1` to `m5-plan-4` (their files `docs/superpowers/plans/<date>-m5-plan-<n>-<name>.md`, their branches `m5p<n>/…`). Each one ends with software that can be tested by itself. Each plan is written just before it is executed, so it builds on the code that actually exists and on what the previous plan's checks showed.
 

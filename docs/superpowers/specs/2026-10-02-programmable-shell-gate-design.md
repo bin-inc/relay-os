@@ -1,7 +1,7 @@
 # Relay OS — Programmable Shell Gate Design (milestones 4 and 5)
 
 - **Date:** 2026-10-02
-- **Status:** Approved 2026-10-02; revised while planning milestone 4's plans 1 to 4 and milestone 5's plans 1 to 4 (see §15)
+- **Status:** Approved 2026-10-02; revised while planning milestone 4's plans 1 to 4 and milestone 5's plans 1 to 4 (see §15); implemented: milestone 4 ended at version 0.5.0 and milestone 5, which ends the gate, at version 0.6.0 (tags `v0.5.0`, `v0.6.0`)
 - **Builds on:** the user-space gate (version 0.4.0,
   `docs/superpowers/specs/2026-09-29-user-space-gate-design.md`, cited below
   as "UG §n") and milestone 1 (`2026-09-26-milestone-1-boot-shell-fs-design.md`,
