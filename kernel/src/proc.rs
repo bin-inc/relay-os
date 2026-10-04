@@ -442,10 +442,10 @@ fn memory_error(e: MapError) -> Errno {
 
 /// Starts the child `s` of the running process (spec §5.2-§5.4, §7.3): the
 /// program at its path, read through the mount table from the running
-/// process's current directory, with its arguments, fds, working directory
-/// and group. `EAGAIN` when the table is full or every pid has been
-/// used, `EPERM` for a group it may not join; those, the fds and the
-/// working directory are checked before the program is read.
+/// process's current directory, with its arguments, environment, fds,
+/// working directory and group. `EAGAIN` when the table is full or every
+/// pid has been used, `EPERM` for a group it may not join; those, the fds
+/// and the working directory are checked before the program is read.
 pub fn spawn(s: &Spawn) -> Result<u32, Errno> {
     let (fds, mut cwd) = {
         let t = PROCS.lock();

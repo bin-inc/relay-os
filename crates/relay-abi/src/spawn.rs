@@ -1,6 +1,6 @@
 //! What `spawn` and `wait` take (spec §7.3): the new program's path,
-//! arguments, working directory, file descriptors and process group, and
-//! `wait`'s flags.
+//! arguments, environment, working directory, file descriptors and process
+//! group, and `wait`'s flags.
 
 /// How many fds `spawn` can hand a child.
 pub const SPAWN_FDS: usize = 8;
