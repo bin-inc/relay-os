@@ -74,11 +74,12 @@ test stick and the maintainer; do not run them unless asked.
   depend on `shell` (an xtask test walks the resolved graph).
 - **Architecture:** new architecture-specific code goes in
   `kernel/src/arch/` or `relay-rt`'s `arch` module. Some kernel modules
-  (`power`, `timer`, `rtc`, `serial`, `mm`, `panic_screen`) still use
-  `x86_64` directly; they are expected to move with the aarch64 port, so
-  do not add more such code outside `arch/`. `crates/relay-abi` holds no
-  architecture detail and keeps the same values (call numbers, error
-  numbers, struct layouts) on every architecture.
+  (`power`, `proc`, `timer`, `rtc`, `serial`, `mm`, `panic_screen`, and
+  the panic test in `lib.rs`) still use `x86_64` or its instructions
+  directly; they are expected to move with the aarch64 port, so do not add
+  more such code outside `arch/`. `crates/relay-abi` holds no architecture
+  detail and keeps the same values (call numbers, error numbers, struct
+  layouts) on every architecture.
 - **Crates:** every host crate starts with
   `#![cfg_attr(not(test), no_std)]` (and `extern crate alloc;` where it
   allocates). A new host crate goes into both `members` and
@@ -104,9 +105,10 @@ test stick and the maintainer; do not run them unless asked.
   it differs) and GNU coreutils, word for word; `/bin/sh` calls itself
   `relay-sh`, `sh`'s own messages start `sh:`, init's `init:`. A refused
   option prints the first line of GNU's message without the `Try … --help`
-  line. Unsupported shell syntax is `relay-sh: unsupported syntax: <what>`
-  with status 2, never passed on as text. Expansion never splits words,
-  a decided difference from bash.
+  line, except in `grep`, whose message is GNU's `Usage:` and `Try` lines.
+  Unsupported shell syntax is `relay-sh: unsupported syntax: <what>` with
+  status 2, never passed on as text. Expansion never splits words, a
+  decided difference from bash.
 - **Command functions** are written once in `crates/shell/src/commands/`
   and run unchanged in the shell's tests, in `host-shell` and as programs
   of `/bin`.
@@ -123,26 +125,41 @@ test stick and the maintainer; do not run them unless asked.
   `wait` block: a test that uses them needs a bound or a timeout, so a
   broken build fails instead of hanging the machine.
 - **Missing tools fail tests;** they never skip them. A test that needs a
-  host tool needs the CI job that runs it to install the tool
-  (`.github/workflows/ci.yml`), and CI has fewer tools than a workstation.
+  host tool needs the CI job that runs it to install the tool, or allow it
+  (`.github/workflows/ci.yml`: the `unit` job lets `unshare -r` make a
+  user namespace), even when the runner image has it; an xtask test checks
+  each job's list. CI has fewer tools than a workstation.
 - **Compare with the real thing exactly:** bash 5.2 (in a pty for anything
   interactive), the host's GNU tools (`crates/shell/src/testing.rs` has
   helpers that run them), `readelf`, the host C library's `strerror`,
   Linux's error numbers. Test with non-ASCII text as well as what the
-  keyboard can type.
+  keyboard can type. New shell syntax gets a script in
+  `crates/shell/tests/corpus/`, which runs under host bash and the shell
+  on every `cargo xtask unit`; the environment is compared with
+  `env -i HOME=/root bash`; GNU's file tests run as root through
+  `unshare -r`.
 - **The check scripts are tests.** `rootfs/root/checks/*.sh` run on the
   NUC and in the `checks` scenario, against the transcripts recorded in
   `xtask/fixtures/checks/` (`*.qemu.log`, `*.nuc.log`). A change to what
-  they print changes those transcripts; the NUC transcripts come only off
-  the stick, after a NUC run.
+  they print changes those transcripts. Each NUC run records the
+  `*.nuc.log` files afresh, copied off the stick; until then a change the
+  NUC would show too is made by hand in its `*.nuc.log`, and a new
+  script's `*.nuc.log` starts as a copy of QEMU's. A new check script
+  starts with `cd /root`, so it passes from any directory, and goes into
+  the `checks` scenario, the transcripts test in `xtask/src/checks.rs`,
+  and the NUC instructions of `README.md` and `docs/hardware-test.md` (a
+  test checks that they run every script).
 - **Output that changes ripples.** One more program in `/bin` changes
   `ls /bin` in the `system` scenario and the count on
   `[ ok ] system: N programs` in `kernel/src/system.rs`'s comment and
   `docs/hardware-test.md`; a new command also changes `help`, and a name
-  that sorts first or last changes `check4.sh`'s `ls /bin` lines. The
-  recorded transcripts change only when a script's expectations stop
-  matching them. Run the full `cargo xtask ci` after any change to
-  output.
+  that sorts among the first four or last changes `check4.sh`'s `ls /bin`
+  lines. A new startup line, or a new ABI version in
+  `system: N programs, ABI N`, changes the `boot` and `system*` scenarios,
+  `check3-a.sh` and its transcripts, and `docs/hardware-test.md`: grep for
+  the old line. The recorded transcripts change only when a script's
+  expectations stop matching them. Run the full `cargo xtask ci` after any
+  change to output.
 - **e2e expectations:** an `expect` consumes its match, including a
   trailing newline or the prompt it ended at; the command echo follows the
   prompt, which the `expect` before the input has consumed (match
@@ -180,7 +197,8 @@ A plan is made in this order:
    (a version bump, a new check script).
 3. **Prototype.** Every task is done for real in a scratch clone of
    `origin/main` outside this repository, one commit per task in
-   `CONTRIBUTING.md`'s format, on a base tagged `p0` with each task tagged
+   `CONTRIBUTING.md`'s format, on a base tagged `p0` (`origin/main` plus
+   the docs of the plan's first pull request) with each task tagged
    `t1`…`tN`. Each guard gets a mutation check. Run the full
    `cargo xtask ci` at the end of each task that changes output.
 4. **Independent review** of the prototype by a fresh, read-only reviewer
@@ -191,7 +209,9 @@ A plan is made in this order:
    commands taken from its commits), then **replay** it: a script applies
    the plan's own text to a fresh clone, runs every command and compares
    each task's tree with the prototype's. The plan's first pull request
-   carries the plan and the spec's new decision-log item.
+   carries the plan, the spec's new decision-log item and the roadmap's
+   notes. The plan ends with a Review Focus section for the final
+   whole-branch review.
 6. **Approval.** The maintainer reviews the plan and chooses how it is
    executed. So far: natively, task by task, with one whole-branch review
    on the most capable model at the end.
@@ -229,12 +249,14 @@ says where it goes.
   `docs/hardware-test.md` go into a commit of that same pull request.
 - CodeQL scans every pull request: triage each new alert and ask the
   maintainer before dismissing one.
-- Ask before creating any tag or GitHub release, and propose its text.
-  A release bumps the workspace version (`chore(release): X.Y.Z`), which
+- Ask before creating any tag or GitHub release, and propose its text. A
+  release bumps the workspace version (`chore(release): X.Y.Z`), which
   reaches `uname -a` in the `shell` scenario, in `check3-a.sh` and in the
   `uname` unit test (`crates/shell/src/commands/basic.rs`), the recorded
-  transcripts' version lines, and `docs/hardware-test.md`'s checks 1
-  and 1b.
+  transcripts' version lines (check 3's `uname -a` and `Relay OS`), and
+  `docs/hardware-test.md`'s check 1. A `docs:` commit after it says the
+  milestone is done in `README.md`, this file, and the Status lines of the
+  spec and the roadmap.
 
 ## Pitfalls
 
