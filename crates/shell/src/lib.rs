@@ -35,6 +35,6 @@ mod vars;
 
 pub use ctx::Ctx;
 pub use io::{Bytes, Console, Group, MemInfo, Programs, Stdin, Stdout, System};
-pub use program::{CommandIo, run_command};
+pub use program::{CommandIo, run_command, run_program};
 pub use shell::Shell;
 pub use vfs::Vfs;

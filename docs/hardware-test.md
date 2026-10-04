@@ -60,7 +60,7 @@ separated by blanks. Every `flash` writes it, so a `flash --kernel` without
    - `[ ok ] boot info: N MiB usable in M regions, cmdline ''` — N about
      15944 (the check scripts want `159nn`).
    - the lines of checks 1b, 2 and 3, ending with
-     `[ ok ] system: 45 programs, ABI 4`, then the motd
+     `[ ok ] system: 46 programs, ABI 4`, then the motd
      (`Welcome to Relay OS.`) and the prompt `root@relay:~# ` with a solid
      block cursor.
 4. Panic screen: in Mint run `cargo xtask flash --kernel --cmdline panic=pagefault`,
@@ -205,8 +205,8 @@ against the output the scripts expect (their `#>` lines), so only the boot
 screen and the steps by hand need a look. The QEMU scenario `checks` runs
 the same scripts on every pull request.
 
-Every command but the shell's built-ins (`cd`, `exit`, `help`, `jobs`,
-`kill`, `wait`) is a program in `/bin`.
+Every command but the shell's built-ins (`cd`, `exit`, `export`, `help`,
+`jobs`, `kill`, `unset`, `wait`) is a program in `/bin`, `env` among them.
 
 ### Check 3 — boot, files and programs
 
@@ -224,7 +224,7 @@ Every command but the shell's built-ins (`cd`, `exit`, `help`, `jobs`,
      `14.3 GiB` root is a stick written before 0.3.0, which the check
      scripts refuse: run `flash --full` again)
    - `[ ok ] dev: /dev/null` (`/dev`, a filesystem of the kernel's)
-   - `[ ok ] system: 45 programs, ABI 4` (the programs of `/bin`, read
+   - `[ ok ] system: 46 programs, ABI 4` (the programs of `/bin`, read
      from `\EFI\RELAY\system.img`)
    - the motd (`Welcome to Relay OS.`), which init prints, and the prompt
      `root@relay:~# ` of the `/bin/sh` it started.

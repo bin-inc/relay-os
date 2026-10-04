@@ -576,7 +576,7 @@ impl<'a> Shell<'a> {
         // a file it was given as input.
         if let Some(script) = ran.script {
             let outer = core::mem::replace(&mut self.fds, fds);
-            status = self.run_script(*script, &env);
+            status = self.run_script(*script);
             self.fds = outer;
         }
         self.release(fds);
@@ -823,11 +823,11 @@ impl<'a> Shell<'a> {
     /// script is a shell of its own; and it has variables and arguments of
     /// its own, the exported variables imported, and starts with `$?` 0, as
     /// there; and its `cd` stays in it.
-    fn run_script(&mut self, script: Script, env: &[u8]) -> i32 {
+    fn run_script(&mut self, script: Script) -> i32 {
         let cwd = self.vfs.cwd();
         self.transcript = Some(Transcript::new(script.transcript, script.transcript_name));
         let mut vars = Vars::script(&script.name, &script.args);
-        vars.import(env);
+        vars.import(&script.environment);
         let started = start_variables(&mut vars, &mut *self.vfs);
         let outer = core::mem::replace(&mut self.vars, vars);
         self.status = 0;

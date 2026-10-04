@@ -9,10 +9,11 @@ programs, the timer shares the CPU among them, and Ctrl-C stops the
 command that runs. Programs open, read and write files, map memory (their
 runtime gives them a heap), read the console a line at a time or as it is
 typed, and copy what the console shows into files (tees). Every command
-but the shell's built-ins (`cd`, `exit`, `help`, `jobs`, `kill`, `wait`)
-is a program of its own in `/bin` (`/bin/ls`), which prints what the
-shell's command prints, and the shell itself is one too: `/bin/sh` runs
-each of those commands as a program, and its scripts may run scripts.
+but the shell's built-ins (`cd`, `exit`, `export`, `help`, `jobs`,
+`kill`, `unset`, `wait`) is a program of its own in `/bin` (`/bin/ls`),
+which prints what the shell's command prints, and the shell itself is
+one too: `/bin/sh` runs each of those commands as a program, and its
+scripts may run scripts.
 Process 1 is the kernel's init: it starts `/bin/sh` at boot and again
 whenever it ends, and a machine that cannot run its shell (no
 `system.img`, or a shell that keeps ending) shows an error screen and
@@ -139,14 +140,14 @@ code keeps, how tests are written and how plans are made and executed.
 | `kernel/` | `relay-kernel`, the higher-half kernel |
 | `crates/boot-info` | Loader → kernel hand-off structure |
 | `crates/term` | Framebuffer text terminal |
-| `crates/vfs` | Error numbers, block-device and filesystem traits, paths, mount table, in-memory filesystem |
+| `crates/vfs` | Error numbers, block-device and filesystem traits, paths, mount table, in-memory filesystem, `DevFs` (`/dev/null`) |
 | `crates/ext2` | ext2 driver with its block cache |
-| `crates/shell` | Line editor, parser, expansion (`$1`, `$NAME`), pipelines, jobs, scripts (`sh FILE`) and every command's function; used by `/bin/sh`, each program of `/bin` and `host-shell` |
+| `crates/shell` | Line editor, parser, expansion (`$1`, `$NAME`, `~`), variables and the environment (`export`, `A=1 cmd`), redirection, pipelines, jobs, scripts (`sh FILE`) and every command's function; used by `/bin/sh`, each program of `/bin` and `host-shell` |
 | `crates/usb` | xHCI host controller driver, HID boot keyboard and USB mass storage (BOT, SCSI), over a `Hal` trait |
 | `crates/heap` | The heap allocator of the kernel and of user programs |
 | `crates/crc32` | CRC-32, for GPT and `system.img` |
 | `crates/relay-abi` | The system-call ABI: version, ELF note, call numbers, error numbers, result encoding, and the structs the calls pass (`Stat`, `SpawnArgs`, `ProcInfo`, `WaitStatus`, …); no architecture detail |
-| `crates/relay-rt` | The runtime of user programs: entry, arguments, system calls, heap, panic handler, ABI note, linker script; the shell's `Vfs`, `Console`, `System`, `Stdin`, `Stdout` and `Programs` over system calls |
+| `crates/relay-rt` | The runtime of user programs: entry, arguments, environment, system calls, heap, panic handler, ABI note, linker script; the shell's `Vfs`, `Console`, `System`, `Stdin`, `Stdout` and `Programs` over system calls |
 | `crates/sysimg` | The `system.img` archive: format, writer, reader, and `SysImgFs`, mounted at `/bin` |
 | `crates/elf` | The rules a program's ELF file must follow; the kernel's `spawn` and xtask's build both check them |
 | `userland/` | User programs: `sh/` the shell (`/bin/sh`), `utils/` one per command (`cat`, `ls`, …), `tests/` the `t-*` test programs (xtask adds `t-abi`, a copy of `t-args` stamped with an older ABI) |

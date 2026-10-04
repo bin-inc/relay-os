@@ -827,6 +827,28 @@ impl Harness {
         (status, self.console.take())
     }
 
+    /// As [`Harness::program_args`], the command given the environment
+    /// `env`.
+    pub fn program_env(
+        &mut self,
+        args: &[&str],
+        env: &[u8],
+        stdout: &mut FakeStdout,
+    ) -> (i32, String) {
+        let words: Vec<String> = args.iter().map(|a| String::from(*a)).collect();
+        let mut input = Bytes::new(core::mem::take(&mut self.stdin));
+        let mut ctx =
+            crate::Ctx::program(&mut self.vfs, &mut self.system, &mut self.console, stdout);
+        ctx.set_input(&mut input);
+        ctx.environment = env.to_vec();
+        let run = crate::commands::find(&words[0]).unwrap().run;
+        let mut status = run(&mut ctx, &words[1..]);
+        if ctx.finish().is_err() {
+            status = ctx.write_error_status;
+        }
+        (status, self.console.take())
+    }
+
     /// Creates (or replaces) a file.
     pub fn put(&mut self, path: &str, data: &[u8]) {
         let node = match self.vfs.lookup(path.as_bytes()) {

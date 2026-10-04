@@ -51,6 +51,12 @@ pub struct Ctx<'a> {
     pub(crate) exited: bool,
     /// The shell's jobs, for its own commands `jobs`, `wait` and `kill`.
     pub(crate) control: Option<JobControl<'a>>,
+    /// The environment the command was given (programmable shell gate
+    /// §8.5): entries, each followed by a NUL.
+    pub(crate) environment: Vec<u8>,
+    /// What starts programs, for `env` run as a program; none in the
+    /// in-process runner.
+    pub(crate) programs: Option<&'a mut dyn Programs>,
 }
 
 /// What the shell's own commands work with: its jobs, its programs (none
@@ -183,6 +189,8 @@ impl<'a> Ctx<'a> {
             status: 0,
             exited: false,
             control: None,
+            environment: Vec::new(),
+            programs: None,
         }
     }
 
