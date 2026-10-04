@@ -1,5 +1,27 @@
 # Relay OS
 
+[![CI](https://github.com/bin-inc/relay-os/actions/workflows/ci.yml/badge.svg)](https://github.com/bin-inc/relay-os/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+[![Release](https://img.shields.io/github/v/release/bin-inc/relay-os)](https://github.com/bin-inc/relay-os/releases)
+
+**A small operating system written from scratch in Rust.** It boots through
+UEFI on real hardware (an Intel NUC 12 Pro) and in QEMU, runs programs in
+ring 3, each in its own address space, and ships a shell you can program.
+
+```text
+root@relay:~# seq 1000 | grep 7 | wc -l
+271
+```
+
+Try it in QEMU in two commands (details under [Quick start](#quick-start)):
+
+```sh
+cargo xtask test      # unit tests, then every QEMU scenario
+cargo xtask qemu      # boot it in a window; type `help` at the prompt
+```
+
+## Status
+
 A small operating system written from scratch in Rust. Milestone 1 boots
 from a USB stick on an Intel NUC 12 Pro, shows a terminal over HDMI and
 stores files on the stick's ext2 root filesystem. Milestone 2 runs programs
@@ -141,6 +163,14 @@ Commit messages and pull-request titles follow Conventional Commits
 `CONTRIBUTING.md`. AI coding agents start from `AGENTS.md`: the rules the
 code keeps, how tests are written and how plans are made and executed.
 
+Questions and ideas are welcome in
+[Discussions](https://github.com/bin-inc/relay-os/discussions). Report
+vulnerabilities as described in [SECURITY.md](SECURITY.md). Everyone taking
+part follows the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+If you like the project, you can
+[buy the maintainer a coffee](https://buymeacoffee.com/maw629).
+
 ## Layout
 
 | Path | Contents |
@@ -170,3 +200,9 @@ code keeps, how tests are written and how plans are made and executed.
 | `.cargo/config.toml`, `rust-toolchain.toml` | The `cargo xtask` alias and static relocation for everything built for `x86_64-unknown-none` (the kernel and the programs); the pinned Rust toolchain and targets |
 | `CONTRIBUTING.md` | Commit-message and pull-request rules |
 | `AGENTS.md` | Context and working rules for AI coding agents (`CLAUDE.md` points Claude Code at it) |
+
+## License
+
+Licensed under either of [Apache License 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option. Unless you state otherwise, any
+contribution you submit is dual licensed as above, without further terms.
