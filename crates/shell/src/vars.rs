@@ -12,6 +12,10 @@ use alloc::vec::Vec;
 /// The most a shell's variables hold, their names' and values' bytes.
 pub const VARS_MAX: usize = 64 * 1024;
 
+/// The most a program's environment holds, as `spawn` takes it
+/// (programmable shell gate §8.1, §8.5).
+pub const ENVIRONMENT_MAX: usize = 64 * 1024;
+
 /// A shell's variables and arguments.
 pub(crate) struct Vars {
     names: BTreeMap<String, Var>,

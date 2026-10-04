@@ -2868,6 +2868,29 @@ mod tests {
     }
 
     #[test]
+    fn a_program_s_environment_holds_at_most_64_kib() {
+        // Past it bash's words for `E2BIG`, status 126, under both
+        // runners; a built-in gets no environment.
+        let mut env = b"X=".to_vec();
+        env.extend(core::iter::repeat_n(b'x', crate::vars::ENVIRONMENT_MAX - 3));
+        env.push(0);
+        let mut h = spawning();
+        h.programs.known.push(("/bin/cat", WaitStatus::exited(0)));
+        h.env = env;
+        let too_long = |name: &str| format!("relay-sh: {name}: Argument list too long\n");
+        assert_eq!(h.spawning("t-args"), (3, "".into()), "64 KiB exactly");
+        assert_eq!(h.spawning("Y= t-args"), (126, too_long("t-args")));
+        assert_eq!(h.spawning("Y= t-args | cat"), (0, too_long("t-args")));
+        let paths: Vec<_> = h.programs.spawned.iter().map(|s| s.path.as_str()).collect();
+        assert_eq!(paths, ["/bin/t-args", "/bin/cat"]);
+        assert_eq!(h.spawning("Y= cd /tmp"), (0, "".into()));
+        assert_eq!(h.run("Y= echo hi"), (126, too_long("echo")));
+        assert_eq!(h.run("echo hi | Y= cat"), (126, too_long("cat")));
+        assert_eq!(h.run("Y= echo hi | cat"), (0, too_long("echo")));
+        assert_eq!(h.run("echo hi"), (0, "hi\n".into()));
+    }
+
+    #[test]
     fn assignments_before_a_script_are_in_its_variables_only() {
         let mut h = Harness::new();
         h.put("/tmp/s.sh", b"echo [$A][$B]\n");

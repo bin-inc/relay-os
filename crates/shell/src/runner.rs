@@ -15,6 +15,7 @@ use crate::io::{Bytes, Console, Group, Programs, Stdin, Stdout, System};
 use crate::killed;
 use crate::shell::{CANCELLED, CANNOT_RUN, NAME, NOT_FOUND, SYNTAX};
 use crate::transcript::Transcript;
+use crate::vars::ENVIRONMENT_MAX;
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
@@ -158,6 +159,9 @@ pub(crate) struct InProcess;
 
 impl Runner for InProcess {
     fn run(&mut self, parts: Parts<'_>, name: &str, args: &[String], fds: Fds) -> Ran {
+        if let Err(e) = startable(parts.env) {
+            return cannot_start(name, e);
+        }
         match commands::find(name) {
             Some(command) => run_function(parts, command, args, fds, None),
             None => not_found(name),
@@ -198,7 +202,8 @@ impl Runner for InProcess {
                 continue;
             };
             let mut err_pipe = Vec::new();
-            if let Some(command) = commands::find(name) {
+            let refused = startable(stage.env).err();
+            if let (None, Some(command)) = (refused, commands::find(name)) {
                 let mut ctx = match fds.0[1] {
                     Slot::PipeOut => Ctx::program(&mut *vfs, &mut *system, &mut *console, &mut out),
                     slot => {
@@ -232,7 +237,10 @@ impl Runner for InProcess {
                 }
             } else {
                 // On its fd 2: the screen, a file, or the pipe.
-                let message = not_found(name).message;
+                let message = match refused {
+                    Some(e) => cannot_start(name, e).message,
+                    None => not_found(name).message,
+                };
                 match fds.0[2] {
                     Slot::PipeOut => err_pipe = message.into_bytes(),
                     Slot::File(i) => {
@@ -348,10 +356,11 @@ impl Runner for Spawning<'_> {
             Group::New
         };
         let fds = fds.0.map(|slot| shell_fd(parts.files, slot, None, None));
-        match self
-            .programs
-            .spawn(path.as_bytes(), &argv, parts.env, fds, group)
-        {
+        let spawned = startable(parts.env).and_then(|()| {
+            self.programs
+                .spawn(path.as_bytes(), &argv, parts.env, fds, group)
+        });
+        match spawned {
             Ok(pid) => match self.programs.wait(pid) {
                 Ok(w) => ended(name, &w),
                 Err(e) => Ran::said(CANNOT_RUN, format!("{NAME}: {name}: {e}\n")),
@@ -478,9 +487,10 @@ impl Spawning<'_> {
             };
             let path = program_path(name);
             let shell_fds = fds.0.map(|slot| shell_fd(parts.files, slot, stdin, stdout));
-            let pid = self
-                .programs
-                .spawn(path.as_bytes(), &argv, stage.env, shell_fds, group);
+            let pid = startable(stage.env).and_then(|()| {
+                self.programs
+                    .spawn(path.as_bytes(), &argv, stage.env, shell_fds, group)
+            });
             match pid {
                 Ok(pid) => {
                     first.get_or_insert(pid);
@@ -611,6 +621,16 @@ pub(crate) fn cannot_start(name: &str, e: Errno) -> Ran {
         CANNOT_RUN
     };
     Ran::own(status, format!("{NAME}: {name}: {e}\n"))
+}
+
+/// A program may start with the environment `env`: one over 64 KiB is
+/// refused before it starts, as `spawn` refuses it (`E2BIG`), so that both
+/// runners say bash's `Argument list too long`.
+fn startable(env: &[u8]) -> Result<(), Errno> {
+    if env.len() > ENVIRONMENT_MAX {
+        return Err(Errno::E2BIG);
+    }
+    Ok(())
 }
 
 pub(crate) fn not_found(name: &str) -> Ran {
