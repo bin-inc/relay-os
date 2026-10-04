@@ -136,7 +136,10 @@ impl<'a> Shell<'a> {
     /// starts (programmable shell gate §8.5).
     pub fn with_environment(mut self, block: &[u8]) -> Shell<'a> {
         self.vars.import(block);
-        start_variables(&mut self.vars, &mut *self.vfs);
+        // Said once, as an assignment that does not fit is.
+        if let Err(e) = start_variables(&mut self.vars, &mut *self.vfs) {
+            self.console.write(format!("{NAME}: {e}\n").as_bytes());
+        }
         self
     }
 
@@ -819,9 +822,12 @@ impl<'a> Shell<'a> {
         self.transcript = Some(Transcript::new(script.transcript, script.transcript_name));
         let mut vars = Vars::script(&script.name, &script.args);
         vars.import(env);
-        start_variables(&mut vars, &mut *self.vfs);
+        let started = start_variables(&mut vars, &mut *self.vfs);
         let outer = core::mem::replace(&mut self.vars, vars);
         self.status = 0;
+        if let Err(e) = started {
+            self.say(format!("{NAME}: {e}\n").as_bytes());
+        }
         let status = self.run_lines(&script.text);
         self.vars = outer;
         if self.exited {
@@ -1051,13 +1057,13 @@ fn runner_stages<'c>(stages: &'c [parser::Command], fds: &[Option<Fds>]) -> Vec<
 
 /// Sets `PWD` and `OLDPWD` in a shell's `vars` as it starts, from the
 /// current directory and whether the `OLDPWD` it imported is a directory.
-fn start_variables(vars: &mut Vars, vfs: &mut dyn Vfs) {
+fn start_variables(vars: &mut Vars, vfs: &mut dyn Vfs) -> Result<(), expand::Error> {
     let oldpwd_is_dir = vars.value("OLDPWD").is_some_and(|old| {
         vfs.lookup(old.as_bytes())
             .and_then(|node| vfs.stat(node))
             .is_ok_and(|s| s.kind == vfs::FileType::Directory)
     });
-    vars.start(&path::display(&vfs.cwd()), oldpwd_is_dir);
+    vars.start(&path::display(&vfs.cwd()), oldpwd_is_dir)
 }
 
 /// Whether `list` is one pipeline of simple commands, and nothing else.
@@ -2872,24 +2878,64 @@ mod tests {
     #[test]
     fn a_program_s_environment_holds_at_most_64_kib() {
         // Past it bash's words for `E2BIG`, status 126, under both
-        // runners; a built-in gets no environment.
+        // runners; a built-in gets no environment. Exported, `X=…` and
+        // `PWD=/` take 40,009 bytes; `Y=…` before a command fills the
+        // rest of 64 KiB, or one byte more.
         let mut env = b"X=".to_vec();
-        env.extend(core::iter::repeat_n(b'x', crate::vars::ENVIRONMENT_MAX - 3));
+        env.extend(core::iter::repeat_n(b'x', 40_000));
         env.push(0);
+        let rest = crate::vars::ENVIRONMENT_MAX - 40_003 - 6 - 3;
+        let fits = format!("Y={}", "y".repeat(rest));
+        let over = format!("Y={}", "y".repeat(rest + 1));
         let mut h = spawning();
         h.programs.known.push(("/bin/cat", WaitStatus::exited(0)));
         h.env = env;
         let too_long = |name: &str| format!("relay-sh: {name}: Argument list too long\n");
-        assert_eq!(h.spawning("t-args"), (3, "".into()), "64 KiB exactly");
-        assert_eq!(h.spawning("Y= t-args"), (126, too_long("t-args")));
-        assert_eq!(h.spawning("Y= t-args | cat"), (0, too_long("t-args")));
+        assert_eq!(
+            h.spawning(&format!("{fits} t-args")),
+            (3, "".into()),
+            "64 KiB exactly"
+        );
+        assert_eq!(
+            h.programs.spawned[0].env.len(),
+            crate::vars::ENVIRONMENT_MAX
+        );
+        assert_eq!(
+            h.spawning(&format!("{over} t-args")),
+            (126, too_long("t-args"))
+        );
+        assert_eq!(
+            h.spawning(&format!("{over} t-args | cat")),
+            (0, too_long("t-args"))
+        );
         let paths: Vec<_> = h.programs.spawned.iter().map(|s| s.path.as_str()).collect();
         assert_eq!(paths, ["/bin/t-args", "/bin/cat"]);
-        assert_eq!(h.spawning("Y= cd /tmp"), (0, "".into()));
-        assert_eq!(h.run("Y= echo hi"), (126, too_long("echo")));
-        assert_eq!(h.run("echo hi | Y= cat"), (126, too_long("cat")));
-        assert_eq!(h.run("Y= echo hi | cat"), (0, too_long("echo")));
+        assert_eq!(h.run(&format!("{over} echo hi")), (126, too_long("echo")));
+        assert_eq!(
+            h.run(&format!("echo hi | {over} cat")),
+            (126, too_long("cat"))
+        );
+        assert_eq!(
+            h.run(&format!("{over} echo hi | cat")),
+            (0, too_long("echo"))
+        );
+        assert_eq!(h.run(&format!("{fits} echo hi")), (0, "hi\n".into()));
         assert_eq!(h.run("echo hi"), (0, "hi\n".into()));
+    }
+
+    #[test]
+    fn a_built_in_gets_no_environment_so_no_limit() {
+        // 11,000 empty variables hold under 64 KiB of names, but their
+        // entries, `V123=` and a NUL each, make more than 64 KiB.
+        let mut env = Vec::new();
+        for i in 0..11_000 {
+            env.extend_from_slice(format!("V{i}=\0").as_bytes());
+        }
+        let mut h = spawning();
+        h.env = env;
+        let too_long = "relay-sh: t-args: Argument list too long\n";
+        assert_eq!(h.spawning("t-args"), (126, too_long.into()));
+        assert_eq!(h.spawning("cd /tmp"), (0, "".into()));
     }
 
     #[test]
@@ -3075,6 +3121,22 @@ mod tests {
             h.lines(&["PWD=/x", "export OLDPWD=/nonexistent", "sh /tmp/s.sh"])
                 .1,
             "+ echo \"[$PWD][$OLDPWD]\"\n[/][]\n"
+        );
+    }
+
+    #[test]
+    fn a_shell_says_once_when_pwd_does_not_fit_its_variables() {
+        let mut h = Harness::new();
+        let mut env = b"A=".to_vec();
+        env.extend(core::iter::repeat_n(b'x', crate::vars::VARS_MAX - 3));
+        env.push(0);
+        h.env = env;
+        assert_eq!(
+            h.run("echo \"[$PWD]\""),
+            (
+                0,
+                "relay-sh: PWD: the variables would hold more than 64 KiB\n[]\n".into()
+            )
         );
     }
 

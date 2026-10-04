@@ -44,16 +44,21 @@ pub fn cd(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     }
     let cwd = path::display(&ctx.vfs.cwd());
     let vars = ctx.vars();
-    let _ = match vars.value("PWD").map(String::from) {
+    let oldpwd = match vars.value("PWD").map(String::from) {
         Some(old) => vars.set("OLDPWD", old),
         None => vars.clear("OLDPWD"),
     };
-    let _ = vars.set("PWD", cwd);
+    let pwd = vars.set("PWD", cwd);
+    // It went there all the same, as bash would; the variables say not.
+    let status = match oldpwd.and(pwd) {
+        Ok(()) => 0,
+        Err(e) => ctx.fail(NAME, format_args!("{e}")),
+    };
     // `cd -` says `$OLDPWD` as it is written, as bash's does.
     if show {
         outln!(ctx, "{dir}");
     }
-    0
+    status
 }
 
 /// `exit [code]`: the shell stops with `code` (modulo 256), or the last
@@ -277,6 +282,18 @@ mod tests {
             "0\n/tmp\n"
         );
         assert_eq!(h.lines(&["HOME=/etc", "cd --", "pwd"]).1, "/etc\n");
+    }
+
+    #[test]
+    fn cd_says_when_pwd_does_not_fit_the_variables() {
+        // It goes there all the same, status 1 (the maintainer,
+        // 2026-10-04).
+        let mut h = Harness::new();
+        let fill = alloc::format!("A={}", "x".repeat(crate::vars::VARS_MAX - 13));
+        assert_eq!(
+            h.lines(&[&fill, "cd /tmp", "echo $? \"[$PWD]\"", "pwd"]).1,
+            "relay-sh: PWD: the variables would hold more than 64 KiB\n1 [/]\n/tmp\n"
+        );
     }
 
     #[test]

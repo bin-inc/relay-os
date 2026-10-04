@@ -114,13 +114,16 @@ impl Vars {
     /// What a shell sets when it starts, after its import (programmable
     /// shell gate §8.5): `PWD`, exported, the current directory `cwd`, in
     /// its place if it was imported; and `OLDPWD` exported without a value,
-    /// unless it was imported naming a directory, as bash's are.
-    pub fn start(&mut self, cwd: &str, oldpwd_is_dir: bool) {
-        let _ = self.export("PWD", Some(String::from(cwd)));
+    /// unless it was imported naming a directory, as bash's are. The first
+    /// that does not fit `VARS_MAX` is the error, the other still set.
+    pub fn start(&mut self, cwd: &str, oldpwd_is_dir: bool) -> Result<(), Error> {
+        let pwd = self.export("PWD", Some(String::from(cwd)));
+        let mut oldpwd = Ok(());
         if !oldpwd_is_dir {
             self.unset("OLDPWD");
-            let _ = self.export("OLDPWD", None);
+            oldpwd = self.export("OLDPWD", None);
         }
+        pwd.and(oldpwd)
     }
 
     /// Sets the variable `name` to `value`, exported or not as it was,
@@ -513,7 +516,7 @@ mod tests {
     fn a_shell_starts_with_pwd_and_oldpwd_exported() {
         let mut v = Vars::new("sh");
         v.import(b"HOME=/root\0");
-        v.start("/tmp", false);
+        v.start("/tmp", false).unwrap();
         assert_eq!(v.environment_with(&[]), b"HOME=/root\0PWD=/tmp\0");
         assert_eq!(
             v.exported().collect::<Vec<_>>(),
@@ -527,9 +530,9 @@ mod tests {
         // imported `OLDPWD` is kept if it names a directory.
         let mut v = Vars::new("sh");
         v.import(b"PWD=/elsewhere\0OLDPWD=/etc\0A=1\0");
-        v.start("/tmp", true);
+        v.start("/tmp", true).unwrap();
         assert_eq!(v.environment_with(&[]), b"PWD=/tmp\0OLDPWD=/etc\0A=1\0");
-        v.start("/tmp", false);
+        v.start("/tmp", false).unwrap();
         assert_eq!(v.environment_with(&[]), b"PWD=/tmp\0A=1\0");
         assert_eq!(v.value("OLDPWD"), None);
     }
