@@ -3512,8 +3512,7 @@ mod tests {
 
     #[test]
     fn several_redirections_are_made_left_to_right() {
-        // bash 5.2: each file is made, and the command writes to the last
-        // (tmp/m5p1/probes/p1.txt).
+        // bash 5.2: each file is made, and the command writes to the last.
         let mut h = Harness::new();
         h.put("/tmp/f", b"old\n");
         assert_eq!(h.run("echo a > /tmp/f > /tmp/g"), (0, String::new()));
@@ -3559,8 +3558,8 @@ mod tests {
 
     #[test]
     fn standard_error_may_go_to_a_file() {
-        // bash 5.2 (tmp/m5p1/probes/p1.txt): a command's own messages go to
-        // its fd 2, a built-in's and the shell's of it alike.
+        // bash 5.2: a command's own messages go to its fd 2, a built-in's
+        // and the shell's of it alike.
         let mut h = Harness::new();
         assert_eq!(h.run("cd /missing 2> /tmp/e"), (1, String::new()));
         assert_eq!(
@@ -3605,7 +3604,7 @@ mod tests {
     #[test]
     fn a_file_appended_to_is_written_at_its_end_each_time() {
         // The prototype's review (M-1): two fds that append to one file, as
-        // the kernel's append does (bash 5.2, tmp/m5p1/probes/p14.txt).
+        // the kernel's append does (bash 5.2).
         let mut h = Harness::new();
         h.put("/tmp/f", b"x\n");
         h.put("/tmp/g", b"old\n");
@@ -3635,8 +3634,7 @@ mod tests {
 
     #[test]
     fn one_output_may_be_made_a_copy_of_the_other() {
-        // bash 5.2 (tmp/m5p1/probes/p1.txt, p2.txt): the copy is of the
-        // fd as it is at that point.
+        // bash 5.2: the copy is of the fd as it is at that point.
         let mut h = Harness::new();
         h.put("/tmp/f", b"");
         assert_eq!(h.run("ls /tmp/f /nope > /tmp/o 2>&1"), (2, String::new()));
@@ -3701,8 +3699,8 @@ mod tests {
 
     #[test]
     fn a_pipeline_s_commands_redirect_over_its_pipes() {
-        // bash 5.2 (tmp/m5p1/probes/p10.txt): `2>&1` sends the errors into
-        // the pipe, and a command's own messages go there too.
+        // bash 5.2: `2>&1` sends the errors into the pipe, and a command's
+        // own messages go there too.
         let mut h = Harness::new();
         h.put("/tmp/f", b"x\n");
         assert_eq!(h.run("ls /tmp/f /nope 2>&1 | wc -l"), (0, "2\n".into()));
@@ -3843,9 +3841,8 @@ mod tests {
 
     #[test]
     fn a_redirection_s_target_is_expanded_when_it_is_reached() {
-        // bash 5.2 (tmp/m5p1/probes/p11.txt, p12.txt): a target that does
-        // not expand is told on fd 2 as it stands, and the redirections
-        // after it are not made.
+        // bash 5.2: a target that does not expand is told on fd 2 as it
+        // stands, and the redirections after it are not made.
         let mut h = Harness::new();
         assert_eq!(h.run("E="), (0, String::new()));
         assert_eq!(h.run("echo a 2> /tmp/e1 > $E"), (1, String::new()));
@@ -3871,7 +3868,7 @@ mod tests {
 
     #[test]
     fn a_compound_command_s_redirections_hold_for_everything_inside() {
-        // bash 5.2 (tmp/m5p1/probes/p3.txt, p4.txt, p11.txt).
+        // bash 5.2.
         let mut h = Harness::new();
         h.put("/tmp/f", b"l1\nl2\nl3\n");
         assert_eq!(
@@ -3998,7 +3995,7 @@ mod tests {
 
     #[test]
     fn a_job_s_number_goes_to_the_fd_2_around_it() {
-        // bash 5.2 (tmp/m5p1/probes/p4.txt): `[1] 42` into the file.
+        // bash 5.2: `[1] 42` into the file.
         let mut h = with_jobs();
         let out = typed(&mut h, &["for x in 1; do t-spin & done 2> /tmp/je"]);
         assert!(!out.contains("[1]"), "{out}");
@@ -4034,7 +4031,7 @@ mod tests {
 
     #[test]
     fn standard_input_may_be_a_file() {
-        // bash 5.2 (tmp/m5p1/probes/p9.txt).
+        // bash 5.2.
         let mut h = Harness::new();
         h.put("/tmp/f", b"l1\nl2\n");
         assert_eq!(h.run("cat < /tmp/f"), (0, "l1\nl2\n".into()));

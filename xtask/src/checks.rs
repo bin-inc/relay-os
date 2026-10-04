@@ -89,7 +89,9 @@ pub fn parse(script: &str, machine: Machine) -> Result<Vec<Command>> {
             // `#word>` looks like an expectation: a typo must not turn one
             // into a comment, or a wrong transcript could pass.
             t if t.chars().all(|c| c.is_ascii_alphabetic() || c == '!') => {
-                bail!("line {n}: `#{t}>` is not an expectation (`#>`, `#!>`, `#nuc>`, `#qemu>`)")
+                bail!(
+                    "line {n}: `#{t}>` is not an expectation (`#>`, `#!>`, `#nuc>`, `#qemu>`, `#same>`)"
+                )
             }
             _ => continue,
         };
@@ -597,8 +599,8 @@ free
                 assert!(r.ok(), "part {i} on {machine:?}: {:?}", r.failures);
             }
             // The NUC's own lines are checked there: QEMU's transcript is
-            // not the NUC's (checks 4 and 5 have none: they run programs
-            // only).
+            // not the NUC's (checks 4 to 7 have none: nothing they print
+            // differs between the machines).
             if script.contains("#nuc>") {
                 let r = check(&parse(script, Machine::Nuc).unwrap(), qemu);
                 assert!(!r.ok(), "part {i}");
@@ -660,7 +662,9 @@ free
             let err = parse(&format!("ls\n#{tag}> x\n"), Machine::Nuc).unwrap_err();
             assert_eq!(
                 err.to_string(),
-                format!("line 2: `#{tag}>` is not an expectation (`#>`, `#!>`, `#nuc>`, `#qemu>`)")
+                format!(
+                    "line 2: `#{tag}>` is not an expectation (`#>`, `#!>`, `#nuc>`, `#qemu>`, `#same>`)"
+                )
             );
         }
     }

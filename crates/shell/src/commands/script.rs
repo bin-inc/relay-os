@@ -1,17 +1,18 @@
 //! `sh FILE [ARG]...`: runs the commands in a file, one line at a time, as
 //! if each had been typed (spec §15 item 12), its arguments `$1` on and
-//! `$0` the file as given (user-space gate §9.4). There are no loops or
-//! conditions: a script is a list of commands. Each command is shown as
-//! `+ <line>` before its output, as `set -x` does, so a photo of the
-//! screen shows which command printed what. A failing command does not
-//! stop the script; Ctrl-C does. Everything the script shows on the screen,
-//! errors included, also goes into a transcript next to it (`x.sh` →
-//! `x.log`), written and synced as each line starts and ends, so it can be
-//! checked afterwards (`cargo xtask verify-usb`). Under `/bin/sh` the
-//! transcript is a console tee, and a script may run another. A command of
-//! the script that redirects into the script's own transcript garbles it,
-//! as it would under bash: the redirection writes from the file's start,
-//! the transcript goes on where it was.
+//! `$0` the file as given (user-space gate §9.4). Its lines are read as the
+//! prompt reads them, so a list or a compound command may go on across
+//! lines. Each line is shown as `+ <line>` as it is read, before its
+//! output, as `set -x` does, so a photo of the screen shows which command
+//! printed what. A failing command does not stop the script; Ctrl-C does.
+//! Everything the script shows on the screen, errors included, also goes
+//! into a transcript next to it (`x.sh` → `x.log`), written and synced as
+//! each line starts and ends, so it can be checked afterwards
+//! (`cargo xtask verify-usb`). Under `/bin/sh` the transcript is a console
+//! tee, and a script may run another. A command of the script that
+//! redirects into the script's own transcript garbles it, as it would under
+//! bash: the redirection writes from the file's start, the transcript goes
+//! on where it was.
 
 use crate::ctx::{Ctx, getopt, quote_if_needed};
 use alloc::format;

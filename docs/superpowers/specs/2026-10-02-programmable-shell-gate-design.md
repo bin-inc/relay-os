@@ -511,8 +511,15 @@ comments:
 - `SHLVL`, `_`, `PATH` and `CDPATH` are not set or used (§8.5, §9.1); the
   prompt shows `getcwd`, not `$PWD`, and `PWD` is `getcwd`'s, so `cd //tmp`
   gives `/tmp` (§9.1, §15 item 7).
+- `export -p` lists `declare -x OLDPWD` while `OLDPWD` has no value, also
+  when an imported `OLDPWD` named no directory, where bash then lists no
+  line for it (§15 items 7 and 8).
 - An environment entry without a valid name, or not UTF-8 text, is dropped,
   where bash passes it on (§8.5, §15 item 7).
+- A program's environment over 64 KiB is refused before the command is
+  looked up (`relay-sh: <name>: Argument list too long`, status 126), so a
+  command not found says it too, where bash says `command not found`
+  (§8.5, §15 item 7).
 - `env` waits for its command, having no `exec`: a command that is killed
   leaves `env` exiting with the shell's status for it, and only the kernel's
   log names the signal (§8.6, §15 item 7).
@@ -521,10 +528,16 @@ comments:
   numbers (`1, 3` for `/dev/null`): `Stat` has none (§15 item 6).
 - `sh FILE` runs only a regular file: `sh /dev/null` fails, status 1, where
   bash runs nothing (§15 item 6).
+- `sh FILE` refuses a standard output or error that is not the console
+  (`sh FILE > f`, `sh FILE 2> /dev/null`): `sh: a script's output cannot
+  be redirected`, status 1, where bash runs the script (§15 items 5
+  and 6).
 - `:` is not a built-in; `true` is the program for it (§14).
 - A redirection's fd is 0, 1 or 2 written as one digit, and a `>&` takes
   only a bare `1` or `2`; bash's other fds and its expanded `>&` targets
   are refused (§15 item 5).
+- `NAME+=value`, alone, before a command or after `export`, is
+  `unsupported syntax`, status 2, where bash appends (§8.5, §15 item 8).
 - A `\` at a line's end is an error, where bash joins the line to the
   next (§15 item 1).
 - The line editor's history keeps each line of a command typed across
@@ -543,6 +556,11 @@ comments:
   are dropped with it (§15 items 1, 2 and 4).
 - `help` and `jobs` say a write error, status 1, where bash's say nothing
   and end with 0 (§15 item 8).
+- After `2>&1` in a pipeline, the message of a stage whose redirection
+  fails or that cannot start goes into the pipe before the next stage
+  starts, so one over 8 KiB, half of what a pipe holds, goes to the
+  screen, where bash pipes it; only a path longer than `PATH_MAX` or a
+  command name of 8 KiB makes one (§7.3, §15 item 8).
 
 ## 11. Testing
 

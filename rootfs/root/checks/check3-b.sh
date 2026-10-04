@@ -1,5 +1,5 @@
 # NUC check 3, part 2 (docs/hardware-test.md): after check3-a.sh and a
-# `reboot`, `sh checks/check3-b.sh`, then checks 4 and 5. Its transcript is
+# `reboot`, `sh checks/check3-b.sh`, then checks 4 to 7. Its transcript is
 # check3-b.log; the `#>` lines are explained in check3-a.sh.
 
 # Run from any directory (programmable shell gate §9.2).

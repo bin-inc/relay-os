@@ -1,9 +1,9 @@
 //! The runtime every Relay OS program links (spec §8.1 of the user-space
-//! gate): the entry point, the arguments, system-call wrappers, the heap
-//! (`alloc` works in every program), the panic handler, the ELF note that
-//! names the ABI, and the shell's `Vfs`, `Console`, `System`, `Stdin`,
-//! `Stdout` and `Programs` over system calls, so a command function runs
-//! unchanged in a program.
+//! gate): the entry point, the arguments and the environment, system-call
+//! wrappers, the heap (`alloc` works in every program), the panic handler,
+//! the ELF note that names the ABI, and the shell's `Vfs`, `Console`,
+//! `System`, `Stdin`, `Stdout` and `Programs` over system calls, so a
+//! command function runs unchanged in a program.
 //!
 //! A program is a `#![no_std]`, `#![no_main]` binary that names its main
 //! function with [`main!`]:

@@ -22,20 +22,19 @@ cargo xtask qemu      # boot it in a window; type `help` at the prompt
 
 ## Status
 
-A small operating system written from scratch in Rust. Milestone 1 boots
-from a USB stick on an Intel NUC 12 Pro, shows a terminal over HDMI and
-stores files on the stick's ext2 root filesystem. Milestone 2 runs programs
-from `/bin` in ring 3, each in its own address space: the shell runs a
-name it does not know (`t-args a b`) as a program, programs start
-programs, the timer shares the CPU among them, and Ctrl-C stops the
+Milestone 1 boots from a USB stick on an Intel NUC 12 Pro, shows a terminal
+over HDMI and stores files on the stick's ext2 root filesystem. Milestone 2
+runs programs from `/bin` in ring 3, each in its own address space: the
+shell runs a name it does not know (`t-args a b`) as a program, programs
+start programs, the timer shares the CPU among them, and Ctrl-C stops the
 command that runs. Programs open, read and write files, map memory (their
 runtime gives them a heap), read the console a line at a time or as it is
-typed, and copy what the console shows into files (tees). Every command
-but the shell's built-ins (`cd`, `exit`, `export`, `help`, `jobs`,
-`kill`, `unset`, `wait`) is a program of its own in `/bin` (`/bin/ls`),
-which prints what the shell's command prints, and the shell itself is
-one too: `/bin/sh` runs each of those commands as a program, and its
-scripts may run scripts.
+typed, and copy what the console shows into files (tees). Every command but
+the shell's built-ins (`cd`, `exit`, `export`, `help`, `jobs`, `kill`,
+`unset`, `wait`) is a program of its own in `/bin` (`/bin/ls`), which
+prints what the shell's command prints, and the shell itself is one too:
+`/bin/sh` runs each of those commands as a program, and its scripts may run
+scripts.
 Process 1 is the kernel's init: it starts `/bin/sh` at boot and again
 whenever it ends, and a machine that cannot run its shell (no
 `system.img`, or a shell that keeps ending) shows an error screen and
@@ -196,10 +195,13 @@ If you like the project, you can
 | `tests/e2e/` | QEMU end-to-end scenarios |
 | `docs/hardware-test.md` | Manual checklist for the NUC, and the log of its results |
 | `docs/superpowers/` | Design specs (`specs/`), milestone roadmaps and the implementation plans (`plans/`) |
-| `.github/` | CI workflow, Dependabot configuration and pull-request template |
+| `.github/` | CI workflow, Dependabot configuration, pull-request and issue templates (`ISSUE_TEMPLATE/`) and the sponsor button (`FUNDING.yml`) |
 | `.cargo/config.toml`, `rust-toolchain.toml` | The `cargo xtask` alias and static relocation for everything built for `x86_64-unknown-none` (the kernel and the programs); the pinned Rust toolchain and targets |
 | `CONTRIBUTING.md` | Commit-message and pull-request rules |
 | `AGENTS.md` | Context and working rules for AI coding agents (`CLAUDE.md` points Claude Code at it) |
+| `SECURITY.md` | How to report a vulnerability, and the versions that get fixes |
+| `CODE_OF_CONDUCT.md` | The Contributor Covenant, and how to report a breach of it |
+| `LICENSE-MIT`, `LICENSE-APACHE` | The two licenses the code is offered under (see [License](#license)) |
 
 ## License
 

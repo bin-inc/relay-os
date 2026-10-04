@@ -330,7 +330,7 @@ mod tests {
 
     #[test]
     fn grep_q_says_only_whether_a_line_is_selected() {
-        // probes/grepq.txt q1–q15 (GNU grep 3.11).
+        // As GNU grep 3.11 answers.
         let files: &[(&str, &[u8])] = &[
             ("f", b"a\nb\n"),
             ("g", b"zz\n"),
@@ -467,8 +467,8 @@ mod tests {
             )
         );
         // Standard input too, whatever is left in it, unless no line is
-        // written (`-q`, `-c`), as GNU's (the prototype's review, I-1; GNU
-        // grep 3.11, tmp/m5p1/probes/p15.txt).
+        // written (`-q`, `-c`), as GNU's (the prototype's review, I-1;
+        // GNU grep 3.11).
         h.put("/tmp/s", b"1\n");
         let said = "grep: (standard input): input file is also the output\n";
         assert_eq!(h.run("grep 1 < /tmp/s >> /tmp/s"), (2, said.into()));

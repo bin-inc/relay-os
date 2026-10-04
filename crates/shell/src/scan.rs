@@ -935,8 +935,8 @@ mod tests {
         assert_eq!(after(&["echo ${a:-${b}; if x}; if c"]), (1, false));
         assert_eq!(after(&["echo ${a:-\\}; if x}; if c"]), (1, false));
         // In double quotes `$(` and `${` start quotes afresh, as bash reads
-        // `"$(echo ")")"` (tmp/m5p1/probes/p13.txt); the double quotes go
-        // on after them (milestone 4's deferred gap).
+        // `"$(echo ")")"`; the double quotes go on after them
+        // (milestone 4's deferred gap).
         assert_eq!(after(&["echo \"$(echo \")\")\"; if c"]), (1, false));
         assert_eq!(after(&["echo \"${x:-\"}\"}\"; if c"]), (1, false));
         assert_eq!(
@@ -966,8 +966,7 @@ mod tests {
             // opens a group too (the prototype's review).
             (&["time if a; then"][..], 1),
             // And after `time`'s options, and after `coproc` and its name
-            // (bash 5.2, tmp/m5p1/probes/p13.txt; milestone 4's deferred
-            // gap).
+            // (bash 5.2; milestone 4's deferred gap).
             (&["time -p { a"], 1),
             (&["time -- while a"], 1),
             (&["time -p -- if a"], 1),
@@ -1186,8 +1185,8 @@ mod tests {
             [false; 6]
         );
         // When what it held reads the same as a subshell's command, the
-        // scan reads on as bash does, the outer subshell open (milestone
-        // 4's deferred minor M-2; tmp/m5p1/probes/p13.txt).
+        // scan reads on as bash does, the outer subshell open
+        // (milestone 4's deferred minor M-2).
         assert_eq!(done_after(&["((a); b)", "c"]), [true, true]);
         assert_eq!(done_after(&["((a) )", "b"]), [true, true]);
         assert_eq!(

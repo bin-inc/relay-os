@@ -1,10 +1,11 @@
-# /bin/sh, the shell as a program (user-space gate §8.2, §8.3; milestone
-# 2, plan 4a), started here by path from the /bin/sh that init started
-# (so a shell of its own, and the one init waits for). Every command but cd,
-# exit and help is a program; a redirection is a file the program writes
-# as its fd 1; at the prompt the shell takes the console and gives it to
-# each command (spawn's FOREGROUND); a script's commands run in its own
-# group, its transcript a console tee, and one script may run another.
+# /bin/sh, the shell as a program (user-space gate §8.2, §8.3; milestone 2,
+# plan 4a), started here by path from the /bin/sh that init started (so a
+# shell of its own, and the one init waits for). Every command but the
+# shell's built-ins (cd, exit, export, help, jobs, kill, unset, wait) is a
+# program; a redirection is a file the program writes as its fd 1; at the
+# prompt the shell takes the console and gives it to each command (spawn's
+# FOREGROUND); a script's commands run in its own group, its transcript a
+# console tee, and one script may run another.
 timeout 30
 expect root@relay:~# $
 # Every kernel-stack slot's page tables made first (they stay), so memory
