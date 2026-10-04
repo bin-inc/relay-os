@@ -2,7 +2,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-02-programmable-shell-gate-design.md` (the programmable shell gate; milestone 5 is its second half, "Redirection and environment", version 0.6.0)
 
-**Status:** Plans 1 and 2 are done (#116–#122); plan 3 is planned and lands with these notes; plan 4 is written just before it runs.
+**Status:** Plans 1 to 3 are done (#116–#127); plan 4 is planned and lands with these notes.
 
 Milestone 5 finishes the programmable shell: every standard stream can be redirected, compound commands included (`<`, `2>`, `2>>`, `2>&1`, `1>&2`), programs get an environment (ABI 4), `/dev/null` exists, the shell exports variables and runs `A=1 cmd`, `/bin/env` lists and changes an environment, `cd` follows `HOME`, `PWD` and `OLDPWD` (`cd -`), and the check scripts pass from any directory (spec §7–§9). It is split into the four plans of spec §12, named `m5-plan-1` to `m5-plan-4` (their files `docs/superpowers/plans/<date>-m5-plan-<n>-<name>.md`, their branches `m5p<n>/…`). Each one ends with software that can be tested by itself. Each plan is written just before it is executed, so it builds on the code that actually exists and on what the previous plan's checks showed.
 
@@ -39,4 +39,6 @@ Plan 1 ──► Plan 2 ──► Plan 3 ──► Plan 4
 - **Plan 2's deferred minors** (`tmp/m5p2/plan-ledger-final.md`): plan 3 settles m-7 (README's crate table) and m-8 (`t-env raw`'s `1 entries`, and relay-rt's environment tests sharing one static); m-2 (`kernel/src/file.rs`'s module comment on a device's `seek`), m-3 (the `FileSystem` contract's sentences that `DevFs` does not keep), m-4 (`xtask/src/userland.rs`'s `3 -> 2`) and m-5 (`check3-b.nuc.log` without the `dev` line, `check3-a.nuc.log`'s `44 programs`) go to plan 4.
 - **Plan 3 changes no ABI** (spec §15 item 7): `spawn` already takes an environment; `Programs::spawn` in the shell gains the block, and `/bin/sh` builds it from its exported variables.
 - **For plan 4 (the NUC transcripts):** plan 3's `+ cd /root` lines reach every `*.nuc.log` by hand, beside plan 2's `ABI 4` and `dev` lines; plan 4's NUC run records them all again.
+- **Plan 3's deferred minors** (`tmp/m5p3/plan-ledger-final.md`): m-1 (a held assignment past `VARS_MAX`), m-2 (`export A+=b`'s message), m-3 (`parser.rs`'s module comment on `~` and `A=1 cmd`), m-4 (§15 item 7's `OLDPWD` sentence, corrected in item 8) and m-5 (`/bin/env` with Ctrl-C and a killed command on target) go to plan 4 (spec §15 item 8).
+- **Plan 4 changes no ABI** (spec §15 item 8): its fixes are in the shell, xtask and the scenarios; `check7.sh` and version 0.6.0 change the check scripts' transcripts, which the NUC run records again.
 - **Still out of the gate** (spec §14): command substitution, arithmetic, globbing, word splitting, functions, `case`, `break`, `continue`, `read`, here-documents, subshells; `PATH`, `CDPATH`; users, an editor, interrupts, floating point, networking, other architectures.
