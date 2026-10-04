@@ -937,8 +937,8 @@ impl Parts {
             }
             // After a compound command, as in bash, only a keyword that
             // closes or goes on with the one around it may come (`fi fi`,
-            // `fi then`), and after its redirections no word at all (`fi >
-            // f fi` is bash's error, probes/p11.txt).
+            // `fi then`), and after its redirections no word at all
+            // (`fi > f fi` is bash's error).
             None if self.compound.is_some() => {
                 return match w.keyword() {
                     Some(k) if k.opens().is_none() && self.redirects.is_empty() => Ok(Some(k)),
@@ -2292,7 +2292,7 @@ mod tests {
 
     #[test]
     fn a_compound_command_takes_redirections_after_its_end() {
-        // Programmable shell gate §7.4, bash 5.2 (tmp/m5p1/probes/p11.txt).
+        // Programmable shell gate §7.4, bash 5.2.
         let redirects = |line: &str| -> Vec<String> {
             let first = parse_line(line).unwrap().items.remove(0).and_or.first;
             assert!(matches!(first.run, Run::Compound(_)), "{line}");
@@ -2826,7 +2826,7 @@ mod tests {
                 "{line}"
             );
         }
-        // Even where a file name is awaited (bash 5.2, probes/p8.txt).
+        // Even where a file name is awaited (bash 5.2).
         for line in ["echo a >2>f", "echo a 2>2>f", "cat <2>f"] {
             assert_eq!(
                 one(line).unwrap_err().to_string(),
@@ -2835,8 +2835,7 @@ mod tests {
             );
         }
         assert_eq!(one("echo a 2> >f"), Err(ParseError::MissingTarget(">")));
-        // `>&` copies fd 1 or 2, a blank before the fd or not (bash 5.2,
-        // probes/p1.txt, p6.txt).
+        // `>&` copies fd 1 or 2, a blank before the fd or not (bash 5.2).
         let copy = |fd, from| Redirect {
             fd,
             op: RedirectOp::Copy(from),
@@ -2888,7 +2887,7 @@ mod tests {
                 "{line}"
             );
         }
-        // `<` and `0<` read a file as fd 0 (bash 5.2, probes/p9.txt).
+        // `<` and `0<` read a file as fd 0 (bash 5.2).
         let read = |path: &str| Redirect {
             fd: 0,
             op: RedirectOp::Read(path.into()),

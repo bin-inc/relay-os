@@ -644,7 +644,7 @@ mod tests {
 
     #[test]
     fn the_rules_by_argument_count_are_gnu_s() {
-        // probes/grammar.txt a0–a4h: 0 to 4 arguments.
+        // 0 to 4 arguments, as GNU reads them.
         like_gnu(&[
             &[],
             &[""],
@@ -705,8 +705,8 @@ mod tests {
 
     #[test]
     fn not_and_or_and_parentheses_are_gnu_s() {
-        // probes/grammar.txt a5a–a5s: 5 arguments and more, GNU's
-        // precedence (`-a` before `-o`) and its errors.
+        // 5 arguments and more, GNU's precedence (`-a` before `-o`) and its
+        // errors.
         like_gnu(&[
             &["", "-o", "x", "-a", ""],
             &["x", "-o", "", "-a", ""],
@@ -749,8 +749,7 @@ mod tests {
 
     #[test]
     fn strings_compare_bytes_and_have_no_less_or_greater() {
-        // probes/grammar.txt s1–s7: GNU's program has no `<` or `>`
-        // (spec §15 item 3).
+        // GNU's program has no `<` or `>` (spec §15 item 3).
         like_gnu(&[
             &["é", "=", "é"],
             &["é", "=", "e"],
@@ -770,7 +769,7 @@ mod tests {
 
     #[test]
     fn integers_are_read_as_gnu_reads_them_and_have_any_length() {
-        // probes/grammar.txt i1–i23: blanks around, a sign, any length.
+        // As GNU reads them: blanks around, a sign, any length.
         like_gnu(&[
             &["1", "-eq", "x"],
             &[" +12 ", "-eq", "12"],
@@ -845,8 +844,7 @@ mod tests {
 
     #[test]
     fn errors_quote_their_argument_as_gnu_s_quote_does() {
-        // probes/quote.txt qt0–qt13: C escapes in plain quotes, other
-        // bytes in octal.
+        // As GNU's quote: C escapes in plain quotes, other bytes in octal.
         like_gnu(&[
             &["a'b", "-eq", "1"],
             &["a\\b", "-eq", "1"],
@@ -867,9 +865,8 @@ mod tests {
 
     #[test]
     fn parentheses_nest_as_deep_as_gnu_s_without_recursion() {
-        // probes/deep.txt d30000e: GNU nests 30000 levels; this evaluator
-        // keeps its open parentheses on a stack of its own, so a small
-        // stack is enough.
+        // GNU nests 30000 levels; this evaluator keeps its open parentheses
+        // on a stack of its own, so a small stack is enough.
         let mut line = alloc::vec![String::from("test")];
         for _ in 0..30_000 {
             line.extend(["(", "x", "-a"].map(String::from));
@@ -1260,7 +1257,7 @@ mod tests {
             &["-t", "0", "-a", "x"],
             &["!", "-t", "1"],
         ]);
-        // On a console: probes/tty.txt (fds 0 and 1 on a pty).
+        // On a console, as GNU's with fds 0 and 1 on a pty.
         let mut h = Harness::new();
         h.system.terminals = alloc::vec![0, 1];
         for (fd, status) in [

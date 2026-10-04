@@ -669,9 +669,9 @@ mod tests {
             (1, "cat: /tmp/a: input file is output file\n".into())
         );
         assert_eq!(h.get("/tmp/a"), b"one\n");
-        // GNU's condition, standard input too (the prototype's review,
-        // I-1; GNU 9.4, tmp/m5p1/probes/p15.txt): the same regular file,
-        // with something left to read; `>` has emptied it.
+        // GNU's condition, standard input too (the prototype's review, I-1;
+        // GNU 9.4): the same regular file, with something left to read; `>`
+        // has emptied it.
         assert_eq!(
             h.run("cat < /tmp/a >> /tmp/a"),
             (1, "cat: -: input file is output file\n".into())
@@ -862,9 +862,8 @@ mod tests {
 
     #[test]
     fn head_leaves_a_file_just_after_its_lines() {
-        // GNU's `head -n` seeks standard input back to just after the
-        // lines it printed when it can (tmp/m5p1/probes/p5.txt), so the
-        // next command reads on from there.
+        // GNU's `head -n` seeks standard input back to just after the lines
+        // it printed when it can, so the next command reads on from there.
         struct File {
             data: &'static [u8],
             at: usize,
