@@ -1,8 +1,8 @@
 Relay OS
 
 Files live on the USB stick and survive reboots. Every command but the
-shell's built-ins (cd, exit, help, jobs, wait, kill) is a program in /bin
-(ls /bin), and the shell is /bin/sh. Useful commands:
+shell's built-ins (cd, exit, export, help, jobs, kill, unset, wait) is a
+program in /bin (ls /bin), and the shell is /bin/sh. Useful commands:
   ls, cd, pwd, cat, echo text > file, mkdir, rm, cp, mv, grep, help
 Pipes and jobs:
   seq 1000 | grep 7 | wc -l    t-spin &    jobs    ps    kill %1    wait
@@ -12,3 +12,6 @@ Scripts and variables:
 Control flow (help shows the forms):
   a; b    a && b    a || b    ! a    if [ -f FILE ]; then a; else b; fi
   while test -f FILE; do a; done    for x in one two; do echo $x; done
+Redirection and the environment:
+  a < in > out 2> err    a > f 2>&1    a 2>&1 | b    a > /dev/null
+  export NAME=value    A=1 env    env -i a    unset NAME    cd -

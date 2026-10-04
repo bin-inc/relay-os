@@ -6,7 +6,7 @@ Kingston DataTraveler 3.0 test stick (serial `08606E6D413FB27127135F8E`).
 The NUC also runs Linux Mint, which is where the stick is written.
 
 Checks 1, 1b and 2 test the boot, the display and the keyboard, and are run by
-hand. Checks 3 to 6 are one run of five scripts on the stick, with a few
+hand. Checks 3 to 7 are one run of six scripts on the stick, with a few
 steps by hand; it is the check every release gets. The results log at the
 end records each run.
 
@@ -186,17 +186,17 @@ The NUC has no serial port, so a keyboard that does not work cannot run
 | `[FAIL] keyboard: no USB keyboard found` and no `port 3` line | The K120 connected after the boot's wait, or not at all | Type anyway: a late keyboard is set up when it appears. If nothing works, `debug=usb`: a `port 3: connected` line means it appeared late, none means the port never saw it; the `ports settled` line shows the wait |
 | Keys show up twice or not at all | Firmware still emulating a keyboard (handoff) | `debug=usb`: the `legacy support` line |
 
-## Checks 3 to 6 — files, programs, pipes, jobs and control flow
+## Checks 3 to 7 — files, programs, pipes, jobs, control flow and the environment
 
 The full checklist of the milestone 1 spec's §9.4, the user-space gate
 spec's §12.4 and the programmable shell gate spec's §11.4, in one run.
 The K120 and the stick sit on the ports of check 2 (the stick on bus 4
 port 3 in Mint's `lsusb -t`).
 
-Most of the run is five scripts on the stick, in `/root/checks/` (in the
+Most of the run is six scripts on the stick, in `/root/checks/` (in the
 repository under `rootfs/root/checks/`): `check3-a.sh` and `check3-b.sh`
-(check 3, either side of a restart), `check4.sh`, `check5.sh` and
-`check6.sh`. The
+(check 3, either side of a restart), `check4.sh`, `check5.sh`, `check6.sh`
+and `check7.sh`, the last started in `/root/checks`. The
 `/bin/sh` that init (process 1) starts as process 2 runs them: `sh FILE`
 runs each line as if it were typed, shows it as `+ <command>` before its
 output, and writes everything it shows into a transcript next to the
@@ -344,9 +344,29 @@ Every command but the shell's built-ins (`cd`, `exit`, `export`, `help`,
 
    Photograph the screen.
 
+### Check 7 — redirection and the environment
+
+10. Type `cd checks` and `sh check7.sh`: check 7 starts in `/root/checks`,
+    which its `OLDPWD` shows. It runs for a few seconds:
+    - `/dev/null` (`[ -c /dev/null ]`, output and errors sent to it,
+      `wc -c < /dev/null`), and every standard stream redirected to files:
+      `>`, `2>`, `>>`, `2>>`, both orders of `2>&1`, `2>&1` into a pipe, a
+      `for` loop's output and `wc -l < file`;
+    - the environment: `export A=1` seen by `env`, `B=2 env` and `$B`
+      empty afterwards, `env -i` and `env -u HOME`, a script it writes
+      that sees `A` and an assigned `B` (a nested `sh`), and neither after
+      `unset A`;
+    - `cd`: `$PWD` and `$OLDPWD` (`/root /root/checks`: the script's
+      `cd /root` left `/root/checks`), `cd /bin`, `cd -` printing `/root`,
+      `cd ..` and `cd` back to `HOME`.
+
+    The prompt `root@relay:~/checks# ` comes back after
+    `+ echo "$PWD $OLDPWD"` and `/root /`: the script's `cd` stays in it.
+    Type `cd` to go home.
+
 ### The error screen, power off and verify-usb
 
-10. The error screen: `reboot`, and choose the stick again with F10, so
+11. The error screen: `reboot`, and choose the stick again with F10, so
     that the kernel log's last lines are the boot's. At the prompt type
     `exit` three times within 10 s. After the first two, init's line and
     a new prompt; after the third, `init: /bin/sh (pid <n>) exited with
@@ -360,19 +380,20 @@ Every command but the shell's built-ins (`cd`, `exit`, `export`, `help`,
     Photograph it, wait a few seconds (it waits for the key, however
     long), then press a key on the K120: the NUC restarts. Choose the
     stick again with F10: the motd and the prompt.
-11. `poweroff`: the NUC switches itself off (`relay: powering off`). If the
+12. `poweroff`: the NUC switches itself off (`relay: powering off`). If the
     screen says `System halted. It is now safe to power off.` instead, note
     the `relay:` line above it and hold the power button.
-12. Boot Mint and run `cargo xtask verify-usb`: `e2fsck: clean`, the tree
+13. Boot Mint and run `cargo xtask verify-usb`: `e2fsck: clean`, the tree
     lists `/root/notes/a`, `/root/notes/big` (8388608 bytes) and
     `/root/notes/t`, and the last lines are `system.img: built <time>`,
     `/root/checks/check3-a.sh: ok, 84 of 84 commands as expected (run <time>)`,
     `/root/checks/check3-b.sh: ok, 5 of 5 commands as expected (run <time>)`,
     `/root/checks/check4.sh: ok, 33 of 33 commands as expected (run <time>)`,
-    `/root/checks/check5.sh: ok, 29 of 29 commands as expected (run <time>)`
-    and `/root/checks/check6.sh: ok, 46 of 46 commands as expected (run <time>)`
-    (each line of a loop written across lines counts), with the UTC times
-    of the five runs. A transcript older than the
+    `/root/checks/check5.sh: ok, 29 of 29 commands as expected (run <time>)`,
+    `/root/checks/check6.sh: ok, 46 of 46 commands as expected (run <time>)`
+    (each line of a loop written across lines counts) and
+    `/root/checks/check7.sh: ok, 39 of 39 commands as expected (run <time>)`,
+    with the UTC times of the six runs. A transcript older than the
     stick's `system.img` (a run before the last `flash --kernel`, which
     keeps the transcripts; `flash --full` erases them) fails. A `FAILED`
     line is followed by the script line, the expectation that failed and
@@ -399,6 +420,8 @@ Every command but the shell's built-ins (`cd`, `exit`, `export`, `help`,
 | `check5.sh`: `ps \| grep -c t-spin` prints another count than 1 before `kill %1`, or than 0 after `wait %1` | A `t-spin` of an earlier command still runs, or the job's did not start | `verify-usb` names the line; `ps` at the prompt lists the processes |
 | `check6.sh` prints `while once` or `until once` over and over, with an `rm` or `touch` error | The loop's file was not removed or made, so the loop runs on | Photograph the screen, then Ctrl-C: `^C` and the prompt come back; `ls /root/check6-go /root/check6-stop` shows which file is left |
 | `check6.sh`'s two `date` lines are more than 10 s apart | A sync after every command is slow on the stick | Note both times in the results log: a later plan syncs once per command line instead (the programmable shell gate's §13) |
+| `check7.sh`'s first `echo "$PWD $OLDPWD"` prints `/root /root` | The script was started from `~`, not from `/root/checks` | `cd checks`, then `sh check7.sh` again (it starts afresh) |
+| `check7.sh`: `env`, `env -u HOME` or the nested script shows a variable it should not, or lacks one | A variable did not reach a program's environment as exported, assigned or unset | `verify-usb` names the line; `env` at the prompt lists what the shell exports |
 | Ctrl-C at `> ` by hand gives no `^C`, or no prompt | The line editor did not get the K120's Ctrl-C | Photograph the screen; Enter, or a second Ctrl-C, shows whether the shell still reads the keyboard |
 | Ctrl-C in the `while` loop by hand gives no `^C`, or no prompt | The Ctrl-C reached neither `sleep` nor the shell's check between its own commands (`wait` for a Ctrl-C), or was lost after `sleep` ended | Photograph the screen; a second Ctrl-C shows whether the loop can end; `dmesg` after it shows a `pid <n> (/bin/sleep): killed: Ctrl-C` line if the first reached `sleep` |
 | The error screen with `/bin/sh cannot start: …` or `/bin/sh ended 3 times within 10 s` | The shell cannot be loaded, or ends as soon as it starts (its `init: /bin/sh (pid N) …` lines, in the log's lines on the screen, say how) | Photograph the screen; a key restarts the machine |
