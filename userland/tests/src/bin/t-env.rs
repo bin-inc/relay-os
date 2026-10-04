@@ -67,7 +67,7 @@ fn main(args: Args) -> u8 {
         Some(b"raw") => {
             let (at, len, count) = relay_rt::env::raw();
             let at = if at == 0 { "no address" } else { "an address" };
-            let _ = writeln!(Fd(1), "{at}, {len} bytes, {count} entries");
+            let _ = writeln!(Fd(1), "{at}, {len} bytes, {count} {}", entries(count));
             Ok(())
         }
         Some(b"sizes") => {

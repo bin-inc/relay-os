@@ -310,6 +310,22 @@ impl Word {
         }
     }
 
+    /// The word is `text` once its quotes are removed (`export`,
+    /// `"export"`, `\export`), with no parameter in it.
+    pub fn is_text(&self, text: &str) -> bool {
+        let mut rest = text;
+        for piece in &self.pieces {
+            let Piece::Text(t, _) = piece else {
+                return false;
+            };
+            let Some(after) = rest.strip_prefix(t.as_str()) else {
+                return false;
+            };
+            rest = after;
+        }
+        rest.is_empty()
+    }
+
     /// The word as an assignment, `NAME=value`, if its name and `=` are
     /// unquoted (`"A"=x` is none, as in bash): the name, and the value as a
     /// word of its own, a `~` at its start or after a `:` made `/root`, as

@@ -8,6 +8,7 @@ use alloc::string::String;
 mod basic;
 mod change;
 mod control;
+mod export;
 mod grep;
 mod ls;
 mod script;
@@ -20,6 +21,7 @@ mod text;
 pub use basic::{clear, echo, r#false, pwd, r#true, uname};
 pub use change::{cp, mkdir, mv, rm, rmdir, touch};
 pub use control::{jobs, kill, wait};
+pub use export::{export, unset};
 pub use grep::grep;
 pub use ls::ls;
 pub(crate) use script::Script;
@@ -93,6 +95,11 @@ pub const COMMANDS: &[Builtin] = &[
         name: "exit",
         help: "leave the shell",
         run: basic::exit,
+    },
+    Builtin {
+        name: "export",
+        help: "give variables to the programs the shell starts",
+        run: export::export,
     },
     Builtin {
         name: "false",
@@ -225,6 +232,11 @@ pub const COMMANDS: &[Builtin] = &[
         run: basic::uname,
     },
     Builtin {
+        name: "unset",
+        help: "remove variables",
+        run: export::unset,
+    },
+    Builtin {
         name: "wait",
         help: "wait for background jobs",
         run: control::wait,
@@ -238,7 +250,9 @@ pub const COMMANDS: &[Builtin] = &[
 
 /// The shell's own commands (user-space gate §8.3); every other one is a
 /// program of its own in `/bin`.
-pub const BUILTINS: &[&str] = &["cd", "exit", "help", "jobs", "kill", "wait"];
+pub const BUILTINS: &[&str] = &[
+    "cd", "exit", "export", "help", "jobs", "kill", "unset", "wait",
+];
 
 pub fn find(name: &str) -> Option<&'static Builtin> {
     COMMANDS.iter().find(|b| b.name == name)
@@ -269,13 +283,18 @@ mod tests {
     }
 
     #[test]
-    fn the_shell_s_own_commands_are_cd_exit_help_and_the_job_commands() {
+    fn the_shell_s_own_commands_are_cd_exit_export_help_unset_and_the_job_commands() {
         let own: alloc::vec::Vec<_> = COMMANDS
             .iter()
             .filter(|b| builtin(b.name).is_some())
             .map(|b| b.name)
             .collect();
-        assert_eq!(own, ["cd", "exit", "help", "jobs", "kill", "wait"]);
+        assert_eq!(
+            own,
+            [
+                "cd", "exit", "export", "help", "jobs", "kill", "unset", "wait"
+            ]
+        );
         assert!(builtin("cat").is_none() && builtin("sh").is_none());
     }
 }

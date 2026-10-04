@@ -164,12 +164,14 @@ pub trait Programs {
     fn close(&mut self, fd: u32);
     /// Makes a pipe: its read end and its write end.
     fn pipe(&mut self) -> Result<(u32, u32), Errno>;
-    /// Starts the program at `path` with `args` (argument 0 first) in
-    /// `group`; its pid. Its fds 0, 1 and 2 are the shell's `fds`.
+    /// Starts the program at `path` with `args` (argument 0 first) and the
+    /// environment `env` (entries, each followed by a NUL) in `group`; its
+    /// pid. Its fds 0, 1 and 2 are the shell's `fds`.
     fn spawn(
         &mut self,
         path: &[u8],
         args: &[&[u8]],
+        env: &[u8],
         fds: [u32; 3],
         group: Group,
     ) -> Result<u32, Errno>;
