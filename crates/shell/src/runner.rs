@@ -229,6 +229,7 @@ impl Runner for InProcess {
                 if let Some((node, offset)) = input_file(files, fds.0[0]) {
                     ctx.set_input_file(node, offset);
                 }
+                ctx.environment = env;
                 ctx.transcript = transcript.take();
                 (command.run)(&mut ctx, args);
                 let _ = ctx.finish();
@@ -578,6 +579,7 @@ pub(crate) fn run_function<'s>(
     };
     let mut ctx = Ctx::new(parts.vfs, parts.system, parts.console, out, err);
     ctx.control = control;
+    ctx.environment = parts.env.to_vec();
     if let Some(input) = parts.input {
         ctx.set_input(input);
     }

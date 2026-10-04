@@ -8,6 +8,7 @@ use alloc::string::String;
 mod basic;
 mod change;
 mod control;
+mod env;
 mod export;
 mod grep;
 mod ls;
@@ -21,6 +22,7 @@ mod text;
 pub use basic::{clear, echo, r#false, pwd, r#true, uname};
 pub use change::{cp, mkdir, mv, rm, rmdir, touch};
 pub use control::{jobs, kill, wait};
+pub use env::env;
 pub use export::{export, unset};
 pub use grep::grep;
 pub use ls::ls;
@@ -90,6 +92,11 @@ pub const COMMANDS: &[Builtin] = &[
         name: "echo",
         help: "print the arguments",
         run: basic::echo,
+    },
+    Builtin {
+        name: "env",
+        help: "print the environment, or run a command with a changed one",
+        run: env::env,
     },
     Builtin {
         name: "exit",

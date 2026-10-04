@@ -33,6 +33,8 @@ pub(crate) struct Script {
     /// The transcript file, emptied, and its name as `sh` was given it.
     pub transcript: Node,
     pub transcript_name: String,
+    /// The environment `sh` was given, which the script imports.
+    pub environment: Vec<u8>,
 }
 
 /// The transcript of `script`: `.sh` becomes `.log`; other names get
@@ -86,6 +88,7 @@ pub fn sh(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
                 args: script_args.to_vec(),
                 transcript,
                 transcript_name: log,
+                environment: ctx.environment.clone(),
             });
             0
         }
