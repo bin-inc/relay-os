@@ -542,8 +542,10 @@ free
 
     /// The real check scripts against a transcript of each machine: QEMU's
     /// from the `checks` scenario, the NUC's as the NUC wrote them in the
-    /// last NUC run of checks 3 to 6 (`docs/hardware-test.md`'s results
-    /// log), copied off the stick unchanged. A `#nuc>` line must not need
+    /// last NUC run of checks 3 to 7 (`docs/hardware-test.md`'s results
+    /// log), copied off the stick unchanged; until that run check 7's is a
+    /// copy of QEMU's and the others hold the lines milestone 5 changed by
+    /// hand (`ABI 4`, `dev`, `+ cd /root`). A `#nuc>` line must not need
     /// a line of its own next to the `#>` line for the same output, which
     /// QEMU alone cannot show.
     #[test]
@@ -578,6 +580,12 @@ free
                 include_str!("../../rootfs/root/checks/check6.sh"),
                 include_str!("../fixtures/checks/check6.qemu.log"),
                 include_str!("../fixtures/checks/check6.nuc.log"),
+            ),
+            (
+                "check7.sh",
+                include_str!("../../rootfs/root/checks/check7.sh"),
+                include_str!("../fixtures/checks/check7.qemu.log"),
+                include_str!("../fixtures/checks/check7.nuc.log"),
             ),
         ];
         // Every check script on the stick has its two transcripts here.

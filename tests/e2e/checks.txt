@@ -1,8 +1,9 @@
 # The NUC checks' scripts (rootfs/root/checks/, spec §15 item 12) run in
 # QEMU as they do on the NUC: check 3's part 1, from /root/checks as each
 # script starts with cd /root (programmable shell gate §9.2), a reboot,
-# part 2, then checks 4, 5 and 6. Afterwards their transcripts on the disk
-# must show what the scripts expect.
+# part 2, then checks 4, 5 and 6, and check 7 from /root/checks (§11.4).
+# Afterwards their transcripts on the disk must show what the scripts
+# expect.
 timeout 30
 expect root@relay:~# $
 send cd checks
@@ -32,9 +33,16 @@ send sh checks/check6.sh
 expect \n\+ rm -f /root/check6-a\.sh .*\n
 expect \n\+ date\n.*\n\+ for a in .*\n(.*\n){3}\+ date\n
 expect root@relay:~# $
+send cd checks
+expect root@relay:~/checks# $
+send sh check7.sh
+expect \n\+ cd /root\n\+ rm -f /root/check7-a\.sh .*\n
+expect \n\+ echo "\$PWD \$OLDPWD"\n/root /\n
+expect root@relay:~/checks# $
 poweroff
 check-script /root/checks/check3-a.sh
 check-script /root/checks/check3-b.sh
 check-script /root/checks/check4.sh
 check-script /root/checks/check5.sh
 check-script /root/checks/check6.sh
+check-script /root/checks/check7.sh
