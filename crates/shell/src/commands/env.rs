@@ -120,6 +120,10 @@ fn refuse(ctx: &mut Ctx<'_>, e: OptError) -> i32 {
 /// in-process runner, which has none, the command's function, with the
 /// block for its environment.
 fn run(ctx: &mut Ctx<'_>, name: &str, args: &[String], block: Vec<u8>) -> i32 {
+    // An empty name names no program, as GNU's `execvp` finds none.
+    if name.is_empty() {
+        return cannot_run(ctx, name, Errno::ENOENT);
+    }
     let Some(programs) = ctx.programs.as_deref_mut() else {
         let Some(command) = super::find(name).filter(|c| !BUILTINS.contains(&c.name)) else {
             return cannot_run(ctx, name, Errno::ENOENT);

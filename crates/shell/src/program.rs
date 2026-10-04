@@ -126,6 +126,8 @@ mod tests {
             WaitStatus::fault(FAULT_PAGE, ACCESS_READ, 0, 0),
         ));
         programs.refusals.push(("/etc", Errno::EISDIR));
+        // As the kernel answers for the directory `/bin/`.
+        programs.refusals.push(("/bin/", Errno::EISDIR));
         programs.refusals.push(("/tmp/text", Errno::ENOEXEC));
         let mut run = |args: &[&str]| {
             let words: alloc::vec::Vec<String> = args.iter().map(|a| String::from(*a)).collect();
@@ -152,6 +154,12 @@ mod tests {
         assert_eq!(
             run(&["nope"]),
             (127, "env: 'nope': No such file or directory\n".into())
+        );
+        // An empty name is no program, as GNU's execvp finds none, not the
+        // directory `/bin/`.
+        assert_eq!(
+            run(&[""]),
+            (127, "env: '': No such file or directory\n".into())
         );
         assert_eq!(
             run(&["/etc"]),
