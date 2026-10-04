@@ -462,10 +462,11 @@ impl<'a> Shell<'a> {
         // starts, so a loop that starts jobs never fills it; they are
         // reported at the next prompt.
         self.collect_jobs();
-        let assigns = commands
+        let alone = commands
             .iter()
-            .find_map(|c| c.words.first().filter(|w| w.assignment().is_some()));
-        if let Some(first) = assigns {
+            .filter(|c| c.words.is_empty())
+            .find_map(|c| c.assigns.first());
+        if let Some(first) = alone {
             // Alone on its line; bash's changes nothing elsewhere.
             let place = match (background, commands.len()) {
                 (Some(_), _) => "the background",
@@ -488,10 +489,19 @@ impl<'a> Shell<'a> {
             };
         }
         let typed = &commands[0];
-        let words = match expand::command_words(&typed.words, &self.vars, self.status) {
-            Ok(words) => words,
+        let (words, assigns) = match expand::command_parts(typed, &self.vars, self.status) {
+            Ok(parts) => parts,
             Err(e) => return self.not_expanded(e, true),
         };
+        if words.is_empty() {
+            // Before words that expanded to nothing the assignments stay
+            // set, as a line of assignments does in bash.
+            for (name, value) in assigns.iter().filter_map(|a| a.split_once('=')) {
+                if let Err(e) = self.vars.set(name, String::from(value)) {
+                    return self.not_expanded(e, true);
+                }
+            }
+        }
         if words.is_empty() && typed.redirects.is_empty() {
             // Its words expanded to nothing: bash's status 0.
             return self.finish(0, String::new());
@@ -499,7 +509,15 @@ impl<'a> Shell<'a> {
         let Some(fds) = self.make(self.fds, &typed.redirects) else {
             return self.finish(1, String::new());
         };
-        let env = self.vars.environment();
+        let env = self.vars.environment_with(&assigns);
+        // Before a built-in the assignments are set while it runs.
+        let builtin = words.first().and_then(|name| commands::builtin(name));
+        if builtin.is_some()
+            && let Err(e) = self.vars.hold(&assigns)
+        {
+            self.release(fds);
+            return self.not_expanded(e, true);
+        }
         let parts = Parts {
             vfs: &mut *self.vfs,
             console: &mut *self.console,
@@ -515,7 +533,7 @@ impl<'a> Shell<'a> {
             env: &env,
         };
         let ran = match words.split_first() {
-            Some((name, args)) => match commands::builtin(name) {
+            Some((name, args)) => match builtin {
                 Some(builtin) => {
                     let control = JobControl {
                         jobs: &mut self.jobs,
@@ -534,6 +552,7 @@ impl<'a> Shell<'a> {
             // A bare `> file` just creates or empties the file.
             None => Ran::said(0, String::new()),
         };
+        self.vars.release();
         let mut message = ran.message;
         if ran.own {
             self.say_on(fds, message.as_bytes());
@@ -547,7 +566,7 @@ impl<'a> Shell<'a> {
         // a file it was given as input.
         if let Some(script) = ran.script {
             let outer = core::mem::replace(&mut self.fds, fds);
-            status = self.run_script(*script);
+            status = self.run_script(*script, &env);
             self.fds = outer;
         }
         self.release(fds);
@@ -558,7 +577,7 @@ impl<'a> Shell<'a> {
     /// so a later one reads an earlier one, and the status is 0. A
     /// redirection after them makes its file, as bash's does.
     fn assign(&mut self, cmd: &parser::Command<parser::Word>) -> i32 {
-        for (name, value) in cmd.words.iter().filter_map(parser::Word::assignment) {
+        for (name, value) in cmd.assigns.iter().filter_map(parser::Word::assignment) {
             let set =
                 expand::value(&value, &self.vars, self.status).and_then(|v| self.vars.set(name, v));
             if let Err(e) = set {
@@ -583,7 +602,7 @@ impl<'a> Shell<'a> {
         }
         let all = self.stage_fds(stages);
         let staged = runner_stages(stages, &all);
-        let env = self.vars.environment();
+        let env = Vec::new();
         let parts = Parts {
             vfs: &mut *self.vfs,
             console: &mut *self.console,
@@ -598,7 +617,7 @@ impl<'a> Shell<'a> {
             files: &mut self.files,
             env: &env,
         };
-        let ran = self.runner.get().pipeline(parts, &staged);
+        let ran = self.runner.get().pipeline(parts, &staged, &self.vars);
         // The last command's own message (the in-process runner's) on its
         // fd 2, as a lone command's.
         let mut message = ran.message;
@@ -627,7 +646,7 @@ impl<'a> Shell<'a> {
         }
         let all = self.stage_fds(stages);
         let staged = runner_stages(stages, &all);
-        let env = self.vars.environment();
+        let env = Vec::new();
         let parts = Parts {
             vfs: &mut *self.vfs,
             console: &mut *self.console,
@@ -639,7 +658,7 @@ impl<'a> Shell<'a> {
             files: &mut self.files,
             env: &env,
         };
-        let started = self.runner.get().background(parts, &staged);
+        let started = self.runner.get().background(parts, &staged, &self.vars);
         for fds in all.into_iter().flatten() {
             self.release(fds);
         }
@@ -794,10 +813,10 @@ impl<'a> Shell<'a> {
     /// script is a shell of its own; and it has variables and arguments of
     /// its own, the exported variables imported, and starts with `$?` 0, as
     /// there.
-    fn run_script(&mut self, script: Script) -> i32 {
+    fn run_script(&mut self, script: Script, env: &[u8]) -> i32 {
         self.transcript = Some(Transcript::new(script.transcript, script.transcript_name));
         let mut vars = Vars::script(&script.name, &script.args);
-        vars.import(&self.vars.environment());
+        vars.import(env);
         let outer = core::mem::replace(&mut self.vars, vars);
         self.status = 0;
         let status = self.run_lines(&script.text);
@@ -1013,7 +1032,8 @@ impl<'a> Shell<'a> {
     }
 }
 
-/// A pipeline's stages for the runner: each one's words and fds.
+/// A pipeline's stages for the runner: each one's words, fds and
+/// assignments.
 fn runner_stages<'c>(stages: &'c [parser::Command], fds: &[Option<Fds>]) -> Vec<runner::Stage<'c>> {
     stages
         .iter()
@@ -1021,6 +1041,7 @@ fn runner_stages<'c>(stages: &'c [parser::Command], fds: &[Option<Fds>]) -> Vec<
         .map(|(c, fds)| runner::Stage {
             words: &c.words,
             fds: *fds,
+            assigns: &c.assigns,
         })
         .collect()
 }
@@ -2750,6 +2771,129 @@ mod tests {
         // With nothing exported, none.
         h.spawning("t-args");
         assert_eq!(h.programs.spawned.last().unwrap().env, b"");
+    }
+
+    #[test]
+    fn assignments_before_a_program_are_in_its_environment_only() {
+        let mut h = spawning();
+        h.programs.known.push(("/bin/cat", WaitStatus::exited(0)));
+        {
+            let mut shell =
+                Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+                    .with_environment(b"HOME=/root\0B=2\0");
+            for line in [
+                "B=3 A=1 t-args",
+                "t-args",
+                "A=1 t-args | X=2 cat",
+                "Y=$B t-args &",
+                "B=4 t-args $B",
+            ] {
+                shell.execute(line);
+            }
+        }
+        let envs: Vec<_> = h.programs.spawned.iter().map(|s| s.env.clone()).collect();
+        assert_eq!(
+            envs,
+            [
+                b"HOME=/root\0B=3\0A=1\0".to_vec(),
+                b"HOME=/root\0B=2\0".to_vec(),
+                b"HOME=/root\0B=2\0A=1\0".to_vec(),
+                b"HOME=/root\0B=2\0X=2\0".to_vec(),
+                b"HOME=/root\0B=2\0Y=2\0".to_vec(),
+                b"HOME=/root\0B=4\0".to_vec(),
+            ]
+        );
+        assert_eq!(
+            h.programs.spawned[5].args,
+            ["t-args", "2"],
+            "the words read the old B"
+        );
+    }
+
+    #[test]
+    fn assignments_before_a_built_in_hold_while_it_runs() {
+        // What bash 5.2 prints for each (programmable shell gate §15 item
+        // 7): a name comes back as it was unless the built-in set or
+        // exported it, and `export -p` lists the values from before.
+        let mut h = Harness::new();
+        let (status, out) = h.lines(&[
+            "A=1 export A",
+            "C=0",
+            "C=1 unset C",
+            "B=1 unset B",
+            "W=1 export W=2",
+            "G=1 cd /tmp > /tmp/o",
+            "export Z=0",
+            "X=1 Z=1 export",
+            "C=1 C=2 cd /",
+            "echo [$A][$B][$C][$W][$G][$Z][$X]",
+        ]);
+        assert_eq!(status, 0);
+        assert_eq!(
+            out,
+            "declare -x A=\"1\"\ndeclare -x W=\"2\"\ndeclare -x Z=\"0\"\n[1][][0][2][][0][]\n"
+        );
+    }
+
+    #[test]
+    fn an_assignment_a_built_in_cannot_hold_runs_nothing() {
+        let mut h = Harness::new();
+        let big = "x".repeat(crate::vars::VARS_MAX - 10);
+        let (status, out) = h.lines(&[
+            &format!("A={big}"),
+            &format!("B={} C=1 cd /tmp", &big[..20]),
+            "pwd",
+            "echo [$C]",
+        ]);
+        assert_eq!(status, 0);
+        assert_eq!(
+            out,
+            "relay-sh: B: the variables would hold more than 64 KiB\n/\n[]\n"
+        );
+    }
+
+    #[test]
+    fn a_program_s_environment_holds_at_most_64_kib() {
+        // Past it bash's words for `E2BIG`, status 126, under both
+        // runners; a built-in gets no environment.
+        let mut env = b"X=".to_vec();
+        env.extend(core::iter::repeat_n(b'x', crate::vars::ENVIRONMENT_MAX - 3));
+        env.push(0);
+        let mut h = spawning();
+        h.programs.known.push(("/bin/cat", WaitStatus::exited(0)));
+        h.env = env;
+        let too_long = |name: &str| format!("relay-sh: {name}: Argument list too long\n");
+        assert_eq!(h.spawning("t-args"), (3, "".into()), "64 KiB exactly");
+        assert_eq!(h.spawning("Y= t-args"), (126, too_long("t-args")));
+        assert_eq!(h.spawning("Y= t-args | cat"), (0, too_long("t-args")));
+        let paths: Vec<_> = h.programs.spawned.iter().map(|s| s.path.as_str()).collect();
+        assert_eq!(paths, ["/bin/t-args", "/bin/cat"]);
+        assert_eq!(h.spawning("Y= cd /tmp"), (0, "".into()));
+        assert_eq!(h.run("Y= echo hi"), (126, too_long("echo")));
+        assert_eq!(h.run("echo hi | Y= cat"), (126, too_long("cat")));
+        assert_eq!(h.run("Y= echo hi | cat"), (0, too_long("echo")));
+        assert_eq!(h.run("echo hi"), (0, "hi\n".into()));
+    }
+
+    #[test]
+    fn assignments_before_a_script_are_in_its_variables_only() {
+        let mut h = Harness::new();
+        h.put("/tmp/s.sh", b"echo [$A][$B]\n");
+        assert_eq!(
+            h.lines(&["B=2", "A=1 sh /tmp/s.sh", "echo [$A]"]),
+            (0, "+ echo [$A][$B]\n[1][]\n[]\n".into())
+        );
+    }
+
+    #[test]
+    fn assignments_before_words_that_expand_to_nothing_stay_set() {
+        // As bash's `A=1 $E`: a line of assignments after all.
+        let mut h = Harness::new();
+        assert_eq!(
+            h.lines(&["A=1 $E", "B=2 $E > /tmp/f", "echo $A $B"]),
+            (0, "1 2\n".into())
+        );
+        assert!(h.exists("/tmp/f"));
     }
 
     #[test]

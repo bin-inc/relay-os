@@ -12,6 +12,10 @@ use alloc::vec::Vec;
 /// The most a shell's variables hold, their names' and values' bytes.
 pub const VARS_MAX: usize = 64 * 1024;
 
+/// The most a program's environment holds, as `spawn` takes it
+/// (programmable shell gate §8.1, §8.5).
+pub const ENVIRONMENT_MAX: usize = 64 * 1024;
+
 /// A shell's variables and arguments.
 pub(crate) struct Vars {
     names: BTreeMap<String, Var>,
@@ -21,6 +25,17 @@ pub(crate) struct Vars {
     pub(crate) args: Vec<String>,
     /// The place the next variable exported takes.
     next: u64,
+    /// While a built-in runs with assignments before it: each assigned
+    /// name with what it was before, and whether the built-in has set or
+    /// exported it since.
+    held: Vec<Held>,
+}
+
+/// An assignment before a built-in, held while it runs.
+struct Held {
+    name: String,
+    before: Option<Var>,
+    changed: bool,
 }
 
 /// One variable: its value, none for one exported before it was given
@@ -40,6 +55,7 @@ impl Vars {
             size: 0,
             args: alloc::vec![String::from(name)],
             next: 0,
+            held: Vec::new(),
         }
     }
 
@@ -105,7 +121,9 @@ impl Vars {
                 value: Some(value),
                 export,
             },
-        )
+        )?;
+        self.changed(name);
+        Ok(())
     }
 
     /// Exports `name`, with `value` if one is given, or the value it has.
@@ -127,7 +145,65 @@ impl Vars {
         if export == self.next {
             self.next += 1;
         }
+        self.changed(name);
         Ok(())
+    }
+
+    /// Sets the assignments before a built-in, `NAME=value` each, while it
+    /// runs (programmable shell gate §15 item 7); [`Vars::release`] puts
+    /// back what they replaced. One that does not fit puts back those
+    /// before it.
+    pub fn hold(&mut self, assigns: &[String]) -> Result<(), Error> {
+        let mut set = Ok(());
+        for (name, value) in assigns.iter().filter_map(|a| a.split_once('=')) {
+            if !self.held.iter().any(|h| h.name == name) {
+                let before = self.names.get(name).cloned();
+                self.held.push(Held {
+                    name: String::from(name),
+                    before,
+                    changed: false,
+                });
+            }
+            set = self.set(name, String::from(value));
+            if set.is_err() {
+                break;
+            }
+        }
+        // Setting them was not the built-in's doing.
+        for h in &mut self.held {
+            h.changed = false;
+        }
+        if set.is_err() {
+            self.release();
+        }
+        set
+    }
+
+    /// The built-in has ended: each name it held is as it was before,
+    /// unless the built-in set or exported it, as bash's are (`A=1 export
+    /// A` keeps `A=1`, `C=1 unset C` brings back the old `C`).
+    pub fn release(&mut self) {
+        for h in core::mem::take(&mut self.held) {
+            if h.changed {
+                continue;
+            }
+            if let Some(old) = self.names.remove(&h.name) {
+                self.size -= size(&h.name, &old);
+            }
+            if let Some(before) = h.before {
+                // It fitted before, so it is put back whatever the
+                // built-in added.
+                self.size += size(&h.name, &before);
+                self.names.insert(h.name, before);
+            }
+        }
+    }
+
+    /// Notes that `name` was set or exported, for a built-in holding it.
+    fn changed(&mut self, name: &str) {
+        if let Some(h) = self.held.iter_mut().find(|h| h.name == name) {
+            h.changed = true;
+        }
     }
 
     /// Removes the variable `name`, exported or not.
@@ -137,32 +213,64 @@ impl Vars {
         }
     }
 
-    /// Every exported variable, by name: its value, if it has one.
+    /// Every exported variable, by name: its value, if it has one. A name
+    /// a built-in holds is as it was before, as bash's `export -p` lists it.
     pub fn exported(&self) -> impl Iterator<Item = (&str, Option<&str>)> {
-        self.names
-            .iter()
-            .filter(|(_, v)| v.export.is_some())
-            .map(|(n, v)| (n.as_str(), v.value.as_deref()))
+        self.names.iter().filter_map(|(n, v)| {
+            let v = match self.held.iter().find(|h| h.name == *n) {
+                Some(h) => h.before.as_ref()?,
+                None => v,
+            };
+            v.export?;
+            Some((n.as_str(), v.value.as_deref()))
+        })
     }
 
-    /// The environment of a program the shell starts: each exported
-    /// variable that has a value, `NAME=value` and a NUL, in the order of
-    /// export.
-    pub fn environment(&self) -> Vec<u8> {
+    /// The environment of a program the shell starts (programmable shell
+    /// gate §8.5): each exported variable that has a value, `NAME=value` and
+    /// a NUL, in the order of export; with `assigns` before it (`A=1 cmd`,
+    /// `NAME=value` each), an exported name keeps its place with the value
+    /// assigned, and the others follow in the order typed, of a name
+    /// assigned twice the last value.
+    pub fn environment_with(&self, assigns: &[String]) -> Vec<u8> {
+        let mut over: Vec<(&str, &str)> = Vec::new();
+        for a in assigns {
+            let Some((name, value)) = a.split_once('=') else {
+                continue;
+            };
+            match over.iter_mut().find(|(n, _)| *n == name) {
+                Some(o) => o.1 = value,
+                None => over.push((name, value)),
+            }
+        }
+        let assigned = |name: &str| over.iter().find(|(n, _)| *n == name).map(|o| o.1);
         let mut exported: Vec<(u64, &str, &str)> = self
             .names
             .iter()
-            .filter_map(|(n, v)| Some((v.export?, n.as_str(), v.value.as_deref()?)))
+            .filter_map(|(n, v)| {
+                let value = assigned(n).or(v.value.as_deref())?;
+                Some((v.export?, n.as_str(), value))
+            })
             .collect();
         exported.sort_unstable_by_key(|&(place, _, _)| place);
+        let rest = over.iter().filter(|(n, _)| !self.is_exported(n));
         let mut block = Vec::new();
-        for (_, name, value) in exported {
+        for (name, value) in exported
+            .iter()
+            .map(|&(_, n, v)| (n, v))
+            .chain(rest.copied())
+        {
             block.extend_from_slice(name.as_bytes());
             block.push(b'=');
             block.extend_from_slice(value.as_bytes());
             block.push(0);
         }
         block
+    }
+
+    /// Whether `name` is exported.
+    fn is_exported(&self, name: &str) -> bool {
+        self.names.get(name).is_some_and(|v| v.export.is_some())
     }
 
     /// Stores `var` as `name`, unless the variables would then hold more
@@ -240,7 +348,7 @@ mod tests {
         v.export("NONE", None).unwrap();
         v.export("A", Some(String::from("été"))).unwrap();
         assert_eq!(
-            v.environment(),
+            v.environment_with(&[]),
             "B=two words\0Z=1\0A=été\0".as_bytes(),
             "in the order of export, not of names"
         );
@@ -250,13 +358,81 @@ mod tests {
         // Given a value, a variable exported without one goes where it was
         // exported.
         v.set("NONE", String::new()).unwrap();
-        assert_eq!(v.environment(), b"B=2\0Z=3\0NONE=\0A=\xc3\xa9t\xc3\xa9\0");
+        assert_eq!(
+            v.environment_with(&[]),
+            b"B=2\0Z=3\0NONE=\0A=\xc3\xa9t\xc3\xa9\0"
+        );
         // Unset and exported again, it goes last.
         v.unset("B");
         v.export("B", Some(String::from("4"))).unwrap();
-        assert_eq!(v.environment(), b"Z=3\0NONE=\0A=\xc3\xa9t\xc3\xa9\0B=4\0");
+        assert_eq!(
+            v.environment_with(&[]),
+            b"Z=3\0NONE=\0A=\xc3\xa9t\xc3\xa9\0B=4\0"
+        );
         assert_eq!(v.get("NOT"), "kept");
         assert!(!v.exported().any(|(n, _)| n == "NOT"));
+    }
+
+    #[test]
+    fn assignments_before_a_program_go_over_the_exported_variables() {
+        let mut v = Vars::new("sh");
+        v.export("HOME", Some(String::from("/root"))).unwrap();
+        v.export("B", None).unwrap();
+        v.export("X", Some(String::from("1"))).unwrap();
+        v.set("L", String::from("local")).unwrap();
+        let assigns = ["X=2", "N=new", "B=b", "L=l=m", "N=last"].map(String::from);
+        assert_eq!(
+            v.environment_with(&assigns),
+            b"HOME=/root\0B=b\0X=2\0N=last\0L=l=m\0",
+            "exported names in their places, the others as typed, the last value"
+        );
+        // The shell's own are as they were.
+        assert_eq!((v.get("X"), v.value("B"), v.get("L")), ("1", None, "local"));
+    }
+
+    #[test]
+    fn assignments_held_for_a_built_in_come_back_unless_it_set_them() {
+        let mut v = Vars::new("sh");
+        v.set("C", String::from("0")).unwrap();
+        v.export("H", Some(String::from("/root"))).unwrap();
+        v.hold(&["H=/d", "C=1", "N=new", "S=x", "E=y"].map(String::from))
+            .unwrap();
+        assert_eq!((v.get("H"), v.get("C"), v.get("N")), ("/d", "1", "new"));
+        // Listed as they were before.
+        assert_eq!(v.exported().collect::<Vec<_>>(), [("H", Some("/root"))]);
+        // What the built-in does: `unset C`, `S=set`, `export E`.
+        v.unset("C");
+        v.set("S", String::from("set")).unwrap();
+        v.export("E", None).unwrap();
+        v.release();
+        assert_eq!(
+            (v.value("H"), v.value("C"), v.value("N")),
+            (Some("/root"), Some("0"), None),
+            "put back"
+        );
+        assert_eq!((v.get("S"), v.get("E")), ("set", "y"), "kept");
+        assert_eq!(
+            v.exported().collect::<Vec<_>>(),
+            [("E", Some("y")), ("H", Some("/root"))]
+        );
+        assert_eq!(v.size, "C0H/rootSsetEy".len());
+    }
+
+    #[test]
+    fn an_assignment_that_does_not_fit_puts_back_the_ones_before() {
+        let mut v = Vars::new("sh");
+        v.set("A", String::from("old")).unwrap();
+        let big = alloc::format!("B={}", "x".repeat(VARS_MAX));
+        assert_eq!(
+            v.hold(&[String::from("A=new"), big]),
+            Err(Error::Full("B".into()))
+        );
+        assert_eq!((v.get("A"), v.value("B")), ("old", None));
+        assert_eq!(v.size, 4);
+        // Nothing is held any more.
+        v.set("A", String::from("x")).unwrap();
+        v.release();
+        assert_eq!(v.get("A"), "x");
     }
 
     #[test]

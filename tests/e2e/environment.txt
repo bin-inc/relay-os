@@ -31,3 +31,30 @@ send exit
 expect root@relay:~# $
 send echo "[$E]"
 expect \n\[\]\nroot@relay:~# $
+# Assignments before a command are its own: before a program they go
+# over the exported variables, an exported name in its place; before a
+# built-in they hold while it runs, unless it sets or exports them.
+send X=1 C=new t-env; echo "[$X][$C]"
+expect \n3 entries, 21 bytes\n\[0\] HOME=/root\n\[1\] C=new\n\[2\] X=1\n\[\]\[two words\]\nroot@relay:~# $
+send t-env | Y=2 t-env
+expect \n3 entries, 27 bytes\n\[0\] HOME=/root\n\[1\] C=two words\n\[2\] Y=2\nroot@relay:~# $
+send C=1 unset C; A=5 export A; echo "[$C]"; t-env
+expect \n\[two words\]\n3 entries, 27 bytes\n\[0\] HOME=/root\n\[1\] C=two words\n\[2\] A=5\nroot@relay:~# $
+# A program's environment holds at most 64 KiB: X holds 40 KiB.
+send X=xxxxxxxxxx; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X
+expect root@relay:~# $
+send export X; t-env raw
+expect \nan address, 40990 bytes, 4 entries\nroot@relay:~# $
+send Y=$X t-env; echo $?
+expect \nrelay-sh: t-env: Argument list too long\n126\nroot@relay:~# $
+send unset X
+expect root@relay:~# $
+# A pipeline's commands each get their environment as they start, not all
+# at once: 16,384 commands that expand to nothing, with 60 KiB exported,
+# would otherwise need a gigabyte (the final review, I-1).
+send X='$E|'; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; echo "${X}true" > /root/p; unset X
+expect root@relay:~# $
+send Y=xxxxxxxxxx; Y=$Y$Y; Y=$Y$Y; Y=$Y$Y; Y=$Y$Y; Y=$Y$Y; Y=$Y$Y; Y=$Y$Y; Y=$Y$Y; Y=$Y$Y; Y=$Y$Y; Y=$Y$Y; P=$Y; Q=$Y; unset Y; R=$P; export P Q R
+expect root@relay:~# $
+send cat /root/p | sh; echo "status $?"; unset P Q R
+expect \nstatus 0\nroot@relay:~# $
