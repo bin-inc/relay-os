@@ -14,8 +14,9 @@ pub const UNAME_ALL: &str = concat!("Relay relay ", env!("CARGO_PKG_VERSION"), "
 /// `cd [-L|-P] [--] [dir]` (programmable shell gate §9.1), as bash 5.2's:
 /// no directory goes to `$HOME`, `-` to `$OLDPWD`, printing it, and an
 /// empty one, or an empty `HOME` or `OLDPWD`, nowhere (`cd -` printing an
-/// empty line). On success `OLDPWD` takes `PWD`'s value, if it has one,
-/// and `PWD` the new directory, each exported or not as it was. `-L` and
+/// empty line). On success, staying where it is too, `OLDPWD` takes
+/// `PWD`'s value, or none when `PWD` has none, and `PWD` the new
+/// directory, each exported or not as it was. `-L` and
 /// `-P` change nothing, as no symbolic link is followed; bash's `-e` is
 /// not supported.
 pub fn cd(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
@@ -35,23 +36,22 @@ pub fn cd(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
         [dir] => (dir.clone(), false),
         _ => return ctx.fail(NAME, format_args!("cd: too many arguments")),
     };
-    if dir.is_empty() {
-        if show {
-            outln!(ctx, "");
-        }
-        return 0;
-    }
-    if let Err(e) = ctx.vfs.chdir(dir.as_bytes()) {
+    // An empty directory stays where it is, a cd that succeeded.
+    if !dir.is_empty()
+        && let Err(e) = ctx.vfs.chdir(dir.as_bytes())
+    {
         return ctx.fail(NAME, format_args!("cd: {dir}: {e}"));
     }
     let cwd = path::display(&ctx.vfs.cwd());
     let vars = ctx.vars();
-    if let Some(old) = vars.value("PWD").map(String::from) {
-        let _ = vars.set("OLDPWD", old);
-    }
+    let _ = match vars.value("PWD").map(String::from) {
+        Some(old) => vars.set("OLDPWD", old),
+        None => vars.clear("OLDPWD"),
+    };
     let _ = vars.set("PWD", cwd.clone());
     if show {
-        outln!(ctx, "{cwd}");
+        let shown = if dir.is_empty() { "" } else { cwd.as_str() };
+        outln!(ctx, "{shown}");
     }
     0
 }
@@ -280,6 +280,28 @@ mod tests {
     }
 
     #[test]
+    fn cd_to_an_empty_directory_still_sets_oldpwd() {
+        // bash counts it a cd that succeeded: OLDPWD takes PWD's value.
+        let mut h = Harness::new();
+        h.env = b"HOME=/root\0".to_vec();
+        assert_eq!(
+            h.lines(&["cd /tmp", "cd /etc", "cd \"\"", "echo \"[$PWD][$OLDPWD]\""])
+                .1,
+            "[/etc][/etc]\n"
+        );
+        assert_eq!(
+            h.lines(&["cd /tmp", "OLDPWD=", "cd -", "echo \"[$PWD][$OLDPWD]\""])
+                .1,
+            "\n[/tmp][/tmp]\n"
+        );
+        assert_eq!(
+            h.lines(&["cd /tmp", "HOME=", "cd", "echo \"[$PWD][$OLDPWD]\""])
+                .1,
+            "[/tmp][/tmp]\n"
+        );
+    }
+
+    #[test]
     fn cd_dash_goes_back_and_says_where() {
         // As bash 5.2 in a pty.
         let mut h = Harness::new();
@@ -327,13 +349,22 @@ mod tests {
             h.lines(&["cd /etc", "cd /nope", "echo $PWD $OLDPWD"]).1,
             "relay-sh: cd: /nope: No such file or directory\n/etc /tmp\n"
         );
-        // OLDPWD takes the variable PWD's value, and none without one.
+        // OLDPWD takes the variable PWD's value; without one it stays a
+        // variable with no value, exported as it was, as bash's does.
         assert_eq!(h.lines(&["PWD=/x", "cd /tmp", "echo $OLDPWD"]).1, "/x\n");
         assert_eq!(
-            h.lines(&["cd /etc", "unset PWD", "cd /tmp", "echo \"[$OLDPWD]\""])
-                .1,
-            "[/tmp]\n",
-            "OLDPWD keeps what it was, not /etc"
+            h.lines(&[
+                "cd /etc",
+                "unset PWD",
+                "cd /tmp",
+                "cd -",
+                "echo $?",
+                "export"
+            ])
+            .1,
+            "relay-sh: cd: OLDPWD not set\n1\n\
+             declare -x HOME=\"/root\"\n\
+             declare -x OLDPWD\n"
         );
         // Made by cd, neither is exported (bash's `declare --`).
         assert_eq!(

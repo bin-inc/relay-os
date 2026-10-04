@@ -138,6 +138,21 @@ impl Vars {
         Ok(())
     }
 
+    /// Takes `name`'s value away, exported or not as it was, as bash's
+    /// `cd` does to `OLDPWD` when `PWD` has none: it stays a variable.
+    pub fn clear(&mut self, name: &str) -> Result<(), Error> {
+        let export = self.names.get(name).and_then(|v| v.export);
+        self.put(
+            name,
+            Var {
+                value: None,
+                export,
+            },
+        )?;
+        self.changed(name);
+        Ok(())
+    }
+
     /// Exports `name`, with `value` if one is given, or the value it has.
     /// One already exported keeps its place; another goes after the rest.
     pub fn export(&mut self, name: &str, value: Option<String>) -> Result<(), Error> {
