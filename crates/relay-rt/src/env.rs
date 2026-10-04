@@ -4,8 +4,6 @@
 //! only: the kernel checks nothing else, and a program reads them as glibc
 //! and Rust's `std` read `environ`.
 
-use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
-
 /// An environment block.
 #[derive(Clone, Copy, Debug)]
 pub struct Block {
@@ -45,9 +43,49 @@ impl Block {
 }
 
 /// The program's block, as the registers gave it before `main` ran.
-static PTR: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
-static LEN: AtomicUsize = AtomicUsize::new(0);
-static COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(not(test))]
+mod raw {
+    use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+
+    static PTR: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+    static LEN: AtomicUsize = AtomicUsize::new(0);
+    static COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    pub fn store(ptr: *const u8, len: usize, count: usize) {
+        PTR.store(ptr.cast_mut(), Ordering::Relaxed);
+        LEN.store(len, Ordering::Relaxed);
+        COUNT.store(count, Ordering::Relaxed);
+    }
+
+    pub fn load() -> (*const u8, usize, usize) {
+        (
+            PTR.load(Ordering::Relaxed),
+            LEN.load(Ordering::Relaxed),
+            COUNT.load(Ordering::Relaxed),
+        )
+    }
+}
+
+/// The test double (programmable shell gate §8.3): each test thread has a
+/// program's environment of its own, so tests that give one never see
+/// each other's.
+#[cfg(test)]
+mod raw {
+    use core::cell::Cell;
+
+    std::thread_local! {
+        static RAW: Cell<(usize, usize, usize)> = const { Cell::new((0, 0, 0)) };
+    }
+
+    pub fn store(ptr: *const u8, len: usize, count: usize) {
+        RAW.with(|r| r.set((ptr as usize, len, count)));
+    }
+
+    pub fn load() -> (*const u8, usize, usize) {
+        let (ptr, len, count) = RAW.with(Cell::get);
+        (ptr as *const u8, len, count)
+    }
+}
 
 /// Keeps the block's address, length and count as `start` got them.
 /// Off Relay OS only the tests set it.
@@ -57,32 +95,26 @@ static COUNT: AtomicUsize = AtomicUsize::new(0);
 /// the whole run.
 #[cfg_attr(not(target_os = "none"), allow(dead_code))]
 pub(crate) unsafe fn set(ptr: *const u8, len: usize, count: usize) {
-    PTR.store(ptr.cast_mut(), Ordering::Relaxed);
-    LEN.store(len, Ordering::Relaxed);
-    COUNT.store(count, Ordering::Relaxed);
+    raw::store(ptr, len, count);
 }
 
 /// The address, length and count the program started with, as they were
 /// (all 0 for no environment): for a test of the entry state.
 pub fn raw() -> (usize, usize, usize) {
-    let p = PTR.load(Ordering::Relaxed);
-    (
-        p as usize,
-        LEN.load(Ordering::Relaxed),
-        COUNT.load(Ordering::Relaxed),
-    )
+    let (p, len, count) = raw::load();
+    (p as usize, len, count)
 }
 
 /// The program's environment.
 pub fn program() -> Block {
-    let p = PTR.load(Ordering::Relaxed);
+    let (p, len, count) = raw::load();
     let bytes: &'static [u8] = if p.is_null() {
         &[]
     } else {
         // SAFETY: as `set` was promised.
-        unsafe { core::slice::from_raw_parts(p, LEN.load(Ordering::Relaxed)) }
+        unsafe { core::slice::from_raw_parts(p, len) }
     };
-    Block::new(bytes, COUNT.load(Ordering::Relaxed))
+    Block::new(bytes, count)
 }
 
 /// The program's whole block, as `spawn` takes one: empty for none.
@@ -170,5 +202,26 @@ mod tests {
         assert_eq!(block(), b"HOME=/root\0X=1\0");
         assert_eq!(var(b"X"), Some(&b"1"[..]));
         assert_eq!(vars().count(), 2);
+    }
+
+    #[test]
+    fn each_test_thread_has_an_environment_of_its_own() {
+        let b: &'static [u8] = b"A=1\0";
+        // SAFETY: a static block.
+        unsafe { set(b.as_ptr(), b.len(), 1) };
+        let other = std::thread::spawn(|| {
+            let before = block();
+            let c: &'static [u8] = b"B=2\0";
+            // SAFETY: a static block.
+            unsafe { set(c.as_ptr(), c.len(), 1) };
+            (before, var(b"B"))
+        });
+        assert_eq!(other.join().unwrap(), (&b""[..], Some(&b"2"[..])));
+        assert_eq!(
+            block(),
+            b"A=1\0",
+            "the other thread's set changed nothing here"
+        );
+        assert_eq!(var(b"B"), None);
     }
 }
