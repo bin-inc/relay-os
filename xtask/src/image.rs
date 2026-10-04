@@ -191,13 +191,21 @@ pub fn esp_read(target: &Path, esp: Partition, path: &str, scratch: &Path) -> Re
         .output()
         .context("cannot start mcopy")?;
     if !out.status.success() {
-        // mtools' own words, which tell a missing file, a damaged FAT and
-        // a stick that cannot be opened apart, on one line.
-        let said = String::from_utf8_lossy(&out.stderr);
-        let lines: Vec<&str> = said.lines().collect();
-        bail!("{}", lines.join("; "));
+        bail!("{}", failure("mcopy", out.status, &out.stderr));
     }
     Ok(fs::read(&file)?)
+}
+
+/// Why a tool failed: its own words, which tell a missing file, a damaged
+/// FAT and a stick that cannot be opened apart, on one line; or, when it
+/// said nothing, how it ended.
+fn failure(tool: &str, status: std::process::ExitStatus, stderr: &[u8]) -> String {
+    let said = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = said.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.is_empty() {
+        return format!("{tool} failed ({status})");
+    }
+    lines.join("; ")
 }
 
 /// Replaces only the cmdline file on an existing ESP.
@@ -408,6 +416,33 @@ pub fn blank_esp(dir: &Path) -> (PathBuf, Partition) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tool_s_failure_is_its_own_words_or_its_status() {
+        // Milestone 4's plan 4, M-3: an mcopy that failed saying nothing
+        // left `…on the ESP: ` with nothing after it.
+        use std::os::unix::process::ExitStatusExt;
+        let one = std::process::ExitStatus::from_raw(1 << 8);
+        assert_eq!(
+            failure(
+                "mcopy",
+                one,
+                b"init :: non DOS media\nCannot initialize '::'\n"
+            ),
+            "init :: non DOS media; Cannot initialize '::'"
+        );
+        assert_eq!(failure("mcopy", one, b"a\n\n  \nb\n"), "a; b");
+        assert_eq!(failure("mcopy", one, b""), "mcopy failed (exit status: 1)");
+        assert_eq!(
+            failure("mcopy", one, b" \n"),
+            "mcopy failed (exit status: 1)"
+        );
+        let killed = std::process::ExitStatus::from_raw(9);
+        assert_eq!(
+            failure("mcopy", killed, b""),
+            "mcopy failed (signal: 9 (SIGKILL))"
+        );
+    }
 
     #[test]
     fn a_file_of_the_esp_reads_back() {
