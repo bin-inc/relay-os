@@ -617,7 +617,13 @@ pub(crate) fn run_function<'s>(
     let (status, message, own) = if ctx.cancelled {
         (CANCELLED, String::from("^C\n"), false)
     } else if let Err(e) = finished {
-        let message = format!("{}: write error: {e}\n", command.name);
+        // A built-in's is the shell's, as bash's (`bash: cd: write
+        // error: …`); a program's its own, as GNU's.
+        let message = if commands::BUILTINS.contains(&command.name) {
+            format!("{NAME}: {}: write error: {e}\n", command.name)
+        } else {
+            format!("{}: write error: {e}\n", command.name)
+        };
         (ctx.write_error_status, message, true)
     } else {
         (status, String::new(), false)
@@ -797,11 +803,15 @@ mod tests {
         );
         assert_eq!(h.programs.closed, [4]);
         assert!(!h.exists("/tmp/h"));
-        // A write that fails is the built-in's write error.
+        // A write that fails is the built-in's write error, named by the
+        // shell as bash names it (the prototype's review, P-1).
         h.programs.write_error = Some((5, Errno::ENOSPC));
         assert_eq!(
             h.spawning("help > /tmp/h"),
-            (1, "help: write error: No space left on device\n".into())
+            (
+                1,
+                "relay-sh: help: write error: No space left on device\n".into()
+            )
         );
     }
 

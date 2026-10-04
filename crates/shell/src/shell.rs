@@ -4028,7 +4028,7 @@ mod tests {
         assert_eq!(h.programs.opened[3], ("/tmp/h".into(), false, 7));
         assert_eq!(
             h.programs.written_to("/tmp/g"),
-            b"help: write error: No space left on device\n"
+            b"relay-sh: help: write error: No space left on device\n"
         );
     }
 
@@ -4117,6 +4117,16 @@ mod tests {
         assert_eq!(
             h.run("echo x > /tmp/f"),
             (1, "echo: write error: No space left on device\n".into())
+        );
+        // A built-in's is the shell's, as bash 5.2's `bash: export: write
+        // error: …` (the prototype's review, P-1); a program's keeps its
+        // own name, as GNU's.
+        assert_eq!(
+            h.run("export -p > /tmp/f"),
+            (
+                1,
+                "relay-sh: export: write error: No space left on device\n".into()
+            )
         );
     }
 
