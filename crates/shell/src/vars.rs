@@ -145,6 +145,26 @@ impl Vars {
             .map(|(n, v)| (n.as_str(), v.value.as_deref()))
     }
 
+    /// The environment of a program the shell starts: each exported
+    /// variable that has a value, `NAME=value` and a NUL, in the order of
+    /// export.
+    pub fn environment(&self) -> Vec<u8> {
+        let mut exported: Vec<(u64, &str, &str)> = self
+            .names
+            .iter()
+            .filter_map(|(n, v)| Some((v.export?, n.as_str(), v.value.as_deref()?)))
+            .collect();
+        exported.sort_unstable_by_key(|&(place, _, _)| place);
+        let mut block = Vec::new();
+        for (_, name, value) in exported {
+            block.extend_from_slice(name.as_bytes());
+            block.push(b'=');
+            block.extend_from_slice(value.as_bytes());
+            block.push(0);
+        }
+        block
+    }
+
     /// Stores `var` as `name`, unless the variables would then hold more
     /// than `VARS_MAX`.
     fn put(&mut self, name: &str, var: Var) -> Result<(), Error> {
@@ -208,6 +228,35 @@ mod tests {
         // Unset, a variable frees its room.
         v.unset("A");
         v.export("C", Some("x".repeat(VARS_MAX - 2))).unwrap();
+    }
+
+    #[test]
+    fn a_program_gets_the_exported_variables_with_a_value_in_export_order() {
+        let mut v = Vars::new("sh");
+        v.set("Z", String::from("1")).unwrap();
+        v.set("NOT", String::from("kept")).unwrap();
+        v.export("B", Some(String::from("two words"))).unwrap();
+        v.export("Z", None).unwrap();
+        v.export("NONE", None).unwrap();
+        v.export("A", Some(String::from("été"))).unwrap();
+        assert_eq!(
+            v.environment(),
+            "B=two words\0Z=1\0A=été\0".as_bytes(),
+            "in the order of export, not of names"
+        );
+        // A new value, or exporting it again, keeps a variable's place.
+        v.set("B", String::from("2")).unwrap();
+        v.export("Z", Some(String::from("3"))).unwrap();
+        // Given a value, a variable exported without one goes where it was
+        // exported.
+        v.set("NONE", String::new()).unwrap();
+        assert_eq!(v.environment(), b"B=2\0Z=3\0NONE=\0A=\xc3\xa9t\xc3\xa9\0");
+        // Unset and exported again, it goes last.
+        v.unset("B");
+        v.export("B", Some(String::from("4"))).unwrap();
+        assert_eq!(v.environment(), b"Z=3\0NONE=\0A=\xc3\xa9t\xc3\xa9\0B=4\0");
+        assert_eq!(v.get("NOT"), "kept");
+        assert!(!v.exported().any(|(n, _)| n == "NOT"));
     }
 
     #[test]

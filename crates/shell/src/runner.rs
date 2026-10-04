@@ -36,6 +36,9 @@ pub(crate) struct Parts<'s> {
     pub input: Option<&'s mut dyn Stdin>,
     /// The files the fds name.
     pub files: &'s mut Files,
+    /// The environment of a program it starts (programmable shell gate
+    /// §8.5).
+    pub env: &'s [u8],
 }
 
 /// How a command went.
@@ -182,6 +185,7 @@ impl Runner for InProcess {
             status,
             mut input,
             files,
+            env,
         } = parts;
         let (last, before) = stages.split_last().expect("a pipeline has stages");
         let mut piped: Option<Bytes> = None;
@@ -265,6 +269,7 @@ impl Runner for InProcess {
             status,
             input: Some(&mut piped),
             files,
+            env,
         };
         self.run(parts, name, args, fds)
     }
@@ -341,7 +346,10 @@ impl Runner for Spawning<'_> {
             Group::New
         };
         let fds = fds.0.map(|slot| shell_fd(parts.files, slot, None, None));
-        match self.programs.spawn(path.as_bytes(), &argv, fds, group) {
+        match self
+            .programs
+            .spawn(path.as_bytes(), &argv, parts.env, fds, group)
+        {
             Ok(pid) => match self.programs.wait(pid) {
                 Ok(w) => ended(name, &w),
                 Err(e) => Ran::said(CANNOT_RUN, format!("{NAME}: {name}: {e}\n")),
@@ -470,7 +478,7 @@ impl Spawning<'_> {
             let shell_fds = fds.0.map(|slot| shell_fd(parts.files, slot, stdin, stdout));
             let pid = self
                 .programs
-                .spawn(path.as_bytes(), &argv, shell_fds, group);
+                .spawn(path.as_bytes(), &argv, parts.env, shell_fds, group);
             match pid {
                 Ok(pid) => {
                     first.get_or_insert(pid);
@@ -665,6 +673,7 @@ mod tests {
             [Spawned {
                 path: "/bin/t-args".into(),
                 args: words(&["t-args", "a", "b c", ""]),
+                env: Vec::new(),
                 fds: [0, 1, 2],
                 group: Group::New,
             }],
@@ -844,6 +853,7 @@ mod tests {
         Spawned {
             path: path.into(),
             args: words(args),
+            env: Vec::new(),
             fds: [fds.0.unwrap_or(0), fds.1.unwrap_or(1), 2],
             group,
         }

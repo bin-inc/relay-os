@@ -499,6 +499,7 @@ impl<'a> Shell<'a> {
         let Some(fds) = self.make(self.fds, &typed.redirects) else {
             return self.finish(1, String::new());
         };
+        let env = self.vars.environment();
         let parts = Parts {
             vfs: &mut *self.vfs,
             console: &mut *self.console,
@@ -511,6 +512,7 @@ impl<'a> Shell<'a> {
                 None => None,
             },
             files: &mut self.files,
+            env: &env,
         };
         let ran = match words.split_first() {
             Some((name, args)) => match commands::builtin(name) {
@@ -581,6 +583,7 @@ impl<'a> Shell<'a> {
         }
         let all = self.stage_fds(stages);
         let staged = runner_stages(stages, &all);
+        let env = self.vars.environment();
         let parts = Parts {
             vfs: &mut *self.vfs,
             console: &mut *self.console,
@@ -593,6 +596,7 @@ impl<'a> Shell<'a> {
                 None => None,
             },
             files: &mut self.files,
+            env: &env,
         };
         let ran = self.runner.get().pipeline(parts, &staged);
         // The last command's own message (the in-process runner's) on its
@@ -623,6 +627,7 @@ impl<'a> Shell<'a> {
         }
         let all = self.stage_fds(stages);
         let staged = runner_stages(stages, &all);
+        let env = self.vars.environment();
         let parts = Parts {
             vfs: &mut *self.vfs,
             console: &mut *self.console,
@@ -632,6 +637,7 @@ impl<'a> Shell<'a> {
             status: self.status,
             input: None,
             files: &mut self.files,
+            env: &env,
         };
         let started = self.runner.get().background(parts, &staged);
         for fds in all.into_iter().flatten() {
@@ -786,10 +792,13 @@ impl<'a> Shell<'a> {
     /// transcript is written by the shell. A script cannot run another.
     /// Its `exit` ends only the script, as it does under `/bin/sh`, where a
     /// script is a shell of its own; and it has variables and arguments of
-    /// its own, and starts with `$?` 0, as there.
+    /// its own, the exported variables imported, and starts with `$?` 0, as
+    /// there.
     fn run_script(&mut self, script: Script) -> i32 {
         self.transcript = Some(Transcript::new(script.transcript, script.transcript_name));
-        let outer = core::mem::replace(&mut self.vars, Vars::script(&script.name, &script.args));
+        let mut vars = Vars::script(&script.name, &script.args);
+        vars.import(&self.vars.environment());
+        let outer = core::mem::replace(&mut self.vars, vars);
         self.status = 0;
         let status = self.run_lines(&script.text);
         self.vars = outer;
@@ -2685,6 +2694,62 @@ mod tests {
                     .into()
             )
         );
+    }
+
+    #[test]
+    fn a_script_starts_with_the_exported_variables() {
+        // As bash's: a script imports them, and what it sets or exports
+        // stays in it.
+        let mut h = Harness::new();
+        h.env = b"HOME=/root\0".to_vec();
+        h.put(
+            "/tmp/s.sh",
+            b"echo [$A][$B][$HOME]\nexport C=in B=changed\n",
+        );
+        assert_eq!(
+            h.lines(&["A=1", "export B=2", "sh /tmp/s.sh", "echo [$B][$C]"]),
+            (
+                0,
+                "+ echo [$A][$B][$HOME]\n[][2][/root]\n+ export C=in B=changed\n[2][]\n".into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_program_gets_exactly_the_exported_variables() {
+        // In the order of export, the imported ones first; one without a
+        // value is none (programmable shell gate §8.5).
+        let mut h = spawning();
+        h.programs.known.push(("/bin/cat", WaitStatus::exited(0)));
+        {
+            let mut shell =
+                Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+                    .with_environment(b"HOME=/root\0X=1\0");
+            for line in [
+                "A=1",
+                "export B=2 NONE",
+                "t-args",
+                "unset X",
+                "t-args | cat",
+                "t-args &",
+            ] {
+                shell.execute(line);
+            }
+        }
+        let envs: Vec<_> = h.programs.spawned.iter().map(|s| s.env.clone()).collect();
+        assert_eq!(
+            envs,
+            [
+                b"HOME=/root\0X=1\0B=2\0".to_vec(),
+                b"HOME=/root\0B=2\0".to_vec(),
+                b"HOME=/root\0B=2\0".to_vec(),
+                b"HOME=/root\0B=2\0".to_vec(),
+            ],
+            "a lone command, each command of a pipeline, a background job"
+        );
+        // With nothing exported, none.
+        h.spawning("t-args");
+        assert_eq!(h.programs.spawned.last().unwrap().env, b"");
     }
 
     #[test]

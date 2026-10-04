@@ -332,6 +332,7 @@ impl Programs for SysPrograms {
         &mut self,
         path: &[u8],
         args: &[&[u8]],
+        env: &[u8],
         fds: [u32; 3],
         group: Group,
     ) -> Result<u32, Errno> {
@@ -344,9 +345,6 @@ impl Programs for SysPrograms {
             let _ = sys::console_mode(MODE_LINE);
         }
         let fds = command_fds(fds);
-        // This program's own environment, until the shell exports
-        // variables (programmable shell gate §15 item 6).
-        let env = crate::env::block();
         let pid = sys::spawn_env(path, &arg_bytes(args), env, b"", &fds, flags, pgid)
             .map_err(Errno::from_number)?;
         if flags & NEW_GROUP != 0 {

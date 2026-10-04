@@ -191,6 +191,8 @@ impl System for TestSystem {
 pub struct Spawned {
     pub path: String,
     pub args: Vec<String>,
+    /// Its environment, as `spawn` takes it.
+    pub env: Vec<u8>,
     /// The shell's fds it got as its fds 0, 1 and 2.
     pub fds: [u32; 3],
     pub group: Group,
@@ -356,6 +358,7 @@ impl Programs for FakePrograms {
         &mut self,
         path: &[u8],
         args: &[&[u8]],
+        env: &[u8],
         fds: [u32; 3],
         group: Group,
     ) -> Result<u32, Errno> {
@@ -376,6 +379,7 @@ impl Programs for FakePrograms {
                 .iter()
                 .map(|a| String::from_utf8_lossy(a).into_owned())
                 .collect(),
+            env: env.to_vec(),
             fds,
             group,
         });
