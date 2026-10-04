@@ -2,8 +2,8 @@
 //! ext2 root partition of an image file (spec §9.1), through a file-backed
 //! `BlockDevice`, with the kernel's `/dev` mounted over the image's. For
 //! trying the filesystem and the shell's commands without a machine: the
-//! in-process runner runs the command functions (no programs, no `&`). It
-//! changes the image in place.
+//! in-process runner runs the command functions (no programs, no `&`), its
+//! environment init's `HOME=/root`. It changes the image in place.
 
 use crate::image;
 use crate::util::run_stdout;
@@ -245,7 +245,8 @@ pub fn session(img: &Path, console: &mut dyn Console) -> Result<()> {
         console.write(format!("cannot mount /dev: {e}\n").as_bytes());
     }
     let mut system = HostSystem(log);
-    let mut shell = Shell::new(&mut vfs, console, &mut system);
+    // As init starts /bin/sh (programmable shell gate §8.5).
+    let mut shell = Shell::new(&mut vfs, console, &mut system).with_environment(b"HOME=/root\0");
     shell.greet();
     shell.run();
     vfs.shutdown()
@@ -303,7 +304,7 @@ mod tests {
 
         let mut console = Script {
             input: b"mkdir /root/notes\recho hello > /root/notes/a\rcat /root/notes/a\r\
-                echo gone > /dev/null\r[ -c /dev/null ] && echo device\rpoweroff\r"
+                echo gone > /dev/null\r[ -c /dev/null ] && echo device\recho $HOME\rpoweroff\r"
                 .iter()
                 .copied()
                 .collect(),
@@ -319,6 +320,8 @@ mod tests {
         );
         // /dev/null is the kernel's DevFs here too, not a file of the image.
         assert!(screen.contains("&& echo device\ndevice\n"), "{screen}");
+        // HOME is init's.
+        assert!(screen.contains("# echo $HOME\n/root\n"), "{screen}");
 
         image::fsck(&img, layout.root).unwrap();
         let target = image::e2fs_target(&img, layout.root);

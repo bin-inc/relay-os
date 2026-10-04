@@ -100,15 +100,24 @@ impl Vars {
         self.args.get(1..).unwrap_or(&[])
     }
 
-    /// The variable `name`'s value; an unset one, or one without a value,
-    /// is empty.
-    pub fn get(&self, name: &str) -> &str {
-        self.value(name).unwrap_or("")
-    }
-
     /// The variable `name`'s value, if it has one.
     pub fn value(&self, name: &str) -> Option<&str> {
         self.names.get(name).and_then(|v| v.value.as_deref())
+    }
+
+    /// What a shell sets when it starts, after its import (programmable
+    /// shell gate §8.5): `PWD`, exported, the current directory `cwd`, in
+    /// its place if it was imported; and `OLDPWD` exported without a value,
+    /// unless it was imported naming a directory, as bash's are. The first
+    /// that does not fit `VARS_MAX` is the error, the other still set.
+    pub fn start(&mut self, cwd: &str, oldpwd_is_dir: bool) -> Result<(), Error> {
+        let pwd = self.export("PWD", Some(String::from(cwd)));
+        let mut oldpwd = Ok(());
+        if !oldpwd_is_dir {
+            self.unset("OLDPWD");
+            oldpwd = self.export("OLDPWD", None);
+        }
+        pwd.and(oldpwd)
     }
 
     /// Sets the variable `name` to `value`, exported or not as it was,
@@ -119,6 +128,21 @@ impl Vars {
             name,
             Var {
                 value: Some(value),
+                export,
+            },
+        )?;
+        self.changed(name);
+        Ok(())
+    }
+
+    /// Takes `name`'s value away, exported or not as it was, as bash's
+    /// `cd` does to `OLDPWD` when `PWD` has none: it stays a variable.
+    pub fn clear(&mut self, name: &str) -> Result<(), Error> {
+        let export = self.names.get(name).and_then(|v| v.export);
+        self.put(
+            name,
+            Var {
+                value: None,
                 export,
             },
         )?;
@@ -294,6 +318,12 @@ fn size(name: &str, var: &Var) -> usize {
 
 #[cfg(test)]
 impl Vars {
+    /// The variable `name`'s value; an unset one, or one without a value,
+    /// is empty.
+    pub fn get(&self, name: &str) -> &str {
+        self.value(name).unwrap_or("")
+    }
+
     /// `names` set, and `args` (`$0` first).
     pub fn of(names: &[(&str, &str)], args: &[&str]) -> Vars {
         let mut vars = Vars::new("");
@@ -480,6 +510,31 @@ mod tests {
         let mut v = Vars::new("sh");
         v.import(b"A=1\0B=2\0A=3\0");
         assert_eq!((v.get("A"), v.get("B")), ("3", "2"));
+    }
+
+    #[test]
+    fn a_shell_starts_with_pwd_and_oldpwd_exported() {
+        let mut v = Vars::new("sh");
+        v.import(b"HOME=/root\0");
+        v.start("/tmp", false).unwrap();
+        assert_eq!(v.environment_with(&[]), b"HOME=/root\0PWD=/tmp\0");
+        assert_eq!(
+            v.exported().collect::<Vec<_>>(),
+            [
+                ("HOME", Some("/root")),
+                ("OLDPWD", None),
+                ("PWD", Some("/tmp"))
+            ]
+        );
+        // An imported `PWD` keeps its place with the directory's path; an
+        // imported `OLDPWD` is kept if it names a directory.
+        let mut v = Vars::new("sh");
+        v.import(b"PWD=/elsewhere\0OLDPWD=/etc\0A=1\0");
+        v.start("/tmp", true).unwrap();
+        assert_eq!(v.environment_with(&[]), b"PWD=/tmp\0OLDPWD=/etc\0A=1\0");
+        v.start("/tmp", false).unwrap();
+        assert_eq!(v.environment_with(&[]), b"PWD=/tmp\0A=1\0");
+        assert_eq!(v.value("OLDPWD"), None);
     }
 
     #[test]

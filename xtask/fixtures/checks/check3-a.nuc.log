@@ -1,3 +1,4 @@
++ cd /root
 + rm -rf /root/notes
 + uname -a
 Relay relay 0.5.0 x86_64

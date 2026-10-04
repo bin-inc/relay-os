@@ -6,6 +6,9 @@
 # line, and each of its lines counts as a command. Only the time differs
 # between the NUC and QEMU.
 
+# Run from any directory (programmable shell gate §9.2).
+cd /root
+
 # Start afresh, so the check can be run again.
 rm -f /root/check6-a.sh /root/check6-a.log /root/check6-go /root/check6-stop /root/check6-old /root/check6-new
 

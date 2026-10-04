@@ -8,9 +8,9 @@
 timeout 60
 expect root@relay:~# $
 send t-env
-expect \n1 entry, 11 bytes\n\[0\] HOME=/root\nroot@relay:~# $
+expect \n2 entries, 21 bytes\n\[0\] HOME=/root\n\[1\] PWD=/root\nroot@relay:~# $
 send t-env raw
-expect \nan address, 11 bytes, 1 entry\nroot@relay:~# $
+expect \nan address, 21 bytes, 2 entries\nroot@relay:~# $
 send t-env var HOME; t-env var NOPE
 expect \n/root\nunset\nroot@relay:~# $
 send t-env child
@@ -20,7 +20,7 @@ expect \nno address, 0 bytes, 0 entries\nroot@relay:~# $
 send t-env limits
 expect \n64 KiB: 2 arguments, 12 bytes; 1 entry, 65536 bytes\none byte more: E2BIG\n64 KiB of each: 3 arguments, 65536 bytes; 1 entry, 65536 bytes\nno final NUL: EINVAL\nroot@relay:~# $
 send t-env sh
-expect \n2 entries, 15 bytes\n\[0\] X=1\n\[1\] HOME=/root\nroot@relay:~# $
+expect \n3 entries, 25 bytes\n\[0\] X=1\n\[1\] HOME=/root\n\[2\] PWD=/root\nroot@relay:~# $
 send echo 'if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then if true; then echo deep; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi; fi' > env-deep.sh
 expect \nroot@relay:~# $
 send t-env deep env-deep.sh

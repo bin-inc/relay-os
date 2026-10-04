@@ -132,9 +132,14 @@ impl<'a> Shell<'a> {
     }
 
     /// The same shell, its environment `block` imported as exported
-    /// variables (programmable shell gate §8.5).
+    /// variables, and `PWD` and `OLDPWD` set as a shell sets them when it
+    /// starts (programmable shell gate §8.5).
     pub fn with_environment(mut self, block: &[u8]) -> Shell<'a> {
         self.vars.import(block);
+        // Said once, as an assignment that does not fit is.
+        if let Err(e) = start_variables(&mut self.vars, &mut *self.vfs) {
+            self.console.write(format!("{NAME}: {e}\n").as_bytes());
+        }
         self
     }
 
@@ -149,10 +154,13 @@ impl<'a> Shell<'a> {
         self.status
     }
 
-    /// `root@relay:<cwd># `, with `/root` shown as `~`.
+    /// `root@relay:<cwd># `, `$HOME` and below shown as `~`, as bash's `\w`
+    /// shows them: only when `HOME` is set and longer than one byte
+    /// (programmable shell gate §15 item 7).
     pub fn prompt(&self) -> String {
         let cwd = path::display(&self.vfs.cwd());
-        let dir = match cwd.strip_prefix(HOME) {
+        let home = self.vars.value("HOME").filter(|h| h.len() > 1);
+        let dir = match home.and_then(|h| cwd.strip_prefix(h)) {
             Some("") => String::from("~"),
             Some(rest) if rest.starts_with('/') => format!("~{rest}"),
             _ => cwd,
@@ -222,7 +230,9 @@ impl<'a> Shell<'a> {
             }
         }
         // Without a /root the shell starts in /.
-        let _ = self.vfs.chdir(HOME.as_bytes());
+        if self.vfs.chdir(HOME.as_bytes()).is_ok() {
+            let _ = self.vars.set("PWD", String::from(HOME));
+        }
     }
 
     /// Runs one command line as if it had been typed; returns its exit
@@ -812,15 +822,21 @@ impl<'a> Shell<'a> {
     /// Its `exit` ends only the script, as it does under `/bin/sh`, where a
     /// script is a shell of its own; and it has variables and arguments of
     /// its own, the exported variables imported, and starts with `$?` 0, as
-    /// there.
+    /// there; and its `cd` stays in it.
     fn run_script(&mut self, script: Script, env: &[u8]) -> i32 {
+        let cwd = self.vfs.cwd();
         self.transcript = Some(Transcript::new(script.transcript, script.transcript_name));
         let mut vars = Vars::script(&script.name, &script.args);
         vars.import(env);
+        let started = start_variables(&mut vars, &mut *self.vfs);
         let outer = core::mem::replace(&mut self.vars, vars);
         self.status = 0;
+        if let Err(e) = started {
+            self.say(format!("{NAME}: {e}\n").as_bytes());
+        }
         let status = self.run_lines(&script.text);
         self.vars = outer;
+        let _ = self.vfs.chdir(&cwd);
         if self.exited {
             self.stopped = false;
         }
@@ -1046,6 +1062,17 @@ fn runner_stages<'c>(stages: &'c [parser::Command], fds: &[Option<Fds>]) -> Vec<
         .collect()
 }
 
+/// Sets `PWD` and `OLDPWD` in a shell's `vars` as it starts, from the
+/// current directory and whether the `OLDPWD` it imported is a directory.
+fn start_variables(vars: &mut Vars, vfs: &mut dyn Vfs) -> Result<(), expand::Error> {
+    let oldpwd_is_dir = vars.value("OLDPWD").is_some_and(|old| {
+        vfs.lookup(old.as_bytes())
+            .and_then(|node| vfs.stat(node))
+            .is_ok_and(|s| s.kind == vfs::FileType::Directory)
+    });
+    vars.start(&path::display(&vfs.cwd()), oldpwd_is_dir)
+}
+
 /// Whether `list` is one pipeline of simple commands, and nothing else.
 fn lone_pipeline(list: &parser::List<parser::Word>) -> bool {
     match &list.items[..] {
@@ -1077,8 +1104,12 @@ mod tests {
     #[test]
     fn the_prompt_shows_home_as_a_tilde() {
         let mut h = Harness::new();
-        let prompt =
-            |h: &mut Harness| Shell::new(&mut h.vfs, &mut h.console, &mut h.system).prompt();
+        let prompt = |h: &mut Harness| {
+            Shell::new(&mut h.vfs, &mut h.console, &mut h.system)
+                .with_environment(&h.env)
+                .prompt()
+        };
+        h.env = b"HOME=/root\0".to_vec();
         assert_eq!(prompt(&mut h), "root@relay:/# ");
         h.run("cd /root");
         assert_eq!(prompt(&mut h), "root@relay:~# ");
@@ -1088,6 +1119,18 @@ mod tests {
         h.dir("/rootless");
         h.run("cd /rootless");
         assert_eq!(prompt(&mut h), "root@relay:/rootless# ");
+        // As bash's `\w`: `HOME` unset, empty, `/` or with a `/` at its end
+        // shows none.
+        h.run("cd /root/notes");
+        for env in [&b""[..], b"HOME=\0", b"HOME=/\0", b"HOME=/root/\0"] {
+            h.env = env.to_vec();
+            assert_eq!(prompt(&mut h), "root@relay:/root/notes# ", "{env:?}");
+        }
+        h.env = b"HOME=/root/notes\0".to_vec();
+        assert_eq!(prompt(&mut h), "root@relay:~# ");
+        h.env = b"HOME=/\0".to_vec();
+        h.run("cd /");
+        assert_eq!(prompt(&mut h), "root@relay:/# ", "bash's `\\w` for HOME=/");
     }
 
     #[test]
@@ -2012,6 +2055,7 @@ mod tests {
         // §5.2: the walker asks before each command, so a list or a
         // loop of built-ins ends too, with `^C` and 130.
         let mut h = Harness::new();
+        h.env = b"HOME=/root\0".to_vec();
         h.console.interrupt_after = Some(1);
         assert_eq!(h.run("cd; cd; cd; echo no"), (130, "^C\n".into()));
         h.console.interrupt_after = Some(1);
@@ -2212,6 +2256,7 @@ mod tests {
     fn ctrl_c_ends_a_loop_of_built_ins_or_of_programs() {
         // A loop a person writes may run forever; Ctrl-C ends it (§5.2).
         let mut h = Harness::new();
+        h.env = b"HOME=/root\0".to_vec();
         h.console.interrupt_after = Some(50);
         assert_eq!(
             h.run("while true; do cd; done; echo no"),
@@ -2718,6 +2763,18 @@ mod tests {
     }
 
     #[test]
+    fn a_script_s_cd_stays_in_it() {
+        // Under /bin/sh a script is a process of its own; the in-process
+        // runner goes back where it was (programmable shell gate §9.2).
+        let mut h = Harness::new();
+        h.put("/tmp/s.sh", b"cd /etc\npwd\n");
+        assert_eq!(
+            h.lines(&["cd /tmp", "sh s.sh", "pwd", "echo $PWD"]).1,
+            "+ cd /etc\n+ pwd\n/etc\n/tmp\n/tmp\n"
+        );
+    }
+
+    #[test]
     fn a_script_starts_with_the_exported_variables() {
         // As bash's: a script imports them, and what it sets or exports
         // stays in it.
@@ -2761,16 +2818,16 @@ mod tests {
         assert_eq!(
             envs,
             [
-                b"HOME=/root\0X=1\0B=2\0".to_vec(),
-                b"HOME=/root\0B=2\0".to_vec(),
-                b"HOME=/root\0B=2\0".to_vec(),
-                b"HOME=/root\0B=2\0".to_vec(),
+                b"HOME=/root\0X=1\0PWD=/\0B=2\0".to_vec(),
+                b"HOME=/root\0PWD=/\0B=2\0".to_vec(),
+                b"HOME=/root\0PWD=/\0B=2\0".to_vec(),
+                b"HOME=/root\0PWD=/\0B=2\0".to_vec(),
             ],
             "a lone command, each command of a pipeline, a background job"
         );
-        // With nothing exported, none.
+        // With nothing imported, `PWD` alone.
         h.spawning("t-args");
-        assert_eq!(h.programs.spawned.last().unwrap().env, b"");
+        assert_eq!(h.programs.spawned.last().unwrap().env, b"PWD=/\0");
     }
 
     #[test]
@@ -2795,12 +2852,12 @@ mod tests {
         assert_eq!(
             envs,
             [
-                b"HOME=/root\0B=3\0A=1\0".to_vec(),
-                b"HOME=/root\0B=2\0".to_vec(),
-                b"HOME=/root\0B=2\0A=1\0".to_vec(),
-                b"HOME=/root\0B=2\0X=2\0".to_vec(),
-                b"HOME=/root\0B=2\0Y=2\0".to_vec(),
-                b"HOME=/root\0B=4\0".to_vec(),
+                b"HOME=/root\0B=3\0PWD=/\0A=1\0".to_vec(),
+                b"HOME=/root\0B=2\0PWD=/\0".to_vec(),
+                b"HOME=/root\0B=2\0PWD=/\0A=1\0".to_vec(),
+                b"HOME=/root\0B=2\0PWD=/\0X=2\0".to_vec(),
+                b"HOME=/root\0B=2\0PWD=/\0Y=2\0".to_vec(),
+                b"HOME=/root\0B=4\0PWD=/\0".to_vec(),
             ]
         );
         assert_eq!(
@@ -2831,14 +2888,15 @@ mod tests {
         assert_eq!(status, 0);
         assert_eq!(
             out,
-            "declare -x A=\"1\"\ndeclare -x W=\"2\"\ndeclare -x Z=\"0\"\n[1][][0][2][][0][]\n"
+            "declare -x A=\"1\"\ndeclare -x OLDPWD=\"/\"\ndeclare -x PWD=\"/tmp\"\ndeclare -x W=\"2\"\n\
+             declare -x Z=\"0\"\n[1][][0][2][][0][]\n"
         );
     }
 
     #[test]
     fn an_assignment_a_built_in_cannot_hold_runs_nothing() {
         let mut h = Harness::new();
-        let big = "x".repeat(crate::vars::VARS_MAX - 10);
+        let big = "x".repeat(crate::vars::VARS_MAX - 30);
         let (status, out) = h.lines(&[
             &format!("A={big}"),
             &format!("B={} C=1 cd /tmp", &big[..20]),
@@ -2855,24 +2913,64 @@ mod tests {
     #[test]
     fn a_program_s_environment_holds_at_most_64_kib() {
         // Past it bash's words for `E2BIG`, status 126, under both
-        // runners; a built-in gets no environment.
+        // runners; a built-in gets no environment. Exported, `X=…` and
+        // `PWD=/` take 40,009 bytes; `Y=…` before a command fills the
+        // rest of 64 KiB, or one byte more.
         let mut env = b"X=".to_vec();
-        env.extend(core::iter::repeat_n(b'x', crate::vars::ENVIRONMENT_MAX - 3));
+        env.extend(core::iter::repeat_n(b'x', 40_000));
         env.push(0);
+        let rest = crate::vars::ENVIRONMENT_MAX - 40_003 - 6 - 3;
+        let fits = format!("Y={}", "y".repeat(rest));
+        let over = format!("Y={}", "y".repeat(rest + 1));
         let mut h = spawning();
         h.programs.known.push(("/bin/cat", WaitStatus::exited(0)));
         h.env = env;
         let too_long = |name: &str| format!("relay-sh: {name}: Argument list too long\n");
-        assert_eq!(h.spawning("t-args"), (3, "".into()), "64 KiB exactly");
-        assert_eq!(h.spawning("Y= t-args"), (126, too_long("t-args")));
-        assert_eq!(h.spawning("Y= t-args | cat"), (0, too_long("t-args")));
+        assert_eq!(
+            h.spawning(&format!("{fits} t-args")),
+            (3, "".into()),
+            "64 KiB exactly"
+        );
+        assert_eq!(
+            h.programs.spawned[0].env.len(),
+            crate::vars::ENVIRONMENT_MAX
+        );
+        assert_eq!(
+            h.spawning(&format!("{over} t-args")),
+            (126, too_long("t-args"))
+        );
+        assert_eq!(
+            h.spawning(&format!("{over} t-args | cat")),
+            (0, too_long("t-args"))
+        );
         let paths: Vec<_> = h.programs.spawned.iter().map(|s| s.path.as_str()).collect();
         assert_eq!(paths, ["/bin/t-args", "/bin/cat"]);
-        assert_eq!(h.spawning("Y= cd /tmp"), (0, "".into()));
-        assert_eq!(h.run("Y= echo hi"), (126, too_long("echo")));
-        assert_eq!(h.run("echo hi | Y= cat"), (126, too_long("cat")));
-        assert_eq!(h.run("Y= echo hi | cat"), (0, too_long("echo")));
+        assert_eq!(h.run(&format!("{over} echo hi")), (126, too_long("echo")));
+        assert_eq!(
+            h.run(&format!("echo hi | {over} cat")),
+            (126, too_long("cat"))
+        );
+        assert_eq!(
+            h.run(&format!("{over} echo hi | cat")),
+            (0, too_long("echo"))
+        );
+        assert_eq!(h.run(&format!("{fits} echo hi")), (0, "hi\n".into()));
         assert_eq!(h.run("echo hi"), (0, "hi\n".into()));
+    }
+
+    #[test]
+    fn a_built_in_gets_no_environment_so_no_limit() {
+        // 11,000 empty variables hold under 64 KiB of names, but their
+        // entries, `V123=` and a NUL each, make more than 64 KiB.
+        let mut env = Vec::new();
+        for i in 0..11_000 {
+            env.extend_from_slice(format!("V{i}=\0").as_bytes());
+        }
+        let mut h = spawning();
+        h.env = env;
+        let too_long = "relay-sh: t-args: Argument list too long\n";
+        assert_eq!(h.spawning("t-args"), (126, too_long.into()));
+        assert_eq!(h.spawning("cd /tmp"), (0, "".into()));
     }
 
     #[test]
@@ -3031,7 +3129,49 @@ mod tests {
         assert_eq!(status, 0);
         assert_eq!(
             out,
-            "/bin/sh /root [x  y]\ndeclare -x A=\"x  y\"\ndeclare -x HOME=\"/root\"\n"
+            "/bin/sh /root [x  y]\ndeclare -x A=\"x  y\"\ndeclare -x HOME=\"/root\"\n\
+             declare -x OLDPWD\ndeclare -x PWD=\"/\"\n"
+        );
+    }
+
+    #[test]
+    fn a_shell_sets_pwd_and_keeps_an_oldpwd_that_names_a_directory() {
+        // As bash 5.2 does when it starts (`env -i PWD=… OLDPWD=… bash`).
+        let mut h = Harness::new();
+        vfs::Vfs::chdir(&mut h.vfs, b"/tmp").unwrap();
+        for (env, out) in [
+            (&b"PWD=/nowhere\0OLDPWD=/etc\0"[..], "[/tmp][/etc]\n"),
+            (b"OLDPWD=/nonexistent\0", "[/tmp][]\n"),
+            (b"OLDPWD=/etc/motd\0", "[/tmp][]\n"),
+            (b"OLDPWD=\0", "[/tmp][]\n"),
+        ] {
+            h.env = env.to_vec();
+            assert_eq!(h.run("echo \"[$PWD][$OLDPWD]\""), (0, out.into()));
+        }
+        // A script the in-process runner runs starts so too, where it runs.
+        h.env = b"OLDPWD=/etc\0".to_vec();
+        h.put("/tmp/s.sh", b"echo \"[$PWD][$OLDPWD]\"\n");
+        vfs::Vfs::chdir(&mut h.vfs, b"/").unwrap();
+        assert_eq!(
+            h.lines(&["PWD=/x", "export OLDPWD=/nonexistent", "sh /tmp/s.sh"])
+                .1,
+            "+ echo \"[$PWD][$OLDPWD]\"\n[/][]\n"
+        );
+    }
+
+    #[test]
+    fn a_shell_says_once_when_pwd_does_not_fit_its_variables() {
+        let mut h = Harness::new();
+        let mut env = b"A=".to_vec();
+        env.extend(core::iter::repeat_n(b'x', crate::vars::VARS_MAX - 3));
+        env.push(0);
+        h.env = env;
+        assert_eq!(
+            h.run("echo \"[$PWD]\""),
+            (
+                0,
+                "relay-sh: PWD: the variables would hold more than 64 KiB\n[]\n".into()
+            )
         );
     }
 
@@ -3043,7 +3183,10 @@ mod tests {
         let mut out = FakeStdout::console();
         let (status, said) = h.sh(&["/tmp/s.sh", "x"], &mut out);
         assert_eq!(status, 0);
-        assert_eq!(said, "+ export\ndeclare -x HOME=\"/root\"\n");
+        assert_eq!(
+            said,
+            "+ export\ndeclare -x HOME=\"/root\"\ndeclare -x OLDPWD\ndeclare -x PWD=\"/\"\n"
+        );
     }
 
     #[test]
@@ -3838,8 +3981,11 @@ mod tests {
     #[test]
     fn greet_shows_the_motd_and_goes_home() {
         let mut h = Harness::new();
-        Shell::new(&mut h.vfs, &mut h.console, &mut h.system).greet();
-        assert_eq!(h.console.take(), "Welcome to Relay OS.\n");
+        let mut shell = Shell::new(&mut h.vfs, &mut h.console, &mut h.system).with_environment(b"");
+        shell.greet();
+        // `PWD` follows it there.
+        shell.execute("echo $PWD");
+        assert_eq!(h.console.take(), "Welcome to Relay OS.\n/root\n");
         assert_eq!(h.run("pwd").1, "/root\n");
     }
 

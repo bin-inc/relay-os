@@ -4,6 +4,9 @@
 # check5.log; the `#>` lines are explained in check3-a.sh. Nothing here
 # differs between the NUC and QEMU.
 
+# Run from any directory (programmable shell gate §9.2).
+cd /root
+
 # Start afresh, so the check can be run again.
 rm -f /root/check5-a.sh /root/check5-a.log /root/check5-b.sh /root/check5-b.log
 

@@ -1,3 +1,4 @@
++ cd /root
 + rm -f /root/check6-a.sh /root/check6-a.log /root/check6-go /root/check6-stop /root/check6-old /root/check6-new
 + for n in 1 2 3
 + do

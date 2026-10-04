@@ -320,7 +320,8 @@ mod tests {
             h.run("sh s.sh"),
             (0, "+ cd /etc\n+ cat hostname\nrelay\n".into())
         );
-        assert_eq!(h.run("pwd").1, "/etc\n");
+        // The script's cd stays in it, as under /bin/sh.
+        assert_eq!(h.run("pwd").1, "/tmp\n");
     }
 
     #[test]

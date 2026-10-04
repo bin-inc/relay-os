@@ -30,6 +30,9 @@ fn scripts() -> Vec<PathBuf> {
     scripts
 }
 
+/// The environment both shells start with.
+const ENVIRONMENT: &[u8] = b"LC_ALL=C\0PATH=/usr/bin:/bin\0";
+
 /// What bash 5.2 prints for `script` and its status, in the C locale with
 /// no startup files, in an empty directory.
 fn bash(script: &Path) -> (i32, String) {
@@ -60,13 +63,15 @@ fn bash(script: &Path) -> (i32, String) {
 }
 
 /// What the in-process runner prints for `text` and its status, in an
-/// empty directory.
+/// empty directory, with bash's environment.
 fn relay(text: &[u8]) -> (i32, String) {
     let mut h = Harness::new();
     h.dir("/tmp/corpus");
     h.vfs.chdir(b"/tmp/corpus").unwrap();
     let mut input = Bytes::new(text.to_vec());
-    let status = Shell::new(&mut h.vfs, &mut h.console, &mut h.system).run_input(&mut input);
+    let status = Shell::new(&mut h.vfs, &mut h.console, &mut h.system)
+        .with_environment(ENVIRONMENT)
+        .run_input(&mut input);
     (status, h.console.take())
 }
 

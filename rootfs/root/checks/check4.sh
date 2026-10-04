@@ -5,6 +5,9 @@
 # `#same> NAME regex` is a line whose group must capture what it captured
 # the first time.
 
+# Run from any directory (programmable shell gate §9.2).
+cd /root
+
 # Start afresh, so the check can be run again.
 rm -f /root/check4.list /root/check4-a.sh /root/check4-a.log /root/check4-b.sh /root/check4-b.log
 
