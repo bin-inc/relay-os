@@ -9,6 +9,8 @@ timeout 60
 expect root@relay:~# $
 send t-env
 expect \n1 entry, 11 bytes\n\[0\] HOME=/root\nroot@relay:~# $
+send t-env raw
+expect \nan address, 11 bytes, 1 entry\nroot@relay:~# $
 send t-env var HOME; t-env var NOPE
 expect \n/root\nunset\nroot@relay:~# $
 send t-env child

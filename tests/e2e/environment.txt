@@ -1,0 +1,33 @@
+# The shell's environment (programmable shell gate §8.5, §11.3; milestone
+# 5, plan 3): a variable reaches a program only once exported, in the order
+# of export, and one exported without a value not at all; export lists
+# them as bash's declare -x; unset removes one; a script, X | sh and a
+# nested sh start with the exported ones, and nothing comes back out.
+timeout 30
+expect root@relay:~# $
+send A=1; t-env
+expect \n1 entry, 11 bytes\n\[0\] HOME=/root\nroot@relay:~# $
+send export A B; t-env
+expect \n2 entries, 15 bytes\n\[0\] HOME=/root\n\[1\] A=1\nroot@relay:~# $
+send export C='two words'; export
+expect \ndeclare -x A="1"\ndeclare -x B\ndeclare -x C="two words"\ndeclare -x HOME="/root"\nroot@relay:~# $
+send unset A; t-env
+expect \n2 entries, 23 bytes\n\[0\] HOME=/root\n\[1\] C=two words\nroot@relay:~# $
+send export 1A=x; echo $?
+expect \nrelay-sh: export: `1A=x': not a valid identifier\n1\nroot@relay:~# $
+send echo 'echo "[$C][$D]"; export D=in; t-env' > /root/env.sh
+expect root@relay:~# $
+send D=out; sh /root/env.sh
+expect \n\+ echo "\[\$C\]\[\$D\]"; export D=in; t-env\n\[two words\]\[\]\n3 entries, 28 bytes\n\[0\] HOME=/root\n\[1\] C=two words\n\[2\] D=in\nroot@relay:~# $
+send echo "[$D]"; t-env
+expect \n\[out\]\n2 entries, 23 bytes\n\[0\] HOME=/root\n\[1\] C=two words\nroot@relay:~# $
+send echo 'echo "[$C]"; t-env' | sh
+expect \n\[two words\]\n2 entries, 23 bytes\n\[0\] HOME=/root\n\[1\] C=two words\nroot@relay:~# $
+send sh
+expect \nroot@relay:~# $
+send export E=nested; t-env
+expect \n3 entries, 32 bytes\n\[0\] HOME=/root\n\[1\] C=two words\n\[2\] E=nested\nroot@relay:~# $
+send exit
+expect root@relay:~# $
+send echo "[$E]"
+expect \n\[\]\nroot@relay:~# $
