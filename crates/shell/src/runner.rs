@@ -100,6 +100,8 @@ impl Ran {
 pub(crate) struct Stage<'c> {
     pub words: &'c [String],
     pub fds: Option<Fds>,
+    /// Its environment: the exported variables with its assignments.
+    pub env: &'c [u8],
 }
 
 /// Runs the commands that are not the shell's own (`commands::BUILTINS`).
@@ -185,7 +187,7 @@ impl Runner for InProcess {
             status,
             mut input,
             files,
-            env,
+            env: _,
         } = parts;
         let (last, before) = stages.split_last().expect("a pipeline has stages");
         let mut piped: Option<Bytes> = None;
@@ -269,7 +271,7 @@ impl Runner for InProcess {
             status,
             input: Some(&mut piped),
             files,
-            env,
+            env: last.env,
         };
         self.run(parts, name, args, fds)
     }
@@ -478,7 +480,7 @@ impl Spawning<'_> {
             let shell_fds = fds.0.map(|slot| shell_fd(parts.files, slot, stdin, stdout));
             let pid = self
                 .programs
-                .spawn(path.as_bytes(), &argv, parts.env, shell_fds, group);
+                .spawn(path.as_bytes(), &argv, stage.env, shell_fds, group);
             match pid {
                 Ok(pid) => {
                     first.get_or_insert(pid);

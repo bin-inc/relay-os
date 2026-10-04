@@ -55,14 +55,19 @@ pub(crate) fn expand(
     commands.iter().map(|c| x.command(c)).collect()
 }
 
-/// A command's `words` expanded: `export`'s assignments as assignments
-/// are (`export A=~/x`), as bash expands a declaration command's.
-pub(crate) fn command_words(
-    words: &[Word],
+/// A command's words and then its assignments expanded, as bash expands
+/// them, sharing the line's room: `export`'s assignments are expanded as
+/// assignments are (`export A=~/x`), as bash expands a declaration
+/// command's. Its redirections are expanded as they are reached.
+pub(crate) fn command_parts(
+    c: &Command<Word>,
     vars: &Vars,
     status: i32,
-) -> Result<Vec<String>, Error> {
-    Expander::new(vars, status).words(words)
+) -> Result<(Vec<String>, Vec<String>), Error> {
+    let mut x = Expander::new(vars, status);
+    let words = x.words(&c.words)?;
+    let assigns = x.assigns(&c.assigns)?;
+    Ok((words, assigns))
 }
 
 /// `words` expanded as a command's arguments are (a `for`'s list).
@@ -88,6 +93,9 @@ pub(crate) fn redirect(r: &Redirect<Word>, vars: &Vars, status: i32) -> Result<R
 
 struct Expander<'v> {
     vars: &'v Vars,
+    /// The assignments of the command being expanded, made so far: a
+    /// later one reads an earlier one (`A=1 B=$A cmd`).
+    made: Vec<(String, String)>,
     status: i32,
     /// What may still be made: bytes, and one for each word.
     room: usize,
@@ -103,6 +111,7 @@ impl<'v> Expander<'v> {
     fn new(vars: &'v Vars, status: i32) -> Expander<'v> {
         Expander {
             vars,
+            made: Vec::new(),
             status,
             room: EXPANSION_MAX,
         }
@@ -116,10 +125,7 @@ impl<'v> Expander<'v> {
 
     fn command(&mut self, c: &Command<Word>) -> Result<Command, Error> {
         let words = self.words(&c.words)?;
-        let mut assigns = Vec::new();
-        for w in &c.assigns {
-            assigns.extend(self.word(w)?);
-        }
+        let assigns = self.assigns(&c.assigns)?;
         let mut redirects = Vec::new();
         for r in &c.redirects {
             redirects.push(self.redirect(r)?);
@@ -146,6 +152,23 @@ impl<'v> Expander<'v> {
                 None => out.extend(self.word(w)?),
             }
         }
+        Ok(out)
+    }
+
+    /// A command's assignments, `NAME=value` each, expanded after its words
+    /// as bash expands them: left to right, each reading the ones before
+    /// (programmable shell gate §15 item 7).
+    fn assigns(&mut self, assigns: &[Word]) -> Result<Vec<String>, Error> {
+        let mut out = Vec::new();
+        for (name, value) in assigns.iter().filter_map(Word::assignment) {
+            let value = self.joined(&value)?;
+            out.push(alloc::format!("{name}={value}"));
+            match self.made.iter_mut().find(|(n, _)| n == name) {
+                Some(made) => made.1 = value,
+                None => self.made.push((String::from(name), value)),
+            }
+        }
+        self.made.clear();
         Ok(out)
     }
 
@@ -235,7 +258,10 @@ impl<'v> Expander<'v> {
     fn value(&self, p: &Param) -> Result<Value<'v>, Error> {
         let args = &self.vars.args;
         Ok(match p {
-            Param::Name(n) => Value::One(Cow::Borrowed(self.vars.get(n))),
+            Param::Name(n) => match self.made.iter().find(|(m, _)| m == n) {
+                Some((_, value)) => Value::One(Cow::Owned(value.clone())),
+                None => Value::One(Cow::Borrowed(self.vars.get(n))),
+            },
             Param::Arg(i) => Value::One(Cow::Borrowed(args.get(*i).map_or("", String::as_str))),
             Param::Count => Value::One(Cow::Owned((args.len() - 1).to_string())),
             Param::Status => Value::One(Cow::Owned(self.status.to_string())),
@@ -423,6 +449,40 @@ mod tests {
             assert_eq!(e, Error::BadSubstitution(typed.into()), "{line}");
             assert_eq!(e.to_string(), alloc::format!("{typed}: bad substitution"));
         }
+    }
+
+    #[test]
+    fn a_command_s_words_expand_before_its_assignments() {
+        // As bash's: `A=1 echo $A` prints the old `A`, `A=1 B=$A env`
+        // gives `B=1`, and a bad substitution in the words is told first.
+        let v = script();
+        let parts = |line: &str| expand(&typed(line), &v, 0).map(|mut c| c.remove(0));
+        let c = parts("A=1 echo $A $E").unwrap();
+        assert_eq!(c.words, ["echo", "a  b"], "the words read the old values");
+        assert_eq!(c.assigns, ["A=1"]);
+        let c = parts("A=1 B=$A A=2 C=$A$1 env").unwrap();
+        assert_eq!(c.assigns, ["A=1", "B=1", "A=2", "C=2one"]);
+        let lone = command_parts(&typed("A=${1A} echo ${2B}")[0], &v, 0);
+        assert_eq!(lone, Err(Error::BadSubstitution("${2B}".into())));
+        assert_eq!(
+            parts("A=${1A} echo ${2B}").unwrap_err(),
+            Error::BadSubstitution("${2B}".into())
+        );
+        // Each command of a pipeline reads only its own.
+        let p = expand(&typed("A=1 x | echo $A"), &v, 0).unwrap();
+        assert_eq!(p[1].words, ["echo", "a  b"]);
+        // An assignment's value as an assignment's: `~` and `$@`.
+        let c = parts("A=~/x B=$@ cmd").unwrap();
+        assert_eq!(c.assigns, ["A=/root/x", "B=one two three  four"]);
+    }
+
+    #[test]
+    fn a_command_s_assignments_share_its_room() {
+        let half = "x".repeat(EXPANSION_MAX / 2);
+        let v = Vars::of(&[("A", &half)], &["s.sh"]);
+        let c = typed("B=$A cmd $A");
+        assert_eq!(command_parts(&c[0], &v, 0), Err(Error::TooLong));
+        assert!(command_parts(&typed("B=$A cmd")[0], &v, 0).is_ok());
     }
 
     #[test]

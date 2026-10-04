@@ -462,8 +462,11 @@ impl<'a> Shell<'a> {
         // starts, so a loop that starts jobs never fills it; they are
         // reported at the next prompt.
         self.collect_jobs();
-        let assigns = commands.iter().find_map(|c| c.assigns.first());
-        if let Some(first) = assigns {
+        let alone = commands
+            .iter()
+            .filter(|c| c.words.is_empty())
+            .find_map(|c| c.assigns.first());
+        if let Some(first) = alone {
             // Alone on its line; bash's changes nothing elsewhere.
             let place = match (background, commands.len()) {
                 (Some(_), _) => "the background",
@@ -486,10 +489,23 @@ impl<'a> Shell<'a> {
             };
         }
         let typed = &commands[0];
-        let words = match expand::command_words(&typed.words, &self.vars, self.status) {
-            Ok(words) => words,
+        let (words, assigns) = match expand::command_parts(typed, &self.vars, self.status) {
+            Ok(parts) => parts,
             Err(e) => return self.not_expanded(e, true),
         };
+        if words.is_empty() {
+            // Before words that expanded to nothing the assignments stay
+            // set, as a line of assignments does in bash.
+            for (name, value) in assigns.iter().filter_map(|a| a.split_once('=')) {
+                if let Err(e) = self.vars.set(name, String::from(value)) {
+                    return self.not_expanded(e, true);
+                }
+            }
+        } else if !assigns.is_empty() && commands::builtin(&words[0]).is_some() {
+            let first = &typed.assigns[0].typed;
+            let message = format!("{NAME}: unsupported syntax: {first} before a built-in\n");
+            return self.finish(SYNTAX, message);
+        }
         if words.is_empty() && typed.redirects.is_empty() {
             // Its words expanded to nothing: bash's status 0.
             return self.finish(0, String::new());
@@ -497,7 +513,7 @@ impl<'a> Shell<'a> {
         let Some(fds) = self.make(self.fds, &typed.redirects) else {
             return self.finish(1, String::new());
         };
-        let env = self.vars.environment();
+        let env = self.vars.environment_with(&assigns);
         let parts = Parts {
             vfs: &mut *self.vfs,
             console: &mut *self.console,
@@ -545,7 +561,7 @@ impl<'a> Shell<'a> {
         // a file it was given as input.
         if let Some(script) = ran.script {
             let outer = core::mem::replace(&mut self.fds, fds);
-            status = self.run_script(*script);
+            status = self.run_script(*script, &env);
             self.fds = outer;
         }
         self.release(fds);
@@ -580,8 +596,9 @@ impl<'a> Shell<'a> {
             return self.finish(ran.status, ran.message);
         }
         let all = self.stage_fds(stages);
-        let staged = runner_stages(stages, &all);
-        let env = self.vars.environment();
+        let envs = self.stage_environments(stages);
+        let staged = runner_stages(stages, &all, &envs);
+        let env = Vec::new();
         let parts = Parts {
             vfs: &mut *self.vfs,
             console: &mut *self.console,
@@ -624,8 +641,9 @@ impl<'a> Shell<'a> {
             return self.finish(1, message);
         }
         let all = self.stage_fds(stages);
-        let staged = runner_stages(stages, &all);
-        let env = self.vars.environment();
+        let envs = self.stage_environments(stages);
+        let staged = runner_stages(stages, &all, &envs);
+        let env = Vec::new();
         let parts = Parts {
             vfs: &mut *self.vfs,
             console: &mut *self.console,
@@ -753,6 +771,15 @@ impl<'a> Shell<'a> {
         all
     }
 
+    /// Each stage's environment: the exported variables with its own
+    /// assignments (programmable shell gate §8.5).
+    fn stage_environments(&self, stages: &[parser::Command]) -> Vec<Vec<u8>> {
+        stages
+            .iter()
+            .map(|c| self.vars.environment_with(&c.assigns))
+            .collect()
+    }
+
     /// Collects the background jobs' processes that have ended.
     fn collect_jobs(&mut self) {
         if let Some(programs) = self.runner.programs() {
@@ -792,10 +819,10 @@ impl<'a> Shell<'a> {
     /// script is a shell of its own; and it has variables and arguments of
     /// its own, the exported variables imported, and starts with `$?` 0, as
     /// there.
-    fn run_script(&mut self, script: Script) -> i32 {
+    fn run_script(&mut self, script: Script, env: &[u8]) -> i32 {
         self.transcript = Some(Transcript::new(script.transcript, script.transcript_name));
         let mut vars = Vars::script(&script.name, &script.args);
-        vars.import(&self.vars.environment());
+        vars.import(env);
         let outer = core::mem::replace(&mut self.vars, vars);
         self.status = 0;
         let status = self.run_lines(&script.text);
@@ -1012,13 +1039,19 @@ impl<'a> Shell<'a> {
 }
 
 /// A pipeline's stages for the runner: each one's words and fds.
-fn runner_stages<'c>(stages: &'c [parser::Command], fds: &[Option<Fds>]) -> Vec<runner::Stage<'c>> {
+fn runner_stages<'c>(
+    stages: &'c [parser::Command],
+    fds: &[Option<Fds>],
+    envs: &'c [Vec<u8>],
+) -> Vec<runner::Stage<'c>> {
     stages
         .iter()
         .zip(fds)
-        .map(|(c, fds)| runner::Stage {
+        .zip(envs)
+        .map(|((c, fds), env)| runner::Stage {
             words: &c.words,
             fds: *fds,
+            env,
         })
         .collect()
 }
@@ -2748,6 +2781,64 @@ mod tests {
         // With nothing exported, none.
         h.spawning("t-args");
         assert_eq!(h.programs.spawned.last().unwrap().env, b"");
+    }
+
+    #[test]
+    fn assignments_before_a_program_are_in_its_environment_only() {
+        let mut h = spawning();
+        h.programs.known.push(("/bin/cat", WaitStatus::exited(0)));
+        {
+            let mut shell =
+                Shell::spawning(&mut h.vfs, &mut h.console, &mut h.system, &mut h.programs)
+                    .with_environment(b"HOME=/root\0B=2\0");
+            for line in [
+                "B=3 A=1 t-args",
+                "t-args",
+                "A=1 t-args | X=2 cat",
+                "Y=$B t-args &",
+                "B=4 t-args $B",
+            ] {
+                shell.execute(line);
+            }
+        }
+        let envs: Vec<_> = h.programs.spawned.iter().map(|s| s.env.clone()).collect();
+        assert_eq!(
+            envs,
+            [
+                b"HOME=/root\0B=3\0A=1\0".to_vec(),
+                b"HOME=/root\0B=2\0".to_vec(),
+                b"HOME=/root\0B=2\0A=1\0".to_vec(),
+                b"HOME=/root\0B=2\0X=2\0".to_vec(),
+                b"HOME=/root\0B=2\0Y=2\0".to_vec(),
+                b"HOME=/root\0B=4\0".to_vec(),
+            ]
+        );
+        assert_eq!(
+            h.programs.spawned[5].args,
+            ["t-args", "2"],
+            "the words read the old B"
+        );
+    }
+
+    #[test]
+    fn assignments_before_a_script_are_in_its_variables_only() {
+        let mut h = Harness::new();
+        h.put("/tmp/s.sh", b"echo [$A][$B]\n");
+        assert_eq!(
+            h.lines(&["B=2", "A=1 sh /tmp/s.sh", "echo [$A]"]),
+            (0, "+ echo [$A][$B]\n[1][]\n[]\n".into())
+        );
+    }
+
+    #[test]
+    fn assignments_before_words_that_expand_to_nothing_stay_set() {
+        // As bash's `A=1 $E`: a line of assignments after all.
+        let mut h = Harness::new();
+        assert_eq!(
+            h.lines(&["A=1 $E", "B=2 $E > /tmp/f", "echo $A $B"]),
+            (0, "1 2\n".into())
+        );
+        assert!(h.exists("/tmp/f"));
     }
 
     #[test]

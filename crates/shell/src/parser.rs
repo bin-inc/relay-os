@@ -741,10 +741,9 @@ fn value_tildes(text: &str, first: bool, last: bool) -> String {
     out
 }
 
-/// A command of `words` and `redirects`. An assignment before a command,
-/// which gives bash's command an environment, is not supported: programs
-/// get none (user-space gate §9.4); nor is bash's `NAME+=value`, which
-/// appends.
+/// A command of `words` and `redirects`, the assignments before its name
+/// (`A=1 cmd`) apart. bash's `NAME+=value`, which appends, is not
+/// supported.
 fn command(
     mut words: Vec<Word>,
     redirects: Vec<Redirect<Word>>,
@@ -759,12 +758,6 @@ fn command(
         .iter()
         .take_while(|w| w.assignment().is_some())
         .count();
-    if count > 0 && count < words.len() {
-        return Err(ParseError::Unsupported(format!(
-            "{} before a command",
-            words[0].typed
-        )));
-    }
     let assigns = words.drain(..count).collect();
     Ok(Command {
         assigns,
@@ -2649,23 +2642,20 @@ mod tests {
     }
 
     #[test]
-    fn an_assignment_before_a_command_is_unsupported() {
-        // bash gives the command an environment, which programs have not.
-        for (line, what) in [
-            ("A=1 echo hi", "A=1 before a command"),
-            ("A='a b' B=2 cat f", "A='a b' before a command"),
-            ("ls | A=1 wc", "A=1 before a command"),
-            ("A=1 echo &", "A=1 before a command"),
-        ] {
-            assert_eq!(
-                parse_line(line),
-                Err(ParseError::Unsupported(what.into())),
-                "{line}"
-            );
+    fn assignments_before_a_command_are_its_own() {
+        // bash gives them to the command's environment (§8.5).
+        let c = &typed("A=1 B='a b' cat f")[0];
+        let as_typed: Vec<_> = c.assigns.iter().map(|w| w.typed.as_str()).collect();
+        assert_eq!(as_typed, ["A=1", "B='a b'"]);
+        assert_eq!(c.words.len(), 2);
+        for line in ["ls | A=1 wc", "A=1 echo &", "A=1 > f cat"] {
+            assert!(parse_line(line).is_ok(), "{line}");
         }
-        // An argument that looks like one is one; assignments alone parse.
+        // An argument that looks like one is one; assignments alone have
+        // no words.
         assert_eq!(words("echo A=1"), ["echo", "A=1"]);
-        assert!(parse_line("A=1 B=2 > f").is_ok());
+        let alone = &typed("A=1 B=2 > f")[0];
+        assert_eq!((alone.assigns.len(), alone.words.len()), (2, 0));
     }
 
     #[test]

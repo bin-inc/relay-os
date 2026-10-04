@@ -145,24 +145,51 @@ impl Vars {
             .map(|(n, v)| (n.as_str(), v.value.as_deref()))
     }
 
-    /// The environment of a program the shell starts: each exported
-    /// variable that has a value, `NAME=value` and a NUL, in the order of
-    /// export.
-    pub fn environment(&self) -> Vec<u8> {
+    /// The environment of a program the shell starts (programmable shell
+    /// gate §8.5): each exported variable that has a value, `NAME=value` and
+    /// a NUL, in the order of export; with `assigns` before it (`A=1 cmd`,
+    /// `NAME=value` each), an exported name keeps its place with the value
+    /// assigned, and the others follow in the order typed, of a name
+    /// assigned twice the last value.
+    pub fn environment_with(&self, assigns: &[String]) -> Vec<u8> {
+        let mut over: Vec<(&str, &str)> = Vec::new();
+        for a in assigns {
+            let Some((name, value)) = a.split_once('=') else {
+                continue;
+            };
+            match over.iter_mut().find(|(n, _)| *n == name) {
+                Some(o) => o.1 = value,
+                None => over.push((name, value)),
+            }
+        }
+        let assigned = |name: &str| over.iter().find(|(n, _)| *n == name).map(|o| o.1);
         let mut exported: Vec<(u64, &str, &str)> = self
             .names
             .iter()
-            .filter_map(|(n, v)| Some((v.export?, n.as_str(), v.value.as_deref()?)))
+            .filter_map(|(n, v)| {
+                let value = assigned(n).or(v.value.as_deref())?;
+                Some((v.export?, n.as_str(), value))
+            })
             .collect();
         exported.sort_unstable_by_key(|&(place, _, _)| place);
+        let rest = over.iter().filter(|(n, _)| !self.is_exported(n));
         let mut block = Vec::new();
-        for (_, name, value) in exported {
+        for (name, value) in exported
+            .iter()
+            .map(|&(_, n, v)| (n, v))
+            .chain(rest.copied())
+        {
             block.extend_from_slice(name.as_bytes());
             block.push(b'=');
             block.extend_from_slice(value.as_bytes());
             block.push(0);
         }
         block
+    }
+
+    /// Whether `name` is exported.
+    fn is_exported(&self, name: &str) -> bool {
+        self.names.get(name).is_some_and(|v| v.export.is_some())
     }
 
     /// Stores `var` as `name`, unless the variables would then hold more
@@ -240,7 +267,7 @@ mod tests {
         v.export("NONE", None).unwrap();
         v.export("A", Some(String::from("été"))).unwrap();
         assert_eq!(
-            v.environment(),
+            v.environment_with(&[]),
             "B=two words\0Z=1\0A=été\0".as_bytes(),
             "in the order of export, not of names"
         );
@@ -250,13 +277,36 @@ mod tests {
         // Given a value, a variable exported without one goes where it was
         // exported.
         v.set("NONE", String::new()).unwrap();
-        assert_eq!(v.environment(), b"B=2\0Z=3\0NONE=\0A=\xc3\xa9t\xc3\xa9\0");
+        assert_eq!(
+            v.environment_with(&[]),
+            b"B=2\0Z=3\0NONE=\0A=\xc3\xa9t\xc3\xa9\0"
+        );
         // Unset and exported again, it goes last.
         v.unset("B");
         v.export("B", Some(String::from("4"))).unwrap();
-        assert_eq!(v.environment(), b"Z=3\0NONE=\0A=\xc3\xa9t\xc3\xa9\0B=4\0");
+        assert_eq!(
+            v.environment_with(&[]),
+            b"Z=3\0NONE=\0A=\xc3\xa9t\xc3\xa9\0B=4\0"
+        );
         assert_eq!(v.get("NOT"), "kept");
         assert!(!v.exported().any(|(n, _)| n == "NOT"));
+    }
+
+    #[test]
+    fn assignments_before_a_program_go_over_the_exported_variables() {
+        let mut v = Vars::new("sh");
+        v.export("HOME", Some(String::from("/root"))).unwrap();
+        v.export("B", None).unwrap();
+        v.export("X", Some(String::from("1"))).unwrap();
+        v.set("L", String::from("local")).unwrap();
+        let assigns = ["X=2", "N=new", "B=b", "L=l=m", "N=last"].map(String::from);
+        assert_eq!(
+            v.environment_with(&assigns),
+            b"HOME=/root\0B=b\0X=2\0N=last\0L=l=m\0",
+            "exported names in their places, the others as typed, the last value"
+        );
+        // The shell's own are as they were.
+        assert_eq!((v.get("X"), v.value("B"), v.get("L")), ("1", None, "local"));
     }
 
     #[test]

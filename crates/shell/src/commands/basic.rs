@@ -129,12 +129,14 @@ pub fn help(ctx: &mut Ctx<'_>, _: &[String]) -> i32 {
          the background, or with `;` to run the next one after it. `a && b`\n\
          runs b if a succeeds, `a || b` if it fails, and `! a` turns a's status\n\
          round. `sh FILE ARG...` runs a script, which reads its arguments as\n\
-         `$1`...`$9`, `$#` and \"$@\". `$?` is the last command's status, and\n\
-         `NAME=value` sets `$NAME`. `if a; then b; fi` runs b if a succeeds,\n\
-         with `elif c; then d;` and `else e;` before `fi` for other cases;\n\
-         `while a; do b; done` repeats b while a succeeds, `until` while it\n\
-         fails; `for x in w...; do b; done` runs b with each w as `$x`, and\n\
-         `for x; do` with each argument. Each may go on across lines, at `> `."
+         `$1`...`$9`, `$#` and \"$@\". `$?` is the last command's status.\n\
+         `NAME=value` sets `$NAME`, `export NAME` gives it to the programs the\n\
+         shell starts, and `NAME=value cmd` gives it to cmd alone.\n\
+         `if a; then b; fi` runs b if a succeeds, with `elif c; then d;` and\n\
+         `else e;` before `fi` for other cases; `while a; do b; done` repeats b\n\
+         while a succeeds, `until` while it fails; `for x in w...; do b; done`\n\
+         runs b with each w as `$x`, and `for x; do` with each argument. Each\n\
+         may go on across lines, at `> `."
     );
     0
 }
@@ -356,6 +358,8 @@ mod tests {
             "\"$@\"",
             "$?",
             "NAME=value",
+            "export NAME",
+            "NAME=value cmd",
             "`;`",
             "&&",
             "||",
