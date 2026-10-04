@@ -5,6 +5,7 @@ use super::BUILTINS;
 use crate::ctx::{Ctx, OptError, quote};
 use crate::io::Group;
 use crate::killed;
+use crate::vars::ENVIRONMENT_MAX;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -123,6 +124,10 @@ fn run(ctx: &mut Ctx<'_>, name: &str, args: &[String], block: Vec<u8>) -> i32 {
         let Some(command) = super::find(name).filter(|c| !BUILTINS.contains(&c.name)) else {
             return cannot_run(ctx, name, Errno::ENOENT);
         };
+        // What `spawn` would refuse.
+        if block.len() > ENVIRONMENT_MAX {
+            return cannot_run(ctx, name, Errno::E2BIG);
+        }
         let outer = core::mem::replace(&mut ctx.environment, block);
         let status = (command.run)(ctx, args);
         ctx.environment = outer;
@@ -272,6 +277,22 @@ mod tests {
             ])
             .1,
             "HOME=/root\nPWD=/\nB=2\nA=1\n3\n+ echo [$A][$HOME]\n[1][]\n"
+        );
+    }
+
+    #[test]
+    fn env_s_command_gets_at_most_64_kib_in_the_in_process_runner_too() {
+        // As `spawn` refuses one more byte (`E2BIG`) for `/bin/env`.
+        let fits = alloc::format!("A={}", "x".repeat(crate::vars::ENVIRONMENT_MAX - 3));
+        let over = alloc::format!("A={}", "x".repeat(crate::vars::ENVIRONMENT_MAX - 2));
+        assert_eq!(env(&["-i", &fits, "true"], BLOCK).0, 0);
+        assert_eq!(
+            env(&["-i", &over, "true"], BLOCK),
+            (
+                126,
+                String::new(),
+                "env: 'true': Argument list too long\n".into()
+            )
         );
     }
 
