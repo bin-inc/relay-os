@@ -58,7 +58,7 @@ separated by blanks. Every `flash` writes it, so a `flash --kernel` without
      black margin.
    - `[ ok ] cpu tables`
    - `[ ok ] boot info: N MiB usable in M regions, cmdline ''` — N about
-     15944 (the check scripts want `159nn`).
+     15943 (the check scripts want `159nn`).
    - the lines of checks 1b, 2 and 3, ending with
      `[ ok ] system: 46 programs, ABI 4`, then the motd
      (`Welcome to Relay OS.`) and the prompt `root@relay:~# ` with a solid
@@ -106,7 +106,7 @@ self-check.
 2. Boot the stick. After about 5 s the screen shows, below the check 1 lines
    (values from the NUC's firmware tables and Linux's view of the machine):
    - `[ ok ] memory: N MiB free of M MiB, heap 32 MiB` — M the boot info's
-     MiB (15944 at 0.4.0), N a little below it.
+     MiB (15943 at 0.6.0), N a little below it (15908).
    - `[ ok ] acpi: 30 tables, ECAM 0xc0000000 buses 0-255, HPET 0xfed00000, S5 7/0`
    - `[ ok ] timer: TSC 2496.000 MHz (CPUID 0x15), 1000 Hz tick (xAPIC)`
    - `[ ok ] rtc: <date and time>` — the current UTC time (Mint keeps the
@@ -119,7 +119,9 @@ self-check.
 3. Photograph the screen, then restore: `cargo xtask flash --kernel`.
 
 A `[FAIL]` line names the step and the reason; boot carries on after it
-(except for memory, which stops the machine).
+(except for memory, which stops the machine). `timer check: FAILED, …`
+instead of `ok` means that the 1 kHz tick and the RTC's seconds disagree,
+or that the RTC's seconds do not change: photograph the screen.
 
 ## Check 2 — typing on the K120
 
@@ -180,6 +182,8 @@ The NUC has no serial port, so a keyboard that does not work cannot run
 
 | What you see | Likely cause | Next step |
 |---|---|---|
+| `[FAIL] usb: no xHCI controller`, or `[FAIL] usb: <reason>` | PCI found no xHCI controller, or every controller failed (the reason is the last one's; a `usb: <controller>: <reason>` line above names each) | Photograph the screen; the `pci:` lines of check 1b list the controllers |
+| `[FAIL] usb: no timer` and `[FAIL] keyboard: no USB` | The `timer` step found no TSC frequency, which USB's waits need | Photograph the screen; the `timer` line above says why |
 | `usb: 00:14.0: timed out` | Handoff or reset did not finish | `debug=usb`: the handoff and reset lines name the register |
 | `port 3: setup failed: …` | The K120's enumeration failed | `debug=usb`: the last `port 3` / `slot` line before the failure |
 | `port 3: … keyboard not started: …` | The K120 refused the boot protocol | Note the reason; `debug=usb` shows the `hid:` lines |
@@ -328,8 +332,9 @@ Every command but the shell's built-ins (`cd`, `exit`, `export`, `help`,
      (`[: invalid integer 'x'`, status 2);
    - 100 programs (`true`) in two nested `for` loops of 10 words between
      two `date` lines. Note both times for the results log: more than
-     10 s apart means that a sync after every command is too slow on the
-     stick (the programmable shell gate's §13), so say so.
+     10 s apart means that a sync after every command has become too slow
+     on the stick, which reopens the programmable shell gate's §13 risk
+     (closed at 0.5.0, with 5 s), so say so.
 
    The prompt comes back after `+ done` and the second `date`.
 
@@ -373,8 +378,8 @@ Every command but the shell's built-ins (`cd`, `exit`, `export`, `help`,
     <status>` (0 unless the command before `exit` failed) and the error
     screen: `*** Relay OS cannot run its shell ***`,
     `/bin/sh ended 3 times within 10 s`, the kernel log's last 20 lines,
-    from the `xhci 00:14.0: port 15:` lines to init's three, and
-    `Press any key to reboot.`
+    from the `xhci 00:14.0: port 15: slot 4 at address 4, …` line to init's
+    three, and `Press any key to reboot.`
     The line `xhci 00:14.0: slot 4: interface 0 class 8/6/80, …` is wider
     than the screen and takes two rows, and the heading stays at the top.
     Photograph it, wait a few seconds (it waits for the key, however
@@ -407,8 +412,9 @@ Every command but the shell's built-ins (`cd`, `exit`, `export`, `help`,
 | `port 15: … disk not started: …` and `[FAIL] mount /: no USB disk` | The stick's setup failed (the reason says which command) | `debug=usb`: the `storage: slot N:` lines with the sense of each failure |
 | `port 15: setup failed: …` | Enumeration failed three times | Replug the stick into the same port and reboot; `debug=usb` shows each try |
 | `[FAIL] mount /: no disk with a GPT` | The stick was set up but its reads fail, or it has no GPT | `dmesg`: a `usb: 00:14.0 port 15: read at block N: …` line and the `storage: slot N:` lines with the sense mean the reads fail; `storage: 00:14.0 port 15: no valid GPT` means re-run `flash --full` |
-| `mount /: warning: no disk has the boot partition …; using …` above `[ ok ] mount /` | The loader's boot GUID matches no partition, and the one disk with an ESP and a Linux partition was used | Note the GUID in the warning and the `boot info` line; the files are usable |
-| `mount /: <disk>: primary GPT damaged, using the backup` in `dmesg` | The stick's primary GPT is damaged; its backup at the end of the disk was used | The files are usable; `flash --full` writes both again |
+| `mount /: warning: no disk has the boot partition …; using …` (or `the loader did not name the boot partition; using …`) above `[ ok ] mount /` | The loader's boot GUID matches no partition (or it named none), and the one disk with an ESP and a Linux partition was used | Note the GUID in the warning and the `boot info` line; the files are usable |
+| `mount /: <disk>: primary GPT damaged, using the backup` above `[ ok ] mount /` | The stick's primary GPT is damaged; its backup at the end of the disk was used | The files are usable; `flash --full` writes both again |
+| `[FAIL] dev: cannot mount /dev: …` | The stick's root has a file named `/dev` (`Not a directory`), or reading `/` failed | `flash --full` writes the root afresh; until then `check3-a.sh` and `check7.sh` fail without `/dev/null` |
 | `[FAIL] system: no system.img`, then the error screen (`*** Relay OS cannot run its shell ***`) | The loader could not read `\EFI\RELAY\system.img` (it is missing, or the FAT is damaged) | `cargo xtask flash --kernel` writes it with the loader and the kernel |
 | `[FAIL] system: ABI N, kernel wants M` or `[FAIL] system: system.img: …`, then the error screen | The archive on the ESP is from another build, or damaged | `cargo xtask flash --kernel` from the same worktree as the kernel |
 | `[FAIL] system: system.img at 0x… (N bytes) is not loader memory`, then the error screen | The loader's hand-off placed the archive outside the memory it reserved | Photograph the screen; `cargo xtask flash --kernel` from the same worktree as the kernel |
@@ -419,7 +425,7 @@ Every command but the shell's built-ins (`cd`, `exit`, `export`, `help`,
 | `check5.sh` stops after `+ wait %1` | `kill %1` did not end the job, so the `t-spin` that `wait` waits for spins on | Photograph the screen, then Ctrl-C: it ends the script but not the job, which runs in its own group; `dmesg` shows no `pid <n> (/bin/t-spin): killed: kill` line, and `ps` shows the `t-spin`: end it with `kill <pid>` |
 | `check5.sh`: `ps \| grep -c t-spin` prints another count than 1 before `kill %1`, or than 0 after `wait %1` | A `t-spin` of an earlier command still runs, or the job's did not start | `verify-usb` names the line; `ps` at the prompt lists the processes |
 | `check6.sh` prints `while once` or `until once` over and over, with an `rm` or `touch` error | The loop's file was not removed or made, so the loop runs on | Photograph the screen, then Ctrl-C: `^C` and the prompt come back; `ls /root/check6-go /root/check6-stop` shows which file is left |
-| `check6.sh`'s two `date` lines are more than 10 s apart | A sync after every command is slow on the stick | Note both times in the results log: a later plan syncs once per command line instead (the programmable shell gate's §13) |
+| `check6.sh`'s two `date` lines are more than 10 s apart | A sync after every command is slow on the stick | Note both times in the results log and report it: the programmable shell gate's §13 risk, closed at 0.5.0 with 5 s, is open again, and its remedy is to sync once per top-level command and after each program |
 | `check7.sh`'s first `echo "$PWD $OLDPWD"` prints `/root /root` | The script was started from `~`, not from `/root/checks` | `cd checks`, then `sh check7.sh` again (it starts afresh) |
 | `check7.sh`: `env`, `env -u HOME` or the nested script shows a variable it should not, or lacks one | A variable did not reach a program's environment as exported, assigned or unset | `verify-usb` names the line; `env` at the prompt lists what the shell exports |
 | Ctrl-C at `> ` by hand gives no `^C`, or no prompt | The line editor did not get the K120's Ctrl-C | Photograph the screen; Enter, or a second Ctrl-C, shows whether the shell still reads the keyboard |
