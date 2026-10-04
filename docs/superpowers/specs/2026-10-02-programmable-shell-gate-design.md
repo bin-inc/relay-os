@@ -1,7 +1,7 @@
 # Relay OS — Programmable Shell Gate Design (milestones 4 and 5)
 
 - **Date:** 2026-10-02
-- **Status:** Approved 2026-10-02; revised while planning milestone 4's plans 1 to 4 and milestone 5's plans 1 to 3 (see §15)
+- **Status:** Approved 2026-10-02; revised while planning milestone 4's plans 1 to 4 and milestone 5's plans 1 to 4 (see §15)
 - **Builds on:** the user-space gate (version 0.4.0,
   `docs/superpowers/specs/2026-09-29-user-space-gate-design.md`, cited below
   as "UG §n") and milestone 1 (`2026-09-26-milestone-1-boot-shell-fs-design.md`,
@@ -541,6 +541,8 @@ comments:
   'a`) is `syntax error: unterminated quote`, status 2, where bash shows
   `> ` and reads on; in a script the lines up to the one that closes it
   are dropped with it (§15 items 1, 2 and 4).
+- `help` and `jobs` say a write error, status 1, where bash's say nothing
+  and end with 0 (§15 item 8).
 
 ## 11. Testing
 
@@ -1370,3 +1372,86 @@ does.
      `FileSystem` contract for devices), m-4 (`xtask`'s `3 -> 2`) and m-5
      (the NUC transcripts edited by hand) go to plan 4 (the maintainer,
      2026-10-03).
+8. **Decisions made while planning milestone 5's plan 4** (hardening and
+   0.6.0):
+   - **The pull requests.** Plan 4 is four: its plan; the deferred minors in
+     the shell, with plan 2's two comments in the kernel and the vfs and the
+     fixes the prototype's review asked for; xtask's and the scenarios'
+     (`verify-usb`'s reason, a test's message, `/bin/env` with Ctrl-C and a
+     killed command on target); `check7.sh`, version 0.6.0 and NUC checks 3
+     to 7, a draft until the maintainer's run, whose transcripts copied off
+     the stick and results-log row go into a commit of that pull request.
+     Milestone 5 and the gate end with it. A spike set the version to 0.6.0
+     and ran a first `check7.sh` in the `checks` scenario: besides the
+     version's places (AGENTS.md), only the fixtures test's list of scripts,
+     the test that the instructions run every script, and one line of the
+     draft that §7.3 refuses (`> before |`) failed.
+   - **Check 7** (§11.4). `check7.sh` is started in `/root/checks`
+     (`cd checks`, then `sh check7.sh`) and starts with `cd /root`, so its
+     `OLDPWD` shows where it was started. Its 39 commands run
+     `[ -c /dev/null ]`, every standard stream redirected to and from
+     `/dev/null` and files (`2>&1` in both orders and into a pipe, `>>`,
+     `2>>`, a `for` loop's output); `export`, `env` with `-i` and `-u`,
+     `B=2 env` and `$B` afterwards, a nested `sh` that sees exported and
+     assigned values, `unset`; `cd -`, `PWD` and `OLDPWD`, `cd ..` and `cd`.
+     Its output is bash 5.2's with GNU's programs (but `cd`'s message, named
+     `relay-sh`, and the nested script's trace), the same on both machines,
+     and it has no steps by hand; its NUC transcript is a copy of QEMU's
+     until the NUC run. The test that the instructions run every check
+     script takes check 7's `cd checks` and `sh check7.sh`.
+   - **A shell whose standard output is not the screen** (§7.5). A `/bin/sh`
+     whose own fd 1 is not the console (`X | sh > f`, `X | sh | cat`,
+     `sh > f` typed at a prompt) holds it as a file it opened, for good, so
+     a built-in's standard output and the shell's and a built-in's messages
+     after `2>&1` go there, as bash's do; until now they reached the screen,
+     since relay-rt's console writes fd 2. Its other messages, its prompt
+     and its job reports stay on the screen (plan 1's review, M-3; the
+     maintainer, 2026-10-04). `Shell::with_output_redirected` is new public
+     API, so its commit is a `feat` (the maintainer).
+   - **A message into a pipe before its reader starts** (§7.3). A stage's
+     failed redirection is told where its fd 2 stood, which after `2>&1` is
+     the pipe: `cat 2>&1 < /nope | wc -l` prints `1`, as bash's does (plan
+     1's final review, M-1; the maintainer, 2026-10-04). Such a message, and
+     that of a stage that cannot start, is written into the fresh pipe
+     before the next stage starts, so one over 8 KiB, half of what a pipe
+     holds, is told on the screen instead and the shell never waits for
+     good: only a path longer than `PATH_MAX` or a command name of 8 KiB
+     makes one (the prototype's review found a 16 KiB name hanging
+     `/bin/sh`, I-1).
+   - **Refusals name the fd as typed** (§7.3): `1> f | cat` is
+     `unsupported syntax: 1> before |`, `0< f | cat` `0< before |`, and a
+     redirection alone before `&` names itself (`< f &` is `< &`, where it
+     said `> &`) (plan 1's final review, M-3; the prototype's review, m-2).
+   - **Held assignments** (§8.5, item 7). While a built-in holds an
+     assignment, a held name the built-in has not set or exported counts the
+     larger of its earlier and its current size in the variables' 64 KiB, so
+     the variables never hold more than `VARS_MAX` once it is released; one
+     it set keeps its value and counts only that (plan 3's final review,
+     m-1; the prototype's review, m-1).
+   - **`export NAME+=value`** (§8.5) is `unsupported syntax: A+=b`, status
+     2, as `NAME+=value` is elsewhere, typed or expanded (bash appends in
+     both), and `export` then exports nothing; the message shows the word as
+     expanded. A bad name before `+=` keeps ``not a valid identifier``,
+     status 1, as bash's (plan 3's final review, m-2).
+   - **A built-in's write error** is the shell's, as bash's:
+     `relay-sh: export: write error: No space left on device`; a program's
+     keeps GNU's `echo: write error: …`. `help` and `jobs` still say it,
+     status 1, where bash's say nothing (§10; the prototype's review, P-1;
+     the maintainer, 2026-10-04).
+   - **Item 7's `OLDPWD`.** Item 7 says bash lists no `export -p` line for
+     an `OLDPWD` without a value; it lists `declare -x OLDPWD` at the start
+     and hides it only when an imported `OLDPWD` names no directory (plan
+     3's final review, m-4). The shell lists it in both cases, as before.
+   - **Plan 2's and plan 3's other deferred minors.** `kernel/src/file.rs`'s
+     comment on a device's `seek` and offsets (m-2) and the `FileSystem`
+     contract's sentences for devices (m-3) are corrected; xtask's `3 -> 2`
+     is built from the constants (m-4); every NUC transcript, edited by hand
+     since plan 2, is recorded again (m-5). The scenario `environment` runs
+     `env t-spin` with Ctrl-C and `env t-fault`, its kernel line anchored
+     (plan 3's m-5), and `verify-usb` says how mcopy ended when it gives no
+     reason (milestone 4's plan 4, M-3).
+   - **The prototype's review** found no critical defect, one important
+     (I-1, above) and three minor ones (m-1, m-2, above; m-3, the anchored
+     `env t-fault` step), each fixed in a task of its own with a test that
+     fails first or folded into the task it concerns, and beside them a
+     built-in's write error (P-1, above) and a comment to reflow.
