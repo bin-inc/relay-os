@@ -48,10 +48,10 @@ pub fn cd(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
         Some(old) => vars.set("OLDPWD", old),
         None => vars.clear("OLDPWD"),
     };
-    let _ = vars.set("PWD", cwd.clone());
+    let _ = vars.set("PWD", cwd);
+    // `cd -` says `$OLDPWD` as it is written, as bash's does.
     if show {
-        let shown = if dir.is_empty() { "" } else { cwd.as_str() };
-        outln!(ctx, "{shown}");
+        outln!(ctx, "{dir}");
     }
     0
 }
@@ -277,6 +277,20 @@ mod tests {
             "0\n/tmp\n"
         );
         assert_eq!(h.lines(&["HOME=/etc", "cd --", "pwd"]).1, "/etc\n");
+    }
+
+    #[test]
+    fn cd_dash_prints_oldpwd_as_it_is_written() {
+        // As bash's; PWD is still getcwd's.
+        let mut h = Harness::new();
+        assert_eq!(
+            h.lines(&["OLDPWD=/tmp/../etc/", "cd -", "echo $PWD"]).1,
+            "/tmp/../etc/\n/etc\n"
+        );
+        assert_eq!(
+            h.lines(&["cd /", "OLDPWD=etc", "cd -", "pwd"]).1,
+            "etc\n/etc\n"
+        );
     }
 
     #[test]
