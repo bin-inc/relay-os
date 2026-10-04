@@ -100,12 +100,6 @@ impl Vars {
         self.args.get(1..).unwrap_or(&[])
     }
 
-    /// The variable `name`'s value; an unset one, or one without a value,
-    /// is empty.
-    pub fn get(&self, name: &str) -> &str {
-        self.value(name).unwrap_or("")
-    }
-
     /// The variable `name`'s value, if it has one.
     pub fn value(&self, name: &str) -> Option<&str> {
         self.names.get(name).and_then(|v| v.value.as_deref())
@@ -324,6 +318,12 @@ fn size(name: &str, var: &Var) -> usize {
 
 #[cfg(test)]
 impl Vars {
+    /// The variable `name`'s value; an unset one, or one without a value,
+    /// is empty.
+    pub fn get(&self, name: &str) -> &str {
+        self.value(name).unwrap_or("")
+    }
+
     /// `names` set, and `args` (`$0` first).
     pub fn of(names: &[(&str, &str)], args: &[&str]) -> Vars {
         let mut vars = Vars::new("");

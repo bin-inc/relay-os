@@ -7,7 +7,7 @@
 //! after it to the last, as bash's `"$@"` does; an empty argument is kept
 //! only in quotes.
 
-use crate::parser::{Command, Param, Piece, Redirect, RedirectOp, Word};
+use crate::parser::{Command, HOME, Param, Piece, Redirect, RedirectOp, Word};
 pub(crate) use crate::vars::Vars;
 use alloc::borrow::Cow;
 use alloc::string::{String, ToString};
@@ -253,15 +253,22 @@ impl<'v> Expander<'v> {
         Ok(())
     }
 
+    /// The variable `name`'s value, if it has one: an assignment of the
+    /// command's made so far, or the shell's.
+    fn variable(&self, name: &str) -> Option<Cow<'v, str>> {
+        match self.made.iter().find(|(m, _)| m == name) {
+            Some((_, value)) => Some(Cow::Owned(value.clone())),
+            None => self.vars.value(name).map(Cow::Borrowed),
+        }
+    }
+
     /// A parameter's value, borrowed from the variables where it is
     /// theirs, so that its room is taken before any of it is copied.
     fn value(&self, p: &Param) -> Result<Value<'v>, Error> {
         let args = &self.vars.args;
         Ok(match p {
-            Param::Name(n) => match self.made.iter().find(|(m, _)| m == n) {
-                Some((_, value)) => Value::One(Cow::Owned(value.clone())),
-                None => Value::One(Cow::Borrowed(self.vars.get(n))),
-            },
+            Param::Name(n) => Value::One(self.variable(n).unwrap_or(Cow::Borrowed(""))),
+            Param::Home => Value::One(self.variable("HOME").unwrap_or(Cow::Borrowed(HOME))),
             Param::Arg(i) => Value::One(Cow::Borrowed(args.get(*i).map_or("", String::as_str))),
             Param::Count => Value::One(Cow::Owned((args.len() - 1).to_string())),
             Param::Status => Value::One(Cow::Owned(self.status.to_string())),
@@ -388,6 +395,44 @@ mod tests {
         // An empty argument alone, as bash's.
         let empty = Vars::of(&[], &["s.sh", ""]);
         assert_eq!(words(r#"echo $@ "$@""#, &empty).unwrap(), ["echo", ""]);
+    }
+
+    #[test]
+    fn a_tilde_is_home_or_root_when_home_is_unset() {
+        // As bash 5.2's (programmable shell gate §8.5): without `HOME` it
+        // reads the password file, here `/root`.
+        let set = Vars::of(&[("HOME", "/h")], &["sh"]);
+        let unset = Vars::of(&[], &["sh"]);
+        let empty = Vars::of(&[("HOME", "")], &["sh"]);
+        assert_eq!(
+            words(r#"echo ~ ~/x a~ "~" ~x"#, &set).unwrap(),
+            ["echo", "/h", "/h/x", "a~", "~", "~x"]
+        );
+        assert_eq!(
+            words("echo ~ ~/x", &unset).unwrap(),
+            ["echo", "/root", "/root/x"]
+        );
+        // An empty `HOME` makes an empty word, which stays.
+        assert_eq!(words("echo ~ ~/x", &empty).unwrap(), ["echo", "", "/x"]);
+        let value = |line: &str, v: &Vars| {
+            let p = typed(line);
+            let (_, value) = p[0].assigns[0].assignment().unwrap();
+            super::value(&value, v, 0).unwrap()
+        };
+        assert_eq!(value("A=~/x:~:a~", &set), "/h/x:/h:a~");
+        assert_eq!(value("A=~", &empty), "");
+        // An assignment of `HOME` before a command: its later assignments
+        // read it, its words the shell's, as bash's.
+        let c = expand(&typed("HOME=/x A=~ cmd ~"), &set, 0)
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            (c.words, c.assigns),
+            (
+                alloc::vec![String::from("cmd"), String::from("/h")],
+                alloc::vec![String::from("HOME=/x"), String::from("A=/x")]
+            )
+        );
     }
 
     #[test]

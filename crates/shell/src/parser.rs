@@ -77,7 +77,8 @@ pub const COMMAND_MAX: usize = 64 * 1024;
 /// frame under it.
 pub const NESTING_MAX: usize = 32;
 
-/// The home directory `~` stands for.
+/// The home directory `~` stands for when `HOME` is unset, as bash takes
+/// it from the password file (programmable shell gate §8.5).
 pub const HOME: &str = "/root";
 
 /// What a command line holds (programmable shell gate §4.1): its items,
@@ -302,6 +303,10 @@ pub enum Param {
     /// A `${…}` that names no parameter (`${1A}`), as typed: bash's `bad
     /// substitution` when it expands.
     Bad(String),
+    /// A `~` that stands for the home directory: `$HOME`, or [`HOME`] when
+    /// it is unset. It is a quoted piece, as bash's result is, so an empty
+    /// `HOME` makes an empty word.
+    Home,
 }
 
 impl Word {
@@ -331,8 +336,8 @@ impl Word {
 
     /// The word as an assignment, `NAME=value`, if its name and `=` are
     /// unquoted (`"A"=x` is none, as in bash): the name, and the value as a
-    /// word of its own, a `~` at its start or after a `:` made `/root`, as
-    /// bash's is.
+    /// word of its own, a `~` at its start or after a `:` standing for the
+    /// home directory, as bash's does.
     pub fn assignment(&self) -> Option<(&str, Word)> {
         let Some(Piece::Text(first, false)) = self.pieces.first() else {
             return None;
@@ -347,11 +352,14 @@ impl Word {
         }
         pieces.extend(self.pieces[1..].iter().cloned());
         let count = pieces.len();
-        for (i, piece) in pieces.iter_mut().enumerate() {
-            if let Piece::Text(text, false) = piece {
-                *text = value_tildes(text, i == 0, i + 1 == count);
-            }
-        }
+        let pieces = pieces
+            .into_iter()
+            .enumerate()
+            .flat_map(|(i, piece)| match piece {
+                Piece::Text(text, false) => value_tildes(&text, i == 0, i + 1 == count),
+                piece => alloc::vec![piece],
+            })
+            .collect();
         let typed = String::from(self.typed.get(name.len() + 1..).unwrap_or(""));
         Some((name, Word { pieces, typed }))
     }
@@ -719,11 +727,12 @@ fn braced(cur: &mut Cursor<'_>) -> Result<Param, ParseError> {
     })
 }
 
-/// An unquoted piece of an assignment's value with each `~` made `/root`
-/// that is at the value's start (`first`) or after a `:`, and before a `/`,
-/// a `:` or the value's end (`last`).
-fn value_tildes(text: &str, first: bool, last: bool) -> String {
-    let mut out = String::new();
+/// An unquoted piece of an assignment's value as pieces, each `~` that is
+/// at the value's start (`first`) or after a `:`, and before a `/`, a `:`
+/// or the value's end (`last`), the home directory.
+fn value_tildes(text: &str, first: bool, last: bool) -> Vec<Piece> {
+    let mut out = Vec::new();
+    let mut run = String::new();
     let mut chars = text.chars().peekable();
     let mut after_colon = first;
     while let Some(c) = chars.next() {
@@ -732,11 +741,17 @@ fn value_tildes(text: &str, first: bool, last: bool) -> String {
             None => last,
         };
         if c == '~' && after_colon && ends {
-            out.push_str(HOME);
+            if !run.is_empty() {
+                out.push(Piece::Text(core::mem::take(&mut run), false));
+            }
+            out.push(Piece::Param(Param::Home, true));
         } else {
-            out.push(c);
+            run.push(c);
         }
         after_colon = c == ':';
+    }
+    if !run.is_empty() || out.is_empty() {
+        out.push(Piece::Text(run, false));
     }
     out
 }
@@ -812,7 +827,7 @@ impl Building {
     }
 
     /// The word, its `~` (alone, or before a `/` in the same unquoted
-    /// piece) made `/root`, as bash's is (`~"/x"` and `~$A` keep it).
+    /// piece) the home directory, as bash's is (`~"/x"` and `~$A` keep it).
     fn finish(self, line: &str) -> Option<Word> {
         if !self.started {
             return None;
@@ -823,7 +838,11 @@ impl Building {
             && let Some(Piece::Text(first, false)) = word.pieces.first_mut()
             && ((alone && first == "~") || first.starts_with("~/"))
         {
-            first.replace_range(..1, HOME);
+            first.remove(0);
+            if first.is_empty() {
+                word.pieces.remove(0);
+            }
+            word.pieces.insert(0, Piece::Param(Param::Home, true));
         }
         word.typed = String::from(&line[self.start..self.end]);
         Some(word)
@@ -2373,7 +2392,7 @@ mod tests {
                 &[text("a", false), text("b cde", true)][..],
                 &[text("", true)],
                 &[text("", true)],
-                &[text("/root/x", false)],
+                &[Piece::Param(Param::Home, true), text("/x", false)],
             ]
         );
         let c = &typed("echo >'o'ut")[0];
@@ -2627,11 +2646,11 @@ mod tests {
 
     #[test]
     fn a_tilde_in_a_value_is_home_at_its_start_or_after_a_colon() {
-        // What bash sets for each.
+        // Where bash sets the home directory.
         for (word, value) in [
-            ("A=~/x:~/y:~:a~", "/root/x:/root/y:/root:a~"),
-            ("A=~", "/root"),
-            ("A=x:~", "x:/root"),
+            ("A=~/x:~/y:~:a~", "<Home>/x:<Home>/y:<Home>:a~"),
+            ("A=~", "<Home>"),
+            ("A=x:~", "x:<Home>"),
             ("A=~x", "~x"),
             ("A='~'/x", "~/x"),
             (r#"A=~"/x""#, "~/x"),

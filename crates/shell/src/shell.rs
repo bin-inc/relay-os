@@ -154,10 +154,13 @@ impl<'a> Shell<'a> {
         self.status
     }
 
-    /// `root@relay:<cwd># `, with `/root` shown as `~`.
+    /// `root@relay:<cwd># `, `$HOME` and below shown as `~`, as bash's `\w`
+    /// shows them: only when `HOME` is set and longer than one byte
+    /// (programmable shell gate §15 item 7).
     pub fn prompt(&self) -> String {
         let cwd = path::display(&self.vfs.cwd());
-        let dir = match cwd.strip_prefix(HOME) {
+        let home = self.vars.value("HOME").filter(|h| h.len() > 1);
+        let dir = match home.and_then(|h| cwd.strip_prefix(h)) {
             Some("") => String::from("~"),
             Some(rest) if rest.starts_with('/') => format!("~{rest}"),
             _ => cwd,
@@ -227,7 +230,9 @@ impl<'a> Shell<'a> {
             }
         }
         // Without a /root the shell starts in /.
-        let _ = self.vfs.chdir(HOME.as_bytes());
+        if self.vfs.chdir(HOME.as_bytes()).is_ok() {
+            let _ = self.vars.set("PWD", String::from(HOME));
+        }
     }
 
     /// Runs one command line as if it had been typed; returns its exit
@@ -1097,8 +1102,12 @@ mod tests {
     #[test]
     fn the_prompt_shows_home_as_a_tilde() {
         let mut h = Harness::new();
-        let prompt =
-            |h: &mut Harness| Shell::new(&mut h.vfs, &mut h.console, &mut h.system).prompt();
+        let prompt = |h: &mut Harness| {
+            Shell::new(&mut h.vfs, &mut h.console, &mut h.system)
+                .with_environment(&h.env)
+                .prompt()
+        };
+        h.env = b"HOME=/root\0".to_vec();
         assert_eq!(prompt(&mut h), "root@relay:/# ");
         h.run("cd /root");
         assert_eq!(prompt(&mut h), "root@relay:~# ");
@@ -1108,6 +1117,18 @@ mod tests {
         h.dir("/rootless");
         h.run("cd /rootless");
         assert_eq!(prompt(&mut h), "root@relay:/rootless# ");
+        // As bash's `\w`: `HOME` unset, empty, `/` or with a `/` at its end
+        // shows none.
+        h.run("cd /root/notes");
+        for env in [&b""[..], b"HOME=\0", b"HOME=/\0", b"HOME=/root/\0"] {
+            h.env = env.to_vec();
+            assert_eq!(prompt(&mut h), "root@relay:/root/notes# ", "{env:?}");
+        }
+        h.env = b"HOME=/root/notes\0".to_vec();
+        assert_eq!(prompt(&mut h), "root@relay:~# ");
+        h.env = b"HOME=/\0".to_vec();
+        h.run("cd /");
+        assert_eq!(prompt(&mut h), "root@relay:/# ", "bash's `\\w` for HOME=/");
     }
 
     #[test]
@@ -3946,8 +3967,11 @@ mod tests {
     #[test]
     fn greet_shows_the_motd_and_goes_home() {
         let mut h = Harness::new();
-        Shell::new(&mut h.vfs, &mut h.console, &mut h.system).greet();
-        assert_eq!(h.console.take(), "Welcome to Relay OS.\n");
+        let mut shell = Shell::new(&mut h.vfs, &mut h.console, &mut h.system).with_environment(b"");
+        shell.greet();
+        // `PWD` follows it there.
+        shell.execute("echo $PWD");
+        assert_eq!(h.console.take(), "Welcome to Relay OS.\n/root\n");
         assert_eq!(h.run("pwd").1, "/root\n");
     }
 

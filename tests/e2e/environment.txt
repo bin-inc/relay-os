@@ -73,3 +73,13 @@ send unset HOME; cd; echo $?; export HOME=/root; cd
 expect \nrelay-sh: cd: HOME not set\n1\nroot@relay:~# $
 send cd -e /tmp; cd -x; echo $?
 expect \nrelay-sh: cd: -e: not supported\nrelay-sh: cd: -x: invalid option\n2\nroot@relay:~# $
+# ~ and the prompt follow HOME; with HOME unset ~ is /root and the prompt
+# shows the whole path, as bash's do.
+send HOME=/tmp; echo ~ ~/x; cd
+expect \n/tmp /tmp/x\nroot@relay:~# $
+send pwd; HOME=/root; cd
+expect \n/tmp\nroot@relay:~# $
+send unset HOME; echo ~
+expect \n/root\nroot@relay:/root# $
+send export HOME=/root
+expect root@relay:~# $
