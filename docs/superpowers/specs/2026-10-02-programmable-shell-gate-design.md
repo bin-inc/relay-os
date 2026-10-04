@@ -1,7 +1,7 @@
 # Relay OS — Programmable Shell Gate Design (milestones 4 and 5)
 
 - **Date:** 2026-10-02
-- **Status:** Approved 2026-10-02; revised while planning milestone 4's plans 1 to 4 and milestone 5's plans 1 and 2 (see §15)
+- **Status:** Approved 2026-10-02; revised while planning milestone 4's plans 1 to 4 and milestone 5's plans 1 to 3 (see §15)
 - **Builds on:** the user-space gate (version 0.4.0,
   `docs/superpowers/specs/2026-09-29-user-space-gate-design.md`, cited below
   as "UG §n") and milestone 1 (`2026-09-26-milestone-1-boot-shell-fs-design.md`,
@@ -509,9 +509,13 @@ comments:
 - Compound commands in a pipeline or with `&`, and `a && b &`, are refused
   (§4.1).
 - `SHLVL`, `_`, `PATH` and `CDPATH` are not set or used (§8.5, §9.1); the
-  prompt shows `getcwd`, not `$PWD` (§9.1).
-- An environment entry without a valid name is dropped, where bash passes
-  it on (§8.5).
+  prompt shows `getcwd`, not `$PWD`, and `PWD` is `getcwd`'s, so `cd //tmp`
+  gives `/tmp` (§9.1, §15 item 7).
+- An environment entry without a valid name, or not UTF-8 text, is dropped,
+  where bash passes it on (§8.5, §15 item 7).
+- `env` waits for its command, having no `exec`: a command that is killed
+  leaves `env` exiting with the shell's status for it, and only the kernel's
+  log names the signal (§8.6, §15 item 7).
 - `test`'s file operators do not follow symbolic links (§6.2).
 - `ls -l` and `stat` show a device's size, 0, where GNU shows its device
   numbers (`1, 3` for `/dev/null`): `Stat` has none (§15 item 6).
@@ -1229,3 +1233,140 @@ does.
      tells its message on the screen, not into the pipe, and a refusal drops
      an explicit default fd (`1> f | cat` says `> before |`): both go to
      plan 4.
+7. **Decisions made while planning milestone 5's plan 3** (the shell's
+   environment):
+   - **The pull requests.** Plan 3 is five: its plan; the exported variables
+     (the import, `export`, `unset`, children's environments, relay-rt's
+     test double); `A=1 cmd` and the 64 KiB limit; `cd`, `PWD`, `OLDPWD`,
+     `HOME`, `~` and the check scripts' `cd /root`; `/bin/env`. The scenario
+     `environment` starts with the second and each later one adds to it. A
+     spike added `cd /root` to every check script, ran `check3-a.sh` from
+     `/root/checks` and gave children only `HOME` and `PWD`: only the
+     recorded transcripts' missing `+ cd /root` lines and `env_calls`'s
+     lines failed. It has no NUC check: the NUC transcripts get their
+     `+ cd /root` line by hand until plan 4's run. The bash corpus cannot
+     run a nested `sh` (the in-process runner's `sh` prints its trace, and
+     `X | sh` needs programs), so export into a nested `sh` is tested by
+     unit tests and the scenario `environment`, and the corpus compares
+     `export`, `unset`, `A=1 cmd`, `cd` and `cd -`.
+   - **The variables** (§8.5). Each variable holds a value or none
+     (`export B` before any `B=`, `OLDPWD` at the start), and an exported
+     one its place in the order of export. `VARS_MAX` counts names and
+     values as before. A variable exported again or given a new value keeps
+     its place; one unset and exported again goes last. A child's
+     environment is the exported variables that have a value, in that order,
+     each `NAME=value` and a NUL.
+   - **The import** (§8.5). A shell imports the entries of its block whose
+     name is a name and that are UTF-8 text, in the block's order, each
+     exported; of two with the same name the last wins, as in bash
+     (relay-rt's `env::var` keeps the first, as glibc's `getenv` does).
+     `sh FILE`, `X | sh` and a nested `sh` import the block they were
+     started with, and a script the in-process runner runs imports the block
+     a program would have got.
+   - **`export` and `unset`** (§8.5), as bash 5.2's:
+     `export NAME[=value]...` marks each name and goes on past a bad one,
+     ``relay-sh: export: `1A=x': not a valid identifier``, status 1;
+     `export` and `export -p` list `declare -x NAME="value"` sorted, `"`,
+     `$`, `` ` `` and `\` escaped with `\`, and a value holding a control
+     character or a byte past ASCII written as `$'…'` with octal escapes, as
+     bash quotes it in the C locale (`$'\303\251'` for `é`);
+     `export -p NAME` exports NAME, as bash's does. `export -n` and
+     `export -f` are `relay-sh: export: -n: not supported`, status 1;
+     another option is bash's `invalid option`, status 2, without its usage
+     line, judged once every option is read, as bash's are (`export -n -x`
+     names `-x`, the prototype's review). `unset NAME` ignores a name that
+     is not one, status 0, as bash's does (it looks for a function too), and
+     `unset -v` names it, ``not a valid identifier``, status 1; `unset -f`
+     and `unset -n` are `not supported`. Both are built-ins: eight in all.
+     After `export`, quoted or not (`"export"`), a word shaped like an
+     assignment expands as one (`export A=~/x`), as bash expands a
+     declaration command's.
+   - **`A=1 cmd`** (§8.5). As in bash, the command's words are expanded
+     first, then the assignments, left to right, each seeing the ones before
+     (`A=1 B=$A env` gives `B=1`), within the line's 64 KiB of expansion. A
+     program gets the exported variables with the assignments over them: an
+     exported name keeps its place with the new value, and the others follow
+     in the order typed. Before a built-in they are set while it runs, and
+     then each comes back as it was, unless the built-in set or exported it,
+     which keeps what it did: `A=1 export A` leaves `A=1` exported,
+     `PWD=/x cd d` leaves `cd`'s `PWD` and `OLDPWD=/x`, `HOME=/d cd` goes to
+     `/d` and `HOME` comes back, `C=1 unset C` brings back the old `C`, as
+     bash's do (the maintainer, 2026-10-03); `export -p` lists the values
+     from before, as bash's does. Assignments before a command whose words
+     expand to nothing (`A=1 $E`) stay set, as a line of assignments does.
+     Assignments alone in a pipeline or with `&`, and `NAME+=value`, stay
+     refused.
+   - **The limit** (§8.5). The shell builds each program's environment and
+     refuses one over 64 KiB before it starts, under both runners:
+     `relay-sh: <name>: Argument list too long`, status 126; in a pipeline
+     only that command fails, as one that cannot start. It is checked before
+     the command is looked up, as the kernel's `spawn` checks it, so a
+     command not found with too big an environment says it too, where bash
+     says `command not found`. A built-in gets no environment, so no limit;
+     the names it holds count in the variables' 64 KiB.
+   - **`PWD` and `OLDPWD` at the start** (§8.5). The shell sets `PWD` from
+     `getcwd` and exports it, in its place if it was imported; an imported
+     `OLDPWD` that names a directory is kept, and otherwise `OLDPWD` is
+     exported without a value (bash then lists no line for it in
+     `export -p`, a quirk not copied). When the variables cannot hold them,
+     the shell says so once, as an assignment that does not fit does (the
+     maintainer, 2026-10-04).
+   - **`cd`** (§9.1), against bash 5.2 in a pty. On success, staying where
+     it is too (`cd ""`, an empty `HOME` or `OLDPWD`), `OLDPWD` takes the
+     variable `PWD`'s value, or loses its value when `PWD` has none, as
+     bash's `cd` binds it, and `PWD` the new directory from `getcwd`; each
+     keeps whether it is exported, and one `cd` makes is not exported (the
+     prototype's review). `cd -` prints `$OLDPWD` as it is written, as
+     bash's does, and with an empty `OLDPWD` an empty line, status 0 (§9.1
+     said it prints nothing); `cd -- -` is `cd -` and `cd --` is `cd`;
+     `cd -@` is bash's `invalid option`, status 2, as Ubuntu's bash 5.2,
+     built without `-@`, says (§9.1 said `not supported`); `cd -e` stays
+     `not supported`. `cd //tmp` sets `PWD` to `/tmp`, where bash keeps
+     `//tmp`. When the variables cannot hold the new `PWD` or `OLDPWD`, `cd`
+     goes there all the same and says the variables would hold more than 64
+     KiB, status 1 (the maintainer, 2026-10-04).
+   - **`~` and the prompt** (§8.5). `~` becomes a part of the word, expanded
+     with its variables: `$HOME`, or `/root` when `HOME` is unset; an empty
+     `HOME` makes `~` an empty word and `~/x` `/x`, as in bash. The prompt
+     shows `~` for `$HOME`'s directory and below as bash's `\w` does: only
+     when `HOME` is set and longer than one byte, so with `HOME` unset or
+     empty it shows the whole path (§8.5 said `/root` when unset; bash uses
+     the password file for `~` but not for `\w`).
+   - **A script's `cd`** (§9.2). Under `/bin/sh` a script is a process of
+     its own; the in-process runner now goes back to the directory it ran
+     the script from, so a script's `cd` stays in it under both.
+   - **`/bin/env`** (§8.6). A command function like the others: it reads the
+     environment its command was given, and starts its command through the
+     program's `Programs` as a program, waiting for it, its status the
+     command's; in the in-process runner it runs the command's function with
+     the new environment. Its options stop at the first word that is not
+     one, as GNU's do (`env A=1 -i` runs `-i`): `-i` and `-`, `-u NAME`
+     (``env: cannot unset 'A=B': Invalid argument``, status 125, for a name
+     holding `=`), `--`; `NAME=value` replaces an entry in its place or adds
+     one at the end, as GNU's `putenv` does. Long options are refused, as
+     every command here refuses them. A command not found is
+     `env: 'X': No such file or directory`, status 127 (an empty name too),
+     one that cannot run status 126, a directory `Permission denied` as
+     Linux's `execve` says, and an environment over 64 KiB
+     `Argument list too long`, under both runners (the prototype's review).
+     With no `exec`, `env` waits for its command: one that is killed leaves
+     `env` the status the shell would give it (139 for a page fault), and
+     nothing is printed but the kernel's log line, where bash names the
+     signal itself (§10; the maintainer, 2026-10-04). `/bin` holds 46
+     programs.
+   - **relay-rt's test double** (§8.3). Under `cfg(test)` a program's
+     environment is the test thread's own, so tests that give one never see
+     each other's (plan 2's final review, m-8).
+   - **`t-env` and `env_calls`.** `t-env raw` says `1 entry` (m-8). From the
+     prompt `t-env` shows `HOME=/root` and `PWD=/root`, and through `sh` the
+     grandchild gets `sh`'s exported variables.
+   - **The prototype's review** found no critical defect, one important
+     (`cd`'s `OLDPWD`, above) and eight minor ones, each fixed in a task of
+     its own with a test that fails first, or folded into the task it
+     concerns (a ripple in `docs/hardware-test.md`, a commit's type).
+   - **Plan 2's deferred minors.** Plan 3 settles m-8 with the test double
+     and m-7, README's crate table for `DevFs` and the environment; m-2
+     (`kernel/src/file.rs`'s comment on a device's `seek`), m-3 (the
+     `FileSystem` contract for devices), m-4 (`xtask`'s `3 -> 2`) and m-5
+     (the NUC transcripts edited by hand) go to plan 4 (the maintainer,
+     2026-10-03).
