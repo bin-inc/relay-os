@@ -401,8 +401,9 @@ pub fn words(args: &Args) -> Vec<String> {
 }
 
 /// The `main` of one of `/bin`'s commands (user-space gate §8.4): runs the
-/// command `name`, whose function is `run`, with the program's arguments,
-/// printing exactly what it prints in the shell; its exit status.
+/// command `name`, whose function is `run`, with the program's arguments
+/// and environment, printing exactly what it prints in the shell; its
+/// exit status.
 pub fn run_command(name: &str, run: shell::commands::Run, args: &Args) -> u8 {
     let io = shell::CommandIo {
         vfs: &mut SysVfs::new(),
@@ -411,7 +412,10 @@ pub fn run_command(name: &str, run: shell::commands::Run, args: &Args) -> u8 {
         stdin: &mut SysStdin,
         stdout: &mut SysStdout::new(),
     };
-    let status = shell::run_command(name, run, &words(args), io);
+    // `env` starts its command in this program's group, as a script's are.
+    let mut programs = SysPrograms::new(false);
+    let env = crate::env::block();
+    let status = shell::run_program(name, run, &words(args), io, env, &mut programs);
     status as u8
 }
 

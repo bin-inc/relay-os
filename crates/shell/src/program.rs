@@ -6,7 +6,7 @@
 
 use crate::commands::Run;
 use crate::ctx::Ctx;
-use crate::io::{Console, Stdin, Stdout, System};
+use crate::io::{Console, Programs, Stdin, Stdout, System};
 use alloc::format;
 use alloc::string::String;
 use vfs::Vfs;
@@ -27,8 +27,36 @@ pub struct CommandIo<'a> {
 /// as `<name>: write error: <message>` with status 1. Each program names
 /// its own function, so it holds no other command's code.
 pub fn run_command(name: &str, run: Run, args: &[String], io: CommandIo<'_>) -> i32 {
+    let ctx = Ctx::program(io.vfs, io.system, io.console, io.stdout);
+    finish(name, run, args, ctx, io.stdin)
+}
+
+/// As [`run_command`], the command given its program's environment `env`
+/// and `programs` to start others (`env`'s command, programmable shell
+/// gate §8.6).
+pub fn run_program(
+    name: &str,
+    run: Run,
+    args: &[String],
+    io: CommandIo<'_>,
+    env: &[u8],
+    programs: &mut dyn Programs,
+) -> i32 {
     let mut ctx = Ctx::program(io.vfs, io.system, io.console, io.stdout);
-    ctx.set_input(io.stdin);
+    ctx.environment = env.to_vec();
+    ctx.programs = Some(programs);
+    finish(name, run, args, ctx, io.stdin)
+}
+
+/// Runs the command on `ctx`, reading `stdin`, and says a write error.
+fn finish<'a>(
+    name: &str,
+    run: Run,
+    args: &[String],
+    mut ctx: Ctx<'a>,
+    stdin: &'a mut dyn Stdin,
+) -> i32 {
+    ctx.set_input(stdin);
     let mut status = run(&mut ctx, args);
     if let Err(e) = ctx.finish() {
         ctx.err(format!("{name}: write error: {e}\n").as_bytes());
@@ -78,6 +106,79 @@ mod tests {
         let mut out = FakeStdout::console();
         h.program("ls /etc", &mut out);
         assert_eq!(out.text(), "hostname  motd\n");
+    }
+
+    #[test]
+    fn env_run_as_a_program_starts_its_command_and_waits_for_it() {
+        // In the program's group, on its fds 0 to 2, with the environment
+        // env made; its status the command's (programmable shell gate
+        // §8.6).
+        use crate::Group;
+        use crate::testing::FakePrograms;
+        use relay_abi::WaitStatus;
+        use relay_abi::wait::{ACCESS_READ, FAULT_PAGE};
+        let mut h = Harness::new();
+        let mut programs = FakePrograms::new();
+        programs.known.push(("/bin/t-args", WaitStatus::exited(3)));
+        programs.known.push(("/tmp/x", WaitStatus::exited(0)));
+        programs.known.push((
+            "/bin/t-fault",
+            WaitStatus::fault(FAULT_PAGE, ACCESS_READ, 0, 0),
+        ));
+        programs.refusals.push(("/etc", Errno::EISDIR));
+        programs.refusals.push(("/tmp/text", Errno::ENOEXEC));
+        let mut run = |args: &[&str]| {
+            let words: alloc::vec::Vec<String> = args.iter().map(|a| String::from(*a)).collect();
+            let mut out = FakeStdout::console();
+            let status = crate::run_program(
+                "env",
+                crate::commands::env,
+                &words,
+                crate::CommandIo {
+                    vfs: &mut h.vfs,
+                    console: &mut h.console,
+                    system: &mut h.system,
+                    stdin: &mut crate::Bytes::new(alloc::vec::Vec::new()),
+                    stdout: &mut out,
+                },
+                b"HOME=/root\0A=1\0",
+                &mut programs,
+            );
+            (status, h.console.take())
+        };
+        assert_eq!(run(&["-u", "A", "B=2", "t-args", "x"]), (3, String::new()));
+        assert_eq!(run(&["/tmp/x"]), (0, String::new()));
+        assert_eq!(run(&["t-fault"]), (139, String::new()));
+        assert_eq!(
+            run(&["nope"]),
+            (127, "env: 'nope': No such file or directory\n".into())
+        );
+        assert_eq!(
+            run(&["/etc"]),
+            (126, "env: '/etc': Permission denied\n".into())
+        );
+        assert_eq!(
+            run(&["/tmp/text"]),
+            (126, "env: '/tmp/text': Exec format error\n".into())
+        );
+        let first = &programs.spawned[0];
+        assert_eq!(
+            (
+                first.path.as_str(),
+                &first.args[..],
+                &first.env[..],
+                first.fds,
+                first.group
+            ),
+            (
+                "/bin/t-args",
+                &["t-args".into(), "x".into()][..],
+                &b"HOME=/root\0B=2\0"[..],
+                [0, 1, 2],
+                Group::Shell
+            )
+        );
+        assert_eq!(programs.spawned[1].path, "/tmp/x");
     }
 
     #[test]
