@@ -34,10 +34,13 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install mtools (the tests of the ESP's files)
+      # Every host tool a unit test runs, even those the runner image has:
+      # mtools and fdisk (the image), e2fsprogs (ext2), binutils (readelf)
+      # and linux-libc-dev (Linux's error numbers).
+      - name: Install the tools the unit tests run
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends mtools
+          sudo apt-get install -y --no-install-recommends mtools fdisk e2fsprogs binutils linux-libc-dev
       # The tests of `test` run GNU's test as root through `unshare -r`;
       # Ubuntu 24.04 lets AppArmor refuse an unprivileged user namespace.
       - name: Allow unprivileged user namespaces
@@ -52,10 +55,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install QEMU, OVMF and disk tools
+      - name: Install QEMU, OVMF, disk tools and readelf
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf mtools e2fsprogs fdisk
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf mtools e2fsprogs fdisk binutils
       - name: Enable KVM, or fall back to software emulation
         run: |
           if [ -e /dev/kvm ]; then

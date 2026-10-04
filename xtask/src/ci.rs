@@ -217,21 +217,41 @@ mod tests {
         assert!(workflow.contains("run: cargo xtask unit"));
     }
 
-    /// The unit job has the runner's own tools (binutils' `readelf`,
-    /// e2fsprogs, Linux's headers) and installs the rest: mtools, which
-    /// the tests of the ESP's files run (`image::esp_read`). A missing tool
-    /// fails a test, never skips it, so CI must have every one.
+    /// A missing tool fails a test, never skips it, so CI must have every
+    /// one, and each job installs those it runs rather than counting on the
+    /// runner image: the unit tests run mtools and `sfdisk` (the image),
+    /// e2fsprogs (ext2), binutils' `readelf` and read Linux's headers
+    /// (`errno.rs`); every build of the scenarios runs `readelf` too.
     #[test]
-    fn the_unit_job_installs_the_tools_its_tests_run() {
+    fn each_job_installs_the_tools_its_tests_run() {
         let workflow = std::fs::read_to_string(root().join(".github/workflows/ci.yml")).unwrap();
-        let unit = workflow
-            .split("\n  unit:\n")
-            .nth(1)
-            .and_then(|rest| rest.split("\n  e2e:\n").next())
+        let (_, rest) = workflow.split_once("\n  unit:\n").expect("a unit job");
+        let (unit, e2e) = rest
+            .split_once("\n  e2e:\n")
             .expect("a unit job before the e2e job");
-        assert!(
-            unit.contains("apt-get install") && unit.contains(" mtools"),
-            "{unit}"
+        let installs = |job: &str, packages: &[&str]| {
+            let line = job
+                .lines()
+                .find(|l| l.contains("apt-get install"))
+                .unwrap_or_else(|| panic!("no apt-get install in\n{job}"));
+            for p in packages {
+                assert!(line.split_whitespace().any(|w| w == *p), "{p}: {line}");
+            }
+        };
+        installs(
+            unit,
+            &["mtools", "fdisk", "e2fsprogs", "binutils", "linux-libc-dev"],
+        );
+        installs(
+            e2e,
+            &[
+                "qemu-system-x86",
+                "ovmf",
+                "mtools",
+                "e2fsprogs",
+                "fdisk",
+                "binutils",
+            ],
         );
     }
 
