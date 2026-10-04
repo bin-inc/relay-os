@@ -632,7 +632,12 @@ mod tests {
         let differ: Vec<usize> = (0..t_abi.len())
             .filter(|&i| t_abi[i] != t_args[i])
             .collect();
-        assert_eq!(differ.len(), 1, "one byte of the version: 3 -> 2");
+        assert_eq!(
+            differ.len(),
+            1,
+            "one byte of the version: {} -> {STALE_ABI}",
+            relay_abi::VERSION
+        );
         assert_eq!(STALE_ABI, 3);
         let e = check_program(path("t-abi")).unwrap_err().to_string();
         assert!(e.contains("built for ABI 3, this is ABI 4"), "{e}");

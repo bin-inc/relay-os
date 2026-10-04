@@ -97,3 +97,15 @@ send env nope; echo $?; env /etc; echo $?; env -x; echo $?
 expect \nenv: 'nope': No such file or directory\n127\nenv: '/etc': Permission denied\n126\nenv: invalid option -- 'x'\n125\nroot@relay:~# $
 send echo 'echo "[$Q]"' > /root/q.sh; env Q=1 sh /root/q.sh
 expect \n\+ echo "\[\$Q\]"\n\[1\]\nroot@relay:~# $
+# env waits for its command, having no exec (§15 item 7): Ctrl-C ends
+# both, in env's group, and a command that is killed leaves env the status
+# the shell gives it, only the kernel's log naming the fault (plan 3's
+# final review, m-5).
+send env t-spin
+alive 1
+type-ahead {ctrl-c}
+expect \n\^C\nroot@relay:~# $
+send echo $?; dmesg | grep -c 'killed: Ctrl-C'; ps | grep -c t-spin
+expect \n130\n2\n0\nroot@relay:~# $
+send env t-fault null-read; echo $?
+expect \Aenv t-fault null-read; echo \$\?\npid \d+ \(/bin/t-fault\): killed: page fault at 0x0[^\n]*\n139\nroot@relay:~# $
