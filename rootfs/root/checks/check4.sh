@@ -1,7 +1,7 @@
 # NUC check 4 (docs/hardware-test.md; milestone 2, plan 4b): after
-# check3-b.sh, `sh checks/check4.sh`. Every command here is a program in
-# ring 3, run by /bin/sh, which init started as process 2. Its transcript
-# is check4.log; the `#>` lines are explained in check3-a.sh, and
+# check3-b.sh, `sh checks/check4.sh`. Every command here but `cd /root` is a
+# program in ring 3, run by /bin/sh, which init started as process 2. Its
+# transcript is check4.log; the `#>` lines are explained in check3-a.sh, and
 # `#same> NAME regex` is a line whose group must capture what it captured
 # the first time.
 
