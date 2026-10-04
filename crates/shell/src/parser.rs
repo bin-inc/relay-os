@@ -1348,8 +1348,10 @@ impl Parser {
                         return Err(ParseError::MissingTarget("&"));
                     }
                     if self.parts.words.is_empty() {
-                        // `> f &`: a background job is a program.
-                        return Err(ParseError::Unsupported("> &".into()));
+                        // `> f &`: a background job is a program. Named as
+                        // typed (`< f &`, `2> e &`).
+                        let op = self.parts.typed(|_| true).unwrap_or_default();
+                        return Err(ParseError::Unsupported(format!("{op} &")));
                     }
                     // bash runs the whole and-or list in the background, in a
                     // shell of its own.
@@ -3472,6 +3474,12 @@ mod tests {
         // bash runs `> f &`; it is not supported.
         for (line, what) in [
             ("> f &", "> &"),
+            // Each names the redirection as typed (the prototype's review,
+            // m-2).
+            ("< f &", "< &"),
+            ("2> e &", "2> &"),
+            ("1> f &", "1> &"),
+            ("2>&1 &", "2>&1 &"),
             // bash runs this (the review found it called its syntax
             // error); `>&2` copies fd 2 (programmable shell gate §7.1).
             ("echo hi >& f", ">&f"),
