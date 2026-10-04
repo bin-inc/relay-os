@@ -151,20 +151,22 @@ pub fn help(ctx: &mut Ctx<'_>, _: &[String]) -> i32 {
     outln!(
         ctx,
         "Send output to a file with `> file` (replace) or `>> file` (append),\n\
-         errors with `2> file` (both with `> file 2>&1`), or output into\n\
-         another program with `| cmd` (built-ins cannot be in a pipeline);\n\
-         `< file` reads a file as input. End a command with `&` to run it in\n\
-         the background, or with `;` to run the next one after it. `a && b`\n\
-         runs b if a succeeds, `a || b` if it fails, and `! a` turns a's status\n\
-         round. `sh FILE ARG...` runs a script, which reads its arguments as\n\
-         `$1`...`$9`, `$#` and \"$@\". `$?` is the last command's status.\n\
-         `NAME=value` sets `$NAME`, `export NAME` gives it to the programs the\n\
-         shell starts, and `NAME=value cmd` gives it to cmd alone.\n\
-         `if a; then b; fi` runs b if a succeeds, with `elif c; then d;` and\n\
-         `else e;` before `fi` for other cases; `while a; do b; done` repeats b\n\
-         while a succeeds, `until` while it fails; `for x in w...; do b; done`\n\
-         runs b with each w as `$x`, and `for x; do` with each argument. Each\n\
-         may go on across lines, at `> `."
+         errors with `2> file` or `2>> file` (both with `> file 2>&1`), or output\n\
+         into another program with `| cmd` (built-ins cannot be in a pipeline);\n\
+         `>&2` sends output to the errors, and `< file` reads a file as input.\n\
+         End a command with `&` to run it in the background, or with `;` to run\n\
+         the next one after it. `a && b` runs b if a succeeds, `a || b` if it\n\
+         fails, and `! a` turns a's status round. `sh FILE ARG...` runs a script,\n\
+         which reads its arguments as `$1`...`$9`, `${{10}}`..., `$#` and \"$@\".\n\
+         `$?` is the last command's status. `NAME=value` sets `$NAME`,\n\
+         `export NAME` gives it to the programs the shell starts, and\n\
+         `NAME=value cmd` gives it to cmd alone. `~` is $HOME: `cd` alone goes\n\
+         there, and `cd -` back to $OLDPWD. `if a; then b; fi` runs b if a\n\
+         succeeds, with `elif c; then d;` and `else e;` before `fi` for other\n\
+         cases; `while a; do b; done` repeats b while a succeeds, `until` while\n\
+         it fails; `for x in w...; do b; done` runs b with each w as `$x`, and\n\
+         `for x; do` with each argument. Each may go on across lines, at `> `,\n\
+         and redirections after `done` or `fi` hold for the whole command."
     );
     0
 }
@@ -556,9 +558,18 @@ mod tests {
             "`until`",
             "`for ",
             "`> `",
+            "2>> file",
+            ">&2",
+            "`done` or `fi`",
+            "`~`",
+            "`cd -`",
+            "${10}",
         ] {
             assert!(builtins.contains(what), "{what}");
         }
+        // The built-ins and the syntax, with the prompt after them, fit on
+        // the NUC's 33 rows.
+        assert!(builtins.lines().count() + 2 <= 33, "{builtins}");
         // No line wider than the NUC's 120 columns, nor 72.
         assert!(text.lines().all(|l| l.chars().count() <= 72), "{text}");
     }
