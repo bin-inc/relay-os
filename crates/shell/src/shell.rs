@@ -822,8 +822,9 @@ impl<'a> Shell<'a> {
     /// Its `exit` ends only the script, as it does under `/bin/sh`, where a
     /// script is a shell of its own; and it has variables and arguments of
     /// its own, the exported variables imported, and starts with `$?` 0, as
-    /// there.
+    /// there; and its `cd` stays in it.
     fn run_script(&mut self, script: Script, env: &[u8]) -> i32 {
+        let cwd = self.vfs.cwd();
         self.transcript = Some(Transcript::new(script.transcript, script.transcript_name));
         let mut vars = Vars::script(&script.name, &script.args);
         vars.import(env);
@@ -835,6 +836,7 @@ impl<'a> Shell<'a> {
         }
         let status = self.run_lines(&script.text);
         self.vars = outer;
+        let _ = self.vfs.chdir(&cwd);
         if self.exited {
             self.stopped = false;
         }
@@ -2757,6 +2759,18 @@ mod tests {
                  + B=in\n+ exit 4\n4 out []\n"
                     .into()
             )
+        );
+    }
+
+    #[test]
+    fn a_script_s_cd_stays_in_it() {
+        // Under /bin/sh a script is a process of its own; the in-process
+        // runner goes back where it was (programmable shell gate §9.2).
+        let mut h = Harness::new();
+        h.put("/tmp/s.sh", b"cd /etc\npwd\n");
+        assert_eq!(
+            h.lines(&["cd /tmp", "sh s.sh", "pwd", "echo $PWD"]).1,
+            "+ cd /etc\n+ pwd\n/etc\n/tmp\n/tmp\n"
         );
     }
 
