@@ -543,9 +543,7 @@ free
     /// The real check scripts against a transcript of each machine: QEMU's
     /// from the `checks` scenario, the NUC's as the NUC wrote them in the
     /// last NUC run of checks 3 to 7 (`docs/hardware-test.md`'s results
-    /// log), copied off the stick unchanged; until that run check 7's is a
-    /// copy of QEMU's and the others hold the lines milestone 5 changed by
-    /// hand (`ABI 4`, `dev`, `+ cd /root`). A `#nuc>` line must not need
+    /// log), copied off the stick unchanged. A `#nuc>` line must not need
     /// a line of its own next to the `#>` line for the same output, which
     /// QEMU alone cannot show.
     #[test]
