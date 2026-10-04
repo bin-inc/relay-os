@@ -36,14 +36,14 @@
 //!
 //! Every `send`, `send-crlf`, `key` and `type` waits for the prompt: since
 //! the input before it (or the start, a reboot or a reset), an expect must
-//! have ended at one (`root@relay:~# `, `root@relay:~# $` or `> $`), or the
-//! scenario is refused. So do `poweroff`, `reboot` and `reset <text>`,
-//! which type a command line; a bare `reset` and `reset-key` press a key
-//! at the error screen, where no prompt comes. A line sent while a command
-//! runs is echoed twice, by the line discipline and by the shell's editor,
-//! and lands inside the output an expect waits for (programmable shell gate
-//! §15 item 3); input sent while something runs on purpose is marked
-//! `-ahead`.
+//! have ended at one (`root@relay:<dir># `, such as `root@relay:~# $` or
+//! `root@relay:/tmp# $`, or `> $`), or the scenario is refused. So do
+//! `poweroff`, `reboot` and `reset <text>`, which type a command line; a
+//! bare `reset` and `reset-key` press a key at the error screen, where no
+//! prompt comes. A line sent while a command runs is echoed twice, by the
+//! line discipline and by the shell's editor, and lands inside the output
+//! an expect waits for (programmable shell gate §15 item 3); input sent
+//! while something runs on purpose is marked `-ahead`.
 //!
 //! ```text
 //! screenshot-nonblank              (QMP screendump; top rows not one colour)

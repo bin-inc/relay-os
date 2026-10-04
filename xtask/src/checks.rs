@@ -599,8 +599,8 @@ free
                 assert!(r.ok(), "part {i} on {machine:?}: {:?}", r.failures);
             }
             // The NUC's own lines are checked there: QEMU's transcript is
-            // not the NUC's (checks 4 and 5 have none: they run programs
-            // only).
+            // not the NUC's (checks 4 to 7 have none: nothing they print
+            // differs between the machines).
             if script.contains("#nuc>") {
                 let r = check(&parse(script, Machine::Nuc).unwrap(), qemu);
                 assert!(!r.ok(), "part {i}");
