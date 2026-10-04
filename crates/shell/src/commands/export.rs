@@ -3,7 +3,7 @@
 
 use crate::ctx::{Ctx, outln};
 use crate::parser::is_name;
-use crate::shell::NAME;
+use crate::shell::{NAME, SYNTAX};
 use alloc::format;
 use alloc::string::String;
 
@@ -11,7 +11,8 @@ use alloc::string::String;
 /// the programs the shell starts, giving it the value if one follows, and
 /// goes on past a name that is not one (status 1). With no NAME it lists
 /// the exported variables as bash's `declare -x` does. `-n` and `-f`
-/// (bash's un-export and functions) are not supported.
+/// (bash's un-export and functions) are not supported, nor is bash's
+/// `NAME+=value`, which appends: a word of that shape exports nothing.
 pub fn export(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     let names = match options(ctx, "export", args, "fnp", "fn") {
         Ok((_, names)) => names,
@@ -19,6 +20,17 @@ pub fn export(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
     };
     if names.is_empty() {
         return list(ctx);
+    }
+    // The shell's rule for `NAME+=value` (programmable shell gate §8.5),
+    // typed or expanded.
+    let appends = |arg: &&String| {
+        arg.split_once('=')
+            .and_then(|(before, _)| before.strip_suffix('+'))
+            .is_some_and(is_name)
+    };
+    if let Some(append) = names.iter().find(appends) {
+        ctx.fail(NAME, format_args!("unsupported syntax: {append}"));
+        return SYNTAX;
     }
     let mut status = 0;
     for arg in names {
@@ -230,6 +242,37 @@ mod tests {
             )
         );
         assert_eq!(h.run("export 1A").0, 1);
+    }
+
+    #[test]
+    fn appending_with_export_is_unsupported_and_exports_nothing() {
+        // bash appends, typed or expanded (probes p3, p5); here it is the
+        // shell's rule for `NAME+=value`, status 2, before anything is
+        // exported (plan 3's final review, m-2).
+        let mut h = Harness::new();
+        for (line, said) in [
+            ("export A+=b", "A+=b"),
+            ("export B=1 A+=b C", "A+=b"),
+            ("export -p A+=b", "A+=b"),
+            ("X=A+=b; export $X", "A+=b"),
+            ("export A+=", "A+="),
+        ] {
+            let message = alloc::format!("relay-sh: unsupported syntax: {said}\n");
+            assert_eq!(
+                h.lines(&["A=a", line, "unset OLDPWD PWD", "export", "echo $A"]),
+                (0, alloc::format!("{message}a\n")),
+                "{line}"
+            );
+            assert_eq!(h.run(line).0, 2, "{line}");
+        }
+        // A bad name before `+=` is not a valid identifier, as in bash.
+        assert_eq!(
+            h.run("export 1A+=b"),
+            (
+                1,
+                "relay-sh: export: `1A+=b': not a valid identifier\n".into()
+            )
+        );
     }
 
     #[test]
