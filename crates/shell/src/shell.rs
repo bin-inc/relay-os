@@ -127,7 +127,7 @@ impl<'a> Shell<'a> {
     /// The same shell, its `$0` `name`: its argument 0, as bash's is
     /// (`relay-sh` otherwise).
     pub fn named(mut self, name: &str) -> Shell<'a> {
-        self.vars = Vars::new(name);
+        self.vars.set_name(name);
         self
     }
 
@@ -481,7 +481,7 @@ impl<'a> Shell<'a> {
             };
         }
         let typed = &commands[0];
-        let words = match expand::words(&typed.words, &self.vars, self.status) {
+        let words = match expand::command_words(&typed.words, &self.vars, self.status) {
             Ok(words) => words,
             Err(e) => return self.not_expanded(e, true),
         };
@@ -510,6 +510,7 @@ impl<'a> Shell<'a> {
                 Some(builtin) => {
                     let control = JobControl {
                         jobs: &mut self.jobs,
+                        vars: &mut self.vars,
                         programs: self.runner.programs(),
                         report: self.prompting && !self.in_script,
                     };

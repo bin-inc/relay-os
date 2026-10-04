@@ -8,8 +8,8 @@
 //! only in quotes.
 
 use crate::parser::{Command, Param, Piece, Redirect, RedirectOp, Word};
+pub(crate) use crate::vars::Vars;
 use alloc::borrow::Cow;
-use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
@@ -18,59 +18,6 @@ use core::fmt;
 /// `spawn` takes at most 64 KiB of arguments (spec §11.1): so nothing a
 /// person types grows the shell's heap without bound.
 pub const EXPANSION_MAX: usize = 64 * 1024;
-
-/// The most a shell's variables hold, their names' and values' bytes.
-pub const VARS_MAX: usize = 64 * 1024;
-
-/// A shell's variables and arguments.
-pub(crate) struct Vars {
-    names: BTreeMap<String, String>,
-    /// The bytes of their names and values.
-    size: usize,
-    /// `$0`, then `$1` on.
-    args: Vec<String>,
-}
-
-impl Vars {
-    /// No variables, and no arguments after `$0`, which is `name`.
-    pub fn new(name: &str) -> Vars {
-        Vars {
-            names: BTreeMap::new(),
-            size: 0,
-            args: alloc::vec![String::from(name)],
-        }
-    }
-
-    /// A script's: none set, `$0` its `name` and `args` after it.
-    pub fn script(name: &str, args: &[String]) -> Vars {
-        let mut vars = Vars::new(name);
-        vars.args.extend_from_slice(args);
-        vars
-    }
-
-    /// The arguments after `$0`, which `"$@"` gives.
-    pub fn positional(&self) -> &[String] {
-        self.args.get(1..).unwrap_or(&[])
-    }
-
-    /// The variable `name`'s value; an unset one is empty.
-    pub fn get(&self, name: &str) -> &str {
-        self.names.get(name).map_or("", String::as_str)
-    }
-
-    /// Sets the variable `name` to `value`, unless the variables would
-    /// then hold more than `VARS_MAX`.
-    pub fn set(&mut self, name: &str, value: String) -> Result<(), Error> {
-        let old = self.names.get(name).map_or(0, |v| name.len() + v.len());
-        let size = self.size - old + name.len() + value.len();
-        if size > VARS_MAX {
-            return Err(Error::Full(String::from(name)));
-        }
-        self.size = size;
-        self.names.insert(String::from(name), value);
-        Ok(())
-    }
-}
 
 /// Why a line could not be expanded; the shell says so, status 1.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -81,7 +28,7 @@ pub(crate) enum Error {
     AmbiguousRedirect(String),
     /// The line would expand to more than `EXPANSION_MAX`.
     TooLong,
-    /// The variable would make the variables hold more than `VARS_MAX`.
+    /// The variable would make the variables hold more than `crate::vars::VARS_MAX`.
     Full(String),
 }
 
@@ -108,6 +55,16 @@ pub(crate) fn expand(
     commands.iter().map(|c| x.command(c)).collect()
 }
 
+/// A command's `words` expanded: `export`'s assignments as assignments
+/// are (`export A=~/x`), as bash expands a declaration command's.
+pub(crate) fn command_words(
+    words: &[Word],
+    vars: &Vars,
+    status: i32,
+) -> Result<Vec<String>, Error> {
+    Expander::new(vars, status).words(words)
+}
+
 /// `words` expanded as a command's arguments are (a `for`'s list).
 pub(crate) fn words(words: &[Word], vars: &Vars, status: i32) -> Result<Vec<String>, Error> {
     let mut x = Expander::new(vars, status);
@@ -121,12 +78,7 @@ pub(crate) fn words(words: &[Word], vars: &Vars, status: i32) -> Result<Vec<Stri
 /// An assignment's value: one string, however it expands (`$@` joined by
 /// blanks, as bash joins it there).
 pub(crate) fn value(word: &Word, vars: &Vars, status: i32) -> Result<String, Error> {
-    Ok(Expander::new(vars, status)
-        .fields(word)?
-        .into_iter()
-        .map(|f| f.text)
-        .collect::<Vec<_>>()
-        .join(" "))
+    Expander::new(vars, status).joined(word)
 }
 
 /// A redirection's target, which must expand to one word.
@@ -163,15 +115,40 @@ impl<'v> Expander<'v> {
     }
 
     fn command(&mut self, c: &Command<Word>) -> Result<Command, Error> {
-        let mut words = Vec::new();
-        for w in &c.words {
-            words.extend(self.word(w)?);
-        }
+        let words = self.words(&c.words)?;
         let mut redirects = Vec::new();
         for r in &c.redirects {
             redirects.push(self.redirect(r)?);
         }
         Ok(Command { words, redirects })
+    }
+
+    /// A command's words. After an unquoted `export`, a word shaped like an
+    /// assignment is one word, `NAME=` and its value expanded as an
+    /// assignment's (a `~` after the `=` or a `:`, `$@` joined by blanks).
+    fn words(&mut self, words: &[Word]) -> Result<Vec<String>, Error> {
+        let export = words.first().is_some_and(|w| w.is_plain("export"));
+        let mut out = Vec::new();
+        for (i, w) in words.iter().enumerate() {
+            match w.assignment().filter(|_| export && i > 0) {
+                Some((name, value)) => {
+                    let value = self.joined(&value)?;
+                    out.push(alloc::format!("{name}={value}"));
+                }
+                None => out.extend(self.word(w)?),
+            }
+        }
+        Ok(out)
+    }
+
+    /// What `word` expands to as one string, `$@`'s words joined by blanks.
+    fn joined(&mut self, word: &Word) -> Result<String, Error> {
+        Ok(self
+            .fields(word)?
+            .into_iter()
+            .map(|f| f.text)
+            .collect::<Vec<_>>()
+            .join(" "))
     }
 
     fn redirect(&mut self, r: &Redirect<Word>) -> Result<Redirect, Error> {
@@ -270,19 +247,6 @@ enum Value<'v> {
 /// that run no shell (tests).
 pub(crate) fn plain(commands: &[Command<Word>]) -> Result<Vec<Command>, Error> {
     expand(commands, &Vars::new(crate::shell::NAME), 0)
-}
-
-#[cfg(test)]
-impl Vars {
-    /// `names` set, and `args` (`$0` first).
-    pub fn of(names: &[(&str, &str)], args: &[&str]) -> Vars {
-        let mut vars = Vars::new("");
-        for (n, v) in names {
-            vars.set(n, String::from(*v)).unwrap();
-        }
-        vars.args = args.iter().map(|a| String::from(*a)).collect();
-        vars
-    }
 }
 
 #[cfg(test)]
@@ -408,23 +372,6 @@ mod tests {
         assert_eq!(
             value("A=${1A}").unwrap_err(),
             Error::BadSubstitution("${1A}".into())
-        );
-    }
-
-    #[test]
-    fn the_variables_hold_at_most_64_kib() {
-        let mut v = Vars::new("sh");
-        let big = "x".repeat(VARS_MAX - 1);
-        v.set("A", big.clone()).unwrap();
-        assert_eq!(v.set("B", String::new()), Err(Error::Full("B".into())));
-        assert_eq!(v.set("A", big.clone() + "y"), Err(Error::Full("A".into())));
-        assert_eq!(v.get("A"), big, "unchanged");
-        // A smaller value makes room again.
-        v.set("A", String::from("1")).unwrap();
-        v.set("B", "x".repeat(VARS_MAX - 3)).unwrap();
-        assert_eq!(
-            Error::Full("B".into()).to_string(),
-            "B: the variables would hold more than 64 KiB"
         );
     }
 

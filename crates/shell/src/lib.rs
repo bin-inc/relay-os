@@ -31,6 +31,7 @@ mod shell;
 mod testing;
 pub mod time;
 mod transcript;
+mod vars;
 
 pub use ctx::Ctx;
 pub use io::{Bytes, Console, Group, MemInfo, Programs, Stdin, Stdout, System};

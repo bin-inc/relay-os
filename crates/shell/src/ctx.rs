@@ -8,6 +8,7 @@ use crate::fds;
 use crate::io::{Console, Programs, Stdin, Stdout, System};
 use crate::jobs::Jobs;
 use crate::transcript::Transcript;
+use crate::vars::Vars;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -52,10 +53,11 @@ pub struct Ctx<'a> {
     pub(crate) control: Option<JobControl<'a>>,
 }
 
-/// What the shell's job commands work with: its jobs, and its programs
-/// (none in the in-process runner, which starts no job).
+/// What the shell's own commands work with: its jobs, its programs (none
+/// in the in-process runner, which starts no job) and its variables.
 pub(crate) struct JobControl<'a> {
     pub jobs: &'a mut Jobs,
+    pub vars: &'a mut Vars,
     pub programs: Option<&'a mut dyn Programs>,
     /// The shell reads commands at its prompt, so `wait %n` says how the
     /// job ended, as bash's interactive shell does.
@@ -188,6 +190,14 @@ impl<'a> Ctx<'a> {
     /// 1.
     pub fn set_write_error_status(&mut self, status: i32) {
         self.write_error_status = status;
+    }
+
+    /// The shell's variables, for its own commands.
+    pub(crate) fn vars(&mut self) -> &mut Vars {
+        let Some(control) = self.control.as_mut() else {
+            unreachable!("the shell's own commands run with its variables")
+        };
+        control.vars
     }
 
     /// Gives the command standard input.

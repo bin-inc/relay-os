@@ -310,6 +310,11 @@ impl Word {
         }
     }
 
+    /// The word is `text`, unquoted, and nothing else.
+    pub fn is_plain(&self, text: &str) -> bool {
+        matches!(&self.pieces[..], [Piece::Text(t, false)] if t == text)
+    }
+
     /// The word as an assignment, `NAME=value`, if its name and `=` are
     /// unquoted (`"A"=x` is none, as in bash): the name, and the value as a
     /// word of its own, a `~` at its start or after a `:` made `/root`, as
