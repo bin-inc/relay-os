@@ -164,8 +164,8 @@ mod tests {
 
     #[test]
     fn export_marks_variables_and_lists_them_as_bash_does() {
-        // `env -i HOME=/root bash` in a pty, but for the variables bash
-        // sets itself (`OLDPWD`, `PWD`, `SHLVL`).
+        // `env -i HOME=/root bash` in a pty, from `/`, but for `HOME` and
+        // `SHLVL`.
         let mut h = Harness::new();
         let (status, out) = h.lines(&[
             "A=1",
@@ -180,15 +180,18 @@ mod tests {
              declare -x B\n\
              declare -x C=\"3\"\n\
              declare -x D=\"\"\n\
-             declare -x E=\"a \\\"b\\\" \\$c \\`d\\` \\\\e\"\n"
+             declare -x E=\"a \\\"b\\\" \\$c \\`d\\` \\\\e\"\n\
+             declare -x OLDPWD\n\
+             declare -x PWD=\"/\"\n"
         );
         assert_eq!(
-            h.lines(&["export Z=1", "export -p"]).1,
+            h.lines(&["export Z=1", "unset OLDPWD PWD", "export -p"]).1,
             "declare -x Z=\"1\"\n"
         );
         // `-p` with names exports them, and `--` ends the options.
         assert_eq!(
-            h.lines(&["export -p Y", "export -- X=-", "export"]).1,
+            h.lines(&["export -p Y", "export -- X=-", "unset OLDPWD PWD", "export"])
+                .1,
             "declare -x X=\"-\"\ndeclare -x Y\n"
         );
     }
@@ -220,7 +223,9 @@ mod tests {
                  relay-sh: export: `A-B': not a valid identifier\n\
                  relay-sh: export: `-': not a valid identifier\n\
                  relay-sh: export: `=x': not a valid identifier\n\
-                 declare -x B=\"2\"\n"
+                 declare -x B=\"2\"\n\
+                 declare -x OLDPWD\n\
+                 declare -x PWD=\"/\"\n"
                     .into()
             )
         );
@@ -244,7 +249,11 @@ mod tests {
                 "relay-sh: export: -x: invalid option\n",
             ),
         ] {
-            assert_eq!(h.lines(&[line, "export"]), (0, message.into()), "{line}");
+            assert_eq!(
+                h.lines(&[line, "unset OLDPWD PWD", "export"]),
+                (0, message.into()),
+                "{line}"
+            );
             assert_eq!(h.run(line).0, status, "{line}");
         }
     }
@@ -257,7 +266,7 @@ mod tests {
                 "A=1 B=2 C=3",
                 "export B D",
                 "unset A B",
-                "unset -v -- D NEVER",
+                "unset -v -- D NEVER OLDPWD PWD",
                 "echo [$A$B$C]",
                 "export",
             ]),
@@ -332,6 +341,7 @@ mod tests {
             h.lines(&[
                 &alloc::format!("B={big}"),
                 &alloc::format!("export A={}", &big[..200]),
+                "unset OLDPWD PWD",
                 "export"
             ]),
             (

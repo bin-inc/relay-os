@@ -700,7 +700,7 @@ mod tests {
             [Spawned {
                 path: "/bin/t-args".into(),
                 args: words(&["t-args", "a", "b c", ""]),
-                env: Vec::new(),
+                env: b"PWD=/\0".to_vec(),
                 fds: [0, 1, 2],
                 group: Group::New,
             }],
@@ -880,7 +880,7 @@ mod tests {
         Spawned {
             path: path.into(),
             args: words(args),
-            env: Vec::new(),
+            env: b"PWD=/\0".to_vec(),
             fds: [fds.0.unwrap_or(0), fds.1.unwrap_or(1), 2],
             group,
         }

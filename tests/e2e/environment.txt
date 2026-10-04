@@ -2,31 +2,35 @@
 # 5, plan 3): a variable reaches a program only once exported, in the order
 # of export, and one exported without a value not at all; export lists
 # them as bash's declare -x; unset removes one; a script, X | sh and a
-# nested sh start with the exported ones, and nothing comes back out.
+# nested sh start with the exported ones, and nothing comes back out;
+# PWD and OLDPWD are set as bash sets them.
 timeout 30
 expect root@relay:~# $
+# The shell starts with PWD exported and OLDPWD exported without a value.
+send echo "[$PWD][$OLDPWD]"
+expect \n\[/root\]\[\]\nroot@relay:~# $
 send A=1; t-env
-expect \n1 entry, 11 bytes\n\[0\] HOME=/root\nroot@relay:~# $
+expect \n2 entries, 21 bytes\n\[0\] HOME=/root\n\[1\] PWD=/root\nroot@relay:~# $
 send export A B; t-env
-expect \n2 entries, 15 bytes\n\[0\] HOME=/root\n\[1\] A=1\nroot@relay:~# $
+expect \n3 entries, 25 bytes\n\[0\] HOME=/root\n\[1\] PWD=/root\n\[2\] A=1\nroot@relay:~# $
 send export C='two words'; export
-expect \ndeclare -x A="1"\ndeclare -x B\ndeclare -x C="two words"\ndeclare -x HOME="/root"\nroot@relay:~# $
+expect \ndeclare -x A="1"\ndeclare -x B\ndeclare -x C="two words"\ndeclare -x HOME="/root"\ndeclare -x OLDPWD\ndeclare -x PWD="/root"\nroot@relay:~# $
 send unset A; t-env
-expect \n2 entries, 23 bytes\n\[0\] HOME=/root\n\[1\] C=two words\nroot@relay:~# $
+expect \n3 entries, 33 bytes\n\[0\] HOME=/root\n\[1\] PWD=/root\n\[2\] C=two words\nroot@relay:~# $
 send export 1A=x; echo $?
 expect \nrelay-sh: export: `1A=x': not a valid identifier\n1\nroot@relay:~# $
 send echo 'echo "[$C][$D]"; export D=in; t-env' > /root/env.sh
 expect root@relay:~# $
 send D=out; sh /root/env.sh
-expect \n\+ echo "\[\$C\]\[\$D\]"; export D=in; t-env\n\[two words\]\[\]\n3 entries, 28 bytes\n\[0\] HOME=/root\n\[1\] C=two words\n\[2\] D=in\nroot@relay:~# $
+expect \n\+ echo "\[\$C\]\[\$D\]"; export D=in; t-env\n\[two words\]\[\]\n4 entries, 38 bytes\n\[0\] HOME=/root\n\[1\] PWD=/root\n\[2\] C=two words\n\[3\] D=in\nroot@relay:~# $
 send echo "[$D]"; t-env
-expect \n\[out\]\n2 entries, 23 bytes\n\[0\] HOME=/root\n\[1\] C=two words\nroot@relay:~# $
+expect \n\[out\]\n3 entries, 33 bytes\n\[0\] HOME=/root\n\[1\] PWD=/root\n\[2\] C=two words\nroot@relay:~# $
 send echo 'echo "[$C]"; t-env' | sh
-expect \n\[two words\]\n2 entries, 23 bytes\n\[0\] HOME=/root\n\[1\] C=two words\nroot@relay:~# $
+expect \n\[two words\]\n3 entries, 33 bytes\n\[0\] HOME=/root\n\[1\] PWD=/root\n\[2\] C=two words\nroot@relay:~# $
 send sh
 expect \nroot@relay:~# $
 send export E=nested; t-env
-expect \n3 entries, 32 bytes\n\[0\] HOME=/root\n\[1\] C=two words\n\[2\] E=nested\nroot@relay:~# $
+expect \n4 entries, 42 bytes\n\[0\] HOME=/root\n\[1\] PWD=/root\n\[2\] C=two words\n\[3\] E=nested\nroot@relay:~# $
 send exit
 expect root@relay:~# $
 send echo "[$E]"
@@ -35,16 +39,16 @@ expect \n\[\]\nroot@relay:~# $
 # over the exported variables, an exported name in its place; before a
 # built-in they hold while it runs, unless it sets or exports them.
 send X=1 C=new t-env; echo "[$X][$C]"
-expect \n3 entries, 21 bytes\n\[0\] HOME=/root\n\[1\] C=new\n\[2\] X=1\n\[\]\[two words\]\nroot@relay:~# $
+expect \n4 entries, 31 bytes\n\[0\] HOME=/root\n\[1\] PWD=/root\n\[2\] C=new\n\[3\] X=1\n\[\]\[two words\]\nroot@relay:~# $
 send t-env | Y=2 t-env
-expect \n3 entries, 27 bytes\n\[0\] HOME=/root\n\[1\] C=two words\n\[2\] Y=2\nroot@relay:~# $
+expect \n4 entries, 37 bytes\n\[0\] HOME=/root\n\[1\] PWD=/root\n\[2\] C=two words\n\[3\] Y=2\nroot@relay:~# $
 send C=1 unset C; A=5 export A; echo "[$C]"; t-env
-expect \n\[two words\]\n3 entries, 27 bytes\n\[0\] HOME=/root\n\[1\] C=two words\n\[2\] A=5\nroot@relay:~# $
+expect \n\[two words\]\n4 entries, 37 bytes\n\[0\] HOME=/root\n\[1\] PWD=/root\n\[2\] C=two words\n\[3\] A=5\nroot@relay:~# $
 # A program's environment holds at most 64 KiB: X holds 40 KiB.
 send X=xxxxxxxxxx; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X; X=$X$X
 expect root@relay:~# $
 send export X; t-env raw
-expect \nan address, 40990 bytes, 4 entries\nroot@relay:~# $
+expect \nan address, 41000 bytes, 5 entries\nroot@relay:~# $
 send Y=$X t-env; echo $?
 expect \nrelay-sh: t-env: Argument list too long\n126\nroot@relay:~# $
 send unset X

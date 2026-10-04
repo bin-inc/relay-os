@@ -132,9 +132,11 @@ impl<'a> Shell<'a> {
     }
 
     /// The same shell, its environment `block` imported as exported
-    /// variables (programmable shell gate §8.5).
+    /// variables, and `PWD` and `OLDPWD` set as a shell sets them when it
+    /// starts (programmable shell gate §8.5).
     pub fn with_environment(mut self, block: &[u8]) -> Shell<'a> {
         self.vars.import(block);
+        start_variables(&mut self.vars, &mut *self.vfs);
         self
     }
 
@@ -817,6 +819,7 @@ impl<'a> Shell<'a> {
         self.transcript = Some(Transcript::new(script.transcript, script.transcript_name));
         let mut vars = Vars::script(&script.name, &script.args);
         vars.import(env);
+        start_variables(&mut vars, &mut *self.vfs);
         let outer = core::mem::replace(&mut self.vars, vars);
         self.status = 0;
         let status = self.run_lines(&script.text);
@@ -1044,6 +1047,17 @@ fn runner_stages<'c>(stages: &'c [parser::Command], fds: &[Option<Fds>]) -> Vec<
             assigns: &c.assigns,
         })
         .collect()
+}
+
+/// Sets `PWD` and `OLDPWD` in a shell's `vars` as it starts, from the
+/// current directory and whether the `OLDPWD` it imported is a directory.
+fn start_variables(vars: &mut Vars, vfs: &mut dyn Vfs) {
+    let oldpwd_is_dir = vars.value("OLDPWD").is_some_and(|old| {
+        vfs.lookup(old.as_bytes())
+            .and_then(|node| vfs.stat(node))
+            .is_ok_and(|s| s.kind == vfs::FileType::Directory)
+    });
+    vars.start(&path::display(&vfs.cwd()), oldpwd_is_dir);
 }
 
 /// Whether `list` is one pipeline of simple commands, and nothing else.
@@ -2761,16 +2775,16 @@ mod tests {
         assert_eq!(
             envs,
             [
-                b"HOME=/root\0X=1\0B=2\0".to_vec(),
-                b"HOME=/root\0B=2\0".to_vec(),
-                b"HOME=/root\0B=2\0".to_vec(),
-                b"HOME=/root\0B=2\0".to_vec(),
+                b"HOME=/root\0X=1\0PWD=/\0B=2\0".to_vec(),
+                b"HOME=/root\0PWD=/\0B=2\0".to_vec(),
+                b"HOME=/root\0PWD=/\0B=2\0".to_vec(),
+                b"HOME=/root\0PWD=/\0B=2\0".to_vec(),
             ],
             "a lone command, each command of a pipeline, a background job"
         );
-        // With nothing exported, none.
+        // With nothing imported, `PWD` alone.
         h.spawning("t-args");
-        assert_eq!(h.programs.spawned.last().unwrap().env, b"");
+        assert_eq!(h.programs.spawned.last().unwrap().env, b"PWD=/\0");
     }
 
     #[test]
@@ -2795,12 +2809,12 @@ mod tests {
         assert_eq!(
             envs,
             [
-                b"HOME=/root\0B=3\0A=1\0".to_vec(),
-                b"HOME=/root\0B=2\0".to_vec(),
-                b"HOME=/root\0B=2\0A=1\0".to_vec(),
-                b"HOME=/root\0B=2\0X=2\0".to_vec(),
-                b"HOME=/root\0B=2\0Y=2\0".to_vec(),
-                b"HOME=/root\0B=4\0".to_vec(),
+                b"HOME=/root\0B=3\0PWD=/\0A=1\0".to_vec(),
+                b"HOME=/root\0B=2\0PWD=/\0".to_vec(),
+                b"HOME=/root\0B=2\0PWD=/\0A=1\0".to_vec(),
+                b"HOME=/root\0B=2\0PWD=/\0X=2\0".to_vec(),
+                b"HOME=/root\0B=2\0PWD=/\0Y=2\0".to_vec(),
+                b"HOME=/root\0B=4\0PWD=/\0".to_vec(),
             ]
         );
         assert_eq!(
@@ -2831,14 +2845,15 @@ mod tests {
         assert_eq!(status, 0);
         assert_eq!(
             out,
-            "declare -x A=\"1\"\ndeclare -x W=\"2\"\ndeclare -x Z=\"0\"\n[1][][0][2][][0][]\n"
+            "declare -x A=\"1\"\ndeclare -x OLDPWD\ndeclare -x PWD=\"/\"\ndeclare -x W=\"2\"\n\
+             declare -x Z=\"0\"\n[1][][0][2][][0][]\n"
         );
     }
 
     #[test]
     fn an_assignment_a_built_in_cannot_hold_runs_nothing() {
         let mut h = Harness::new();
-        let big = "x".repeat(crate::vars::VARS_MAX - 10);
+        let big = "x".repeat(crate::vars::VARS_MAX - 30);
         let (status, out) = h.lines(&[
             &format!("A={big}"),
             &format!("B={} C=1 cd /tmp", &big[..20]),
@@ -3031,7 +3046,33 @@ mod tests {
         assert_eq!(status, 0);
         assert_eq!(
             out,
-            "/bin/sh /root [x  y]\ndeclare -x A=\"x  y\"\ndeclare -x HOME=\"/root\"\n"
+            "/bin/sh /root [x  y]\ndeclare -x A=\"x  y\"\ndeclare -x HOME=\"/root\"\n\
+             declare -x OLDPWD\ndeclare -x PWD=\"/\"\n"
+        );
+    }
+
+    #[test]
+    fn a_shell_sets_pwd_and_keeps_an_oldpwd_that_names_a_directory() {
+        // As bash 5.2 does when it starts (`env -i PWD=… OLDPWD=… bash`).
+        let mut h = Harness::new();
+        vfs::Vfs::chdir(&mut h.vfs, b"/tmp").unwrap();
+        for (env, out) in [
+            (&b"PWD=/nowhere\0OLDPWD=/etc\0"[..], "[/tmp][/etc]\n"),
+            (b"OLDPWD=/nonexistent\0", "[/tmp][]\n"),
+            (b"OLDPWD=/etc/motd\0", "[/tmp][]\n"),
+            (b"OLDPWD=\0", "[/tmp][]\n"),
+        ] {
+            h.env = env.to_vec();
+            assert_eq!(h.run("echo \"[$PWD][$OLDPWD]\""), (0, out.into()));
+        }
+        // A script the in-process runner runs starts so too, where it runs.
+        h.env = b"OLDPWD=/etc\0".to_vec();
+        h.put("/tmp/s.sh", b"echo \"[$PWD][$OLDPWD]\"\n");
+        vfs::Vfs::chdir(&mut h.vfs, b"/").unwrap();
+        assert_eq!(
+            h.lines(&["PWD=/x", "export OLDPWD=/nonexistent", "sh /tmp/s.sh"])
+                .1,
+            "+ echo \"[$PWD][$OLDPWD]\"\n[/][]\n"
         );
     }
 
@@ -3043,7 +3084,10 @@ mod tests {
         let mut out = FakeStdout::console();
         let (status, said) = h.sh(&["/tmp/s.sh", "x"], &mut out);
         assert_eq!(status, 0);
-        assert_eq!(said, "+ export\ndeclare -x HOME=\"/root\"\n");
+        assert_eq!(
+            said,
+            "+ export\ndeclare -x HOME=\"/root\"\ndeclare -x OLDPWD\ndeclare -x PWD=\"/\"\n"
+        );
     }
 
     #[test]
