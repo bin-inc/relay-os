@@ -302,11 +302,12 @@ mod tests {
     fn export_s_assignments_expand_as_assignments() {
         // A `~` after `=` or `:`, and `$@` joined by blanks, as bash's
         // `export` (a declaration command) has them; a plain argument
-        // keeps its `~` (user-space gate §16 item 11).
+        // keeps its `~` (user-space gate §16 item 11). A quoted `export`
+        // is `export` too, as in bash.
         let mut h = Harness::new();
         h.put(
             "/tmp/s.sh",
-            b"export A=~/x B=x:~ \"C=~/y\" D=$@\nexport\necho a=~/x\n",
+            b"export A=~/x B=x:~ \"C=~/y\" D=$@\n\"export\" E=~/z\nexport\necho a=~/x\n",
         );
         let (status, said) = h.run("sh /tmp/s.sh 1 '2 3'");
         assert_eq!(status, 0);
@@ -315,7 +316,8 @@ mod tests {
                 "declare -x A=\"/root/x\"\n\
                  declare -x B=\"x:/root\"\n\
                  declare -x C=\"~/y\"\n\
-                 declare -x D=\"1 2 3\"\n"
+                 declare -x D=\"1 2 3\"\n\
+                 declare -x E=\"/root/z\"\n"
             ),
             "{said}"
         );

@@ -123,11 +123,11 @@ impl<'v> Expander<'v> {
         Ok(Command { words, redirects })
     }
 
-    /// A command's words. After an unquoted `export`, a word shaped like an
+    /// A command's words. After `export`, quoted or not, a word shaped like an
     /// assignment is one word, `NAME=` and its value expanded as an
     /// assignment's (a `~` after the `=` or a `:`, `$@` joined by blanks).
     fn words(&mut self, words: &[Word]) -> Result<Vec<String>, Error> {
-        let export = words.first().is_some_and(|w| w.is_plain("export"));
+        let export = words.first().is_some_and(|w| w.is_text("export"));
         let mut out = Vec::new();
         for (i, w) in words.iter().enumerate() {
             match w.assignment().filter(|_| export && i > 0) {
