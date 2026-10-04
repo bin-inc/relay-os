@@ -18,9 +18,10 @@
 //! before anything else is a `$`.
 //!
 //! A word whose unquoted start is a name and `=` is an assignment
-//! (`Word::assignment`), its value's `~` at its start or after a `:` made
-//! `/root`, as bash's is; an assignment before a command, which would give
-//! bash's command an environment, and bash's `NAME+=value` are refused.
+//! (`Word::assignment`), its value's `~` at its start or after a `:` the
+//! home directory, as bash's is. Assignments before a command's name are
+//! kept apart from its words (`A=1 cmd`, programmable shell gate §8.5);
+//! bash's `NAME+=value`, which appends, is refused.
 //!
 //! `> file` and `>> file` redirect standard output, and `2> file` and
 //! `2>> file` standard error (programmable shell gate §7.1), any number of
@@ -30,9 +31,10 @@
 //! word after `>&` is refused, as are bash's `&>` and `>|`. `< file` and
 //! `0< file` read the file as standard input; bash's other fds,
 //! here-documents, `<&` and `<>` are refused. An unquoted `~` alone, or
-//! before `/` in the same unquoted piece, at the start of a word means
-//! `/root`, as in Linux. An unquoted `#` at the start of a word begins a
-//! comment, which runs to the end of the line. An unquoted `|` joins
+//! before `/` in the same unquoted piece, at the start of a word is the
+//! home directory: `Param::Home`, which expands to `$HOME`, or to `/root`
+//! when `HOME` is unset (§8.5). An unquoted `#` at the start of a word
+//! begins a comment, which runs to the end of the line. An unquoted `|` joins
 //! commands into a pipeline (user-space gate §9.1); each has a name, only
 //! the last may redirect its output and only the first its input, and
 //! bash's syntax errors name a `|` with no command before it or none after.
