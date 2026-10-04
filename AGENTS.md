@@ -12,17 +12,20 @@ UEFI machines. Its test machine is an Intel NUC 12 Pro booting from a USB
 stick; QEMU with OVMF runs everything else. A later aim is an ARM
 handheld, so the system-call ABI must stay free of x86 detail.
 
-Status: milestones 1 to 4 are done, at version 0.5.0 (tag `v0.5.0`). The
-kernel boots, drives xHCI (keyboard and USB storage), mounts an ext2 root
-and runs programs in ring 3 from a read-only `/bin` (`system.img`).
-Process 1 is the kernel's init, which runs `/bin/sh`; the shell has
-pipes, background jobs, scripts with arguments and variables, lists
-(`;`, `&&`, `||`, `!`), `if`, `while`, `until` and `for`, commands read
-across lines with bash's `> ` prompt, and eight built-ins (`cd`, `exit`,
-`export`, `help`, `jobs`, `kill`, `unset`, `wait`). Every other command is
-a program, `test`, `[` and `env` too. The programmable shell gate goes on
-with milestone 5 (redirection and environment, 0.6.0). The aarch64 port
-comes later.
+Status: milestones 1 to 5 are done, at version 0.6.0 (tag `v0.6.0`),
+which ends the programmable shell gate. The kernel boots, drives xHCI
+(keyboard and USB storage), mounts an ext2 root, a `/dev` with
+`/dev/null`, and runs programs in ring 3 from a read-only `/bin`
+(`system.img`), each given an environment (ABI 4). Process 1 is the
+kernel's init, which runs `/bin/sh`; the shell has pipes, background
+jobs, scripts with arguments and variables, lists (`;`, `&&`, `||`, `!`),
+`if`, `while`, `until` and `for`, commands read across lines with bash's
+`> ` prompt, redirection of every standard stream (`<`, `2>`, `2>&1`,
+compound commands too), exported variables, `A=1 cmd`, `cd -` with
+`HOME`, `PWD` and `OLDPWD`, and eight built-ins (`cd`, `exit`, `export`,
+`help`, `jobs`, `kill`, `unset`, `wait`). Every other command is a
+program, `test`, `[` and `env` too. The next gate is not chosen yet; the
+aarch64 port comes later.
 
 ## Where to read
 

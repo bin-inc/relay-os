@@ -6,7 +6,7 @@ Kingston DataTraveler 3.0 test stick (serial `08606E6D413FB27127135F8E`).
 The NUC also runs Linux Mint, which is where the stick is written.
 
 Checks 1, 1b and 2 test the boot, the display and the keyboard, and are run by
-hand. Checks 3 to 6 are one run of five scripts on the stick, with a few
+hand. Checks 3 to 7 are one run of six scripts on the stick, with a few
 steps by hand; it is the check every release gets. The results log at the
 end records each run.
 
@@ -51,7 +51,7 @@ separated by blanks. Every `flash` writes it, so a `flash --kernel` without
 1. In Mint: `cargo xtask flash --full` and type `ERASE` when asked.
 2. Boot the stick (see above).
 3. Within about 5 s the monitor must show, on black:
-   - `Relay OS 0.5.0`
+   - `Relay OS 0.6.0`
    - `[ ok ] console WxH (CxR cells)` — note W×H. It should be the monitor's
      native resolution (1920×1200 on the ASUS PA248QV); the terminal uses at
      most the top-left 1920×1080 of it, so wider or taller screens have a
@@ -186,17 +186,17 @@ The NUC has no serial port, so a keyboard that does not work cannot run
 | `[FAIL] keyboard: no USB keyboard found` and no `port 3` line | The K120 connected after the boot's wait, or not at all | Type anyway: a late keyboard is set up when it appears. If nothing works, `debug=usb`: a `port 3: connected` line means it appeared late, none means the port never saw it; the `ports settled` line shows the wait |
 | Keys show up twice or not at all | Firmware still emulating a keyboard (handoff) | `debug=usb`: the `legacy support` line |
 
-## Checks 3 to 6 — files, programs, pipes, jobs and control flow
+## Checks 3 to 7 — files, programs, pipes, jobs, control flow and the environment
 
 The full checklist of the milestone 1 spec's §9.4, the user-space gate
 spec's §12.4 and the programmable shell gate spec's §11.4, in one run.
 The K120 and the stick sit on the ports of check 2 (the stick on bus 4
 port 3 in Mint's `lsusb -t`).
 
-Most of the run is five scripts on the stick, in `/root/checks/` (in the
+Most of the run is six scripts on the stick, in `/root/checks/` (in the
 repository under `rootfs/root/checks/`): `check3-a.sh` and `check3-b.sh`
-(check 3, either side of a restart), `check4.sh`, `check5.sh` and
-`check6.sh`. The
+(check 3, either side of a restart), `check4.sh`, `check5.sh`, `check6.sh`
+and `check7.sh`, the last started in `/root/checks`. The
 `/bin/sh` that init (process 1) starts as process 2 runs them: `sh FILE`
 runs each line as if it were typed, shows it as `+ <command>` before its
 output, and writes everything it shows into a transcript next to the
@@ -344,9 +344,29 @@ Every command but the shell's built-ins (`cd`, `exit`, `export`, `help`,
 
    Photograph the screen.
 
+### Check 7 — redirection and the environment
+
+10. Type `cd checks` and `sh check7.sh`: check 7 starts in `/root/checks`,
+    which its `OLDPWD` shows. It runs for a few seconds:
+    - `/dev/null` (`[ -c /dev/null ]`, output and errors sent to it,
+      `wc -c < /dev/null`), and every standard stream redirected to files:
+      `>`, `2>`, `>>`, `2>>`, both orders of `2>&1`, `2>&1` into a pipe, a
+      `for` loop's output and `wc -l < file`;
+    - the environment: `export A=1` seen by `env`, `B=2 env` and `$B`
+      empty afterwards, `env -i` and `env -u HOME`, a script it writes
+      that sees `A` and an assigned `B` (a nested `sh`), and neither after
+      `unset A`;
+    - `cd`: `$PWD` and `$OLDPWD` (`/root /root/checks`: the script's
+      `cd /root` left `/root/checks`), `cd /bin`, `cd -` printing `/root`,
+      `cd ..` and `cd` back to `HOME`.
+
+    The prompt `root@relay:~/checks# ` comes back after
+    `+ echo "$PWD $OLDPWD"` and `/root /`: the script's `cd` stays in it.
+    Type `cd` to go home.
+
 ### The error screen, power off and verify-usb
 
-10. The error screen: `reboot`, and choose the stick again with F10, so
+11. The error screen: `reboot`, and choose the stick again with F10, so
     that the kernel log's last lines are the boot's. At the prompt type
     `exit` three times within 10 s. After the first two, init's line and
     a new prompt; after the third, `init: /bin/sh (pid <n>) exited with
@@ -360,19 +380,20 @@ Every command but the shell's built-ins (`cd`, `exit`, `export`, `help`,
     Photograph it, wait a few seconds (it waits for the key, however
     long), then press a key on the K120: the NUC restarts. Choose the
     stick again with F10: the motd and the prompt.
-11. `poweroff`: the NUC switches itself off (`relay: powering off`). If the
+12. `poweroff`: the NUC switches itself off (`relay: powering off`). If the
     screen says `System halted. It is now safe to power off.` instead, note
     the `relay:` line above it and hold the power button.
-12. Boot Mint and run `cargo xtask verify-usb`: `e2fsck: clean`, the tree
+13. Boot Mint and run `cargo xtask verify-usb`: `e2fsck: clean`, the tree
     lists `/root/notes/a`, `/root/notes/big` (8388608 bytes) and
     `/root/notes/t`, and the last lines are `system.img: built <time>`,
-    `/root/checks/check3-a.sh: ok, 84 of 84 commands as expected (run <time>)`,
-    `/root/checks/check3-b.sh: ok, 5 of 5 commands as expected (run <time>)`,
-    `/root/checks/check4.sh: ok, 33 of 33 commands as expected (run <time>)`,
-    `/root/checks/check5.sh: ok, 29 of 29 commands as expected (run <time>)`
-    and `/root/checks/check6.sh: ok, 46 of 46 commands as expected (run <time>)`
-    (each line of a loop written across lines counts), with the UTC times
-    of the five runs. A transcript older than the
+    `/root/checks/check3-a.sh: ok, 85 of 85 commands as expected (run <time>)`,
+    `/root/checks/check3-b.sh: ok, 6 of 6 commands as expected (run <time>)`,
+    `/root/checks/check4.sh: ok, 34 of 34 commands as expected (run <time>)`,
+    `/root/checks/check5.sh: ok, 30 of 30 commands as expected (run <time>)`,
+    `/root/checks/check6.sh: ok, 47 of 47 commands as expected (run <time>)`
+    (each line of a loop written across lines counts) and
+    `/root/checks/check7.sh: ok, 39 of 39 commands as expected (run <time>)`,
+    with the UTC times of the six runs. A transcript older than the
     stick's `system.img` (a run before the last `flash --kernel`, which
     keeps the transcripts; `flash --full` erases them) fails. A `FAILED`
     line is followed by the script line, the expectation that failed and
@@ -399,6 +420,8 @@ Every command but the shell's built-ins (`cd`, `exit`, `export`, `help`,
 | `check5.sh`: `ps \| grep -c t-spin` prints another count than 1 before `kill %1`, or than 0 after `wait %1` | A `t-spin` of an earlier command still runs, or the job's did not start | `verify-usb` names the line; `ps` at the prompt lists the processes |
 | `check6.sh` prints `while once` or `until once` over and over, with an `rm` or `touch` error | The loop's file was not removed or made, so the loop runs on | Photograph the screen, then Ctrl-C: `^C` and the prompt come back; `ls /root/check6-go /root/check6-stop` shows which file is left |
 | `check6.sh`'s two `date` lines are more than 10 s apart | A sync after every command is slow on the stick | Note both times in the results log: a later plan syncs once per command line instead (the programmable shell gate's §13) |
+| `check7.sh`'s first `echo "$PWD $OLDPWD"` prints `/root /root` | The script was started from `~`, not from `/root/checks` | `cd checks`, then `sh check7.sh` again (it starts afresh) |
+| `check7.sh`: `env`, `env -u HOME` or the nested script shows a variable it should not, or lacks one | A variable did not reach a program's environment as exported, assigned or unset | `verify-usb` names the line; `env` at the prompt lists what the shell exports |
 | Ctrl-C at `> ` by hand gives no `^C`, or no prompt | The line editor did not get the K120's Ctrl-C | Photograph the screen; Enter, or a second Ctrl-C, shows whether the shell still reads the keyboard |
 | Ctrl-C in the `while` loop by hand gives no `^C`, or no prompt | The Ctrl-C reached neither `sleep` nor the shell's check between its own commands (`wait` for a Ctrl-C), or was lost after `sleep` ended | Photograph the screen; a second Ctrl-C shows whether the loop can end; `dmesg` after it shows a `pid <n> (/bin/sleep): killed: Ctrl-C` line if the first reached `sleep` |
 | The error screen with `/bin/sh cannot start: …` or `/bin/sh ended 3 times within 10 s` | The shell cannot be loaded, or ends as soon as it starts (its `init: /bin/sh (pid N) …` lines, in the log's lines on the screen, say how) | Photograph the screen; a key restarts the machine |
@@ -446,3 +469,4 @@ Every command but the shell's built-ins (`cd`, `exit`, `export`, `help`,
 | 2026-10-01 | 3 and 4 (milestone 2 done, 0.3.0) | `be269cd` | Pass | `flash --full` of 0.3.0, then F10: `Relay OS 0.3.0`, every startup line `[ ok ]`, `console 1920x1200 (120x33 cells)`, `cpu: SMEP on, SMAP on`, `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 2.0 GiB`, `[ ok ] system: 34 programs, ABI 2`. Check 3 by script: 84 of 84, `uname -a` → `Relay relay 0.3.0 x86_64`, `t-spin 1` 4594860032 iterations (the same as plans 3b and 4b; a kernel built without the poll on ticks from ring 3 made 4677697536 on 2026-10-01, so the poll costs 1.8 %); the three steps by hand as before; after `reboot` 5 of 5. Check 4 by script: 33 of 33 (`t-spawn fill` 60 children, `frames lost: 0`, every `t-fault` kind killed, `free`'s used 41668 KiB before and after); `exit` by hand restarted the shell. Then, after a `reboot`, three quick `exit`s reached the error screen (photographed): the heading at the top, `/bin/sh ended 3 times within 10 s`, the kernel log's last 20 lines from `xhci 00:14.0: port 15: reset done` to init's three, the 122-column `xhci 00:14.0: slot 4: interface 0 class 8/6/80, …` line taking two rows, and `Press any key to reboot.`; a K120 key restarted the machine. `verify-usb`: `e2fsck: clean`, `system.img: built Thu Oct  1 02:21:57 UTC 2026`, 84 of 84, 5 of 5, 33 of 33, each run after the build. |
 | 2026-10-02 | 3, 4 and 5 (milestone 3 done, 0.4.0) | `7ef2413` | Pass | `flash --full` of 0.4.0, then F10: `Relay OS 0.4.0`, every startup line `[ ok ]`, `console 1920x1200 (120x33 cells)`, `boot info: 15944 MiB usable in 34 regions`, `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 2.0 GiB`, `[ ok ] system: 42 programs, ABI 3` (photographed). Check 3 by script: 84 of 84, `uname -a` → `Relay relay 0.4.0 x86_64`, `t-spin 1` 4594860032 iterations (as since plan 3b); the three steps by hand as before; after `reboot` 5 of 5. Check 4 by script: 33 of 33 (`t-spawn 1000` 4071233 free frames before and after, every `t-fault` kind killed, `free`'s used 41964 KiB before and after). Check 5 by script: 29 of 29, its transcript byte for byte QEMU's (pipes, `t-spin &` killed and waited for with 137, a nested script's arguments and `cd "$9"`). `exit` by hand restarted the shell. After a `reboot`, three quick `exit`s reached the error screen (photographed): the heading at the top, `/bin/sh ended 3 times within 10 s`, the 122-column `xhci 00:14.0: slot 4: interface 0 class 8/6/80, …` line taking two rows, init's three lines (the third shell's `exited with 127`: two mistyped tries at it, `et` and `eit`, were not found, and `exit` alone takes the last command's status; it still ended within 10 s), and `Press any key to reboot.`; a K120 key restarted the machine. `verify-usb`: `e2fsck: clean`, `system.img: built Fri Oct  2 00:40:53 UTC 2026`, 84 of 84, 5 of 5, 33 of 33, 29 of 29, each run after the build. The transcripts replaced those edited by hand to say `ABI 3` (milestone 3's plans 1–3 had no NUC check). |
 | 2026-10-03 | 3 to 6 (milestone 4 done, 0.5.0) | `ce19f7e` | Pass | `flash --full` of 0.5.0, then F10: `Relay OS 0.5.0`, every startup line `[ ok ]`, `console 1920x1200 (120x33 cells)`, `boot info: 15943 MiB usable in 34 regions`, `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 2.0 GiB`, `[ ok ] system: 44 programs, ABI 3` (photographed). Check 3 by script: 84 of 84, `uname -a` → `Relay relay 0.5.0 x86_64`, `t-spin 1` 4593811456 iterations; the three steps by hand worked as before (the user's report; not photographed); after `reboot` 5 of 5. Check 4 by script: 33 of 33 (`t-spawn 1000` 4071099 free frames before and after, `free`'s used 42148 KiB before and after). Check 5 by script: 29 of 29, its transcript byte for byte the last run's; `exit` by hand restarted the shell (photographed). Check 6 by script: 46 of 46, its transcript QEMU's but the times; the 100 programs between the `date` lines took 5 s (03:44:45 to 03:44:50 UTC), under the 10 s of the programmable shell gate's decision, so §13's risk is closed; by hand a `for` typed across three lines printed `a`, `b`, `c`, and Ctrl-C at `> ` and in `while true; do sleep 1; done` each gave `^C`, the prompt and `$?` 130 (photographed). After a `reboot`, three `exit`s reached the error screen (photographed): the heading at the top, `/bin/sh ended 3 times within 10 s`, the xhci `slot 4: interface 0 class 8/6/80` line taking two rows, init's three lines (`exited with 0`), `Press any key to reboot.`. `verify-usb`: `e2fsck: clean`, `system.img: built Sat Oct  3 03:35:21 UTC 2026`, 84 of 84, 5 of 5, 33 of 33, 29 of 29, 46 of 46, each run after the build. The transcripts replaced those edited by hand (`check4.nuc.log`'s `[` and `test` lines, check 3's `0.5.0` lines) and `check6.nuc.log`, a copy of QEMU's. |
+| 2026-10-04 | 3 to 7 (milestone 5 done, 0.6.0) | `0035273` | Pass | `flash --full` of 0.6.0, then F10: `Relay OS 0.6.0`, every startup line `[ ok ]`, `console 1920x1200 (120x33 cells)`, `boot info: 15943 MiB usable in 34 regions`, `[ ok ] mount /: ext2 on 00:14.0 port 15 partition 2, 2.0 GiB`, `[ ok ] dev: /dev/null`, `[ ok ] system: 46 programs, ABI 4` (photographed). Check 3 by script: 85 of 85 (the scripts' `cd /root` line, milestone 5's plan 3, is one more command each; step 13's counts are corrected), `uname -a` → `Relay relay 0.6.0 x86_64`, `t-spin 1` 4594860032 iterations, `t-spawn 100` 4070882 free frames before and after; the three steps by hand passed (`t-spin 5` with `echo typed` typed during it, Ctrl-C of `t-spin`, `hello wrold` corrected in `t-read` to `[12] hello world\n` and Ctrl-D; photographed); after `reboot` 6 of 6. Check 4 by script: 34 of 34 (`t-spawn 1000` 4070879 free frames before and after, `free`'s used 43348 KiB before and after). Check 5 by script: 30 of 30, its transcript byte for byte the one recorded; `exit` by hand restarted the shell (photographed). Check 6 by script: 47 of 47, its transcript QEMU's but the times; the 100 programs took 5 s (12:53:01 to 12:53:06 UTC), as on 0.5.0; by hand a `for` across three lines printed `a`, `b`, `c`, and Ctrl-C at `> ` and in `while true; do sleep 1; done` each gave `^C` and `$?` 130 (photographed). Check 7 by script, started in `/root/checks`: 39 of 39, its transcript byte for byte QEMU's (`/dev/null`, every stream redirected, `export`, `env -i` and `-u`, `A=1 cmd`, a nested `sh`, `unset`, `cd -` with `PWD` and `OLDPWD`). After a `reboot`, three `exit`s reached the error screen (photographed): the heading at the top, `/bin/sh ended 3 times within 10 s`, the xhci `slot 4: interface 0 class 8/6/80` line taking two rows, init's three lines (`exited with 0`), `Press any key to reboot.`; a K120 key restarted the machine, and `poweroff` switched it off. `verify-usb`: `e2fsck: clean`, `system.img: built Sun Oct  4 12:08:25 UTC 2026`, 85 of 85, 6 of 6, 34 of 34, 30 of 30, 47 of 47, 39 of 39, each run after the build. The transcripts replaced those edited by hand since milestone 5's plan 2 (`ABI 4`, `dev`, `+ cd /root`, `0.6.0`) and `check7.nuc.log`, a copy of QEMU's. |

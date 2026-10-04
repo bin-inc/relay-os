@@ -542,7 +542,7 @@ free
 
     /// The real check scripts against a transcript of each machine: QEMU's
     /// from the `checks` scenario, the NUC's as the NUC wrote them in the
-    /// last NUC run of checks 3 to 6 (`docs/hardware-test.md`'s results
+    /// last NUC run of checks 3 to 7 (`docs/hardware-test.md`'s results
     /// log), copied off the stick unchanged. A `#nuc>` line must not need
     /// a line of its own next to the `#>` line for the same output, which
     /// QEMU alone cannot show.
@@ -579,6 +579,12 @@ free
                 include_str!("../fixtures/checks/check6.qemu.log"),
                 include_str!("../fixtures/checks/check6.nuc.log"),
             ),
+            (
+                "check7.sh",
+                include_str!("../../rootfs/root/checks/check7.sh"),
+                include_str!("../fixtures/checks/check7.qemu.log"),
+                include_str!("../fixtures/checks/check7.nuc.log"),
+            ),
         ];
         // Every check script on the stick has its two transcripts here.
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../rootfs/root/checks");
@@ -610,8 +616,12 @@ free
         for doc in ["README.md", "docs/hardware-test.md"] {
             let text = std::fs::read_to_string(format!("{root}/{doc}")).unwrap();
             for s in &scripts {
+                // From `~`, or from `/root/checks` as check 7 starts
+                // (programmable shell gate §11.4).
+                let from_home = format!("sh checks/{s}");
+                let from_checks = format!("`cd checks` and `sh {s}`");
                 assert!(
-                    text.contains(&format!("sh checks/{s}")),
+                    text.contains(&from_home) || text.contains(&from_checks),
                     "{doc} does not run {s}"
                 );
             }

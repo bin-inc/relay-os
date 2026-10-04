@@ -5,13 +5,13 @@ filled the table with 60 children
 + t-spin 1
 4592762880 iterations
 + t-spawn 1000
-free frames before: 4071099
-free frames after: 4071099
+free frames before: 4070879
+free frames after: 4070879
 frames lost: 0
 + free
               total        used        free
-Mem:       16326516       42148    16284368
-Heap:         32768        8543       24225
+Mem:       16325796       43348    16282448
+Heap:         32768        8545       24223
 + t-fault null-read
 relay-sh: t-fault: killed (page fault at 0x0, read, ip 0x4001e9)
 + t-fault null-write
@@ -44,7 +44,7 @@ t-args: kill
 + t-spawn orphan
 + t-spin 1
 2324692992 iterations
-2393899008 iterations
+2395996160 iterations
 + t-args a 'b c' ''
 [1] a
 [2] b c
@@ -61,6 +61,7 @@ date
 df
 dmesg
 echo
+env
 false
 free
 grep
@@ -81,6 +82,7 @@ stat
 sync
 t-abi
 t-args
+t-env
 t-fault
 t-files
 t-mem
@@ -113,5 +115,5 @@ two
 two
 + free
               total        used        free
-Mem:       16326516       42148    16284368
-Heap:         32768        8544       24224
+Mem:       16325796       43348    16282448
+Heap:         32768        8545       24223

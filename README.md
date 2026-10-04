@@ -29,9 +29,17 @@ Milestone 4 makes the shell one to program in: lists (`a; b`,
 bash's `> ` prompt, `if`, `while`, `until` and `for`, and `test` and `[`
 (`[ -f FILE ]`) as programs, with `grep -q`.
 
+Milestone 5 adds redirection and the environment: every standard stream
+can be redirected (`< in`, `2> err`, `2>> err`, `> f 2>&1`, `a 2>&1 | b`),
+compound commands too (`for …; done > f`), and `/dev/null` exists;
+programs get an environment, the shell exports variables (`export`,
+`unset`, `A=1 cmd`) and `/bin/env` shows and changes one; `cd` follows
+`HOME`, `PWD` and `OLDPWD` (`cd -`), and the check scripts pass from any
+directory.
+
 Milestone 1 is version 0.2.0, milestone 2 version 0.3.0, milestone 3
-version 0.4.0, which ends the user-space gate, and milestone 4 version
-0.5.0.
+version 0.4.0, which ends the user-space gate, milestone 4 version 0.5.0
+and milestone 5 version 0.6.0, which ends the programmable shell gate.
 
 Design: `docs/superpowers/specs/2026-09-26-milestone-1-boot-shell-fs-design.md`
 (milestone 1), `docs/superpowers/specs/2026-09-29-user-space-gate-design.md`
@@ -58,7 +66,8 @@ has the whole checklist):
    startup line says `[ ok ]` and the prompt `root@relay:~# ` follows.
 4. Type `sh checks/check3-a.sh`, then `reboot`, boot the stick again, type
    `sh checks/check3-b.sh`, `sh checks/check4.sh`, `sh checks/check5.sh`
-   and `sh checks/check6.sh`, then `poweroff`.
+   and `sh checks/check6.sh`, then `cd checks` and `sh check7.sh`, then
+   `poweroff`.
 5. Back in Linux Mint: `cargo xtask verify-usb` checks the filesystem and
    the output of every script.
 

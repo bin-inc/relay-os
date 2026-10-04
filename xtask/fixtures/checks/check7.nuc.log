@@ -1,0 +1,70 @@
++ cd /root
++ rm -f /root/check7-a.sh /root/check7-a.log /root/check7-out /root/check7-err
++ [ -c /dev/null ] && echo null is a character device
+null is a character device
++ echo lost > /dev/null
++ cat /dev/null | wc -c
+0
++ ls /nope 2> /dev/null; echo $?
+2
++ wc -c < /dev/null
+0
++ ls /root/checks/check7.sh /nope > /root/check7-out 2> /root/check7-err
++ cat /root/check7-out /root/check7-err
+/root/checks/check7.sh
+ls: cannot access '/nope': No such file or directory
++ ls /nope /root/checks/check7.sh > /root/check7-out 2>&1
++ cat /root/check7-out
+ls: cannot access '/nope': No such file or directory
+/root/checks/check7.sh
++ ls /nope /root/checks/check7.sh 2>&1 > /root/check7-out
+ls: cannot access '/nope': No such file or directory
++ cat /root/check7-out
+/root/checks/check7.sh
++ ls /nope /root/checks/check7.sh 2>&1 | wc -l
+2
++ for w in a b c; do echo $w; done > /root/check7-out
++ wc -l < /root/check7-out
+3
++ echo more >> /root/check7-out
++ cd /nope 2>> /root/check7-out
++ tail -n 2 /root/check7-out
+more
+relay-sh: cd: /nope: No such file or directory
++ export A=1
++ env | grep ^A=
+A=1
++ B=2 env | grep ^B=
+B=2
++ echo "[$B]"
+[]
++ env -i C=3 D=4 env
+C=3
+D=4
++ env -u HOME env | grep -c ^HOME=
+0
++ echo 'echo "nested: [$A] [$B]"' > /root/check7-a.sh
++ B=5 sh /root/check7-a.sh
++ echo "nested: [$A] [$B]"
+nested: [1] [5]
++ unset A
++ env | grep -c ^A=
+0
++ sh /root/check7-a.sh
++ echo "nested: [$A] [$B]"
+nested: [] []
++ echo "$PWD $OLDPWD"
+/root /root/checks
++ cd /bin
++ echo "$PWD $OLDPWD"
+/bin /root
++ cd -
+/root
++ pwd
+/root
++ cd ..
++ pwd
+/
++ cd
++ echo "$PWD $OLDPWD"
+/root /
