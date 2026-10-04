@@ -83,3 +83,17 @@ send unset HOME; echo ~
 expect \n/root\nroot@relay:/root# $
 send export HOME=/root
 expect root@relay:~# $
+# env prints its environment, or runs a command with a changed one, as
+# GNU's does.
+send env -u C -u A -u OLDPWD
+expect \nPWD=/root\nHOME=/root\nroot@relay:~# $
+send env -i A=1 B='two words' env
+expect \nA=1\nB=two words\nroot@relay:~# $
+send Z=1 env -u Z HOME=/x X=1 t-env
+expect \n6 entries, 50 bytes\n\[0\] PWD=/root\n\[1\] OLDPWD=/tmp\n\[2\] C=two words\n\[3\] A=5\n\[4\] HOME=/x\n\[5\] X=1\nroot@relay:~# $
+send env -i env; env -i t-env
+expect \n0 entries, 0 bytes\nroot@relay:~# $
+send env nope; echo $?; env /etc; echo $?; env -x; echo $?
+expect \nenv: 'nope': No such file or directory\n127\nenv: '/etc': Permission denied\n126\nenv: invalid option -- 'x'\n125\nroot@relay:~# $
+send echo 'echo "[$Q]"' > /root/q.sh; env Q=1 sh /root/q.sh
+expect \n\+ echo "\[\$Q\]"\n\[1\]\nroot@relay:~# $
