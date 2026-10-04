@@ -657,6 +657,8 @@ pub struct Harness {
     pub spy: Rc<SpyState>,
     /// The next command's standard input (in-process and as a program).
     pub stdin: Vec<u8>,
+    /// The environment each shell starts with (`with_environment`).
+    pub env: Vec<u8>,
 }
 
 impl Harness {
@@ -684,6 +686,7 @@ impl Harness {
             programs: FakePrograms::new(),
             spy: state,
             stdin: Vec::new(),
+            env: Vec::new(),
         }
     }
 
@@ -697,6 +700,7 @@ impl Harness {
             programs: FakePrograms::new(),
             spy,
             stdin: Vec::new(),
+            env: Vec::new(),
         }
     }
 
@@ -704,6 +708,7 @@ impl Harness {
     pub fn run(&mut self, line: &str) -> (i32, String) {
         let mut input = Bytes::new(core::mem::take(&mut self.stdin));
         let status = Shell::new(&mut self.vfs, &mut self.console, &mut self.system)
+            .with_environment(&self.env)
             .with_input(&mut input)
             .execute(line);
         (status, self.console.take())
@@ -713,8 +718,9 @@ impl Harness {
     /// prompt); the last one's status and everything they printed.
     pub fn lines(&mut self, lines: &[&str]) -> (i32, String) {
         let mut input = Bytes::new(core::mem::take(&mut self.stdin));
-        let mut shell =
-            Shell::new(&mut self.vfs, &mut self.console, &mut self.system).with_input(&mut input);
+        let mut shell = Shell::new(&mut self.vfs, &mut self.console, &mut self.system)
+            .with_environment(&self.env)
+            .with_input(&mut input);
         let mut status = 0;
         for line in lines {
             status = shell.execute(line);
@@ -731,6 +737,7 @@ impl Harness {
             &mut self.system,
             &mut self.programs,
         )
+        .with_environment(&self.env)
         .execute(line);
         (status, self.console.take())
     }
@@ -765,6 +772,7 @@ impl Harness {
             &mut self.system,
             &mut self.programs,
         )
+        .with_environment(&self.env)
         .run_file(&args, stdout);
         (status, self.console.take())
     }

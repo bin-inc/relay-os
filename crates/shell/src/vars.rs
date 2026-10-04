@@ -4,6 +4,7 @@
 //! in the order the variables were exported.
 
 use crate::expand::Error;
+use crate::parser::is_name;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -52,6 +53,30 @@ impl Vars {
     /// `$0` becomes `name`.
     pub fn set_name(&mut self, name: &str) {
         self.args[0] = String::from(name);
+    }
+
+    /// `$0` becomes `name`, and `args` come after it (a script's).
+    pub fn set_args(&mut self, name: &str, args: &[String]) {
+        self.args = alloc::vec![String::from(name)];
+        self.args.extend_from_slice(args);
+    }
+
+    /// Imports an environment (programmable shell gate §8.5): each entry of
+    /// `block`, `NAME=value` and a NUL, whose name is one and that is UTF-8
+    /// text, becomes an exported variable, in the block's order; of two
+    /// with one name the last wins, as in bash. A block `spawn` took holds
+    /// at most 64 KiB, so its variables fit.
+    pub fn import(&mut self, block: &[u8]) {
+        for entry in block.split(|&b| b == 0) {
+            let Ok(entry) = core::str::from_utf8(entry) else {
+                continue;
+            };
+            if let Some((name, value)) = entry.split_once('=')
+                && is_name(name)
+            {
+                let _ = self.export(name, Some(String::from(value)));
+            }
+        }
     }
 
     /// The arguments after `$0`, which `"$@"` gives.
@@ -198,6 +223,38 @@ mod tests {
         assert_eq!((v.get("OLDPWD"), v.value("OLDPWD")), ("", None));
         assert_eq!((v.get("B"), v.value("B")), ("1", Some("1")));
         assert_eq!(v.value("UNSET"), None);
+    }
+
+    #[test]
+    fn an_environment_is_imported_as_exported_variables() {
+        let mut v = Vars::new("sh");
+        v.import(b"HOME=/root\0A=1=2\0C=\xc3\xa9t\xc3\xa9\0E=\0");
+        assert_eq!(
+            v.exported().collect::<Vec<_>>(),
+            [
+                ("A", Some("1=2")),
+                ("C", Some("été")),
+                ("E", Some("")),
+                ("HOME", Some("/root"))
+            ]
+        );
+    }
+
+    #[test]
+    fn an_entry_without_a_name_or_not_text_is_dropped() {
+        // bash passes `1A=x` and `A-B=y` on to its programs (§10); `=z`
+        // and an entry without `=` it drops too.
+        let mut v = Vars::new("sh");
+        v.import(b"1A=x\0A-B=y\0=z\0noeq\0\0B=\xff\0OK=1\0");
+        assert_eq!(v.exported().collect::<Vec<_>>(), [("OK", Some("1"))]);
+    }
+
+    #[test]
+    fn of_two_entries_with_one_name_the_last_wins() {
+        // As bash's import (glibc's `getenv` finds the first).
+        let mut v = Vars::new("sh");
+        v.import(b"A=1\0B=2\0A=3\0");
+        assert_eq!((v.get("A"), v.get("B")), ("3", "2"));
     }
 
     #[test]

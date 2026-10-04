@@ -131,6 +131,13 @@ impl<'a> Shell<'a> {
         self
     }
 
+    /// The same shell, its environment `block` imported as exported
+    /// variables (programmable shell gate §8.5).
+    pub fn with_environment(mut self, block: &[u8]) -> Shell<'a> {
+        self.vars.import(block);
+        self
+    }
+
     /// The same shell, its in-process commands reading `input`.
     pub fn with_input(mut self, input: &'a mut dyn Stdin) -> Shell<'a> {
         self.input = Some(input);
@@ -820,7 +827,7 @@ impl<'a> Shell<'a> {
         let Some(programs) = self.runner.programs() else {
             unreachable!("run_file needs a spawning shell")
         };
-        self.vars = Vars::script(&script.name, &script.args);
+        self.vars.set_args(&script.name, &script.args);
         let log = script.transcript_name;
         if let Err(e) = programs.tee_push(log.as_bytes()) {
             let shown = quote_if_needed(&path::display(log.as_bytes()));
@@ -2796,6 +2803,38 @@ mod tests {
             h.programs.spawned[0].args,
             ["t-args", "0", "", "x", "~/", "/root/"]
         );
+    }
+
+    #[test]
+    fn a_shell_imports_its_environment_as_exported_variables() {
+        // `/bin/sh` imports the block it was started with (programmable
+        // shell gate §8.5), its name given after.
+        let mut h = Harness::new();
+        let (status, out) = {
+            let mut shell = Shell::new(&mut h.vfs, &mut h.console, &mut h.system)
+                .with_environment(b"HOME=/root\0A=x  y\0")
+                .named("/bin/sh");
+            (
+                shell.execute("echo $0 $HOME [$A]; export"),
+                h.console.take(),
+            )
+        };
+        assert_eq!(status, 0);
+        assert_eq!(
+            out,
+            "/bin/sh /root [x  y]\ndeclare -x A=\"x  y\"\ndeclare -x HOME=\"/root\"\n"
+        );
+    }
+
+    #[test]
+    fn a_script_bin_sh_runs_keeps_the_variables_it_imported() {
+        let mut h = spawning();
+        h.env = b"HOME=/root\0".to_vec();
+        h.put("/tmp/s.sh", b"export\n");
+        let mut out = FakeStdout::console();
+        let (status, said) = h.sh(&["/tmp/s.sh", "x"], &mut out);
+        assert_eq!(status, 0);
+        assert_eq!(said, "+ export\ndeclare -x HOME=\"/root\"\n");
     }
 
     #[test]
