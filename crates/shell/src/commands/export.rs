@@ -66,9 +66,9 @@ pub fn unset(ctx: &mut Ctx<'_>, args: &[String]) -> i32 {
 
 /// A built-in's option letters and the words after them, as bash reads
 /// them: options come first, a word `-` or `--` ends them (`--` dropped),
-/// and a letter not in `known` is bash's `invalid option` (status 2,
-/// without its usage line); one of `refused`, which bash knows, is not
-/// supported (status 1).
+/// and once all are read a letter not in `known` is bash's `invalid
+/// option` (status 2, without its usage line), else one of `refused`,
+/// which bash knows, is not supported (status 1).
 fn options<'a>(
     ctx: &mut Ctx<'_>,
     name: &str,
@@ -86,15 +86,16 @@ fn options<'a>(
         let Some(letters) = arg.strip_prefix('-').filter(|l| !l.is_empty()) else {
             break;
         };
-        if let Some(bad) = letters.chars().find(|c| !known.contains(*c)) {
-            ctx.fail(NAME, format_args!("{name}: -{bad}: invalid option"));
-            return Err(2);
-        }
-        if let Some(no) = letters.chars().find(|c| refused.contains(*c)) {
-            return Err(ctx.fail(NAME, format_args!("{name}: -{no}: not supported")));
-        }
         seen.push_str(letters);
         first += 1;
+    }
+    // Every option is read before any is judged, as bash's are.
+    if let Some(bad) = seen.chars().find(|c| !known.contains(*c)) {
+        ctx.fail(NAME, format_args!("{name}: -{bad}: invalid option"));
+        return Err(2);
+    }
+    if let Some(no) = seen.chars().find(|c| refused.contains(*c)) {
+        return Err(ctx.fail(NAME, format_args!("{name}: -{no}: not supported")));
     }
     Ok((seen, &args[first..]))
 }
@@ -236,6 +237,12 @@ mod tests {
             // bash's, without its usage line.
             ("export -x A", 2, "relay-sh: export: -x: invalid option\n"),
             ("export -nx A", 2, "relay-sh: export: -x: invalid option\n"),
+            // bash reads every option before it judges them.
+            (
+                "export -n -x A",
+                2,
+                "relay-sh: export: -x: invalid option\n",
+            ),
         ] {
             assert_eq!(h.lines(&[line, "export"]), (0, message.into()), "{line}");
             assert_eq!(h.run(line).0, status, "{line}");
@@ -283,6 +290,7 @@ mod tests {
             ("unset -f f", 1, "relay-sh: unset: -f: not supported\n"),
             ("unset -fv A", 1, "relay-sh: unset: -f: not supported\n"),
             ("unset -x A", 2, "relay-sh: unset: -x: invalid option\n"),
+            ("unset -f -x A", 2, "relay-sh: unset: -x: invalid option\n"),
         ] {
             assert_eq!(h.run(line), (status, message.into()), "{line}");
         }
