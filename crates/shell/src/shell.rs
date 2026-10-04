@@ -11,7 +11,7 @@ use crate::io::{Console, Programs, Stdin, Stdout, System};
 use crate::jobs::Jobs;
 use crate::parser::{self, HOME};
 use crate::reader::Reader;
-use crate::runner::{self, Parts, Ran, Runners};
+use crate::runner::{self, PIPED_MESSAGE_MAX, Parts, Ran, Runners};
 use crate::transcript::{self, Transcript};
 use alloc::format;
 use alloc::string::String;
@@ -32,12 +32,6 @@ pub const CANCELLED: i32 = 130;
 const CONTINUE: &str = "> ";
 /// The most of `/etc/motd` shown at start.
 const MOTD_MAX: usize = 16 * 1024;
-/// The longest message of a failed redirection that goes into the pipe
-/// after its command, before the pipe's reader starts: half of the 16 KiB
-/// a pipe holds, so the write never waits. Any path the vfs takes
-/// (`PATH_MAX`, 4 KiB) fits; a longer one's (`File name too long`) is told
-/// on the screen.
-const PIPED_MESSAGE_MAX: usize = 8 * 1024;
 
 pub struct Shell<'a> {
     vfs: &'a mut dyn Vfs,
@@ -1127,8 +1121,8 @@ fn builtin_in(stages: &[parser::Command]) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::PIPED_MESSAGE_MAX;
     use crate::Shell;
+    use crate::runner::PIPED_MESSAGE_MAX;
     use crate::testing::{FakeStdout, Harness};
     use alloc::string::String;
     use relay_abi::WaitStatus;
@@ -3759,6 +3753,25 @@ mod tests {
             )
         );
         assert_eq!(h.programs.written.len(), 1, "nothing more written");
+        // So is a stage that cannot start: its message into a pipe whose
+        // reader has not started would block the shell for good (the
+        // prototype's review, I-1).
+        let name = "x".repeat(PIPED_MESSAGE_MAX);
+        assert_eq!(
+            h.spawning(&alloc::format!("{name} 2>&1 | t-args")),
+            (3, alloc::format!("relay-sh: {name}: command not found\n"))
+        );
+        assert_eq!(h.programs.written.len(), 1, "nothing more written");
+        // In the in-process runner too.
+        let mut h = Harness::new();
+        assert_eq!(
+            h.run(&alloc::format!("{name} 2>&1 | wc -c")),
+            (
+                0,
+                alloc::format!("relay-sh: {name}: command not found\n0\n")
+            )
+        );
+        assert_eq!(h.run("nope 2>&1 | wc -c"), (0, "34\n".into()));
     }
 
     #[test]

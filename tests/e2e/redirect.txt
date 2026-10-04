@@ -30,6 +30,13 @@ expect \n2\nroot@relay:~# $
 # A redirection that fails after `2>&1` tells it into the pipe (plan 4).
 send cat 2>&1 < r-nope | wc -l
 expect \n1\nroot@relay:~# $
+# A stage that cannot start, its message longer than a pipe takes before
+# its reader starts: on the screen, so the shell does not wait for good
+# (the prototype's review, I-1).
+send B=yyyyyyyy; for i in 1 2 3 4 5 6 7 8 9 10 11; do B=$B$B; done
+expect root@relay:~# $
+send $B 2>&1 | wc -c
+expect \nrelay-sh: y{16384}: command not found\n0\nroot@relay:~# $
 send nope 2> r-e2; cd /nope 2>> r-e2; cat r-e2
 expect \nrelay-sh: nope: command not found\nrelay-sh: cd: /nope: No such file or directory\nroot@relay:~# $
 # A construct's redirections, made once: help (a built-in) and echo (a

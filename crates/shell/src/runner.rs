@@ -250,7 +250,9 @@ impl Runner for InProcess {
                     None => not_found(name).message,
                 };
                 match fds.0[2] {
-                    Slot::PipeOut => err_pipe = message.into_bytes(),
+                    Slot::PipeOut if message.len() <= PIPED_MESSAGE_MAX => {
+                        err_pipe = message.into_bytes()
+                    }
                     Slot::File(i) => {
                         if let Handle::Node { node, offset } = files.handle(i) {
                             let message = message.as_bytes();
@@ -324,6 +326,14 @@ impl Stdout for Collected {
         None
     }
 }
+
+/// The longest message the shell writes into the pipe after a command,
+/// before the pipe's reader starts (a failed redirection's, or that of a
+/// command that cannot start): half of the 16 KiB a pipe holds, so the
+/// write never waits. Any path the vfs takes (`PATH_MAX`, 4 KiB) fits; a
+/// longer message (`File name too long`, a name of 8 KiB) is told on the
+/// screen.
+pub(crate) const PIPED_MESSAGE_MAX: usize = 8 * 1024;
 
 /// A command the shell runs itself, refused in a pipeline (§9.1).
 pub(crate) fn in_a_pipeline(name: &str) -> Ran {
@@ -515,10 +525,13 @@ impl Spawning<'_> {
                     }
                 }
                 Err(e) => {
-                    // On its fd 2, the pipe after it too (`nope 2>&1 | b`).
+                    // On its fd 2, the pipe after it too (`nope 2>&1 | b`),
+                    // unless it is too long for that pipe to take at once.
                     let refused = cannot_start(name, e);
+                    let long = refused.message.len() > PIPED_MESSAGE_MAX;
                     match fds.0[2] {
                         Slot::Shell(_) => parts.console.write(refused.message.as_bytes()),
+                        Slot::PipeOut if long => parts.console.write(refused.message.as_bytes()),
                         _ => {
                             let _ = self
                                 .programs
