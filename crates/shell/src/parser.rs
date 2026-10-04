@@ -199,12 +199,15 @@ impl<W> Compound<W> {
     }
 }
 
-/// One command: its words and its redirections, in the order typed. The
-/// parser gives them as typed ([`Word`]), and expansion as the strings a
-/// command gets.
+/// One command: its assignments, its words and its redirections, in the
+/// order typed. The parser gives them as typed ([`Word`]), and expansion
+/// as the strings a command gets.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Command<W = String> {
-    /// The command name first, then its arguments. Empty for a blank line.
+    /// The assignments before the command's name, `NAME=value` each.
+    pub assigns: Vec<W>,
+    /// The command name first, then its arguments. Empty for a blank line
+    /// and for a line of assignments.
     pub words: Vec<W>,
     pub redirects: Vec<Redirect<W>>,
 }
@@ -742,23 +745,32 @@ fn value_tildes(text: &str, first: bool, last: bool) -> String {
 /// which gives bash's command an environment, is not supported: programs
 /// get none (user-space gate §9.4); nor is bash's `NAME+=value`, which
 /// appends.
-fn command(words: Vec<Word>, redirects: Vec<Redirect<Word>>) -> Result<Command<Word>, ParseError> {
+fn command(
+    mut words: Vec<Word>,
+    redirects: Vec<Redirect<Word>>,
+) -> Result<Command<Word>, ParseError> {
     let mut leading = words
         .iter()
         .take_while(|w| w.assignment().is_some() || w.appends());
     if let Some(append) = leading.find(|w| w.appends()) {
         return Err(ParseError::Unsupported(append.typed.clone()));
     }
-    if let Some(first) = words.first()
-        && first.assignment().is_some()
-        && words.iter().any(|w| w.assignment().is_none())
-    {
+    let count = words
+        .iter()
+        .take_while(|w| w.assignment().is_some())
+        .count();
+    if count > 0 && count < words.len() {
         return Err(ParseError::Unsupported(format!(
             "{} before a command",
-            first.typed
+            words[0].typed
         )));
     }
-    Ok(Command { words, redirects })
+    let assigns = words.drain(..count).collect();
+    Ok(Command {
+        assigns,
+        words,
+        redirects,
+    })
 }
 
 /// A word being built.
@@ -968,6 +980,7 @@ pub fn parse(line: &str) -> Result<Vec<Command>, ParseError> {
     let list = parse_line(line)?;
     let Some(item) = list.items.first() else {
         return Ok(alloc::vec![Command {
+            assigns: Vec::new(),
             words: Vec::new(),
             redirects: Vec::new(),
         }]);
@@ -2582,7 +2595,7 @@ mod tests {
     /// `word`'s assignment, the value's pieces joined.
     fn assignment(word: &str) -> Option<(String, String)> {
         let c = typed(word);
-        let (name, value) = c[0].words[0].assignment()?;
+        let (name, value) = c[0].assigns.first().or(c[0].words.first())?.assignment()?;
         let text = value
             .pieces
             .iter()
@@ -3227,6 +3240,7 @@ mod tests {
         assert_eq!(
             parse("").unwrap(),
             [Command {
+                assigns: Vec::new(),
                 words: Vec::new(),
                 redirects: Vec::new()
             }]

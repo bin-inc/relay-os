@@ -116,11 +116,19 @@ impl<'v> Expander<'v> {
 
     fn command(&mut self, c: &Command<Word>) -> Result<Command, Error> {
         let words = self.words(&c.words)?;
+        let mut assigns = Vec::new();
+        for w in &c.assigns {
+            assigns.extend(self.word(w)?);
+        }
         let mut redirects = Vec::new();
         for r in &c.redirects {
             redirects.push(self.redirect(r)?);
         }
-        Ok(Command { words, redirects })
+        Ok(Command {
+            assigns,
+            words,
+            redirects,
+        })
     }
 
     /// A command's words. After `export`, quoted or not, a word shaped like an
@@ -362,7 +370,7 @@ mod tests {
         let v = script();
         let value = |line: &str| {
             let p = typed(line);
-            let (_, value) = p[0].words[0].assignment().unwrap();
+            let (_, value) = p[0].assigns[0].assignment().unwrap();
             super::value(&value, &v, 0)
         };
         assert_eq!(value("A=$@").unwrap(), "one two three  four");

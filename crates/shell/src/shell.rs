@@ -462,9 +462,7 @@ impl<'a> Shell<'a> {
         // starts, so a loop that starts jobs never fills it; they are
         // reported at the next prompt.
         self.collect_jobs();
-        let assigns = commands
-            .iter()
-            .find_map(|c| c.words.first().filter(|w| w.assignment().is_some()));
+        let assigns = commands.iter().find_map(|c| c.assigns.first());
         if let Some(first) = assigns {
             // Alone on its line; bash's changes nothing elsewhere.
             let place = match (background, commands.len()) {
@@ -558,7 +556,7 @@ impl<'a> Shell<'a> {
     /// so a later one reads an earlier one, and the status is 0. A
     /// redirection after them makes its file, as bash's does.
     fn assign(&mut self, cmd: &parser::Command<parser::Word>) -> i32 {
-        for (name, value) in cmd.words.iter().filter_map(parser::Word::assignment) {
+        for (name, value) in cmd.assigns.iter().filter_map(parser::Word::assignment) {
             let set =
                 expand::value(&value, &self.vars, self.status).and_then(|v| self.vars.set(name, v));
             if let Err(e) = set {
