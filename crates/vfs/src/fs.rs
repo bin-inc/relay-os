@@ -120,6 +120,13 @@ impl<T: Env + ?Sized> Env for Rc<T> {
 /// New files get mode `0644`, new directories `0755`, uid and gid 0, and
 /// all three times set to now. Changing a file's data sets its mtime and
 /// ctime; adding or removing a directory entry sets the directory's.
+///
+/// A filesystem of devices, [`DevFs`](crate::DevFs), keeps the order of
+/// errors but not the rest where its devices differ from files: a device's
+/// reads, writes and truncation do what the device does (`null`'s ignore
+/// the offset and the size), making a new name and removing or moving one
+/// are `EPERM` (a rename of a name onto itself too), and `shutdown` leaves
+/// it writable. The model test holds only ext2 and `MemFs` to the contract.
 pub trait FileSystem {
     /// The root directory.
     fn root(&self) -> Ino;
