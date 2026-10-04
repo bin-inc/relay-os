@@ -314,10 +314,12 @@ impl Vars {
 impl Vars {
     /// What releasing the names a built-in holds would add, were `name` to
     /// hold `var`: each held name counts the larger of its size before and
-    /// its size now, so that it fits when it comes back.
+    /// its size now, so that it fits when it comes back; one the built-in
+    /// set or exported keeps what it holds, and counts nothing more.
     fn held_back(&self, name: &str, var: &Var) -> usize {
         self.held
             .iter()
+            .filter(|h| !h.changed)
             .map(|h| {
                 let before = h.before.as_ref().map_or(0, |v| size(&h.name, v));
                 let now = if h.name == name {
@@ -503,6 +505,22 @@ mod tests {
         assert_eq!(v.size, VARS_MAX);
         v.release();
         assert_eq!((v.value("A"), v.size), (Some(big.as_str()), VARS_MAX - 1));
+    }
+
+    #[test]
+    fn a_held_name_the_built_in_set_keeps_no_room() {
+        // `release` keeps what the built-in set or exported, so its old
+        // value never comes back (the prototype's review, m-1): `A=1
+        // export A B=<40K>` fits, as in bash.
+        let mut v = Vars::new("sh");
+        let big = "x".repeat(40 * 1024);
+        v.set("A", big.clone()).unwrap();
+        v.hold(&[String::from("A=1")]).unwrap();
+        v.export("A", None).unwrap();
+        v.set("B", big.clone()).unwrap();
+        v.release();
+        assert_eq!((v.get("A"), v.value("B")), ("1", Some(big.as_str())));
+        assert!(v.size <= VARS_MAX);
     }
 
     #[test]

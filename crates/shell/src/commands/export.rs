@@ -397,6 +397,26 @@ mod tests {
     }
 
     #[test]
+    fn a_name_export_sets_while_held_gives_its_room_back() {
+        // The prototype's review, m-1: `export` keeps the `A` it set, so
+        // `B` fits, as in bash.
+        let mut h = Harness::new();
+        let big = "x".repeat(40 * 1024);
+        assert_eq!(
+            h.lines(&[
+                &alloc::format!("A={big}"),
+                &alloc::format!("A=1 export A B={big}"),
+                "echo $A",
+                "unset B",
+                &alloc::format!("A={big}"),
+                &alloc::format!("A= export A=x C={big}"),
+                "echo $A",
+            ]),
+            (0, "1\nx\n".into())
+        );
+    }
+
+    #[test]
     fn a_variable_export_cannot_hold_fails() {
         let mut h = Harness::new();
         let big = "x".repeat(crate::vars::VARS_MAX - 100);
